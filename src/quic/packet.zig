@@ -110,3 +110,33 @@ pub fn decodeVarInt(reader: anytype) !struct { value: u64, len: usize } {
 pub fn parseHeaderForm(first_byte: u8) HeaderForm {
     return if ((first_byte & 0x80) != 0) .long else .short;
 }
+
+/// Stub: encode a long header into the given writer.
+/// TODO: implement according to RFC 9000 Section 17.2.
+pub fn encodeLongHeader(writer: anytype, header: LongHeader) !void {
+    _ = writer;
+    _ = header;
+    @panic("encodeLongHeader: TODO");
+}
+
+/// Stub: parse a long header from the given reader.
+/// TODO: implement according to RFC 9000 Section 17.2.
+pub fn parseLongHeader(reader: anytype) !LongHeader {
+    _ = reader;
+    @panic("parseLongHeader: TODO");
+}
+
+/// Stub: encode a short header into the given writer.
+/// TODO: implement according to RFC 9000 Section 17.3.
+pub fn encodeShortHeader(writer: anytype, header: ShortHeader) !void {
+    _ = writer;
+    _ = header;
+    @panic("encodeShortHeader: TODO");
+}
+
+/// Stub: parse a short header from the given reader.
+/// TODO: implement according to RFC 9000 Section 17.3.
+pub fn parseShortHeader(reader: anytype) !ShortHeader {
+    _ = reader;
+    @panic("parseShortHeader: TODO");
+}

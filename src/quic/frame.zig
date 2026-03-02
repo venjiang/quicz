@@ -40,12 +40,19 @@ pub const CryptoFrame = struct {
 
 pub const PaddingFrame = struct { len: usize };
 
+/// ACK frame (simplified: largest acknowledged + ack delay + range count omitted for now).
+pub const AckFrame = struct {
+    largest_acknowledged: u64,
+    ack_delay: u64,
+};
+
 /// A simplified union of a few important frame types.
 pub const Frame = union(enum) {
     padding: PaddingFrame,
     ping: void,
+    ack: AckFrame,
     stream: StreamFrame,
     crypto: CryptoFrame,
 
-    // TODO: add ACK and other frames
+    // TODO: add more frames (RESET_STREAM, MAX_DATA, etc.)
 };

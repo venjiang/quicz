@@ -1,45 +1,30 @@
 const std = @import("std");
-const quicz = @import("quicz");
 
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
-    var stdout = std.io.getStdOut().writer();
+    _ = gpa; // reserved for future quicz integration
 
-    const addr = try std.net.Address.parseIp4("127.0.0.1", 4443);
+    const stdout = std.fs.File.stdout();
 
-    var sock = try std.net.DatagramSocket.createIpv4();
-    defer sock.deinit();
+    // Prepare destination address (server)
+    const server_addr = try std.net.Address.parseIp4("127.0.0.1", 4443);
 
-    try sock.connect(addr);
+    // Create UDP socket using Zig 0.15.2 std.net API (no DatagramSocket helper in 0.15.2)
+    const sockfd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.UDP);
+    defer std.posix.close(sockfd);
 
-    var conn = try quicz.QuicConnection.init(gpa, .client, .{});
-    defer conn.deinit();
-
-    const now = std.time.milliTimestamp();
-
-    var out_buf: [2048]u8 = undefined;
-    if (try conn.pollTx(now, &out_buf)) |tx| {
-        _ = try sock.send(tx);
-    }
-
-    const stream_id = try conn.openStream();
-    try stdout.print("Opened stream {d}\n", .{stream_id});
+    try std.posix.connect(sockfd, &server_addr.any, server_addr.getOsSockLen());
 
     const msg = "hello from quicz client";
-    try conn.sendOnStream(stream_id, msg[0..], true);
+    _ = try std.posix.send(sockfd, msg, 0);
+    try stdout.writeAll("[client] sent: ");
+    try stdout.writeAll(msg);
+    try stdout.writeAll("\n");
 
-    if (try conn.pollTx(std.time.milliTimestamp(), &out_buf)) |tx2| {
-        _ = try sock.send(tx2);
-    }
-
-    var recv_buf: [2048]u8 = undefined;
-    const n = try sock.receive(&recv_buf);
-    try conn.processDatagram(std.time.milliTimestamp(), recv_buf[0..n]);
-
-    var app_buf: [1024]u8 = undefined;
-    if (try conn.recvOnStream(stream_id, &app_buf)) |len| {
-        try stdout.print("Got echo: {s}\n", .{app_buf[0..len]});
-    } else {
-        try stdout.print("No app data yet\n", .{});
-    }
+    var buf: [1024]u8 = undefined;
+    const recv_len = try std.posix.recv(sockfd, &buf, 0);
+    const echo = buf[0..recv_len];
+    try stdout.writeAll("[client] received echo: ");
+    try stdout.writeAll(echo);
+    try stdout.writeAll("\n");
 }
