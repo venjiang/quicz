@@ -1,4 +1,5 @@
 const std = @import("std");
+const packet = @import("packet.zig");
 
 /// Basic subset of QUIC frames (RFC 9000 Section 19).
 pub const FrameType = enum(u8) {
@@ -56,3 +57,220 @@ pub const Frame = union(enum) {
 
     // TODO: add more frames (RESET_STREAM, MAX_DATA, etc.)
 };
+
+pub const FrameError = error{
+    UnsupportedFrameType,
+    InvalidPaddingLength,
+    InvalidFrameLength,
+};
+
+pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
+    switch (frame.*) {
+        .stream => |stream| allocator.free(stream.data),
+        .crypto => |crypto| allocator.free(crypto.data),
+        else => {},
+    }
+}
+
+pub fn encodeFrame(writer: anytype, frame: Frame) !void {
+    switch (frame) {
+        .padding => |padding| {
+            if (padding.len == 0) return error.InvalidPaddingLength;
+            var i: usize = 0;
+            while (i < padding.len) : (i += 1) {
+                try writer.writeByte(@intFromEnum(FrameType.padding));
+            }
+        },
+        .ping => {
+            try writer.writeByte(@intFromEnum(FrameType.ping));
+        },
+        .ack => |ack| {
+            try writer.writeByte(@intFromEnum(FrameType.ack));
+            try packet.encodeVarInt(writer, ack.largest_acknowledged);
+            try packet.encodeVarInt(writer, ack.ack_delay);
+            try packet.encodeVarInt(writer, 0); // ack range count
+            try packet.encodeVarInt(writer, 0); // first ack range
+        },
+        .stream => |stream| {
+            var frame_type: u8 = @intFromEnum(FrameType.stream);
+            if (stream.offset != 0) {
+                frame_type |= 0x04; // OFF bit
+            }
+            frame_type |= 0x02; // LEN bit: always set in this simplified codec
+            if (stream.fin) {
+                frame_type |= 0x01; // FIN bit
+            }
+
+            try writer.writeByte(frame_type);
+            try packet.encodeVarInt(writer, stream.stream_id);
+            if (stream.offset != 0) {
+                try packet.encodeVarInt(writer, stream.offset);
+            }
+            try packet.encodeVarInt(writer, stream.data.len);
+            try writer.writeAll(stream.data);
+        },
+        .crypto => |crypto| {
+            try writer.writeByte(@intFromEnum(FrameType.crypto));
+            try packet.encodeVarInt(writer, crypto.offset);
+            try packet.encodeVarInt(writer, crypto.data.len);
+            try writer.writeAll(crypto.data);
+        },
+    }
+}
+
+pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
+    const frame_type = try reader.readByte();
+
+    if (frame_type == @intFromEnum(FrameType.padding)) {
+        return .{ .padding = .{ .len = 1 } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.ping)) {
+        return .{ .ping = {} };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.ack)) {
+        const largest_acknowledged = (try packet.decodeVarInt(reader)).value;
+        const ack_delay = (try packet.decodeVarInt(reader)).value;
+        _ = try packet.decodeVarInt(reader); // ack range count
+        _ = try packet.decodeVarInt(reader); // first ack range
+
+        return .{ .ack = .{
+            .largest_acknowledged = largest_acknowledged,
+            .ack_delay = ack_delay,
+        } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.crypto)) {
+        const offset = (try packet.decodeVarInt(reader)).value;
+        const data_len = (try packet.decodeVarInt(reader)).value;
+        const len_usize: usize = @intCast(data_len);
+
+        const data = try allocator.alloc(u8, len_usize);
+        errdefer allocator.free(data);
+        try reader.readNoEof(data);
+
+        return .{ .crypto = .{
+            .offset = offset,
+            .data = data,
+        } };
+    }
+
+    if ((frame_type & 0b1111_1000) == @intFromEnum(FrameType.stream)) {
+        const has_off = (frame_type & 0x04) != 0;
+        const has_len = (frame_type & 0x02) != 0;
+        const fin = (frame_type & 0x01) != 0;
+
+        const stream_id = (try packet.decodeVarInt(reader)).value;
+
+        var offset: u64 = 0;
+        if (has_off) {
+            offset = (try packet.decodeVarInt(reader)).value;
+        }
+
+        if (!has_len) {
+            return error.InvalidFrameLength;
+        }
+
+        const data_len = (try packet.decodeVarInt(reader)).value;
+        const len_usize: usize = @intCast(data_len);
+
+        const data = try allocator.alloc(u8, len_usize);
+        errdefer allocator.free(data);
+        try reader.readNoEof(data);
+
+        return .{ .stream = .{
+            .stream_id = stream_id,
+            .offset = offset,
+            .fin = fin,
+            .data = data,
+        } };
+    }
+
+    return error.UnsupportedFrameType;
+}
+
+test "encode/decode stream frame roundtrip" {
+    var buf: [256]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buf);
+
+    const input = Frame{ .stream = .{
+        .stream_id = 7,
+        .offset = 1024,
+        .fin = true,
+        .data = "hello",
+    } };
+    try encodeFrame(out.writer(), input);
+
+    const encoded = out.getWritten();
+    var in = std.io.fixedBufferStream(encoded);
+    var parsed = try decodeFrame(in.reader(), std.testing.allocator);
+    defer deinitFrame(&parsed, std.testing.allocator);
+
+    switch (parsed) {
+        .stream => |frame| {
+            try std.testing.expectEqual(@as(u64, 7), frame.stream_id);
+            try std.testing.expectEqual(@as(u64, 1024), frame.offset);
+            try std.testing.expect(frame.fin);
+            try std.testing.expectEqualStrings("hello", frame.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "encode/decode crypto frame roundtrip" {
+    var buf: [256]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buf);
+
+    const input = Frame{ .crypto = .{
+        .offset = 4096,
+        .data = "crypto-bytes",
+    } };
+    try encodeFrame(out.writer(), input);
+
+    const encoded = out.getWritten();
+    var in = std.io.fixedBufferStream(encoded);
+    var parsed = try decodeFrame(in.reader(), std.testing.allocator);
+    defer deinitFrame(&parsed, std.testing.allocator);
+
+    switch (parsed) {
+        .crypto => |frame| {
+            try std.testing.expectEqual(@as(u64, 4096), frame.offset);
+            try std.testing.expectEqualStrings("crypto-bytes", frame.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "encode/decode ack frame roundtrip" {
+    var buf: [128]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buf);
+
+    const input = Frame{ .ack = .{
+        .largest_acknowledged = 12345,
+        .ack_delay = 42,
+    } };
+    try encodeFrame(out.writer(), input);
+
+    const encoded = out.getWritten();
+    var in = std.io.fixedBufferStream(encoded);
+    const parsed = try decodeFrame(in.reader(), std.testing.allocator);
+
+    switch (parsed) {
+        .ack => |frame| {
+            try std.testing.expectEqual(@as(u64, 12345), frame.largest_acknowledged);
+            try std.testing.expectEqual(@as(u64, 42), frame.ack_delay);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "stream frame without LEN bit fails" {
+    const wire = [_]u8{
+        0x08,
+        0x01,
+    };
+
+    var in = std.io.fixedBufferStream(&wire);
+    try std.testing.expectError(error.InvalidFrameLength, decodeFrame(in.reader(), std.testing.allocator));
+}
