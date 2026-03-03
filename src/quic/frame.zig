@@ -47,6 +47,16 @@ pub const AckFrame = struct {
     ack_delay: u64,
 };
 
+pub const ResetStreamFrame = struct {
+    stream_id: u64,
+    application_error_code: u64,
+    final_size: u64,
+};
+
+pub const MaxDataFrame = struct {
+    maximum_data: u64,
+};
+
 pub const ConnectionCloseFrame = struct {
     error_code: u64,
     frame_type: u64,
@@ -63,12 +73,12 @@ pub const Frame = union(enum) {
     padding: PaddingFrame,
     ping: void,
     ack: AckFrame,
+    reset_stream: ResetStreamFrame,
     stream: StreamFrame,
     crypto: CryptoFrame,
+    max_data: MaxDataFrame,
     connection_close: ConnectionCloseFrame,
     application_close: ApplicationCloseFrame,
-
-    // TODO: add more frames (RESET_STREAM, MAX_DATA, etc.)
 };
 
 pub const FrameError = error{
@@ -106,6 +116,12 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try packet.encodeVarInt(writer, 0); // ack range count
             try packet.encodeVarInt(writer, 0); // first ack range
         },
+        .reset_stream => |reset| {
+            try writer.writeByte(@intFromEnum(FrameType.reset_stream));
+            try packet.encodeVarInt(writer, reset.stream_id);
+            try packet.encodeVarInt(writer, reset.application_error_code);
+            try packet.encodeVarInt(writer, reset.final_size);
+        },
         .stream => |stream| {
             var frame_type: u8 = @intFromEnum(FrameType.stream);
             if (stream.offset != 0) {
@@ -129,6 +145,10 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try packet.encodeVarInt(writer, crypto.offset);
             try packet.encodeVarInt(writer, crypto.data.len);
             try writer.writeAll(crypto.data);
+        },
+        .max_data => |max_data| {
+            try writer.writeByte(@intFromEnum(FrameType.max_data));
+            try packet.encodeVarInt(writer, max_data.maximum_data);
         },
         .connection_close => |close| {
             try writer.writeByte(@intFromEnum(FrameType.connection_close));
@@ -169,6 +189,18 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         } };
     }
 
+    if (frame_type == @intFromEnum(FrameType.reset_stream)) {
+        const stream_id = (try packet.decodeVarInt(reader)).value;
+        const application_error_code = (try packet.decodeVarInt(reader)).value;
+        const final_size = (try packet.decodeVarInt(reader)).value;
+
+        return .{ .reset_stream = .{
+            .stream_id = stream_id,
+            .application_error_code = application_error_code,
+            .final_size = final_size,
+        } };
+    }
+
     if (frame_type == @intFromEnum(FrameType.crypto)) {
         const offset = (try packet.decodeVarInt(reader)).value;
         const data_len = (try packet.decodeVarInt(reader)).value;
@@ -182,6 +214,11 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
             .offset = offset,
             .data = data,
         } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.max_data)) {
+        const maximum_data = (try packet.decodeVarInt(reader)).value;
+        return .{ .max_data = .{ .maximum_data = maximum_data } };
     }
 
     if ((frame_type & 0b1111_1000) == @intFromEnum(FrameType.stream)) {
@@ -320,6 +357,52 @@ test "encode/decode ack frame roundtrip" {
         .ack => |frame| {
             try std.testing.expectEqual(@as(u64, 12345), frame.largest_acknowledged);
             try std.testing.expectEqual(@as(u64, 42), frame.ack_delay);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "encode/decode reset_stream frame roundtrip" {
+    var buf: [128]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buf);
+
+    const input = Frame{ .reset_stream = .{
+        .stream_id = 9,
+        .application_error_code = 0x15,
+        .final_size = 2048,
+    } };
+    try encodeFrame(out.writer(), input);
+
+    const encoded = out.getWritten();
+    var in = std.io.fixedBufferStream(encoded);
+    const parsed = try decodeFrame(in.reader(), std.testing.allocator);
+
+    switch (parsed) {
+        .reset_stream => |frame| {
+            try std.testing.expectEqual(@as(u64, 9), frame.stream_id);
+            try std.testing.expectEqual(@as(u64, 0x15), frame.application_error_code);
+            try std.testing.expectEqual(@as(u64, 2048), frame.final_size);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "encode/decode max_data frame roundtrip" {
+    var buf: [64]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buf);
+
+    const input = Frame{ .max_data = .{
+        .maximum_data = 1_000_000,
+    } };
+    try encodeFrame(out.writer(), input);
+
+    const encoded = out.getWritten();
+    var in = std.io.fixedBufferStream(encoded);
+    const parsed = try decodeFrame(in.reader(), std.testing.allocator);
+
+    switch (parsed) {
+        .max_data => |frame| {
+            try std.testing.expectEqual(@as(u64, 1_000_000), frame.maximum_data);
         },
         else => return error.TestUnexpectedResult,
     }
