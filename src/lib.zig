@@ -1,5 +1,8 @@
 const std = @import("std");
 
+pub const packet = @import("quic/packet.zig");
+pub const frame = @import("quic/frame.zig");
+
 pub const Error = error{
     ConnectionClosed,
     InvalidPacket,
