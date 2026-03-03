@@ -67,6 +67,14 @@ pub const MaxStreamDataFrame = struct {
     maximum_stream_data: u64,
 };
 
+pub const MaxStreamsBidiFrame = struct {
+    maximum_streams: u64,
+};
+
+pub const MaxStreamsUniFrame = struct {
+    maximum_streams: u64,
+};
+
 pub const ConnectionCloseFrame = struct {
     error_code: u64,
     frame_type: u64,
@@ -89,6 +97,8 @@ pub const Frame = union(enum) {
     crypto: CryptoFrame,
     max_data: MaxDataFrame,
     max_stream_data: MaxStreamDataFrame,
+    max_streams_bidi: MaxStreamsBidiFrame,
+    max_streams_uni: MaxStreamsUniFrame,
     connection_close: ConnectionCloseFrame,
     application_close: ApplicationCloseFrame,
 };
@@ -171,6 +181,14 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeByte(@intFromEnum(FrameType.max_stream_data));
             try packet.encodeVarInt(writer, max_stream_data.stream_id);
             try packet.encodeVarInt(writer, max_stream_data.maximum_stream_data);
+        },
+        .max_streams_bidi => |max_streams| {
+            try writer.writeByte(@intFromEnum(FrameType.max_streams_bidi));
+            try packet.encodeVarInt(writer, max_streams.maximum_streams);
+        },
+        .max_streams_uni => |max_streams| {
+            try writer.writeByte(@intFromEnum(FrameType.max_streams_uni));
+            try packet.encodeVarInt(writer, max_streams.maximum_streams);
         },
         .connection_close => |close| {
             try writer.writeByte(@intFromEnum(FrameType.connection_close));
@@ -261,6 +279,16 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
             .stream_id = stream_id,
             .maximum_stream_data = maximum_stream_data,
         } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.max_streams_bidi)) {
+        const maximum_streams = (try packet.decodeVarInt(reader)).value;
+        return .{ .max_streams_bidi = .{ .maximum_streams = maximum_streams } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.max_streams_uni)) {
+        const maximum_streams = (try packet.decodeVarInt(reader)).value;
+        return .{ .max_streams_uni = .{ .maximum_streams = maximum_streams } };
     }
 
     if ((frame_type & 0b1111_1000) == @intFromEnum(FrameType.stream)) {
@@ -491,6 +519,48 @@ test "encode/decode max_stream_data frame roundtrip" {
         .max_stream_data => |frame| {
             try std.testing.expectEqual(@as(u64, 5), frame.stream_id);
             try std.testing.expectEqual(@as(u64, 65_535), frame.maximum_stream_data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "encode/decode max_streams_bidi frame roundtrip" {
+    var buf: [64]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buf);
+
+    const input = Frame{ .max_streams_bidi = .{
+        .maximum_streams = 24,
+    } };
+    try encodeFrame(out.writer(), input);
+
+    const encoded = out.getWritten();
+    var in = std.io.fixedBufferStream(encoded);
+    const parsed = try decodeFrame(in.reader(), std.testing.allocator);
+
+    switch (parsed) {
+        .max_streams_bidi => |frame| {
+            try std.testing.expectEqual(@as(u64, 24), frame.maximum_streams);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "encode/decode max_streams_uni frame roundtrip" {
+    var buf: [64]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buf);
+
+    const input = Frame{ .max_streams_uni = .{
+        .maximum_streams = 40,
+    } };
+    try encodeFrame(out.writer(), input);
+
+    const encoded = out.getWritten();
+    var in = std.io.fixedBufferStream(encoded);
+    const parsed = try decodeFrame(in.reader(), std.testing.allocator);
+
+    switch (parsed) {
+        .max_streams_uni => |frame| {
+            try std.testing.expectEqual(@as(u64, 40), frame.maximum_streams);
         },
         else => return error.TestUnexpectedResult,
     }
