@@ -47,6 +47,17 @@ pub const AckFrame = struct {
     ack_delay: u64,
 };
 
+pub const ConnectionCloseFrame = struct {
+    error_code: u64,
+    frame_type: u64,
+    reason_phrase: []const u8,
+};
+
+pub const ApplicationCloseFrame = struct {
+    error_code: u64,
+    reason_phrase: []const u8,
+};
+
 /// A simplified union of a few important frame types.
 pub const Frame = union(enum) {
     padding: PaddingFrame,
@@ -54,6 +65,8 @@ pub const Frame = union(enum) {
     ack: AckFrame,
     stream: StreamFrame,
     crypto: CryptoFrame,
+    connection_close: ConnectionCloseFrame,
+    application_close: ApplicationCloseFrame,
 
     // TODO: add more frames (RESET_STREAM, MAX_DATA, etc.)
 };
@@ -68,6 +81,8 @@ pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
     switch (frame.*) {
         .stream => |stream| allocator.free(stream.data),
         .crypto => |crypto| allocator.free(crypto.data),
+        .connection_close => |close| allocator.free(close.reason_phrase),
+        .application_close => |close| allocator.free(close.reason_phrase),
         else => {},
     }
 }
@@ -114,6 +129,19 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try packet.encodeVarInt(writer, crypto.offset);
             try packet.encodeVarInt(writer, crypto.data.len);
             try writer.writeAll(crypto.data);
+        },
+        .connection_close => |close| {
+            try writer.writeByte(@intFromEnum(FrameType.connection_close));
+            try packet.encodeVarInt(writer, close.error_code);
+            try packet.encodeVarInt(writer, close.frame_type);
+            try packet.encodeVarInt(writer, close.reason_phrase.len);
+            try writer.writeAll(close.reason_phrase);
+        },
+        .application_close => |close| {
+            try writer.writeByte(@intFromEnum(FrameType.application_close));
+            try packet.encodeVarInt(writer, close.error_code);
+            try packet.encodeVarInt(writer, close.reason_phrase.len);
+            try writer.writeAll(close.reason_phrase);
         },
     }
 }
@@ -184,6 +212,38 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
             .offset = offset,
             .fin = fin,
             .data = data,
+        } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.connection_close)) {
+        const error_code = (try packet.decodeVarInt(reader)).value;
+        const triggering_frame_type = (try packet.decodeVarInt(reader)).value;
+        const reason_len = (try packet.decodeVarInt(reader)).value;
+        const len_usize: usize = @intCast(reason_len);
+
+        const reason_phrase = try allocator.alloc(u8, len_usize);
+        errdefer allocator.free(reason_phrase);
+        try reader.readNoEof(reason_phrase);
+
+        return .{ .connection_close = .{
+            .error_code = error_code,
+            .frame_type = triggering_frame_type,
+            .reason_phrase = reason_phrase,
+        } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.application_close)) {
+        const error_code = (try packet.decodeVarInt(reader)).value;
+        const reason_len = (try packet.decodeVarInt(reader)).value;
+        const len_usize: usize = @intCast(reason_len);
+
+        const reason_phrase = try allocator.alloc(u8, len_usize);
+        errdefer allocator.free(reason_phrase);
+        try reader.readNoEof(reason_phrase);
+
+        return .{ .application_close = .{
+            .error_code = error_code,
+            .reason_phrase = reason_phrase,
         } };
     }
 
@@ -273,4 +333,54 @@ test "stream frame without LEN bit fails" {
 
     var in = std.io.fixedBufferStream(&wire);
     try std.testing.expectError(error.InvalidFrameLength, decodeFrame(in.reader(), std.testing.allocator));
+}
+
+test "encode/decode connection_close frame roundtrip" {
+    var buf: [256]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buf);
+
+    const input = Frame{ .connection_close = .{
+        .error_code = 0x0a,
+        .frame_type = @intFromEnum(FrameType.stream),
+        .reason_phrase = "flow control violation",
+    } };
+    try encodeFrame(out.writer(), input);
+
+    const encoded = out.getWritten();
+    var in = std.io.fixedBufferStream(encoded);
+    var parsed = try decodeFrame(in.reader(), std.testing.allocator);
+    defer deinitFrame(&parsed, std.testing.allocator);
+
+    switch (parsed) {
+        .connection_close => |frame| {
+            try std.testing.expectEqual(@as(u64, 0x0a), frame.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(FrameType.stream)), frame.frame_type);
+            try std.testing.expectEqualStrings("flow control violation", frame.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "encode/decode application_close frame roundtrip" {
+    var buf: [256]u8 = undefined;
+    var out = std.io.fixedBufferStream(&buf);
+
+    const input = Frame{ .application_close = .{
+        .error_code = 0x1337,
+        .reason_phrase = "app shutdown",
+    } };
+    try encodeFrame(out.writer(), input);
+
+    const encoded = out.getWritten();
+    var in = std.io.fixedBufferStream(encoded);
+    var parsed = try decodeFrame(in.reader(), std.testing.allocator);
+    defer deinitFrame(&parsed, std.testing.allocator);
+
+    switch (parsed) {
+        .application_close => |frame| {
+            try std.testing.expectEqual(@as(u64, 0x1337), frame.error_code);
+            try std.testing.expectEqualStrings("app shutdown", frame.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
