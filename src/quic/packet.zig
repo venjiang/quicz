@@ -83,10 +83,7 @@ pub fn decodeVarInt(reader: anytype) !struct { value: u64, len: usize } {
         2 => blk: {
             var buf: [3]u8 = undefined;
             try reader.readNoEof(&buf);
-            const value = (@as(u64, first & 0x3f) << 24)
-                | (@as(u64, buf[0]) << 16)
-                | (@as(u64, buf[1]) << 8)
-                | buf[2];
+            const value = (@as(u64, first & 0x3f) << 24) | (@as(u64, buf[0]) << 16) | (@as(u64, buf[1]) << 8) | buf[2];
             break :blk .{ .value = value, .len = 4 };
         },
         3 => blk: {
@@ -139,4 +136,103 @@ pub fn encodeShortHeader(writer: anytype, header: ShortHeader) !void {
 pub fn parseShortHeader(reader: anytype) !ShortHeader {
     _ = reader;
     @panic("parseShortHeader: TODO");
+}
+
+test "encodeVarInt emits expected bytes at size boundaries" {
+    const Case = struct {
+        value: u64,
+        expected: []const u8,
+    };
+
+    const cases = [_]Case{
+        .{ .value = 0, .expected = &[_]u8{0x00} },
+        .{ .value = 63, .expected = &[_]u8{0x3f} },
+        .{ .value = 64, .expected = &[_]u8{ 0x40, 0x40 } },
+        .{ .value = 16383, .expected = &[_]u8{ 0x7f, 0xff } },
+        .{ .value = 16384, .expected = &[_]u8{ 0x80, 0x00, 0x40, 0x00 } },
+        .{ .value = 1073741823, .expected = &[_]u8{ 0xbf, 0xff, 0xff, 0xff } },
+        .{ .value = 1073741824, .expected = &[_]u8{ 0xc0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00 } },
+        .{ .value = 4611686018427387903, .expected = &[_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } },
+    };
+
+    for (cases) |c| {
+        var out: [8]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&out);
+        try encodeVarInt(fbs.writer(), c.value);
+
+        const written = fbs.getWritten();
+        try std.testing.expectEqual(c.expected.len, written.len);
+        try std.testing.expectEqualSlices(u8, c.expected, written);
+    }
+}
+
+test "decodeVarInt parses expected values and lengths" {
+    const Case = struct {
+        encoded: []const u8,
+        expected_value: u64,
+        expected_len: usize,
+    };
+
+    const cases = [_]Case{
+        .{ .encoded = &[_]u8{0x00}, .expected_value = 0, .expected_len = 1 },
+        .{ .encoded = &[_]u8{0x3f}, .expected_value = 63, .expected_len = 1 },
+        .{ .encoded = &[_]u8{ 0x40, 0x40 }, .expected_value = 64, .expected_len = 2 },
+        .{ .encoded = &[_]u8{ 0x7f, 0xff }, .expected_value = 16383, .expected_len = 2 },
+        .{ .encoded = &[_]u8{ 0x80, 0x00, 0x40, 0x00 }, .expected_value = 16384, .expected_len = 4 },
+        .{ .encoded = &[_]u8{ 0xbf, 0xff, 0xff, 0xff }, .expected_value = 1073741823, .expected_len = 4 },
+        .{ .encoded = &[_]u8{ 0xc0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00 }, .expected_value = 1073741824, .expected_len = 8 },
+        .{ .encoded = &[_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff }, .expected_value = 4611686018427387903, .expected_len = 8 },
+    };
+
+    for (cases) |c| {
+        var fbs = std.io.fixedBufferStream(c.encoded);
+        const decoded = try decodeVarInt(fbs.reader());
+
+        try std.testing.expectEqual(c.expected_value, decoded.value);
+        try std.testing.expectEqual(c.expected_len, decoded.len);
+        try std.testing.expectEqual(c.encoded.len, fbs.pos);
+    }
+}
+
+test "decodeVarInt fails on truncated inputs" {
+    const cases = [_][]const u8{
+        &[_]u8{0x40},
+        &[_]u8{ 0x80, 0x00 },
+        &[_]u8{ 0xc0, 0x00, 0x00, 0x00 },
+    };
+
+    for (cases) |encoded| {
+        var fbs = std.io.fixedBufferStream(encoded);
+        try std.testing.expectError(error.EndOfStream, decodeVarInt(fbs.reader()));
+    }
+}
+
+test "encodeVarInt and decodeVarInt roundtrip representative values" {
+    const values = [_]u64{
+        0,
+        1,
+        37,
+        63,
+        64,
+        15293,
+        16383,
+        16384,
+        999999,
+        1073741823,
+        1073741824,
+        4611686018427387903,
+    };
+
+    for (values) |value| {
+        var out: [8]u8 = undefined;
+        var writer_fbs = std.io.fixedBufferStream(&out);
+        try encodeVarInt(writer_fbs.writer(), value);
+
+        const encoded = writer_fbs.getWritten();
+        var reader_fbs = std.io.fixedBufferStream(encoded);
+        const decoded = try decodeVarInt(reader_fbs.reader());
+
+        try std.testing.expectEqual(value, decoded.value);
+        try std.testing.expectEqual(encoded.len, decoded.len);
+    }
 }
