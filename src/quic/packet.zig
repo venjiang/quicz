@@ -37,6 +37,45 @@ pub const ParsedHeader = union(HeaderForm) {
     short: ShortHeader,
 };
 
+pub const PacketError = error{
+    InvalidHeaderForm,
+    InvalidFixedBit,
+    InvalidConnectionIdLength,
+    InvalidPacketNumber,
+    UnexpectedToken,
+    InvalidLength,
+};
+
+fn packetNumberLen(packet_number: u64) PacketError!u2 {
+    if (packet_number <= 0xff) return 1;
+    if (packet_number <= 0xffff) return 2;
+    if (packet_number <= 0xffffff) return 3;
+    if (packet_number <= 0xffffffff) return 4;
+    return error.InvalidPacketNumber;
+}
+
+fn encodePacketNumber(writer: anytype, packet_number: u64, pn_len: u2) !void {
+    var buf: [4]u8 = undefined;
+    const pn_len_usize: usize = pn_len;
+
+    var i: usize = 0;
+    while (i < pn_len_usize) : (i += 1) {
+        const shift = @as(u6, @intCast((pn_len_usize - 1 - i) * 8));
+        buf[i] = @as(u8, @intCast((packet_number >> shift) & 0xff));
+    }
+
+    try writer.writeAll(buf[0..pn_len_usize]);
+}
+
+fn decodePacketNumber(reader: anytype, pn_len: u2) !u64 {
+    var value: u64 = 0;
+    var i: usize = 0;
+    while (i < pn_len) : (i += 1) {
+        value = (value << 8) | try reader.readByte();
+    }
+    return value;
+}
+
 /// Encode a QUIC variable-length integer (RFC 9000 Section 16).
 pub fn encodeVarInt(writer: anytype, value: u64) !void {
     if (value <= 63) {
@@ -108,34 +147,178 @@ pub fn parseHeaderForm(first_byte: u8) HeaderForm {
     return if ((first_byte & 0x80) != 0) .long else .short;
 }
 
-/// Stub: encode a long header into the given writer.
-/// TODO: implement according to RFC 9000 Section 17.2.
 pub fn encodeLongHeader(writer: anytype, header: LongHeader) !void {
-    _ = writer;
-    _ = header;
-    @panic("encodeLongHeader: TODO");
+    if (header.dcid.len > 20 or header.scid.len > 20) {
+        return error.InvalidConnectionIdLength;
+    }
+    if (header.packet_type != .initial and header.token.len != 0) {
+        return error.UnexpectedToken;
+    }
+
+    const pn_len = try packetNumberLen(header.packet_number);
+
+    var first_byte: u8 = 0;
+    first_byte |= 0x80; // Header Form = long
+    first_byte |= 0x40; // Fixed Bit
+    first_byte |= @as(u8, @intCast(@intFromEnum(header.packet_type))) << 4;
+    first_byte |= @as(u8, pn_len - 1);
+
+    try writer.writeByte(first_byte);
+
+    const version = @as(u32, @intFromEnum(header.version));
+    var version_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &version_buf, version, .big);
+    try writer.writeAll(&version_buf);
+
+    try writer.writeByte(@as(u8, @intCast(header.dcid.len)));
+    try writer.writeAll(header.dcid);
+
+    try writer.writeByte(@as(u8, @intCast(header.scid.len)));
+    try writer.writeAll(header.scid);
+
+    if (header.packet_type == .initial) {
+        try encodeVarInt(writer, header.token.len);
+        try writer.writeAll(header.token);
+    }
+
+    // Simplified: encode payload length as packet number length only.
+    try encodeVarInt(writer, pn_len);
+    try encodePacketNumber(writer, header.packet_number, pn_len);
 }
 
-/// Stub: parse a long header from the given reader.
-/// TODO: implement according to RFC 9000 Section 17.2.
 pub fn parseLongHeader(reader: anytype) !LongHeader {
-    _ = reader;
-    @panic("parseLongHeader: TODO");
+    const first_byte = try reader.readByte();
+    if ((first_byte & 0x80) == 0) return error.InvalidHeaderForm;
+    if ((first_byte & 0x40) == 0) return error.InvalidFixedBit;
+
+    const packet_type: PacketType = @enumFromInt(@as(u2, @intCast((first_byte >> 4) & 0x03)));
+    const pn_len: u2 = @as(u2, @intCast(first_byte & 0x03)) + 1;
+
+    var version_buf: [4]u8 = undefined;
+    try reader.readNoEof(&version_buf);
+    const version: Version = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
+
+    const dcid_len = try reader.readByte();
+    if (dcid_len > 20) return error.InvalidConnectionIdLength;
+    const dcid = try std.heap.page_allocator.alloc(u8, dcid_len);
+    try reader.readNoEof(dcid);
+
+    const scid_len = try reader.readByte();
+    if (scid_len > 20) return error.InvalidConnectionIdLength;
+    const scid = try std.heap.page_allocator.alloc(u8, scid_len);
+    try reader.readNoEof(scid);
+
+    var token: []const u8 = &[_]u8{};
+    if (packet_type == .initial) {
+        const token_len_varint = try decodeVarInt(reader);
+        const token_len = token_len_varint.value;
+        token = try std.heap.page_allocator.alloc(u8, token_len);
+        try reader.readNoEof(@constCast(token));
+    }
+
+    const length_varint = try decodeVarInt(reader);
+    if (length_varint.value < pn_len) return error.InvalidLength;
+
+    const packet_number = try decodePacketNumber(reader, pn_len);
+
+    return .{
+        .version = version,
+        .dcid = dcid,
+        .scid = scid,
+        .packet_type = packet_type,
+        .token = token,
+        .packet_number = packet_number,
+    };
 }
 
-/// Stub: encode a short header into the given writer.
-/// TODO: implement according to RFC 9000 Section 17.3.
 pub fn encodeShortHeader(writer: anytype, header: ShortHeader) !void {
-    _ = writer;
-    _ = header;
-    @panic("encodeShortHeader: TODO");
+    if (header.dcid.len > 20) {
+        return error.InvalidConnectionIdLength;
+    }
+
+    const pn_len = try packetNumberLen(header.packet_number);
+
+    var first_byte: u8 = 0;
+    first_byte |= 0x40; // Fixed Bit
+    if (header.key_phase) first_byte |= 0x04;
+    first_byte |= @as(u8, pn_len - 1);
+
+    try writer.writeByte(first_byte);
+
+    // Simplified encoding: prefix short-header DCID with length.
+    try writer.writeByte(@as(u8, @intCast(header.dcid.len)));
+    try writer.writeAll(header.dcid);
+    try encodePacketNumber(writer, header.packet_number, pn_len);
 }
 
-/// Stub: parse a short header from the given reader.
-/// TODO: implement according to RFC 9000 Section 17.3.
 pub fn parseShortHeader(reader: anytype) !ShortHeader {
-    _ = reader;
-    @panic("parseShortHeader: TODO");
+    const first_byte = try reader.readByte();
+    if ((first_byte & 0x80) != 0) return error.InvalidHeaderForm;
+    if ((first_byte & 0x40) == 0) return error.InvalidFixedBit;
+
+    const key_phase = (first_byte & 0x04) != 0;
+    const pn_len: u2 = @as(u2, @intCast(first_byte & 0x03)) + 1;
+
+    const dcid_len = try reader.readByte();
+    if (dcid_len > 20) return error.InvalidConnectionIdLength;
+    const dcid = try std.heap.page_allocator.alloc(u8, dcid_len);
+    try reader.readNoEof(dcid);
+
+    const packet_number = try decodePacketNumber(reader, pn_len);
+
+    return .{
+        .dcid = dcid,
+        .key_phase = key_phase,
+        .packet_number = packet_number,
+    };
+}
+
+test "encode/parse long header roundtrip" {
+    var out: [256]u8 = undefined;
+    var writer_fbs = std.io.fixedBufferStream(&out);
+
+    const input = LongHeader{
+        .version = .v1,
+        .dcid = &[_]u8{ 0xaa, 0xbb, 0xcc, 0xdd },
+        .scid = &[_]u8{ 0x11, 0x22, 0x33, 0x44 },
+        .packet_type = .initial,
+        .token = &[_]u8{ 0xde, 0xad },
+        .packet_number = 0x1234,
+    };
+
+    try encodeLongHeader(writer_fbs.writer(), input);
+
+    const encoded = writer_fbs.getWritten();
+    var reader_fbs = std.io.fixedBufferStream(encoded);
+    const parsed = try parseLongHeader(reader_fbs.reader());
+
+    try std.testing.expectEqual(input.version, parsed.version);
+    try std.testing.expectEqual(input.packet_type, parsed.packet_type);
+    try std.testing.expectEqual(input.packet_number, parsed.packet_number);
+    try std.testing.expectEqualSlices(u8, input.dcid, parsed.dcid);
+    try std.testing.expectEqualSlices(u8, input.scid, parsed.scid);
+    try std.testing.expectEqualSlices(u8, input.token, parsed.token);
+}
+
+test "encode/parse short header roundtrip" {
+    var out: [256]u8 = undefined;
+    var writer_fbs = std.io.fixedBufferStream(&out);
+
+    const input = ShortHeader{
+        .dcid = &[_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff },
+        .key_phase = true,
+        .packet_number = 0x010203,
+    };
+
+    try encodeShortHeader(writer_fbs.writer(), input);
+
+    const encoded = writer_fbs.getWritten();
+    var reader_fbs = std.io.fixedBufferStream(encoded);
+    const parsed = try parseShortHeader(reader_fbs.reader());
+
+    try std.testing.expectEqual(input.key_phase, parsed.key_phase);
+    try std.testing.expectEqual(input.packet_number, parsed.packet_number);
+    try std.testing.expectEqualSlices(u8, input.dcid, parsed.dcid);
 }
 
 test "encodeVarInt emits expected bytes at size boundaries" {
