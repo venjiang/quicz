@@ -236,3 +236,55 @@ test "encodeVarInt and decodeVarInt roundtrip representative values" {
         try std.testing.expectEqual(encoded.len, decoded.len);
     }
 }
+
+test "encodeVarInt boundary values requested" {
+    const Case = struct {
+        value: u64,
+        expected: []const u8,
+    };
+
+    const cases = [_]Case{
+        .{ .value = 63, .expected = &[_]u8{0x3f} },
+        .{ .value = 64, .expected = &[_]u8{ 0x40, 0x40 } },
+        .{ .value = 16383, .expected = &[_]u8{ 0x7f, 0xff } },
+        .{ .value = 16384, .expected = &[_]u8{ 0x80, 0x00, 0x40, 0x00 } },
+        .{ .value = 1073741823, .expected = &[_]u8{ 0xbf, 0xff, 0xff, 0xff } },
+        .{ .value = 1073741824, .expected = &[_]u8{ 0xc0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00 } },
+    };
+
+    for (cases) |c| {
+        var out: [8]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&out);
+        try encodeVarInt(fbs.writer(), c.value);
+
+        const written = fbs.getWritten();
+        try std.testing.expectEqual(c.expected.len, written.len);
+        try std.testing.expectEqualSlices(u8, c.expected, written);
+    }
+}
+
+test "decodeVarInt boundary values requested" {
+    const Case = struct {
+        encoded: []const u8,
+        expected_value: u64,
+        expected_len: usize,
+    };
+
+    const cases = [_]Case{
+        .{ .encoded = &[_]u8{0x3f}, .expected_value = 63, .expected_len = 1 },
+        .{ .encoded = &[_]u8{ 0x40, 0x40 }, .expected_value = 64, .expected_len = 2 },
+        .{ .encoded = &[_]u8{ 0x7f, 0xff }, .expected_value = 16383, .expected_len = 2 },
+        .{ .encoded = &[_]u8{ 0x80, 0x00, 0x40, 0x00 }, .expected_value = 16384, .expected_len = 4 },
+        .{ .encoded = &[_]u8{ 0xbf, 0xff, 0xff, 0xff }, .expected_value = 1073741823, .expected_len = 4 },
+        .{ .encoded = &[_]u8{ 0xc0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00 }, .expected_value = 1073741824, .expected_len = 8 },
+    };
+
+    for (cases) |c| {
+        var fbs = std.io.fixedBufferStream(c.encoded);
+        const decoded = try decodeVarInt(fbs.reader());
+
+        try std.testing.expectEqual(c.expected_value, decoded.value);
+        try std.testing.expectEqual(c.expected_len, decoded.len);
+        try std.testing.expectEqual(c.encoded.len, fbs.pos);
+    }
+}
