@@ -1,9 +1,19 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+const required_zig_version = "0.16.0";
 
 // Build script for the current Zig stable template.
 // - Builds two example executables: quicz-echo-server and quicz-echo-client
 // - Uses src/lib.zig as a shared module imported by both executables.
 pub fn build(b: *std.Build) void {
+    // Keep build semantics tied to the Zig version this repository is tested with.
+    comptime {
+        if (!std.mem.eql(u8, builtin.zig_version_string, required_zig_version)) {
+            @compileError("quicz requires Zig " ++ required_zig_version ++ "; found " ++ builtin.zig_version_string);
+        }
+    }
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
