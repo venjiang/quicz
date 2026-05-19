@@ -16,8 +16,8 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] QUIC variable-length integer (varint) encode/decode helpers
 - [x] Minimal QUIC packet headers (long/short) parsing and serialization
 - [x] Basic frame model (STREAM/CRYPTO/PADDING/PING/ACK with ranges/RESET_STREAM/STOP_SENDING/MAX_* and CONNECTION_CLOSE subset)
-- [x] Minimal in-memory connection and stream queue/receive flow with send-side STREAM fragmentation, inbound RESET_STREAM handling, basic connection/stream/stream-count flow control, and close-state handling
-- [x] Simplified loss recovery and congestion-control state with automatic ACK generation and ACK-driven sent-packet tracking
+- [x] Minimal in-memory connection and stream queue/receive flow with send-side STREAM fragmentation, inbound RESET_STREAM handling, basic connection/stream/stream-count flow control, strict bidirectional stream validation, and close-state handling
+- [x] Simplified loss recovery and congestion-control state with automatic ACK generation, ACK range handling, unsent-packet ACK rejection, and ACK-driven sent-packet tracking
 - [ ] Full connection state machine and distinct packet number spaces
 - [ ] Full RFC 9002 loss detection & congestion control with loss timers and packet threshold loss detection
 - [ ] TLS 1.3 integration for QUIC (RFC 9001)
@@ -87,14 +87,20 @@ pub fn main() !void {
     // Current skeleton behavior:
     // - call conn.openStream() before sending on locally initiated
     //   bidirectional streams
+    // - sendOnStream(...) accepts observed peer-initiated bidirectional streams
+    //   for replies, but rejects unobserved peer streams and unidirectional IDs
     // - call conn.pollTx(...) to get unencrypted frame payload bytes;
     //   it may emit ACK-only payloads or coalesce a pending ACK with STREAM data
     // - feed peer payload bytes into conn.processDatagram(...)
     // - read application data via conn.recvOnStream(...)
     // sendOnStream(...) fragments larger writes to fit max_datagram_size.
+    // processDatagram(...) validates inbound bidirectional stream counts,
+    // rejects unopened local stream IDs and unmodeled unidirectional stream
+    // state, and rolls back partial state changes when a payload is invalid.
     // ACK, MAX_DATA, MAX_STREAM_DATA, and MAX_STREAMS_BIDI frames update
-    // in-memory recovery and flow-control state; protected packetization is
-    // still outside this API.
+    // in-memory recovery and flow-control state; RESET_STREAM marks the
+    // receive side closed unless the stream already finished with the same
+    // final size. Protected packetization is still outside this API.
     // Full UDP packetization, TLS, and packet protection are still pending.
 }
 ```

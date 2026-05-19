@@ -15,15 +15,19 @@
 - 固定 QUIC 版本（v1: 0x00000001，内部同时预留 v2 0x6b3343cf）
 - 基础包头/包体解析与序列化（Initial / Handshake / 1-RTT）
 - 每个 UDP 四元组对应一个连接
-- 基础流支持、发送侧 STREAM 分片、入站 RESET_STREAM 处理、流量控制和 stream-count 限制与关闭状态处理
-- 简化的丢包检测和拥塞控制，含自动 ACK 生成与 sent-packet tracking
+- 基础流支持、发送侧 STREAM 分片、入站 RESET_STREAM 处理、流量控制和 stream-count 限制、严格双向 stream 校验与关闭状态处理
+- 针对格式错误的内存态 frame payload 做事务化处理，失败时回滚本次部分 receive、recovery、流控和关闭状态更新
+- 简化的丢包检测和拥塞控制，含自动 ACK 生成、ACK range 处理、未发送 packet 的 ACK 拒绝与 sent-packet tracking
 
 ## 当前实现状态（Current Implementation Status）
 
-- 已实现：QUIC varint 工具、最小 long/short header codec、基础 frame codec（STREAM、CRYPTO、PADDING、PING、ACK 多区间、RESET_STREAM、STOP_SENDING、MAX_DATA、MAX_STREAM_DATA、MAX_STREAMS_BIDI/UNI 与 connection-close 变体）、带发送侧 STREAM 分片和入站 RESET_STREAM 处理的内存态 `QuicConnection` stream 发送/接收骨架、基础 connection/stream 流量控制和双向 stream-count 限制、CONNECTION_CLOSE/APPLICATION_CLOSE 关闭状态处理、针对 ACK-eliciting payload 的自动 ACK 生成、ACK 驱动的 sent-packet tracking，以及简化 recovery / congestion 状态对象。
-- 本地发起的 bidirectional stream 必须先通过 `openStream()` 创建，才能调用 `sendOnStream()`；已观察到的对端发起 bidirectional stream 仍可由 `sendOnStream()` 创建发送侧状态，用于当前内存态 echo 示例回写。
-- 当前 connection 骨架只接受 bidirectional STREAM/RESET_STREAM 流量；unidirectional stream 状态尚未建模，但 frame codec 仍能编解码相关帧类型。
+- 已实现：QUIC varint 工具、最小 long/short header codec，以及 STREAM、CRYPTO、PADDING、PING、ACK 多区间、RESET_STREAM、STOP_SENDING、MAX_DATA、MAX_STREAM_DATA、MAX_STREAMS_BIDI/UNI 与 connection-close 变体的基础 frame codec。
+- `QuicConnection` 实现了内存态 stream 发送/接收骨架，包含发送侧 STREAM 分片、连续接收缓存、入站 RESET_STREAM 处理、基础 connection 和 stream 流量控制、双向 stream-count 限制、CONNECTION_CLOSE/APPLICATION_CLOSE 关闭状态处理、针对 ACK-eliciting payload 的自动 ACK 生成、ACK-only 发送、空间允许时的 ACK 与 STREAM 合并、ACK 驱动的 sent-packet tracking，以及简化 recovery / congestion 状态对象。
+- 本地发起的 bidirectional stream 必须先通过 `openStream()` 创建，才能调用 `sendOnStream()`；`openStream()` 会遵守对端 bidirectional stream limit，直到收到更大的 MAX_STREAMS_BIDI 帧。
+- `sendOnStream()` 可用于回复已观察到的对端发起 bidirectional stream，当前内存态 echo 示例依赖这个行为。它会拒绝未观察到的对端发起 stream、未通过 `openStream()` 创建的本地发起 stream、unidirectional stream ID、已经发送 FIN 的 stream，以及被流控阻塞的写入。
+- `processDatagram()` 只接受已建模的 bidirectional STREAM/RESET_STREAM 接收状态。它会拒绝 unidirectional STREAM/RESET_STREAM 流量、未打开的本地 stream ID、超过接收 stream-count limit 的对端发起 bidirectional stream、乱序新 stream 数据、final size 之后的数据、final size 不一致的 RESET_STREAM、超出大小限制的 frame payload，以及确认从未发送 packet number 的 ACK。
+- 无效的多帧 payload 会回滚本次 payload 中已经改变的状态，包括接收缓存、RESET_STREAM 状态、MAX_DATA/MAX_STREAMS_BIDI 更新、待发送 ACK 状态、sent-packet recovery 状态与关闭状态。
 - 当前 `pollTx` / `processDatagram` 只流转未加密 QUIC frame payload 字节。`pollTx` 可能发送 ACK-only payload，或把待发送 ACK 与 STREAM 数据合并；它还不会生成或消费带 packet protection 的真实 UDP QUIC packet。
-- 尚未实现：TLS 1.3 集成、packet protection、独立 packet number spaces、完整 RFC 9002 loss timer 和 packet-threshold loss detection、UDP 四元组连接归属、QUIC v2 行为、路径迁移与 stateless reset。
+- 尚未实现：TLS 1.3 集成、packet protection、独立 packet number spaces、完整 RFC 9002 loss timer 和 packet-threshold loss detection、UDP 四元组连接归属、unidirectional stream 状态、乱序 stream 重组、QUIC v2 行为、路径迁移与 stateless reset。
 
 后续阶段会逐步扩展，最终覆盖完整 RFC 范围。
