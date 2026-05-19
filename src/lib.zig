@@ -30,6 +30,8 @@ pub const Config = struct {
     initial_max_data: u64 = 65_536,
     /// Initial per-stream data limit in both send and receive directions.
     initial_max_stream_data: u64 = 65_536,
+    /// Initial number of peer-advertised bidirectional streams this endpoint may open.
+    initial_max_streams_bidi: u64 = 64,
 };
 
 /// Endpoint role. It determines the locally initiated bidirectional stream IDs.
@@ -185,6 +187,8 @@ pub const QuicConnection = struct {
     pending_ack_largest: ?u64,
     peer_max_data: u64,
     peer_initial_max_stream_data: u64,
+    peer_max_streams_bidi: u64,
+    opened_bidi_streams: u64,
     sent_stream_data_bytes: u64,
     recv_max_data: u64,
     recv_max_stream_data: u64,
@@ -215,6 +219,8 @@ pub const QuicConnection = struct {
             .pending_ack_largest = null,
             .peer_max_data = config.initial_max_data,
             .peer_initial_max_stream_data = config.initial_max_stream_data,
+            .peer_max_streams_bidi = config.initial_max_streams_bidi,
+            .opened_bidi_streams = 0,
             .sent_stream_data_bytes = 0,
             .recv_max_data = config.initial_max_data,
             .recv_max_stream_data = config.initial_max_stream_data,
@@ -263,6 +269,7 @@ pub const QuicConnection = struct {
         const next_peer_packet_number_snapshot = self.next_peer_packet_number;
         const pending_ack_largest_snapshot = self.pending_ack_largest;
         const peer_max_data_snapshot = self.peer_max_data;
+        const peer_max_streams_bidi_snapshot = self.peer_max_streams_bidi;
         const closed_snapshot = self.closed;
         const send_stream_count = self.send_streams.items.len;
         const send_stream_snapshots = self.allocator.alloc(SendStreamState, send_stream_count) catch return error.OutOfMemory;
@@ -284,6 +291,7 @@ pub const QuicConnection = struct {
             self.rollbackRecvStreams(recv_stream_count, recv_snapshots);
             self.recv_data_bytes = recv_data_bytes_snapshot;
             self.rollbackSendStreams(send_stream_count, send_stream_snapshots);
+            self.peer_max_streams_bidi = peer_max_streams_bidi_snapshot;
             self.peer_max_data = peer_max_data_snapshot;
             self.next_peer_packet_number = next_peer_packet_number_snapshot;
             self.pending_ack_largest = pending_ack_largest_snapshot;
@@ -311,6 +319,7 @@ pub const QuicConnection = struct {
                 .ack => |ack| try self.receiveAckFrame(now_millis, ack),
                 .max_data => |max_data| self.receiveMaxDataFrame(max_data),
                 .max_stream_data => |max_stream_data| self.receiveMaxStreamDataFrame(max_stream_data),
+                .max_streams_bidi => |max_streams| self.receiveMaxStreamsBidiFrame(max_streams),
                 .stream => |stream_frame| try self.receiveStreamFrame(stream_frame),
                 .connection_close, .application_close => self.closed = true,
                 else => {},
@@ -412,12 +421,14 @@ pub const QuicConnection = struct {
         if (stream_id > max_quic_varint) return error.InvalidStream;
 
         const next_stream_id = std.math.add(u64, stream_id, 4) catch return error.Internal;
+        if (self.opened_bidi_streams >= self.peer_max_streams_bidi) return error.FlowControlBlocked;
 
         self.send_streams.append(self.allocator, .{
             .stream_id = stream_id,
             .max_data = self.peer_initial_max_stream_data,
         }) catch return error.OutOfMemory;
         self.next_stream_id = next_stream_id;
+        self.opened_bidi_streams = std.math.add(u64, self.opened_bidi_streams, 1) catch return error.Internal;
         return stream_id;
     }
 
@@ -661,6 +672,10 @@ pub const QuicConnection = struct {
         stream_state.max_data = @max(stream_state.max_data, max_stream_data.maximum_stream_data);
     }
 
+    fn receiveMaxStreamsBidiFrame(self: *QuicConnection, max_streams: frame.MaxStreamsBidiFrame) void {
+        self.peer_max_streams_bidi = @max(self.peer_max_streams_bidi, max_streams.maximum_streams);
+    }
+
     fn receiveStreamFrame(self: *QuicConnection, stream_frame: frame.StreamFrame) Error!void {
         if (stream_frame.stream_id > max_quic_varint) return error.InvalidStream;
 
@@ -713,6 +728,41 @@ test "openStream allocates client and server bidirectional stream ids" {
     try std.testing.expectEqual(@as(u64, 4), try client.openStream());
     try std.testing.expectEqual(@as(u64, 1), try server.openStream());
     try std.testing.expectEqual(@as(u64, 5), try server.openStream());
+}
+
+test "openStream enforces peer bidirectional stream limit until MAX_STREAMS_BIDI" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
+    defer conn.deinit();
+
+    try std.testing.expectEqual(@as(u64, 0), try conn.openStream());
+    try std.testing.expectError(error.FlowControlBlocked, conn.openStream());
+    try std.testing.expectEqual(@as(u64, 1), conn.opened_bidi_streams);
+    try std.testing.expectEqual(@as(usize, 1), conn.send_streams.items.len);
+
+    var update_buf: [16]u8 = undefined;
+    var update_out = buffer.fixedWriter(&update_buf);
+    try frame.encodeFrame(update_out.writer(), .{ .max_streams_bidi = .{ .maximum_streams = 2 } });
+    try conn.processDatagram(0, update_out.getWritten());
+
+    try std.testing.expectEqual(@as(u64, 4), try conn.openStream());
+    try std.testing.expectEqual(@as(u64, 2), conn.opened_bidi_streams);
+}
+
+test "processDatagram rolls back MAX_STREAMS_BIDI updates when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
+    defer conn.deinit();
+
+    try std.testing.expectEqual(@as(u64, 0), try conn.openStream());
+    try std.testing.expectError(error.FlowControlBlocked, conn.openStream());
+
+    var datagram: [16]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .max_streams_bidi = .{ .maximum_streams = 2 } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_max_streams_bidi);
+    try std.testing.expectError(error.FlowControlBlocked, conn.openStream());
 }
 
 test "sendOnStream and pollTx emit stream frame payloads" {

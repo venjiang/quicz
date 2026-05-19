@@ -16,7 +16,7 @@
 - [x] QUIC 变长整数（varint）编解码工具
 - [x] 最小 QUIC 包头（long/short）解析与序列化
 - [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK 多区间 / RESET_STREAM / STOP_SENDING / MAX_* / CONNECTION_CLOSE 子集）
-- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转，含发送侧 STREAM 分片、基础 connection/stream 流量控制与关闭状态处理
+- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转，含发送侧 STREAM 分片、基础 connection/stream/stream-count 流量控制与关闭状态处理
 - [x] 简化丢包恢复与拥塞控制状态，含自动 ACK 生成与 ACK 驱动的 sent-packet tracking
 - [ ] 完整连接状态机与独立 packet number spaces
 - [ ] 完整 RFC 9002 丢包检测与拥塞控制（含 loss timer 与 packet threshold loss detection）
@@ -79,6 +79,7 @@ pub fn main() !void {
             .initial_rtt_ms = 333,
             .initial_max_data = 65_536,
             .initial_max_stream_data = 65_536,
+            .initial_max_streams_bidi = 64,
         },
     );
     defer conn.deinit();
@@ -92,8 +93,8 @@ pub fn main() !void {
     // - 将对端 payload 字节喂给 conn.processDatagram(...)
     // - 通过 conn.recvOnStream(...) 读取应用层数据
     // sendOnStream(...) 会按 max_datagram_size 分片较大的写入。
-    // ACK 与 MAX_DATA/MAX_STREAM_DATA 帧会更新内存态 recovery 与流控状态；
-    // 带 packet protection 的 packetization 仍不在这个 API 内。
+    // ACK、MAX_DATA、MAX_STREAM_DATA 与 MAX_STREAMS_BIDI 帧会更新内存态
+    // recovery 与流控状态；带 packet protection 的 packetization 仍不在这个 API 内。
     // 完整 UDP packetization、TLS 与 packet protection 仍未实现。
 }
 ```

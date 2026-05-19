@@ -16,7 +16,7 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] QUIC variable-length integer (varint) encode/decode helpers
 - [x] Minimal QUIC packet headers (long/short) parsing and serialization
 - [x] Basic frame model (STREAM/CRYPTO/PADDING/PING/ACK with ranges/RESET_STREAM/STOP_SENDING/MAX_* and CONNECTION_CLOSE subset)
-- [x] Minimal in-memory connection and stream queue/receive flow with send-side STREAM fragmentation, basic connection/stream flow control, and close-state handling
+- [x] Minimal in-memory connection and stream queue/receive flow with send-side STREAM fragmentation, basic connection/stream/stream-count flow control, and close-state handling
 - [x] Simplified loss recovery and congestion-control state with automatic ACK generation and ACK-driven sent-packet tracking
 - [ ] Full connection state machine and distinct packet number spaces
 - [ ] Full RFC 9002 loss detection & congestion control with loss timers and packet threshold loss detection
@@ -76,6 +76,7 @@ pub fn main() !void {
             .initial_rtt_ms = 333,
             .initial_max_data = 65_536,
             .initial_max_stream_data = 65_536,
+            .initial_max_streams_bidi = 64,
         },
     );
     defer conn.deinit();
@@ -89,8 +90,9 @@ pub fn main() !void {
     // - feed peer payload bytes into conn.processDatagram(...)
     // - read application data via conn.recvOnStream(...)
     // sendOnStream(...) fragments larger writes to fit max_datagram_size.
-    // ACK frames and MAX_DATA/MAX_STREAM_DATA frames update in-memory recovery
-    // and flow-control state; protected packetization is still outside this API.
+    // ACK, MAX_DATA, MAX_STREAM_DATA, and MAX_STREAMS_BIDI frames update
+    // in-memory recovery and flow-control state; protected packetization is
+    // still outside this API.
     // Full UDP packetization, TLS, and packet protection are still pending.
 }
 ```
