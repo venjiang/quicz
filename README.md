@@ -16,7 +16,7 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] QUIC variable-length integer (varint) encode/decode helpers
 - [x] Minimal QUIC packet headers (long/short) parsing and serialization
 - [x] Basic frame model (STREAM/CRYPTO/PADDING/PING/ACK/ACK_ECN with ranges/RESET_STREAM/STOP_SENDING/MAX_*/BLOCKED/NEW_TOKEN/NEW_CONNECTION_ID/RETIRE_CONNECTION_ID/PATH_CHALLENGE/PATH_RESPONSE/HANDSHAKE_DONE and CONNECTION_CLOSE subset)
-- [x] Minimal in-memory connection and stream queue/receive flow with send-side STREAM and CRYPTO fragmentation, inbound CRYPTO buffering, RESET_STREAM and STOP_SENDING handling, PATH_CHALLENGE response queuing, unmatched PATH_RESPONSE rejection, client-only NEW_TOKEN/HANDSHAKE_DONE receive validation, basic connection/stream/stream-count flow control, strict stream direction validation, and close-state handling
+- [x] Minimal in-memory connection and stream queue/receive flow with send-side PING plus STREAM and CRYPTO fragmentation, inbound CRYPTO buffering, RESET_STREAM and STOP_SENDING handling, PATH_CHALLENGE response queuing, unmatched PATH_RESPONSE rejection, client-only NEW_TOKEN/HANDSHAKE_DONE receive validation, basic connection/stream/stream-count flow control, strict stream direction validation, and close-state handling
 - [x] Simplified loss recovery and congestion-control state with automatic ACK generation, ACK range handling, unsent-packet ACK rejection, and ACK-driven sent-packet tracking
 - [ ] Full connection state machine and distinct packet number spaces
 - [ ] Full RFC 9002 loss detection & congestion control with loss timers and packet threshold loss detection
@@ -84,6 +84,7 @@ pub fn main() !void {
 
     const stream_id = try conn.openStream();
     try conn.sendCrypto("client-hello-bytes"[0..]);
+    try conn.sendPing();
     try conn.sendOnStream(stream_id, "hello, quicz"[0..], true);
 
     // Current skeleton behavior:
@@ -93,8 +94,8 @@ pub fn main() !void {
     //   for replies, but rejects unobserved peer streams, unopened local streams,
     //   and peer-initiated unidirectional stream IDs
     // - call conn.pollTx(...) to get unencrypted frame payload bytes;
-    //   it may emit ACK-only, CRYPTO, PATH_RESPONSE, RESET_STREAM, or STREAM
-    //   payloads, and may coalesce a pending ACK when space allows
+    //   it may emit ACK-only, PING, CRYPTO, PATH_RESPONSE, RESET_STREAM, or
+    //   STREAM payloads, and may coalesce a pending ACK when space allows
     // - feed peer payload bytes into conn.processDatagram(...)
     // - read handshake bytes via conn.recvCrypto(...)
     // - read application data via conn.recvOnStream(...)
@@ -105,7 +106,8 @@ pub fn main() !void {
     // unopened local bidirectional IDs and inbound local unidirectional IDs,
     // and rolls back partial state changes when a payload is invalid.
     // CRYPTO frames are received into a contiguous in-memory handshake buffer.
-    // ACK, MAX_DATA, MAX_STREAM_DATA, and MAX_STREAMS_BIDI/UNI frames update
+    // sendPing() queues an ack-eliciting PING frame. ACK, MAX_DATA,
+    // MAX_STREAM_DATA, and MAX_STREAMS_BIDI/UNI frames update
     // in-memory recovery and flow-control state; MAX_STREAM_DATA validates the
     // stream state before updating send credit; PATH_CHALLENGE queues a matching
     // PATH_RESPONSE; PATH_RESPONSE is rejected until outbound challenge tracking

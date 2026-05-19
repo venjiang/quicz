@@ -152,6 +152,10 @@ fn pathResponseFrameWireLen() usize {
     return 9; // frame type + 8-byte path validation data
 }
 
+fn pingFrameWireLen() usize {
+    return 1; // frame type only
+}
+
 fn resetStreamFrameWireLen(reset: frame.ResetStreamFrame) Error!usize {
     var len: usize = 1; // frame type
     len = try addWireLen(len, try quicVarIntWireLen(reset.stream_id));
@@ -261,6 +265,7 @@ pub const QuicConnection = struct {
     next_peer_packet_number: u64,
     pending_ack_largest: ?u64,
     pending_path_responses: std.ArrayList([8]u8),
+    pending_ping_count: usize,
     peer_max_data: u64,
     peer_initial_max_stream_data: u64,
     peer_max_streams_bidi: u64,
@@ -311,6 +316,7 @@ pub const QuicConnection = struct {
             .next_peer_packet_number = 0,
             .pending_ack_largest = null,
             .pending_path_responses = .empty,
+            .pending_ping_count = 0,
             .peer_max_data = config.initial_max_data,
             .peer_initial_max_stream_data = config.initial_max_stream_data,
             .peer_max_streams_bidi = config.initial_max_streams_bidi,
@@ -480,6 +486,9 @@ pub const QuicConnection = struct {
         }
         if (self.crypto_send_queue.items.len != 0) {
             return try self.pollCryptoFrame(ack_to_send, now_millis, out_buf);
+        }
+        if (self.pending_ping_count != 0) {
+            return try self.pollPingFrame(ack_to_send, now_millis, out_buf);
         }
 
         self.dropResetClosedStreamFrames();
@@ -702,6 +711,15 @@ pub const QuicConnection = struct {
         state.next_offset = next_offset;
         if (fin) state.fin_sent = true;
         self.sent_stream_data_bytes = next_sent_total;
+    }
+
+    /// Queue one ack-eliciting PING frame for transmission by `pollTx`.
+    ///
+    /// The PING has no payload and does not consume stream or connection flow
+    /// control credit. It is still congestion controlled once emitted.
+    pub fn sendPing(self: *QuicConnection) Error!void {
+        if (self.closed) return error.ConnectionClosed;
+        self.pending_ping_count = std.math.add(usize, self.pending_ping_count, 1) catch return error.Internal;
     }
 
     /// Read received CRYPTO bytes from the modeled handshake byte stream.
@@ -1023,6 +1041,69 @@ pub const QuicConnection = struct {
         std.debug.assert(written.len == encoded_len);
 
         _ = self.pending_reset_streams.orderedRemove(0);
+        if (include_ack) self.pending_ack_largest = null;
+        self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
+        self.recovery_state.onPacketSent(written.len);
+        return written;
+    }
+
+    fn pollPingFrame(
+        self: *QuicConnection,
+        ack_to_send: ?frame.AckFrame,
+        now_millis: i64,
+        out_buf: []u8,
+    ) Error!?[]u8 {
+        const ping_encoded_len = pingFrameWireLen();
+        if (ping_encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
+
+        var encoded_len = ping_encoded_len;
+        var include_ack = false;
+        if (ack_to_send) |ack| {
+            const ack_encoded_len = try ackFrameWireLen(ack);
+            const coalesced_len = try addWireLen(ack_encoded_len, ping_encoded_len);
+            if (coalesced_len <= self.config.max_datagram_size and out_buf.len >= coalesced_len and self.recovery_state.canSend(coalesced_len)) {
+                encoded_len = coalesced_len;
+                include_ack = true;
+            } else if (ack_encoded_len <= self.config.max_datagram_size and out_buf.len >= ack_encoded_len) {
+                return try self.pollAckOnly(ack, out_buf);
+            } else {
+                return error.BufferTooSmall;
+            }
+        }
+
+        if (!self.recovery_state.canSend(encoded_len)) return null;
+        if (out_buf.len < encoded_len) return error.BufferTooSmall;
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        var appended_sent_packet = false;
+        errdefer if (appended_sent_packet) {
+            self.sent_packets.items.len -= 1;
+        };
+
+        const packet_number = self.next_packet_number;
+        self.sent_packets.append(self.allocator, .{
+            .packet_number = packet_number,
+            .sent_time_millis = now_millis,
+            .bytes = encoded_len,
+        }) catch return error.OutOfMemory;
+        appended_sent_packet = true;
+
+        var out = buffer.fixedWriter(out_buf[0..encoded_len]);
+        if (include_ack) {
+            frame.encodeFrame(out.writer(), .{ .ack = ack_to_send.? }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(out.writer(), .{ .ping = {} }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const written = out.getWritten();
+        std.debug.assert(written.len == encoded_len);
+
+        self.pending_ping_count -= 1;
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
         self.recovery_state.onPacketSent(written.len);
@@ -1485,6 +1566,72 @@ test "pollTx coalesces pending ACK with queued CRYPTO payload" {
             try std.testing.expectEqual(@as(u64, 0), crypto.offset);
             try std.testing.expectEqualStrings("hs", crypto.data);
         },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "sendPing and pollTx emit ping frame payloads" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    try conn.sendPing();
+    try conn.sendPing();
+    try std.testing.expectEqual(@as(usize, 2), conn.pending_ping_count);
+
+    var out_buf: [16]u8 = undefined;
+    const first_payload = (try conn.pollTx(10, &out_buf)).?;
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 1), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(usize, first_payload.len), conn.recovery_state.bytes_in_flight);
+
+    var first = try frame.decodeFrameSlice(first_payload, std.testing.allocator);
+    defer frame.deinitFrame(&first.frame, std.testing.allocator);
+    switch (first.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    const second_payload = (try conn.pollTx(20, &out_buf)).?;
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 2), conn.sent_packets.items.len);
+
+    var second = try frame.decodeFrameSlice(second_payload, std.testing.allocator);
+    defer frame.deinitFrame(&second.frame, std.testing.allocator);
+    switch (second.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "pollTx coalesces pending ACK with queued PING payload" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", false);
+
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(20, (try client.pollTx(10, &datagram)).?);
+    try server.sendPing();
+
+    const coalesced = (try server.pollTx(30, &datagram)).?;
+    try std.testing.expectEqual(@as(usize, 1), server.sent_packets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_ping_count);
+    try std.testing.expectEqual(@as(?u64, null), server.pending_ack_largest);
+
+    var first = try frame.decodeFrameSlice(coalesced, std.testing.allocator);
+    defer frame.deinitFrame(&first.frame, std.testing.allocator);
+    switch (first.frame) {
+        .ack => |ack| try std.testing.expectEqual(@as(u64, 0), ack.largest_acknowledged),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var second = try frame.decodeFrameSlice(coalesced[first.len..], std.testing.allocator);
+    defer frame.deinitFrame(&second.frame, std.testing.allocator);
+    switch (second.frame) {
+        .ping => {},
         else => return error.TestUnexpectedResult,
     }
 }
@@ -2613,6 +2760,7 @@ test "connection close frame closes public connection API" {
     try std.testing.expectError(error.ConnectionClosed, conn.pollTx(0, &out_buf));
     try std.testing.expectError(error.ConnectionClosed, conn.openStream());
     try std.testing.expectError(error.ConnectionClosed, conn.openUniStream());
+    try std.testing.expectError(error.ConnectionClosed, conn.sendPing());
     try std.testing.expectError(error.ConnectionClosed, conn.sendOnStream(0, "x", false));
 
     var recv_buf: [8]u8 = undefined;
