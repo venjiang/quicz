@@ -701,8 +701,12 @@ pub const QuicConnection = struct {
         self.peer_max_streams_bidi = @max(self.peer_max_streams_bidi, max_streams.maximum_streams);
     }
 
-    fn validateIncomingStreamCount(self: QuicConnection, stream_id: u64) Error!void {
-        if (!isBidirectionalStream(stream_id) or isLocalBidirectionalStream(self.side, stream_id)) return;
+    fn validateIncomingStreamCount(self: *QuicConnection, stream_id: u64) Error!void {
+        if (!isBidirectionalStream(stream_id)) return;
+        if (isLocalBidirectionalStream(self.side, stream_id)) {
+            if (self.findSendStream(stream_id) == null) return error.InvalidPacket;
+            return;
+        }
         if (streamCountForId(stream_id) > self.recv_max_streams_bidi) return error.InvalidPacket;
     }
 
@@ -1348,6 +1352,42 @@ test "processDatagram enforces inbound bidirectional stream count for RESET_STRE
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
     try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
     try std.testing.expectEqual(@as(u64, 0), conn.recv_data_bytes);
+}
+
+test "processDatagram rejects local bidirectional streams that were not opened" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "x",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 0,
+        .application_error_code = 1,
+        .final_size = 0,
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
+
+    _ = try conn.openStream();
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "ok",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items.len);
 }
 
 test "connection close frame closes public connection API" {
