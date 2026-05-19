@@ -46,6 +46,7 @@ pub const PaddingFrame = struct { len: usize };
 
 /// NEW_TOKEN frame carrying an address validation token for future connections.
 pub const NewTokenFrame = struct {
+    /// Opaque token bytes. QUIC NEW_TOKEN frames require a non-empty token.
     token: []const u8,
 };
 
@@ -236,6 +237,10 @@ fn validateNewConnectionIdFrame(new_connection_id: NewConnectionIdFrame) FrameEr
     }
 }
 
+fn validateNewTokenFrame(new_token: NewTokenFrame) FrameError!void {
+    if (new_token.token.len == 0) return error.InvalidFrameValue;
+}
+
 /// Release any buffers owned by a decoded frame.
 pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
     switch (frame.*) {
@@ -346,6 +351,8 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try packet.encodeVarInt(writer, stop_sending.application_error_code);
         },
         .new_token => |new_token| {
+            try validateNewTokenFrame(new_token);
+
             try writer.writeByte(@intFromEnum(FrameType.new_token));
             try packet.encodeVarInt(writer, new_token.token.len);
             try writer.writeAll(new_token.token);
@@ -522,6 +529,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
     if (frame_type == @intFromEnum(FrameType.new_token)) {
         const token_len = (try packet.decodeVarInt(reader)).value;
         const len_usize = try varIntToUsize(token_len);
+        if (len_usize == 0) return error.InvalidFrameValue;
         const token = try buffer.readOwnedBytes(reader, allocator, len_usize);
 
         return .{ .new_token = .{ .token = token } };
@@ -1039,6 +1047,19 @@ test "encode/decode new_token frame roundtrip" {
         .new_token => |frame| try std.testing.expectEqualStrings("future-address-token", frame.token),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "new_token frame rejects empty token" {
+    var buf: [8]u8 = undefined;
+    var out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .new_token = .{ .token = "" } }));
+
+    const wire = [_]u8{
+        @intFromEnum(FrameType.new_token),
+        0x00, // invalid empty token length
+    };
+    var in = buffer.fixedReader(&wire);
+    try std.testing.expectError(error.InvalidFrameValue, decodeFrame(in.reader(), std.testing.allocator));
 }
 
 test "encode/decode max_stream_data frame roundtrip" {
