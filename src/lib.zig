@@ -35,6 +35,12 @@ const PendingStreamFrame = struct {
     data: []u8,
 };
 
+const SentPacket = struct {
+    packet_number: u64,
+    sent_time_millis: i64,
+    bytes: usize,
+};
+
 fn quicVarIntWireLen(value: u64) Error!usize {
     if (value <= 63) return 1;
     if (value <= 16383) return 2;
@@ -62,6 +68,31 @@ fn streamEndOffset(offset: u64, data_len: usize) ?u64 {
     const end = std.math.add(u64, offset, len) catch return null;
     if (end > max_quic_varint) return null;
     return end;
+}
+
+fn elapsedMillis(sent_time_millis: i64, now_millis: i64) u64 {
+    if (now_millis <= sent_time_millis) return 0;
+    const delta = std.math.sub(i64, now_millis, sent_time_millis) catch return std.math.maxInt(u64);
+    return @intCast(delta);
+}
+
+fn ackFrameContains(ack: frame.AckFrame, packet_number: u64) bool {
+    if (ack.first_ack_range > ack.largest_acknowledged) return false;
+
+    var range_largest = ack.largest_acknowledged;
+    var range_smallest = range_largest - ack.first_ack_range;
+    if (packet_number >= range_smallest and packet_number <= range_largest) return true;
+
+    for (ack.ranges) |range| {
+        const skipped = std.math.add(u64, range.gap, 2) catch return false;
+        if (range_smallest < skipped) return false;
+        range_largest = range_smallest - skipped;
+        if (range.ack_range > range_largest) return false;
+        range_smallest = range_largest - range.ack_range;
+        if (packet_number >= range_smallest and packet_number <= range_largest) return true;
+    }
+
+    return false;
 }
 
 const SendStreamState = struct {
@@ -97,7 +128,9 @@ pub const QuicConnection = struct {
     config: Config,
     side: ConnectionSide,
     next_stream_id: u64,
+    next_packet_number: u64,
     recovery_state: recovery.Recovery,
+    sent_packets: std.ArrayList(SentPacket),
     send_queue: std.ArrayList(PendingStreamFrame),
     send_streams: std.ArrayList(SendStreamState),
     recv_streams: std.ArrayList(RecvStreamState),
@@ -116,10 +149,12 @@ pub const QuicConnection = struct {
                 .client => 0,
                 .server => 1,
             },
+            .next_packet_number = 0,
             .recovery_state = recovery.Recovery.init(.{
                 .max_datagram_size = config.max_datagram_size,
                 .initial_rtt_ms = config.initial_rtt_ms,
             }),
+            .sent_packets = .empty,
             .send_queue = .empty,
             .send_streams = .empty,
             .recv_streams = .empty,
@@ -131,6 +166,7 @@ pub const QuicConnection = struct {
         for (self.send_queue.items) |pending| {
             self.allocator.free(pending.data);
         }
+        self.sent_packets.deinit(self.allocator);
         self.send_queue.deinit(self.allocator);
         self.send_streams.deinit(self.allocator);
         for (self.recv_streams.items) |*stream| {
@@ -145,9 +181,13 @@ pub const QuicConnection = struct {
         now_millis: i64,
         datagram: []const u8,
     ) Error!void {
-        _ = now_millis;
-
         if (datagram.len == 0 or datagram.len > self.config.max_datagram_size) return error.InvalidPacket;
+
+        const recovery_snapshot = self.recovery_state;
+        const sent_packet_count = self.sent_packets.items.len;
+        const sent_packet_snapshots = self.allocator.alloc(SentPacket, sent_packet_count) catch return error.OutOfMemory;
+        defer self.allocator.free(sent_packet_snapshots);
+        @memcpy(sent_packet_snapshots, self.sent_packets.items);
 
         const recv_stream_count = self.recv_streams.items.len;
         const recv_snapshots = self.allocator.alloc(RecvStreamSnapshot, recv_stream_count) catch return error.OutOfMemory;
@@ -159,7 +199,11 @@ pub const QuicConnection = struct {
                 .final_size = stream.final_size,
             };
         }
-        errdefer self.rollbackRecvStreams(recv_stream_count, recv_snapshots);
+        errdefer {
+            self.rollbackRecvStreams(recv_stream_count, recv_snapshots);
+            self.rollbackSentPackets(sent_packet_count, sent_packet_snapshots);
+            self.recovery_state = recovery_snapshot;
+        }
 
         var offset: usize = 0;
         while (offset < datagram.len) {
@@ -172,6 +216,7 @@ pub const QuicConnection = struct {
             if (decoded.len == 0) return error.InvalidPacket;
 
             switch (decoded.frame) {
+                .ack => |ack| self.receiveAckFrame(now_millis, ack),
                 .stream => |stream_frame| try self.receiveStreamFrame(stream_frame),
                 else => {},
             }
@@ -186,8 +231,6 @@ pub const QuicConnection = struct {
         now_millis: i64,
         out_buf: []u8,
     ) Error!?[]u8 {
-        _ = now_millis;
-
         if (self.send_queue.items.len == 0) return null;
 
         const pending = self.send_queue.items[0];
@@ -195,6 +238,20 @@ pub const QuicConnection = struct {
         if (encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
         if (!self.recovery_state.canSend(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        var appended_sent_packet = false;
+        errdefer if (appended_sent_packet) {
+            self.sent_packets.items.len -= 1;
+        };
+
+        const packet_number = self.next_packet_number;
+        self.sent_packets.append(self.allocator, .{
+            .packet_number = packet_number,
+            .sent_time_millis = now_millis,
+            .bytes = encoded_len,
+        }) catch return error.OutOfMemory;
+        appended_sent_packet = true;
 
         var writable = out_buf;
         if (writable.len > self.config.max_datagram_size) {
@@ -217,6 +274,7 @@ pub const QuicConnection = struct {
 
         const removed = self.send_queue.orderedRemove(0);
         self.allocator.free(removed.data);
+        self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
         self.recovery_state.onPacketSent(written.len);
         return written;
     }
@@ -326,6 +384,43 @@ pub const QuicConnection = struct {
         }
     }
 
+    fn rollbackSentPackets(
+        self: *QuicConnection,
+        original_len: usize,
+        snapshots: []const SentPacket,
+    ) void {
+        self.sent_packets.items.len = original_len;
+        @memcpy(self.sent_packets.items[0..original_len], snapshots);
+    }
+
+    fn receiveAckFrame(self: *QuicConnection, now_millis: i64, ack: frame.AckFrame) void {
+        var acked_bytes: usize = 0;
+        var largest_acked_packet: ?SentPacket = null;
+
+        var i: usize = 0;
+        while (i < self.sent_packets.items.len) {
+            if (!ackFrameContains(ack, self.sent_packets.items[i].packet_number)) {
+                i += 1;
+                continue;
+            }
+
+            const removed = self.sent_packets.orderedRemove(i);
+            acked_bytes = std.math.add(usize, acked_bytes, removed.bytes) catch std.math.maxInt(usize);
+            if (largest_acked_packet == null or removed.packet_number > largest_acked_packet.?.packet_number) {
+                largest_acked_packet = removed;
+            }
+        }
+
+        if (acked_bytes == 0) return;
+
+        const rtt_packet = largest_acked_packet.?;
+        self.recovery_state.onPacketAcked(
+            acked_bytes,
+            elapsedMillis(rtt_packet.sent_time_millis, now_millis),
+            ack.ack_delay,
+        );
+    }
+
     fn receiveStreamFrame(self: *QuicConnection, stream_frame: frame.StreamFrame) Error!void {
         if (stream_frame.stream_id > max_quic_varint) return error.InvalidStream;
 
@@ -400,6 +495,109 @@ test "sendOnStream and pollTx emit stream frame payloads" {
     }
 
     try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
+}
+
+test "pollTx records sent packets for ACK-driven recovery" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "hello", false);
+
+    var out_buf: [128]u8 = undefined;
+    const payload = (try conn.pollTx(10, &out_buf)).?;
+
+    try std.testing.expectEqual(@as(usize, 1), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.sent_packets.items[0].packet_number);
+    try std.testing.expectEqual(@as(i64, 10), conn.sent_packets.items[0].sent_time_millis);
+    try std.testing.expectEqual(payload.len, conn.sent_packets.items[0].bytes);
+    try std.testing.expectEqual(@as(u64, 1), conn.next_packet_number);
+}
+
+test "processDatagram ACK updates recovery and removes sent packets" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "hello", false);
+
+    var out_buf: [128]u8 = undefined;
+    const payload = (try conn.pollTx(10, &out_buf)).?;
+    try std.testing.expectEqual(payload.len, conn.recovery_state.bytes_in_flight);
+
+    var ack_buf: [32]u8 = undefined;
+    var ack_out = buffer.fixedWriter(&ack_buf);
+    try frame.encodeFrame(ack_out.writer(), .{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+
+    try conn.processDatagram(60, ack_out.getWritten());
+
+    try std.testing.expectEqual(@as(usize, 0), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.recovery_state.bytes_in_flight);
+    try std.testing.expectEqual(@as(?u64, 50), conn.recovery_state.latest_rtt_ms);
+}
+
+test "ACK ranges keep unacknowledged sent packets in flight" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "a", false);
+    try conn.sendOnStream(stream_id, "b", false);
+    try conn.sendOnStream(stream_id, "c", false);
+
+    var out_buf: [128]u8 = undefined;
+    _ = (try conn.pollTx(10, &out_buf)).?;
+    const unacked_payload = (try conn.pollTx(20, &out_buf)).?;
+    _ = (try conn.pollTx(30, &out_buf)).?;
+    try std.testing.expectEqual(@as(usize, 3), conn.sent_packets.items.len);
+
+    const ranges = [_]frame.AckRange{
+        .{ .gap = 0, .ack_range = 0 },
+    };
+    var ack_buf: [32]u8 = undefined;
+    var ack_out = buffer.fixedWriter(&ack_buf);
+    try frame.encodeFrame(ack_out.writer(), .{ .ack = .{
+        .largest_acknowledged = 2,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+    } });
+
+    try conn.processDatagram(60, ack_out.getWritten());
+
+    try std.testing.expectEqual(@as(usize, 1), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(u64, 1), conn.sent_packets.items[0].packet_number);
+    try std.testing.expectEqual(unacked_payload.len, conn.recovery_state.bytes_in_flight);
+}
+
+test "processDatagram rolls back ACK recovery state when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "hello", false);
+
+    var out_buf: [128]u8 = undefined;
+    const payload = (try conn.pollTx(10, &out_buf)).?;
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(60, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 1), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.sent_packets.items[0].packet_number);
+    try std.testing.expectEqual(payload.len, conn.recovery_state.bytes_in_flight);
+    try std.testing.expectEqual(@as(?u64, null), conn.recovery_state.latest_rtt_ms);
 }
 
 test "processDatagram and recvOnStream move stream data" {
