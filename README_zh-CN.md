@@ -15,11 +15,11 @@
 - [x] `QuicConnection` 的基础 API 设计（初版）
 - [x] QUIC 变长整数（varint）编解码工具
 - [x] 最小 QUIC 包头（long/short）解析与序列化
-- [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK / RESET_STREAM / STOP_SENDING / MAX_* / CONNECTION_CLOSE 子集）
-- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转
-- [x] 简化丢包恢复与拥塞控制状态骨架
-- [ ] 完整连接状态机、packet number spaces 与 stream 流量控制
-- [ ] 完整 RFC 9002 丢包检测与拥塞控制（含 packet tracking）
+- [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK 多区间 / RESET_STREAM / STOP_SENDING / MAX_* / CONNECTION_CLOSE 子集）
+- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转，含基础 connection/stream 流量控制
+- [x] 简化丢包恢复与拥塞控制状态，含 ACK 驱动的 sent-packet tracking
+- [ ] 完整连接状态机与独立 packet number spaces
+- [ ] 完整 RFC 9002 丢包检测与拥塞控制（含 loss timer 与 packet threshold loss detection）
 - [ ] TLS 1.3 集成（RFC 9001）
 - [ ] QUIC v2（RFC 9369）版本支持
 
@@ -77,6 +77,8 @@ pub fn main() !void {
         .{
             .max_datagram_size = 1350,
             .initial_rtt_ms = 333,
+            .initial_max_data = 65_536,
+            .initial_max_stream_data = 65_536,
         },
     );
     defer conn.deinit();
@@ -88,6 +90,8 @@ pub fn main() !void {
     // - 调用 conn.pollTx(...) 获取未加密的 frame payload 字节
     // - 将对端 payload 字节喂给 conn.processDatagram(...)
     // - 通过 conn.recvOnStream(...) 读取应用层数据
+    // ACK 与 MAX_DATA/MAX_STREAM_DATA 帧会更新内存态 recovery 与流控状态，
+    // 但 packetization 仍不在这个 API 内。
     // 完整 UDP packetization、TLS 与 packet protection 仍未实现。
 }
 ```
