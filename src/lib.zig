@@ -279,7 +279,7 @@ pub const QuicConnection = struct {
             }
 
             switch (decoded.frame) {
-                .ack => |ack| self.receiveAckFrame(now_millis, ack),
+                .ack => |ack| try self.receiveAckFrame(now_millis, ack),
                 .max_data => |max_data| self.receiveMaxDataFrame(max_data),
                 .max_stream_data => |max_stream_data| self.receiveMaxStreamDataFrame(max_stream_data),
                 .stream => |stream_frame| try self.receiveStreamFrame(stream_frame),
@@ -508,7 +508,9 @@ pub const QuicConnection = struct {
         @memcpy(self.sent_packets.items[0..original_len], snapshots);
     }
 
-    fn receiveAckFrame(self: *QuicConnection, now_millis: i64, ack: frame.AckFrame) void {
+    fn receiveAckFrame(self: *QuicConnection, now_millis: i64, ack: frame.AckFrame) Error!void {
+        if (ack.largest_acknowledged >= self.next_packet_number) return error.InvalidPacket;
+
         var acked_bytes: usize = 0;
         var largest_acked_packet: ?SentPacket = null;
 
@@ -703,6 +705,32 @@ test "processDatagram ACK updates recovery and removes sent packets" {
     try std.testing.expectEqual(@as(usize, 0), conn.sent_packets.items.len);
     try std.testing.expectEqual(@as(usize, 0), conn.recovery_state.bytes_in_flight);
     try std.testing.expectEqual(@as(?u64, 50), conn.recovery_state.latest_rtt_ms);
+}
+
+test "processDatagram rejects ACK for packet number never sent" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "hello", false);
+
+    var out_buf: [128]u8 = undefined;
+    const payload = (try conn.pollTx(10, &out_buf)).?;
+    try std.testing.expectEqual(@as(u64, 1), conn.next_packet_number);
+
+    var ack_buf: [32]u8 = undefined;
+    var ack_out = buffer.fixedWriter(&ack_buf);
+    try frame.encodeFrame(ack_out.writer(), .{ .ack = .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(60, ack_out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 1), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.sent_packets.items[0].packet_number);
+    try std.testing.expectEqual(payload.len, conn.recovery_state.bytes_in_flight);
+    try std.testing.expectEqual(@as(?u64, null), conn.recovery_state.latest_rtt_ms);
 }
 
 test "processDatagram queues ACK for ack-eliciting payloads" {
