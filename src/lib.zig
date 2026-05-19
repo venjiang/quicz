@@ -389,6 +389,7 @@ pub const QuicConnection = struct {
                 .stop_sending => |stop_sending| try self.receiveStopSendingFrame(stop_sending),
                 .reset_stream => |reset_stream| try self.receiveResetStreamFrame(reset_stream),
                 .stream => |stream_frame| try self.receiveStreamFrame(stream_frame),
+                .handshake_done => if (self.side == .server) return error.InvalidPacket,
                 .connection_close, .application_close => self.closed = true,
                 else => {},
             }
@@ -2092,6 +2093,39 @@ test "recvOnStream rejects locally initiated unidirectional streams" {
 
     var read_buf: [8]u8 = undefined;
     try std.testing.expectError(error.InvalidStream, conn.recvOnStream(stream_id, &read_buf));
+}
+
+test "client accepts HANDSHAKE_DONE and queues ACK" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const payload = [_]u8{@intFromEnum(frame.FrameType.handshake_done)};
+    try conn.processDatagram(0, &payload);
+
+    try std.testing.expectEqual(@as(?u64, 0), conn.pending_ack_largest);
+
+    var out_buf: [16]u8 = undefined;
+    const ack_payload = (try conn.pollTx(0, &out_buf)).?;
+    var decoded = try frame.decodeFrameSlice(ack_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .ack => |ack| try std.testing.expectEqual(@as(u64, 0), ack.largest_acknowledged),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "server rejects HANDSHAKE_DONE from peer" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    const payload = [_]u8{@intFromEnum(frame.FrameType.handshake_done)};
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, &payload));
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
+
+    var out_buf: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
 }
 
 test "connection close frame closes public connection API" {
