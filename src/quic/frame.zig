@@ -88,6 +88,27 @@ pub const MaxStreamsUniFrame = struct {
     maximum_streams: u64,
 };
 
+/// DATA_BLOCKED frame reporting the connection data limit that blocked sending.
+pub const DataBlockedFrame = struct {
+    maximum_data: u64,
+};
+
+/// STREAM_DATA_BLOCKED frame reporting the stream data limit that blocked sending.
+pub const StreamDataBlockedFrame = struct {
+    stream_id: u64,
+    maximum_stream_data: u64,
+};
+
+/// STREAMS_BLOCKED frame for bidirectional stream-count credit exhaustion.
+pub const StreamsBlockedBidiFrame = struct {
+    maximum_streams: u64,
+};
+
+/// STREAMS_BLOCKED frame for unidirectional stream-count credit exhaustion.
+pub const StreamsBlockedUniFrame = struct {
+    maximum_streams: u64,
+};
+
 /// PATH_CHALLENGE frame carrying 8 bytes of path validation data.
 pub const PathChallengeFrame = struct {
     data: [8]u8,
@@ -122,6 +143,10 @@ pub const Frame = union(enum) {
     max_stream_data: MaxStreamDataFrame,
     max_streams_bidi: MaxStreamsBidiFrame,
     max_streams_uni: MaxStreamsUniFrame,
+    data_blocked: DataBlockedFrame,
+    stream_data_blocked: StreamDataBlockedFrame,
+    streams_blocked_bidi: StreamsBlockedBidiFrame,
+    streams_blocked_uni: StreamsBlockedUniFrame,
     path_challenge: PathChallengeFrame,
     path_response: PathResponseFrame,
     connection_close: ConnectionCloseFrame,
@@ -262,6 +287,23 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
         .max_streams_uni => |max_streams| {
             try writer.writeByte(@intFromEnum(FrameType.max_streams_uni));
             try packet.encodeVarInt(writer, max_streams.maximum_streams);
+        },
+        .data_blocked => |data_blocked| {
+            try writer.writeByte(@intFromEnum(FrameType.data_blocked));
+            try packet.encodeVarInt(writer, data_blocked.maximum_data);
+        },
+        .stream_data_blocked => |stream_data_blocked| {
+            try writer.writeByte(@intFromEnum(FrameType.stream_data_blocked));
+            try packet.encodeVarInt(writer, stream_data_blocked.stream_id);
+            try packet.encodeVarInt(writer, stream_data_blocked.maximum_stream_data);
+        },
+        .streams_blocked_bidi => |streams_blocked| {
+            try writer.writeByte(@intFromEnum(FrameType.streams_blocked_bidi));
+            try packet.encodeVarInt(writer, streams_blocked.maximum_streams);
+        },
+        .streams_blocked_uni => |streams_blocked| {
+            try writer.writeByte(@intFromEnum(FrameType.streams_blocked_uni));
+            try packet.encodeVarInt(writer, streams_blocked.maximum_streams);
         },
         .path_challenge => |path_challenge| {
             try writer.writeByte(@intFromEnum(FrameType.path_challenge));
@@ -405,6 +447,30 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
     if (frame_type == @intFromEnum(FrameType.max_streams_uni)) {
         const maximum_streams = (try packet.decodeVarInt(reader)).value;
         return .{ .max_streams_uni = .{ .maximum_streams = maximum_streams } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.data_blocked)) {
+        const maximum_data = (try packet.decodeVarInt(reader)).value;
+        return .{ .data_blocked = .{ .maximum_data = maximum_data } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.stream_data_blocked)) {
+        const stream_id = (try packet.decodeVarInt(reader)).value;
+        const maximum_stream_data = (try packet.decodeVarInt(reader)).value;
+        return .{ .stream_data_blocked = .{
+            .stream_id = stream_id,
+            .maximum_stream_data = maximum_stream_data,
+        } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.streams_blocked_bidi)) {
+        const maximum_streams = (try packet.decodeVarInt(reader)).value;
+        return .{ .streams_blocked_bidi = .{ .maximum_streams = maximum_streams } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.streams_blocked_uni)) {
+        const maximum_streams = (try packet.decodeVarInt(reader)).value;
+        return .{ .streams_blocked_uni = .{ .maximum_streams = maximum_streams } };
     }
 
     if (frame_type == @intFromEnum(FrameType.path_challenge)) {
@@ -811,6 +877,58 @@ test "encode/decode max_streams_uni frame roundtrip" {
         .max_streams_uni => |frame| {
             try std.testing.expectEqual(@as(u64, 40), frame.maximum_streams);
         },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "encode/decode blocked flow-control frames roundtrip" {
+    var data_buf: [64]u8 = undefined;
+    var data_out = buffer.fixedWriter(&data_buf);
+    try encodeFrame(data_out.writer(), .{ .data_blocked = .{ .maximum_data = 4096 } });
+
+    var data_in = buffer.fixedReader(data_out.getWritten());
+    const data_blocked = try decodeFrame(data_in.reader(), std.testing.allocator);
+    switch (data_blocked) {
+        .data_blocked => |frame| try std.testing.expectEqual(@as(u64, 4096), frame.maximum_data),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var stream_buf: [64]u8 = undefined;
+    var stream_out = buffer.fixedWriter(&stream_buf);
+    try encodeFrame(stream_out.writer(), .{ .stream_data_blocked = .{
+        .stream_id = 5,
+        .maximum_stream_data = 2048,
+    } });
+
+    var stream_in = buffer.fixedReader(stream_out.getWritten());
+    const stream_blocked = try decodeFrame(stream_in.reader(), std.testing.allocator);
+    switch (stream_blocked) {
+        .stream_data_blocked => |frame| {
+            try std.testing.expectEqual(@as(u64, 5), frame.stream_id);
+            try std.testing.expectEqual(@as(u64, 2048), frame.maximum_stream_data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var bidi_buf: [64]u8 = undefined;
+    var bidi_out = buffer.fixedWriter(&bidi_buf);
+    try encodeFrame(bidi_out.writer(), .{ .streams_blocked_bidi = .{ .maximum_streams = 3 } });
+
+    var bidi_in = buffer.fixedReader(bidi_out.getWritten());
+    const bidi_blocked = try decodeFrame(bidi_in.reader(), std.testing.allocator);
+    switch (bidi_blocked) {
+        .streams_blocked_bidi => |frame| try std.testing.expectEqual(@as(u64, 3), frame.maximum_streams),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var uni_buf: [64]u8 = undefined;
+    var uni_out = buffer.fixedWriter(&uni_buf);
+    try encodeFrame(uni_out.writer(), .{ .streams_blocked_uni = .{ .maximum_streams = 4 } });
+
+    var uni_in = buffer.fixedReader(uni_out.getWritten());
+    const uni_blocked = try decodeFrame(uni_in.reader(), std.testing.allocator);
+    switch (uni_blocked) {
+        .streams_blocked_uni => |frame| try std.testing.expectEqual(@as(u64, 4), frame.maximum_streams),
         else => return error.TestUnexpectedResult,
     }
 }
