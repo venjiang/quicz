@@ -224,10 +224,12 @@ pub const QuicConnection = struct {
     ) Error!void {
         if (stream_id > max_quic_varint) return error.InvalidStream;
 
-        const state = try self.ensureSendStreamState(stream_id);
-        if (state.fin_sent) return error.StreamClosed;
+        const existing_state = self.findSendStream(stream_id);
+        if (existing_state) |state| {
+            if (state.fin_sent) return error.StreamClosed;
+        }
 
-        const offset = state.next_offset;
+        const offset = if (existing_state) |state| state.next_offset else 0;
         const next_offset = streamEndOffset(offset, data.len) orelse return error.InvalidStream;
         const encoded_len = try streamFrameWireLen(stream_id, offset, data.len);
         if (encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
@@ -235,6 +237,17 @@ pub const QuicConnection = struct {
         const owned = self.allocator.alloc(u8, data.len) catch return error.OutOfMemory;
         errdefer self.allocator.free(owned);
         @memcpy(owned, data);
+
+        var appended_send_state = false;
+        errdefer if (appended_send_state) {
+            _ = self.send_streams.orderedRemove(self.send_streams.items.len - 1);
+        };
+
+        const state = existing_state orelse blk: {
+            self.send_streams.append(self.allocator, .{ .stream_id = stream_id }) catch return error.OutOfMemory;
+            appended_send_state = true;
+            break :blk &self.send_streams.items[self.send_streams.items.len - 1];
+        };
 
         self.send_queue.append(self.allocator, .{
             .stream_id = stream_id,
@@ -263,13 +276,11 @@ pub const QuicConnection = struct {
         return n;
     }
 
-    fn ensureSendStreamState(self: *QuicConnection, stream_id: u64) Error!*SendStreamState {
+    fn findSendStream(self: *QuicConnection, stream_id: u64) ?*SendStreamState {
         for (self.send_streams.items) |*stream| {
             if (stream.stream_id == stream_id) return stream;
         }
-
-        self.send_streams.append(self.allocator, .{ .stream_id = stream_id }) catch return error.OutOfMemory;
-        return &self.send_streams.items[self.send_streams.items.len - 1];
+        return null;
     }
 
     fn ensureRecvStreamState(self: *QuicConnection, stream_id: u64) Error!*RecvStreamState {
@@ -439,6 +450,14 @@ test "sendOnStream rejects unsendable stream frames before mutating state" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "sendOnStream does not create state for oversized new streams" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 8 });
+    defer conn.deinit();
+
+    try std.testing.expectError(error.BufferTooSmall, conn.sendOnStream(4, "too large", false));
+    try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
 }
 
 test "processDatagram preserves out of memory from frame decoding" {
