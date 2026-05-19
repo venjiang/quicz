@@ -51,10 +51,12 @@ pub const FixedWriter = struct {
     }
 };
 
+/// Create a fixed reader over `data`.
 pub fn fixedReader(data: []const u8) FixedReader {
     return .{ .data = data };
 }
 
+/// Create a fixed writer over caller-owned `buffer`.
 pub fn fixedWriter(buffer: []u8) FixedWriter {
     return .{ .buffer = buffer };
 }

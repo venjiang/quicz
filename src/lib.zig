@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const packet = @import("quic/packet.zig");
 pub const frame = @import("quic/frame.zig");
+pub const recovery = @import("quic/recovery.zig");
 const buffer = @import("quic/buffer.zig");
 
 /// Public error set returned by the experimental connection API.
@@ -58,6 +59,7 @@ pub const QuicConnection = struct {
     config: Config,
     side: ConnectionSide,
     next_stream_id: u64,
+    recovery_state: recovery.Recovery,
     send_queue: std.ArrayList(PendingStreamFrame),
     send_streams: std.ArrayList(SendStreamState),
     recv_streams: std.ArrayList(RecvStreamState),
@@ -76,6 +78,10 @@ pub const QuicConnection = struct {
                 .client => 0,
                 .server => 1,
             },
+            .recovery_state = recovery.Recovery.init(.{
+                .max_datagram_size = config.max_datagram_size,
+                .initial_rtt_ms = config.initial_rtt_ms,
+            }),
             .send_queue = .empty,
             .send_streams = .empty,
             .recv_streams = .empty,
@@ -146,8 +152,11 @@ pub const QuicConnection = struct {
         };
 
         const written = out.getWritten();
+        if (!self.recovery_state.canSend(written.len)) return null;
+
         const removed = self.send_queue.orderedRemove(0);
         self.allocator.free(removed.data);
+        self.recovery_state.onPacketSent(written.len);
         return written;
     }
 
@@ -262,6 +271,7 @@ test "sendOnStream and pollTx emit stream frame payloads" {
 
     var out_buf: [128]u8 = undefined;
     const payload = (try conn.pollTx(0, &out_buf)).?;
+    try std.testing.expectEqual(payload.len, conn.recovery_state.bytes_in_flight);
 
     var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
     defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
@@ -297,6 +307,23 @@ test "processDatagram and recvOnStream move stream data" {
     const n = (try server.recvOnStream(stream_id, &read_buf)).?;
     try std.testing.expectEqualStrings("hello world", read_buf[0..n]);
     try std.testing.expectEqual(@as(?usize, null), try server.recvOnStream(stream_id, &read_buf));
+}
+
+test "pollTx returns null when congestion window is full" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "hello", false);
+
+    conn.recovery_state.congestion_window = 0;
+
+    var out_buf: [128]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
+
+    conn.recovery_state.congestion_window = 128;
+    const payload = (try conn.pollTx(0, &out_buf)).?;
+    try std.testing.expect(payload.len > 0);
 }
 
 test "pollTx keeps queued frame when output buffer is too small" {
