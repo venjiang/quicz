@@ -15,7 +15,7 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] Basic API surface for `QuicConnection` (initial draft)
 - [x] QUIC variable-length integer (varint) encode/decode helpers
 - [x] Minimal QUIC packet headers (long/short) parsing and serialization
-- [x] Basic frame model (STREAM/CRYPTO/PADDING/PING/ACK/CONNECTION_CLOSE subset)
+- [x] Basic frame model (STREAM/CRYPTO/PADDING/PING/ACK/RESET_STREAM/STOP_SENDING/MAX_* and CONNECTION_CLOSE subset)
 - [x] Minimal in-memory connection and stream queue/receive flow
 - [x] Simplified loss recovery and congestion-control state skeleton
 - [ ] Full connection state machine, packet number spaces, and stream flow control
@@ -43,7 +43,8 @@ For more detailed design and per-feature notes, see the [`docs/en/`](docs/en/) d
 
 ## Build
 
-You need a Zig stable version (currently developed and tested with **0.16.0**).
+You need Zig **0.16.0**. The build currently enforces this exact tested
+version so Zig standard-library changes do not silently alter behavior.
 
 ```bash
 zig build

@@ -20,7 +20,7 @@
 
 ## 当前实现状态（Current Implementation Status）
 
-- 已实现：QUIC varint 工具、最小 long/short header codec、基础 frame codec、内存态 `QuicConnection` stream 发送/接收骨架，以及简化 recovery / congestion 状态对象。
+- 已实现：QUIC varint 工具、最小 long/short header codec、基础 frame codec（STREAM、CRYPTO、PADDING、PING、ACK、RESET_STREAM、STOP_SENDING、MAX_DATA、MAX_STREAM_DATA、MAX_STREAMS_BIDI/UNI 与 connection-close 变体）、内存态 `QuicConnection` stream 发送/接收骨架，以及简化 recovery / congestion 状态对象。
 - 当前 `pollTx` / `processDatagram` 只流转未加密 QUIC frame payload 字节，还不会生成或消费带 packet protection 的真实 UDP QUIC packet。
 - 尚未实现：TLS 1.3 集成、packet protection、packet number space tracking、基于真实 ACK 的 recovery、stream 流量控制、UDP 四元组连接归属、QUIC v2 行为、路径迁移与 stateless reset。
 

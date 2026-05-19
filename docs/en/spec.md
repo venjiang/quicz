@@ -20,7 +20,7 @@ Initial target documents:
 
 ## Current implementation status
 
-- Implemented: QUIC varint helpers, minimal long/short header codecs, basic frame codecs, an in-memory `QuicConnection` stream send/receive skeleton, and a simplified recovery/congestion state object.
+- Implemented: QUIC varint helpers, minimal long/short header codecs, basic frame codecs (STREAM, CRYPTO, PADDING, PING, ACK, RESET_STREAM, STOP_SENDING, MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS_BIDI/UNI, and connection-close variants), an in-memory `QuicConnection` stream send/receive skeleton, and a simplified recovery/congestion state object.
 - Current `pollTx` / `processDatagram` behavior moves unencrypted QUIC frame payload bytes. It does not yet produce or consume protected QUIC packets over UDP.
 - Not implemented yet: TLS 1.3 integration, packet protection, packet number space tracking, real ACK-driven recovery, stream flow control, UDP 4-tuple connection ownership, QUIC v2 behavior, path migration, and stateless reset.
 

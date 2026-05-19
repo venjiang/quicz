@@ -15,7 +15,7 @@
 - [x] `QuicConnection` 的基础 API 设计（初版）
 - [x] QUIC 变长整数（varint）编解码工具
 - [x] 最小 QUIC 包头（long/short）解析与序列化
-- [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK / CONNECTION_CLOSE 子集）
+- [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK / RESET_STREAM / STOP_SENDING / MAX_* / CONNECTION_CLOSE 子集）
 - [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转
 - [x] 简化丢包恢复与拥塞控制状态骨架
 - [ ] 完整连接状态机、packet number spaces 与 stream 流量控制
@@ -46,7 +46,8 @@
 
 ## 构建（Build）
 
-需要安装 Zig 稳定版本（当前开发与测试使用 **0.16.0**）。
+需要安装 Zig **0.16.0**。当前构建会强制校验这个精确测试版本，避免 Zig
+标准库变化静默改变行为。
 
 ```bash
 zig build
