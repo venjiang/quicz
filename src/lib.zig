@@ -81,6 +81,12 @@ const RecvStreamState = struct {
     }
 };
 
+const RecvStreamSnapshot = struct {
+    data_len: usize,
+    read_offset: usize,
+    final_size: ?u64,
+};
+
 /// Experimental QUIC connection handle.
 ///
 /// The current implementation only moves unencrypted frame payload bytes through
@@ -141,7 +147,19 @@ pub const QuicConnection = struct {
     ) Error!void {
         _ = now_millis;
 
-        if (datagram.len > self.config.max_datagram_size) return error.InvalidPacket;
+        if (datagram.len == 0 or datagram.len > self.config.max_datagram_size) return error.InvalidPacket;
+
+        const recv_stream_count = self.recv_streams.items.len;
+        const recv_snapshots = self.allocator.alloc(RecvStreamSnapshot, recv_stream_count) catch return error.OutOfMemory;
+        defer self.allocator.free(recv_snapshots);
+        for (self.recv_streams.items, recv_snapshots) |stream, *snapshot| {
+            snapshot.* = .{
+                .data_len = stream.data.items.len,
+                .read_offset = stream.read_offset,
+                .final_size = stream.final_size,
+            };
+        }
+        errdefer self.rollbackRecvStreams(recv_stream_count, recv_snapshots);
 
         var offset: usize = 0;
         while (offset < datagram.len) {
@@ -288,6 +306,24 @@ pub const QuicConnection = struct {
             if (stream.stream_id == stream_id) return stream;
         }
         return null;
+    }
+
+    fn rollbackRecvStreams(
+        self: *QuicConnection,
+        original_len: usize,
+        snapshots: []const RecvStreamSnapshot,
+    ) void {
+        while (self.recv_streams.items.len > original_len) {
+            var removed = self.recv_streams.orderedRemove(self.recv_streams.items.len - 1);
+            removed.deinit(self.allocator);
+        }
+
+        for (snapshots, 0..) |snapshot, i| {
+            var stream = &self.recv_streams.items[i];
+            stream.data.items.len = snapshot.data_len;
+            stream.read_offset = snapshot.read_offset;
+            stream.final_size = snapshot.final_size;
+        }
     }
 
     fn receiveStreamFrame(self: *QuicConnection, stream_frame: frame.StreamFrame) Error!void {
@@ -498,6 +534,54 @@ test "processDatagram rejects payloads larger than configured datagram size" {
     };
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, &wire));
+}
+
+test "processDatagram rejects empty payloads" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, &[_]u8{}));
+}
+
+test "processDatagram rolls back stream state when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "x",
+    } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "a",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 1,
+        .fin = true,
+        .data = "b",
+    } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items.len);
+    try std.testing.expectEqualStrings("a", conn.recv_streams.items[0].data.items);
+    try std.testing.expectEqual(@as(?u64, null), conn.recv_streams.items[0].final_size);
 }
 
 test "processDatagram does not create state for out-of-order new streams" {
