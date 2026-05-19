@@ -6,6 +6,7 @@ pub const recovery = @import("quic/recovery.zig");
 const buffer = @import("quic/buffer.zig");
 
 const max_quic_varint = 4611686018427387903;
+const max_stream_count = @as(u64, 1) << 60;
 
 /// Public error set returned by the experimental connection API.
 pub const Error = error{
@@ -30,9 +31,9 @@ pub const Config = struct {
     initial_max_data: u64 = 65_536,
     /// Initial per-stream data limit in both send and receive directions.
     initial_max_stream_data: u64 = 65_536,
-    /// Initial bidirectional stream-count limit in both send and receive directions.
+    /// Initial bidirectional stream-count limit in both send and receive directions. Maximum is 2^60.
     initial_max_streams_bidi: u64 = 64,
-    /// Initial unidirectional stream-count limit in both send and receive directions.
+    /// Initial unidirectional stream-count limit in both send and receive directions. Maximum is 2^60.
     initial_max_streams_uni: u64 = 64,
 };
 
@@ -290,6 +291,10 @@ pub const QuicConnection = struct {
         side: ConnectionSide,
         config: Config,
     ) !QuicConnection {
+        if (config.initial_max_streams_bidi > max_stream_count or config.initial_max_streams_uni > max_stream_count) {
+            return error.InvalidStream;
+        }
+
         return QuicConnection{
             .allocator = allocator,
             .config = config,
@@ -1322,6 +1327,25 @@ test "openStream allocates client and server bidirectional stream ids" {
     try std.testing.expectEqual(@as(u64, 4), try client.openStream());
     try std.testing.expectEqual(@as(u64, 1), try server.openStream());
     try std.testing.expectEqual(@as(u64, 5), try server.openStream());
+}
+
+test "init validates initial stream count limits" {
+    var max_bidi = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_streams_bidi = max_stream_count,
+    });
+    defer max_bidi.deinit();
+
+    var max_uni = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_streams_uni = max_stream_count,
+    });
+    defer max_uni.deinit();
+
+    try std.testing.expectError(error.InvalidStream, QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_streams_bidi = max_stream_count + 1,
+    }));
+    try std.testing.expectError(error.InvalidStream, QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_streams_uni = max_stream_count + 1,
+    }));
 }
 
 test "openStream enforces peer bidirectional stream limit until MAX_STREAMS_BIDI" {
