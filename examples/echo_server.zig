@@ -24,5 +24,5 @@ pub fn main() !void {
     try client.processDatagram(0, (try server.pollTx(0, &datagram)).?);
 
     const echo_len = (try client.recvOnStream(stream_id, &recv_buf)).?;
-    std.debug.print("[server] echoed: {s}\n", .{recv_buf[0..echo_len]});
+    std.debug.print("[client] echoed: {s}\n", .{recv_buf[0..echo_len]});
 }
