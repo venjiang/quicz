@@ -467,6 +467,8 @@ pub const QuicConnection = struct {
             if (state.fin_sent) return error.StreamClosed;
         } else if (isLocalBidirectionalStream(self.side, stream_id)) {
             return error.InvalidStream;
+        } else if (self.findRecvStream(stream_id) == null) {
+            return error.InvalidStream;
         }
 
         const offset = if (existing_state) |state| state.next_offset else 0;
@@ -843,6 +845,26 @@ test "sendOnStream rejects unidirectional stream ids" {
     try std.testing.expectError(error.InvalidStream, server.sendOnStream(3, "x", false));
     try std.testing.expectEqual(@as(usize, 0), client.send_streams.items.len);
     try std.testing.expectEqual(@as(usize, 0), server.send_streams.items.len);
+}
+
+test "sendOnStream requires observed peer bidirectional streams" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    try std.testing.expectError(error.InvalidStream, conn.sendOnStream(1, "reply", false));
+
+    var datagram: [16]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 1,
+        .offset = 0,
+        .fin = false,
+        .data = "",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    try conn.sendOnStream(1, "reply", false);
+    try std.testing.expectEqual(@as(usize, 1), conn.send_streams.items.len);
 }
 
 test "processDatagram rolls back MAX_STREAMS_BIDI updates when payload is invalid" {
@@ -1540,6 +1562,16 @@ test "sendOnStream does not create state for oversized new streams" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 3 });
     defer conn.deinit();
 
+    var datagram: [8]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 1,
+        .offset = 0,
+        .fin = false,
+        .data = "",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
     try std.testing.expectError(error.BufferTooSmall, conn.sendOnStream(1, "too large", false));
     try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
 }
@@ -1547,6 +1579,16 @@ test "sendOnStream does not create state for oversized new streams" {
 test "sendOnStream rolls back partial fragmentation when later offsets cannot fit" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 4 });
     defer conn.deinit();
+
+    var datagram: [8]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 1,
+        .offset = 0,
+        .fin = false,
+        .data = "",
+    } });
+    try conn.processDatagram(0, out.getWritten());
 
     try std.testing.expectError(error.BufferTooSmall, conn.sendOnStream(1, "ab", false));
     try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
@@ -1620,6 +1662,16 @@ test "sendOnStream does not create state for flow-control blocked new streams" {
         .initial_max_stream_data = 1,
     });
     defer conn.deinit();
+
+    var datagram: [8]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 1,
+        .offset = 0,
+        .fin = false,
+        .data = "",
+    } });
+    try conn.processDatagram(0, out.getWritten());
 
     try std.testing.expectError(error.FlowControlBlocked, conn.sendOnStream(1, "xx", false));
     try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
