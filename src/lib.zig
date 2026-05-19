@@ -2754,12 +2754,11 @@ test "receive stream rejects end offset beyond QUIC varint range" {
 
     var datagram: [64]u8 = undefined;
     var out = buffer.fixedWriter(&datagram);
-    try frame.encodeFrame(out.writer(), .{ .stream = .{
-        .stream_id = 0,
-        .offset = max_quic_varint,
-        .fin = true,
-        .data = "x",
-    } });
+    try out.writeByte(0x0f); // STREAM with OFF, LEN, and FIN bits
+    try packet.encodeVarInt(out.writer(), 0);
+    try packet.encodeVarInt(out.writer(), max_quic_varint);
+    try packet.encodeVarInt(out.writer(), 1);
+    try out.writeByte('x');
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
 }

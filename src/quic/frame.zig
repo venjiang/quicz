@@ -2,6 +2,7 @@ const std = @import("std");
 const buffer = @import("buffer.zig");
 const packet = @import("packet.zig");
 
+const max_quic_varint: u64 = (@as(u64, 1) << 62) - 1;
 const max_stream_count: u64 = @as(u64, 1) << 60;
 
 /// Basic subset of QUIC frames (RFC 9000 Section 19).
@@ -247,6 +248,21 @@ fn validateStreamCount(maximum_streams: u64) FrameError!void {
     if (maximum_streams > max_stream_count) return error.InvalidFrameValue;
 }
 
+fn validateFrameEndOffset(offset: u64, data_len: u64) FrameError!void {
+    const end_offset = std.math.add(u64, offset, data_len) catch return error.InvalidFrameValue;
+    if (end_offset > max_quic_varint) return error.InvalidFrameValue;
+}
+
+fn validateFrameSliceEndOffset(offset: u64, data: []const u8) FrameError!void {
+    const data_len = std.math.cast(u64, data.len) orelse return error.InvalidFrameLength;
+    try validateFrameEndOffset(offset, data_len);
+}
+
+fn validateFrameEndOffsetFromLen(offset: u64, data_len: usize) FrameError!void {
+    const data_len_u64 = std.math.cast(u64, data_len) orelse return error.InvalidFrameLength;
+    try validateFrameEndOffset(offset, data_len_u64);
+}
+
 /// Release any buffers owned by a decoded frame.
 pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
     switch (frame.*) {
@@ -364,6 +380,8 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeAll(new_token.token);
         },
         .stream => |stream| {
+            try validateFrameSliceEndOffset(stream.offset, stream.data);
+
             var frame_type: u8 = @intFromEnum(FrameType.stream);
             if (stream.offset != 0) {
                 frame_type |= 0x04; // OFF bit
@@ -382,6 +400,8 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeAll(stream.data);
         },
         .crypto => |crypto| {
+            try validateFrameSliceEndOffset(crypto.offset, crypto.data);
+
             try writer.writeByte(@intFromEnum(FrameType.crypto));
             try packet.encodeVarInt(writer, crypto.offset);
             try packet.encodeVarInt(writer, crypto.data.len);
@@ -548,6 +568,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
     if (frame_type == @intFromEnum(FrameType.crypto)) {
         const offset = (try packet.decodeVarInt(reader)).value;
         const data_len = (try packet.decodeVarInt(reader)).value;
+        try validateFrameEndOffset(offset, data_len);
         const len_usize = try varIntToUsize(data_len);
 
         const data = try buffer.readOwnedBytes(reader, allocator, len_usize);
@@ -665,10 +686,13 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
 
         const len_usize = if (has_len) blk: {
             const data_len = (try packet.decodeVarInt(reader)).value;
+            try validateFrameEndOffset(offset, data_len);
             break :blk try varIntToUsize(data_len);
         } else blk: {
             if (comptime readerHasRemainingLen(@TypeOf(reader))) {
-                break :blk reader.remainingLen();
+                const data_len = reader.remainingLen();
+                try validateFrameEndOffsetFromLen(offset, data_len);
+                break :blk data_len;
             }
             return error.InvalidFrameLength;
         };
@@ -792,6 +816,42 @@ test "encode/decode crypto frame roundtrip" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "stream and crypto frames reject end offsets above varint maximum" {
+    var encode_buf: [64]u8 = undefined;
+    var encode_out = buffer.fixedWriter(&encode_buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(encode_out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = max_quic_varint,
+        .fin = false,
+        .data = "x",
+    } }));
+
+    encode_out = buffer.fixedWriter(&encode_buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(encode_out.writer(), .{ .crypto = .{
+        .offset = max_quic_varint,
+        .data = "x",
+    } }));
+
+    var stream_wire: [32]u8 = undefined;
+    var stream_out = buffer.fixedWriter(&stream_wire);
+    try stream_out.writeByte(0x0e); // STREAM with OFF and LEN bits
+    try packet.encodeVarInt(stream_out.writer(), 0);
+    try packet.encodeVarInt(stream_out.writer(), max_quic_varint);
+    try packet.encodeVarInt(stream_out.writer(), 1);
+    try stream_out.writeByte('x');
+    var stream_in = buffer.fixedReader(stream_out.getWritten());
+    try std.testing.expectError(error.InvalidFrameValue, decodeFrame(stream_in.reader(), std.testing.allocator));
+
+    var crypto_wire: [32]u8 = undefined;
+    var crypto_out = buffer.fixedWriter(&crypto_wire);
+    try crypto_out.writeByte(@intFromEnum(FrameType.crypto));
+    try packet.encodeVarInt(crypto_out.writer(), max_quic_varint);
+    try packet.encodeVarInt(crypto_out.writer(), 1);
+    try crypto_out.writeByte('x');
+    var crypto_in = buffer.fixedReader(crypto_out.getWritten());
+    try std.testing.expectError(error.InvalidFrameValue, decodeFrame(crypto_in.reader(), std.testing.allocator));
 }
 
 test "encode/decode ack frame roundtrip" {
