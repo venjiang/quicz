@@ -11,13 +11,15 @@
 
 ### 已实现 / 正在进行
 
-- [x] 项目骨架：Zig 构建集成 + 示例 echo client/server
+- [x] 项目骨架：Zig 构建集成 + 内存态示例 echo client/server
 - [x] `QuicConnection` 的基础 API 设计（初版）
 - [x] QUIC 变长整数（varint）编解码工具
-- [ ] QUIC 包头（long/short）解析与序列化
-- [ ] 基础帧模型（STREAM / CRYPTO / PADDING / PING 等）
-- [ ] 连接状态机与流管理
-- [ ] 丢包检测与基础拥塞控制
+- [x] 最小 QUIC 包头（long/short）解析与序列化
+- [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK / CONNECTION_CLOSE 子集）
+- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转
+- [x] 简化丢包恢复与拥塞控制状态骨架
+- [ ] 完整连接状态机、packet number spaces 与 stream 流量控制
+- [ ] 完整 RFC 9002 丢包检测与拥塞控制（含 packet tracking）
 - [ ] TLS 1.3 集成（RFC 9001）
 - [ ] QUIC v2（RFC 9369）版本支持
 
@@ -44,7 +46,7 @@
 
 ## 构建（Build）
 
-需要安装 Zig 稳定版本（当前开发与测试使用 **0.15.2**）。
+需要安装 Zig 稳定版本（当前开发与测试使用 **0.16.0**）。
 
 ```bash
 zig build
@@ -67,7 +69,6 @@ const quicz = @import("quicz");
 
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
-    var stdout = std.io.getStdOut().writer();
 
     var conn = try quicz.QuicConnection.init(
         gpa,
@@ -82,11 +83,11 @@ pub fn main() !void {
     const stream_id = try conn.openStream();
     try conn.sendOnStream(stream_id, "hello, quicz"[0..], true);
 
-    // 通常需要将 quicz 集成到你的 UDP 事件循环中：
-    // - 调用 conn.pollTx(...) 获取待发送的 UDP datagrams
-    // - 将收到的 UDP 数据报喂给 conn.processDatagram(...)
+    // 当前骨架行为：
+    // - 调用 conn.pollTx(...) 获取未加密的 frame payload 字节
+    // - 将对端 payload 字节喂给 conn.processDatagram(...)
     // - 通过 conn.recvOnStream(...) 读取应用层数据
-    _ = stdout;
+    // 完整 UDP packetization、TLS 与 packet protection 仍未实现。
 }
 ```
 
@@ -95,16 +96,18 @@ pub fn main() !void {
 - [`examples/echo_server.zig`](examples/echo_server.zig)
 - [`examples/echo_client.zig`](examples/echo_client.zig)
 
+这些示例当前用于演示内存态 frame-payload API，并不是可互通的 QUIC-over-UDP 程序。
+
 ## 文档结构（Documentation Layout）
 
 项目文档使用中英文目录区分存放：
 
 - 英文文档：`docs/en/`
   - 作为权威、完整的设计与业务逻辑说明
-  - 示例：`docs/en/spec.md`, `docs/en/packet.md`, `docs/en/frame.md`, ...
+  - 当前已有：`docs/en/spec.md`
 - 中文文档：`docs/zh-CN/`
   - 对应英文文档的等价翻译与本地化说明
-  - 示例：`docs/zh-CN/spec.md`, `docs/zh-CN/packet.md`, `docs/zh-CN/frame.md`, ...
+  - 当前已有：`docs/zh-CN/spec.md`
 
 代码中的标识符与注释统一使用英文；中文文档主要用于帮助理解与说明，不会影响 API 设计。
 

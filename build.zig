@@ -1,6 +1,6 @@
 const std = @import("std");
 
-// Build script for Zig 0.15.2 based on the official template.
+// Build script for the current Zig stable template.
 // - Builds two example executables: quicz-echo-server and quicz-echo-client
 // - Uses src/lib.zig as a shared module imported by both executables.
 pub fn build(b: *std.Build) void {

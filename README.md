@@ -11,13 +11,15 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 
 ### Implemented / In Progress
 
-- [x] Project skeleton with Zig build integration and example echo client/server
+- [x] Project skeleton with Zig build integration and in-memory example echo client/server
 - [x] Basic API surface for `QuicConnection` (initial draft)
 - [x] QUIC variable-length integer (varint) encode/decode helpers
-- [ ] QUIC packet headers (long/short) parsing and serialization
-- [ ] Basic frame model (STREAM/CRYPTO/PADDING/PING etc.)
-- [ ] Connection state machine and stream management
-- [ ] Loss detection & basic congestion control
+- [x] Minimal QUIC packet headers (long/short) parsing and serialization
+- [x] Basic frame model (STREAM/CRYPTO/PADDING/PING/ACK/CONNECTION_CLOSE subset)
+- [x] Minimal in-memory connection and stream queue/receive flow
+- [x] Simplified loss recovery and congestion-control state skeleton
+- [ ] Full connection state machine, packet number spaces, and stream flow control
+- [ ] Full RFC 9002 loss detection & congestion control with packet tracking
 - [ ] TLS 1.3 integration for QUIC (RFC 9001)
 - [ ] QUIC v2 (RFC 9369) version support
 
@@ -41,7 +43,7 @@ For more detailed design and per-feature notes, see the [`docs/en/`](docs/en/) d
 
 ## Build
 
-You need a Zig stable version (currently developed and tested with **0.15.2**).
+You need a Zig stable version (currently developed and tested with **0.16.0**).
 
 ```bash
 zig build
@@ -64,7 +66,6 @@ const quicz = @import("quicz");
 
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
-    var stdout = std.io.getStdOut().writer();
 
     var conn = try quicz.QuicConnection.init(
         gpa,
@@ -79,16 +80,18 @@ pub fn main() !void {
     const stream_id = try conn.openStream();
     try conn.sendOnStream(stream_id, "hello, quicz"[0..], true);
 
-    // Typically you integrate quicz with your UDP socket event loop:
-    // - call conn.pollTx(...) to get datagrams to send
-    // - feed received datagrams into conn.processDatagram(...)
+    // Current skeleton behavior:
+    // - call conn.pollTx(...) to get unencrypted frame payload bytes
+    // - feed peer payload bytes into conn.processDatagram(...)
     // - read application data via conn.recvOnStream(...)
-    _ = stdout;
+    // Full UDP packetization, TLS, and packet protection are still pending.
 }
 ```
 
 See [`examples/echo_server.zig`](examples/echo_server.zig) and
-[`examples/echo_client.zig`](examples/echo_client.zig) for a minimal echo example.
+[`examples/echo_client.zig`](examples/echo_client.zig) for minimal in-memory
+examples. They exercise the current frame-payload API and are not yet
+interoperable QUIC-over-UDP programs.
 
 ## 中文说明（Chinese Overview）
 
