@@ -6,7 +6,8 @@ const packet = @import("packet.zig");
 pub const FrameType = enum(u8) {
     padding = 0x00,
     ping = 0x01,
-    ack = 0x02, // simplified, omitting ECN variants for now
+    ack = 0x02,
+    ack_ecn = 0x03,
     reset_stream = 0x04,
     stop_sending = 0x05,
     crypto = 0x06,
@@ -26,6 +27,7 @@ pub const FrameType = enum(u8) {
     path_response = 0x1b,
     connection_close = 0x1c,
     application_close = 0x1d,
+    handshake_done = 0x1e,
 };
 
 pub const StreamFrame = struct {
@@ -63,6 +65,19 @@ pub const AckFrame = struct {
     ack_delay: u64,
     first_ack_range: u64,
     ranges: []const AckRange = &[_]AckRange{},
+};
+
+/// ECN counters carried by an ACK_ECN frame.
+pub const EcnCounts = struct {
+    ect0_count: u64,
+    ect1_count: u64,
+    ecn_ce_count: u64,
+};
+
+/// ACK_ECN frame model: an ACK frame plus ECN validation counters.
+pub const AckEcnFrame = struct {
+    ack: AckFrame,
+    ecn_counts: EcnCounts,
 };
 
 pub const ResetStreamFrame = struct {
@@ -153,6 +168,7 @@ pub const Frame = union(enum) {
     padding: PaddingFrame,
     ping: void,
     ack: AckFrame,
+    ack_ecn: AckEcnFrame,
     reset_stream: ResetStreamFrame,
     stop_sending: StopSendingFrame,
     new_token: NewTokenFrame,
@@ -172,6 +188,7 @@ pub const Frame = union(enum) {
     path_response: PathResponseFrame,
     connection_close: ConnectionCloseFrame,
     application_close: ApplicationCloseFrame,
+    handshake_done: void,
 };
 
 pub const FrameError = error{
@@ -222,7 +239,8 @@ fn validateNewConnectionIdFrame(new_connection_id: NewConnectionIdFrame) FrameEr
 /// Release any buffers owned by a decoded frame.
 pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
     switch (frame.*) {
-        .ack => |ack| if (ack.ranges.len != 0) allocator.free(ack.ranges),
+        .ack => |ack| deinitAckFrame(ack, allocator),
+        .ack_ecn => |ack_ecn| deinitAckFrame(ack_ecn.ack, allocator),
         .stream => |stream| allocator.free(stream.data),
         .crypto => |crypto| allocator.free(crypto.data),
         .new_token => |new_token| allocator.free(new_token.token),
@@ -246,6 +264,52 @@ fn validateAckFrame(ack: AckFrame) FrameError!void {
     }
 }
 
+fn deinitAckFrame(ack: AckFrame, allocator: std.mem.Allocator) void {
+    if (ack.ranges.len != 0) allocator.free(ack.ranges);
+}
+
+fn encodeAckFrameFields(writer: anytype, ack: AckFrame) !void {
+    try validateAckFrame(ack);
+
+    try packet.encodeVarInt(writer, ack.largest_acknowledged);
+    try packet.encodeVarInt(writer, ack.ack_delay);
+    try packet.encodeVarInt(writer, ack.ranges.len);
+    try packet.encodeVarInt(writer, ack.first_ack_range);
+    for (ack.ranges) |range| {
+        try packet.encodeVarInt(writer, range.gap);
+        try packet.encodeVarInt(writer, range.ack_range);
+    }
+}
+
+fn decodeAckFrameFields(reader: anytype, allocator: std.mem.Allocator) !AckFrame {
+    const largest_acknowledged = (try packet.decodeVarInt(reader)).value;
+    const ack_delay = (try packet.decodeVarInt(reader)).value;
+    const ack_range_count = (try packet.decodeVarInt(reader)).value;
+    const first_ack_range = (try packet.decodeVarInt(reader)).value;
+
+    const range_count = try varIntToUsize(ack_range_count);
+    try validateAckRangeCountFitsReader(reader, range_count);
+    const ranges = try allocator.alloc(AckRange, range_count);
+    errdefer if (ranges.len != 0) allocator.free(ranges);
+
+    for (ranges) |*range| {
+        range.* = .{
+            .gap = (try packet.decodeVarInt(reader)).value,
+            .ack_range = (try packet.decodeVarInt(reader)).value,
+        };
+    }
+
+    const ack = AckFrame{
+        .largest_acknowledged = largest_acknowledged,
+        .ack_delay = ack_delay,
+        .first_ack_range = first_ack_range,
+        .ranges = ranges,
+    };
+    try validateAckFrame(ack);
+
+    return ack;
+}
+
 /// Encode one minimal QUIC frame to `writer`.
 pub fn encodeFrame(writer: anytype, frame: Frame) !void {
     switch (frame) {
@@ -260,17 +324,15 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeByte(@intFromEnum(FrameType.ping));
         },
         .ack => |ack| {
-            try validateAckFrame(ack);
-
             try writer.writeByte(@intFromEnum(FrameType.ack));
-            try packet.encodeVarInt(writer, ack.largest_acknowledged);
-            try packet.encodeVarInt(writer, ack.ack_delay);
-            try packet.encodeVarInt(writer, ack.ranges.len);
-            try packet.encodeVarInt(writer, ack.first_ack_range);
-            for (ack.ranges) |range| {
-                try packet.encodeVarInt(writer, range.gap);
-                try packet.encodeVarInt(writer, range.ack_range);
-            }
+            try encodeAckFrameFields(writer, ack);
+        },
+        .ack_ecn => |ack_ecn| {
+            try writer.writeByte(@intFromEnum(FrameType.ack_ecn));
+            try encodeAckFrameFields(writer, ack_ecn.ack);
+            try packet.encodeVarInt(writer, ack_ecn.ecn_counts.ect0_count);
+            try packet.encodeVarInt(writer, ack_ecn.ecn_counts.ect1_count);
+            try packet.encodeVarInt(writer, ack_ecn.ecn_counts.ecn_ce_count);
         },
         .reset_stream => |reset| {
             try writer.writeByte(@intFromEnum(FrameType.reset_stream));
@@ -381,6 +443,9 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try packet.encodeVarInt(writer, close.reason_phrase.len);
             try writer.writeAll(close.reason_phrase);
         },
+        .handshake_done => {
+            try writer.writeByte(@intFromEnum(FrameType.handshake_done));
+        },
     }
 }
 
@@ -415,32 +480,20 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         return .{ .ping = {} };
     }
 
-    if (frame_type == @intFromEnum(FrameType.ack)) {
-        const largest_acknowledged = (try packet.decodeVarInt(reader)).value;
-        const ack_delay = (try packet.decodeVarInt(reader)).value;
-        const ack_range_count = (try packet.decodeVarInt(reader)).value;
-        const first_ack_range = (try packet.decodeVarInt(reader)).value;
+    if (frame_type == @intFromEnum(FrameType.ack) or frame_type == @intFromEnum(FrameType.ack_ecn)) {
+        const ack = try decodeAckFrameFields(reader, allocator);
+        errdefer deinitAckFrame(ack, allocator);
 
-        const range_count = try varIntToUsize(ack_range_count);
-        try validateAckRangeCountFitsReader(reader, range_count);
-        const ranges = try allocator.alloc(AckRange, range_count);
-        errdefer if (ranges.len != 0) allocator.free(ranges);
-
-        for (ranges) |*range| {
-            range.* = .{
-                .gap = (try packet.decodeVarInt(reader)).value,
-                .ack_range = (try packet.decodeVarInt(reader)).value,
-            };
+        if (frame_type == @intFromEnum(FrameType.ack_ecn)) {
+            return .{ .ack_ecn = .{
+                .ack = ack,
+                .ecn_counts = .{
+                    .ect0_count = (try packet.decodeVarInt(reader)).value,
+                    .ect1_count = (try packet.decodeVarInt(reader)).value,
+                    .ecn_ce_count = (try packet.decodeVarInt(reader)).value,
+                },
+            } };
         }
-
-        const ack = AckFrame{
-            .largest_acknowledged = largest_acknowledged,
-            .ack_delay = ack_delay,
-            .first_ack_range = first_ack_range,
-            .ranges = ranges,
-        };
-        try validateAckFrame(ack);
-
         return .{ .ack = ack };
     }
 
@@ -636,6 +689,10 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         } };
     }
 
+    if (frame_type == @intFromEnum(FrameType.handshake_done)) {
+        return .{ .handshake_done = {} };
+    }
+
     return error.UnsupportedFrameType;
 }
 
@@ -771,6 +828,63 @@ test "encode/decode ack frame with additional ranges" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "encode/decode ack_ecn frame roundtrip" {
+    const ranges = [_]AckRange{
+        .{ .gap = 0, .ack_range = 1 },
+    };
+
+    var buf: [128]u8 = undefined;
+    var out = buffer.fixedWriter(&buf);
+    try encodeFrame(out.writer(), .{ .ack_ecn = .{
+        .ack = .{
+            .largest_acknowledged = 8,
+            .ack_delay = 2,
+            .first_ack_range = 0,
+            .ranges = &ranges,
+        },
+        .ecn_counts = .{
+            .ect0_count = 11,
+            .ect1_count = 12,
+            .ecn_ce_count = 13,
+        },
+    } });
+
+    var in = buffer.fixedReader(out.getWritten());
+    var parsed = try decodeFrame(in.reader(), std.testing.allocator);
+    defer deinitFrame(&parsed, std.testing.allocator);
+
+    switch (parsed) {
+        .ack_ecn => |frame| {
+            try std.testing.expectEqual(@as(u64, 8), frame.ack.largest_acknowledged);
+            try std.testing.expectEqual(@as(u64, 2), frame.ack.ack_delay);
+            try std.testing.expectEqual(@as(u64, 0), frame.ack.first_ack_range);
+            try std.testing.expectEqual(@as(usize, 1), frame.ack.ranges.len);
+            try std.testing.expectEqual(@as(u64, 0), frame.ack.ranges[0].gap);
+            try std.testing.expectEqual(@as(u64, 1), frame.ack.ranges[0].ack_range);
+            try std.testing.expectEqual(@as(u64, 11), frame.ecn_counts.ect0_count);
+            try std.testing.expectEqual(@as(u64, 12), frame.ecn_counts.ect1_count);
+            try std.testing.expectEqual(@as(u64, 13), frame.ecn_counts.ecn_ce_count);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "ack_ecn with truncated ecn counts frees decoded ranges" {
+    const wire = [_]u8{
+        @intFromEnum(FrameType.ack_ecn),
+        0x08, // largest acknowledged
+        0x00, // ack delay
+        0x01, // one additional ACK range
+        0x00, // first ACK range
+        0x00, // gap
+        0x00, // ack range
+        0x01, // ECT(0), missing ECT(1) and CE counts
+    };
+
+    var in = buffer.fixedReader(&wire);
+    try std.testing.expectError(error.EndOfStream, decodeFrame(in.reader(), std.testing.allocator));
 }
 
 test "ack frame additional ranges must not underflow packet numbers" {
@@ -1305,4 +1419,18 @@ test "connection close with truncated reason fails" {
 
     var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.EndOfStream, decodeFrame(in.reader(), std.testing.allocator));
+}
+
+test "encode/decode handshake_done frame roundtrip" {
+    var buf: [8]u8 = undefined;
+    var out = buffer.fixedWriter(&buf);
+
+    try encodeFrame(out.writer(), .{ .handshake_done = {} });
+
+    var in = buffer.fixedReader(out.getWritten());
+    const parsed = try decodeFrame(in.reader(), std.testing.allocator);
+    switch (parsed) {
+        .handshake_done => {},
+        else => return error.TestUnexpectedResult,
+    }
 }
