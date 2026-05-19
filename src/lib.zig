@@ -70,6 +70,30 @@ fn streamFrameWireLen(stream_id: u64, offset: u64, data_len: usize) Error!usize 
     return addWireLen(len, data_len);
 }
 
+fn maxStreamFrameDataLen(stream_id: u64, offset: u64, remaining: usize, max_datagram_size: usize) Error!usize {
+    if (try streamFrameWireLen(stream_id, offset, 0) > max_datagram_size) return error.BufferTooSmall;
+    if (remaining == 0) return 0;
+
+    var best: usize = 0;
+    var low: usize = 1;
+    var high: usize = remaining;
+    while (low <= high) {
+        const mid = low + (high - low) / 2;
+        const encoded_len = try streamFrameWireLen(stream_id, offset, mid);
+        if (encoded_len <= max_datagram_size) {
+            best = mid;
+            if (mid == std.math.maxInt(usize)) break;
+            low = mid + 1;
+        } else {
+            if (mid == 0) break;
+            high = mid - 1;
+        }
+    }
+
+    if (best == 0) return error.BufferTooSmall;
+    return best;
+}
+
 fn ackFrameWireLen(ack: frame.AckFrame) Error!usize {
     var len: usize = 1; // frame type
     len = try addWireLen(len, try quicVarIntWireLen(ack.largest_acknowledged));
@@ -420,12 +444,7 @@ pub const QuicConnection = struct {
         const next_sent_total = streamEndOffset(self.sent_stream_data_bytes, data.len) orelse return error.InvalidStream;
         if (next_sent_total > self.peer_max_data) return error.FlowControlBlocked;
 
-        const encoded_len = try streamFrameWireLen(stream_id, offset, data.len);
-        if (encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
-
-        const owned = self.allocator.alloc(u8, data.len) catch return error.OutOfMemory;
-        errdefer self.allocator.free(owned);
-        @memcpy(owned, data);
+        _ = try maxStreamFrameDataLen(stream_id, offset, data.len, self.config.max_datagram_size);
 
         var appended_send_state = false;
         errdefer if (appended_send_state) {
@@ -441,12 +460,32 @@ pub const QuicConnection = struct {
             break :blk &self.send_streams.items[self.send_streams.items.len - 1];
         };
 
-        self.send_queue.append(self.allocator, .{
-            .stream_id = stream_id,
-            .offset = offset,
-            .fin = fin,
-            .data = owned,
-        }) catch return error.OutOfMemory;
+        const send_queue_snapshot = self.send_queue.items.len;
+        errdefer self.rollbackSendQueue(send_queue_snapshot);
+
+        if (data.len == 0) {
+            try self.queueStreamFrame(stream_id, offset, data, fin);
+        } else {
+            var consumed: usize = 0;
+            var frame_offset = offset;
+            while (consumed < data.len) {
+                const chunk_len = try maxStreamFrameDataLen(
+                    stream_id,
+                    frame_offset,
+                    data.len - consumed,
+                    self.config.max_datagram_size,
+                );
+                const next_consumed = consumed + chunk_len;
+                try self.queueStreamFrame(
+                    stream_id,
+                    frame_offset,
+                    data[consumed..next_consumed],
+                    fin and next_consumed == data.len,
+                );
+                frame_offset = streamEndOffset(frame_offset, chunk_len) orelse return error.Internal;
+                consumed = next_consumed;
+            }
+        }
 
         state.next_offset = next_offset;
         if (fin) state.fin_sent = true;
@@ -483,6 +522,32 @@ pub const QuicConnection = struct {
             if (stream.stream_id == stream_id) return stream;
         }
         return null;
+    }
+
+    fn queueStreamFrame(
+        self: *QuicConnection,
+        stream_id: u64,
+        offset: u64,
+        data: []const u8,
+        fin: bool,
+    ) Error!void {
+        const owned = self.allocator.alloc(u8, data.len) catch return error.OutOfMemory;
+        errdefer self.allocator.free(owned);
+        @memcpy(owned, data);
+
+        self.send_queue.append(self.allocator, .{
+            .stream_id = stream_id,
+            .offset = offset,
+            .fin = fin,
+            .data = owned,
+        }) catch return error.OutOfMemory;
+    }
+
+    fn rollbackSendQueue(self: *QuicConnection, original_len: usize) void {
+        while (self.send_queue.items.len > original_len) {
+            const removed = self.send_queue.orderedRemove(self.send_queue.items.len - 1);
+            self.allocator.free(removed.data);
+        }
     }
 
     fn rollbackRecvStreams(
@@ -675,6 +740,48 @@ test "sendOnStream and pollTx emit stream frame payloads" {
     }
 
     try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
+}
+
+test "sendOnStream fragments stream data by max datagram size" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 10 });
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "abcdefghijklmnop", true);
+
+    const Expected = struct {
+        offset: u64,
+        data: []const u8,
+        fin: bool,
+    };
+    const expected = [_]Expected{
+        .{ .offset = 0, .data = "abcdefg", .fin = false },
+        .{ .offset = 7, .data = "hijklm", .fin = false },
+        .{ .offset = 13, .data = "nop", .fin = true },
+    };
+
+    var out_buf: [10]u8 = undefined;
+    for (expected) |want| {
+        const payload = (try conn.pollTx(0, &out_buf)).?;
+        try std.testing.expect(payload.len <= out_buf.len);
+
+        var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+        defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+        switch (decoded.frame) {
+            .stream => |stream_frame| {
+                try std.testing.expectEqual(stream_id, stream_frame.stream_id);
+                try std.testing.expectEqual(want.offset, stream_frame.offset);
+                try std.testing.expectEqual(want.fin, stream_frame.fin);
+                try std.testing.expectEqualStrings(want.data, stream_frame.data);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
+    try std.testing.expectEqual(@as(u64, 16), conn.findSendStream(stream_id).?.next_offset);
+    try std.testing.expect(conn.findSendStream(stream_id).?.fin_sent);
 }
 
 test "pollTx records sent packets for ACK-driven recovery" {
@@ -1033,7 +1140,7 @@ test "pollTx keeps queued frame when output buffer is too small" {
 }
 
 test "sendOnStream rejects unsendable stream frames before mutating state" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 8 });
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 3 });
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -1042,7 +1149,7 @@ test "sendOnStream rejects unsendable stream frames before mutating state" {
     var out_buf: [32]u8 = undefined;
     try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
 
-    try conn.sendOnStream(stream_id, "x", true);
+    try conn.sendOnStream(stream_id, "", true);
     const payload = (try conn.pollTx(0, &out_buf)).?;
     var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
     defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
@@ -1051,18 +1158,28 @@ test "sendOnStream rejects unsendable stream frames before mutating state" {
         .stream => |stream_frame| {
             try std.testing.expectEqual(@as(u64, 0), stream_frame.offset);
             try std.testing.expect(stream_frame.fin);
-            try std.testing.expectEqualStrings("x", stream_frame.data);
+            try std.testing.expectEqualStrings("", stream_frame.data);
         },
         else => return error.TestUnexpectedResult,
     }
 }
 
 test "sendOnStream does not create state for oversized new streams" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 8 });
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 3 });
     defer conn.deinit();
 
     try std.testing.expectError(error.BufferTooSmall, conn.sendOnStream(4, "too large", false));
     try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
+}
+
+test "sendOnStream rolls back partial fragmentation when later offsets cannot fit" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 4 });
+    defer conn.deinit();
+
+    try std.testing.expectError(error.BufferTooSmall, conn.sendOnStream(0, "ab", false));
+    try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.send_queue.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.sent_stream_data_bytes);
 }
 
 test "sendOnStream enforces connection flow control until MAX_DATA" {
