@@ -15,14 +15,21 @@ pub const Error = error{
     Internal,
     OutOfMemory,
     BufferTooSmall,
+    FlowControlBlocked,
     StreamClosed,
     InvalidStream,
 };
 
 /// Runtime configuration for a `QuicConnection`.
 pub const Config = struct {
+    /// Maximum frame payload bytes accepted or emitted by the in-memory API.
     max_datagram_size: u16 = 1350,
+    /// Initial RTT estimate used by recovery before the first ACK sample.
     initial_rtt_ms: u32 = 333,
+    /// Initial connection-level stream data limit in both send and receive directions.
+    initial_max_data: u64 = 65_536,
+    /// Initial per-stream data limit in both send and receive directions.
+    initial_max_stream_data: u64 = 65_536,
 };
 
 /// Endpoint role. It determines the locally initiated bidirectional stream IDs.
@@ -98,6 +105,7 @@ fn ackFrameContains(ack: frame.AckFrame, packet_number: u64) bool {
 const SendStreamState = struct {
     stream_id: u64,
     next_offset: u64 = 0,
+    max_data: u64,
     fin_sent: bool = false,
 };
 
@@ -121,14 +129,20 @@ const RecvStreamSnapshot = struct {
 /// Experimental QUIC connection handle.
 ///
 /// The current implementation only moves unencrypted frame payload bytes through
-/// the public API. Packet protection, TLS, ACK processing, and network I/O are
-/// intentionally outside this first connection skeleton.
+/// the public API. Packet protection, TLS, and network I/O are intentionally
+/// outside this connection skeleton.
 pub const QuicConnection = struct {
     allocator: std.mem.Allocator,
     config: Config,
     side: ConnectionSide,
     next_stream_id: u64,
     next_packet_number: u64,
+    peer_max_data: u64,
+    peer_initial_max_stream_data: u64,
+    sent_stream_data_bytes: u64,
+    recv_max_data: u64,
+    recv_max_stream_data: u64,
+    recv_data_bytes: u64,
     recovery_state: recovery.Recovery,
     sent_packets: std.ArrayList(SentPacket),
     send_queue: std.ArrayList(PendingStreamFrame),
@@ -150,6 +164,12 @@ pub const QuicConnection = struct {
                 .server => 1,
             },
             .next_packet_number = 0,
+            .peer_max_data = config.initial_max_data,
+            .peer_initial_max_stream_data = config.initial_max_stream_data,
+            .sent_stream_data_bytes = 0,
+            .recv_max_data = config.initial_max_data,
+            .recv_max_stream_data = config.initial_max_stream_data,
+            .recv_data_bytes = 0,
             .recovery_state = recovery.Recovery.init(.{
                 .max_datagram_size = config.max_datagram_size,
                 .initial_rtt_ms = config.initial_rtt_ms,
@@ -189,6 +209,13 @@ pub const QuicConnection = struct {
         defer self.allocator.free(sent_packet_snapshots);
         @memcpy(sent_packet_snapshots, self.sent_packets.items);
 
+        const peer_max_data_snapshot = self.peer_max_data;
+        const send_stream_count = self.send_streams.items.len;
+        const send_stream_snapshots = self.allocator.alloc(SendStreamState, send_stream_count) catch return error.OutOfMemory;
+        defer self.allocator.free(send_stream_snapshots);
+        @memcpy(send_stream_snapshots, self.send_streams.items);
+
+        const recv_data_bytes_snapshot = self.recv_data_bytes;
         const recv_stream_count = self.recv_streams.items.len;
         const recv_snapshots = self.allocator.alloc(RecvStreamSnapshot, recv_stream_count) catch return error.OutOfMemory;
         defer self.allocator.free(recv_snapshots);
@@ -201,6 +228,9 @@ pub const QuicConnection = struct {
         }
         errdefer {
             self.rollbackRecvStreams(recv_stream_count, recv_snapshots);
+            self.recv_data_bytes = recv_data_bytes_snapshot;
+            self.rollbackSendStreams(send_stream_count, send_stream_snapshots);
+            self.peer_max_data = peer_max_data_snapshot;
             self.rollbackSentPackets(sent_packet_count, sent_packet_snapshots);
             self.recovery_state = recovery_snapshot;
         }
@@ -217,6 +247,8 @@ pub const QuicConnection = struct {
 
             switch (decoded.frame) {
                 .ack => |ack| self.receiveAckFrame(now_millis, ack),
+                .max_data => |max_data| self.receiveMaxDataFrame(max_data),
+                .max_stream_data => |max_stream_data| self.receiveMaxStreamDataFrame(max_stream_data),
                 .stream => |stream_frame| try self.receiveStreamFrame(stream_frame),
                 else => {},
             }
@@ -286,7 +318,10 @@ pub const QuicConnection = struct {
 
         const next_stream_id = std.math.add(u64, stream_id, 4) catch return error.Internal;
 
-        self.send_streams.append(self.allocator, .{ .stream_id = stream_id }) catch return error.OutOfMemory;
+        self.send_streams.append(self.allocator, .{
+            .stream_id = stream_id,
+            .max_data = self.peer_initial_max_stream_data,
+        }) catch return error.OutOfMemory;
         self.next_stream_id = next_stream_id;
         return stream_id;
     }
@@ -307,6 +342,12 @@ pub const QuicConnection = struct {
 
         const offset = if (existing_state) |state| state.next_offset else 0;
         const next_offset = streamEndOffset(offset, data.len) orelse return error.InvalidStream;
+        const stream_max_data = if (existing_state) |state| state.max_data else self.peer_initial_max_stream_data;
+        if (next_offset > stream_max_data) return error.FlowControlBlocked;
+
+        const next_sent_total = streamEndOffset(self.sent_stream_data_bytes, data.len) orelse return error.InvalidStream;
+        if (next_sent_total > self.peer_max_data) return error.FlowControlBlocked;
+
         const encoded_len = try streamFrameWireLen(stream_id, offset, data.len);
         if (encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
 
@@ -320,7 +361,10 @@ pub const QuicConnection = struct {
         };
 
         const state = existing_state orelse blk: {
-            self.send_streams.append(self.allocator, .{ .stream_id = stream_id }) catch return error.OutOfMemory;
+            self.send_streams.append(self.allocator, .{
+                .stream_id = stream_id,
+                .max_data = self.peer_initial_max_stream_data,
+            }) catch return error.OutOfMemory;
             appended_send_state = true;
             break :blk &self.send_streams.items[self.send_streams.items.len - 1];
         };
@@ -334,6 +378,7 @@ pub const QuicConnection = struct {
 
         state.next_offset = next_offset;
         if (fin) state.fin_sent = true;
+        self.sent_stream_data_bytes = next_sent_total;
     }
 
     /// Read queued data for a stream. Returns null when no data is available.
@@ -384,6 +429,15 @@ pub const QuicConnection = struct {
         }
     }
 
+    fn rollbackSendStreams(
+        self: *QuicConnection,
+        original_len: usize,
+        snapshots: []const SendStreamState,
+    ) void {
+        self.send_streams.items.len = original_len;
+        @memcpy(self.send_streams.items[0..original_len], snapshots);
+    }
+
     fn rollbackSentPackets(
         self: *QuicConnection,
         original_len: usize,
@@ -421,6 +475,15 @@ pub const QuicConnection = struct {
         );
     }
 
+    fn receiveMaxDataFrame(self: *QuicConnection, max_data: frame.MaxDataFrame) void {
+        self.peer_max_data = @max(self.peer_max_data, max_data.maximum_data);
+    }
+
+    fn receiveMaxStreamDataFrame(self: *QuicConnection, max_stream_data: frame.MaxStreamDataFrame) void {
+        const stream_state = self.findSendStream(max_stream_data.stream_id) orelse return;
+        stream_state.max_data = @max(stream_state.max_data, max_stream_data.maximum_stream_data);
+    }
+
     fn receiveStreamFrame(self: *QuicConnection, stream_frame: frame.StreamFrame) Error!void {
         if (stream_frame.stream_id > max_quic_varint) return error.InvalidStream;
 
@@ -438,6 +501,10 @@ pub const QuicConnection = struct {
         }
 
         const end_offset = streamEndOffset(stream_frame.offset, stream_frame.data.len) orelse return error.InvalidPacket;
+        if (end_offset > self.recv_max_stream_data) return error.InvalidPacket;
+
+        const next_recv_total = streamEndOffset(self.recv_data_bytes, stream_frame.data.len) orelse return error.InvalidPacket;
+        if (next_recv_total > self.recv_max_data) return error.InvalidPacket;
 
         var appended_recv_state = false;
         errdefer if (appended_recv_state) {
@@ -452,6 +519,7 @@ pub const QuicConnection = struct {
         };
 
         stream_state.data.appendSlice(self.allocator, stream_frame.data) catch return error.OutOfMemory;
+        self.recv_data_bytes = next_recv_total;
         if (stream_frame.fin) {
             stream_state.final_size = end_offset;
         }
@@ -705,6 +773,78 @@ test "sendOnStream does not create state for oversized new streams" {
     try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
 }
 
+test "sendOnStream enforces connection flow control until MAX_DATA" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 10,
+    });
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "12345", false);
+    try std.testing.expectError(error.FlowControlBlocked, conn.sendOnStream(stream_id, "x", false));
+    try std.testing.expectEqual(@as(u64, 5), conn.sent_stream_data_bytes);
+    try std.testing.expectEqual(@as(usize, 1), conn.send_queue.items.len);
+
+    var update_buf: [16]u8 = undefined;
+    var update_out = buffer.fixedWriter(&update_buf);
+    try frame.encodeFrame(update_out.writer(), .{ .max_data = .{ .maximum_data = 6 } });
+    try conn.processDatagram(0, update_out.getWritten());
+
+    try conn.sendOnStream(stream_id, "x", false);
+    try std.testing.expectEqual(@as(u64, 6), conn.sent_stream_data_bytes);
+    try std.testing.expectEqual(@as(usize, 2), conn.send_queue.items.len);
+}
+
+test "sendOnStream enforces stream flow control until MAX_STREAM_DATA" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 10,
+        .initial_max_stream_data = 5,
+    });
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "12345", false);
+    try std.testing.expectError(error.FlowControlBlocked, conn.sendOnStream(stream_id, "x", false));
+    try std.testing.expectEqual(@as(u64, 5), conn.findSendStream(stream_id).?.next_offset);
+
+    var update_buf: [32]u8 = undefined;
+    var update_out = buffer.fixedWriter(&update_buf);
+    try frame.encodeFrame(update_out.writer(), .{ .max_stream_data = .{
+        .stream_id = stream_id,
+        .maximum_stream_data = 6,
+    } });
+    try conn.processDatagram(0, update_out.getWritten());
+
+    try conn.sendOnStream(stream_id, "x", false);
+
+    var out_buf: [128]u8 = undefined;
+    _ = (try conn.pollTx(0, &out_buf)).?;
+    const payload = (try conn.pollTx(0, &out_buf)).?;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .stream => |stream_frame| {
+            try std.testing.expectEqual(@as(u64, 5), stream_frame.offset);
+            try std.testing.expectEqualStrings("x", stream_frame.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "sendOnStream does not create state for flow-control blocked new streams" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 100,
+        .initial_max_stream_data = 1,
+    });
+    defer conn.deinit();
+
+    try std.testing.expectError(error.FlowControlBlocked, conn.sendOnStream(4, "xx", false));
+    try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.sent_stream_data_bytes);
+}
+
 test "processDatagram preserves out of memory from frame decoding" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var conn = try QuicConnection.init(failing_allocator.allocator(), .server, .{});
@@ -757,6 +897,79 @@ test "processDatagram accepts stream frame without length field" {
     var read_buf: [8]u8 = undefined;
     const n = (try conn.recvOnStream(0, &read_buf)).?;
     try std.testing.expectEqualStrings("ok", read_buf[0..n]);
+}
+
+test "processDatagram enforces receive stream flow control" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 100,
+        .initial_max_stream_data = 5,
+    });
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "123456",
+    } });
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.recv_data_bytes);
+}
+
+test "processDatagram enforces receive connection flow control" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 5,
+    });
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "12345",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 4,
+        .offset = 0,
+        .fin = false,
+        .data = "x",
+    } });
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items.len);
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+}
+
+test "processDatagram rolls back flow-control updates when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 10,
+    });
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "12345", false);
+    try std.testing.expectError(error.FlowControlBlocked, conn.sendOnStream(stream_id, "x", false));
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .max_data = .{ .maximum_data = 6 } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(u64, 5), conn.peer_max_data);
+    try std.testing.expectError(error.FlowControlBlocked, conn.sendOnStream(stream_id, "x", false));
 }
 
 test "processDatagram rolls back stream state when payload is invalid" {
