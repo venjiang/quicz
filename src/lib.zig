@@ -1152,6 +1152,22 @@ test "processDatagram preserves out of memory from frame decoding" {
     try std.testing.expectError(error.OutOfMemory, conn.processDatagram(0, &wire));
 }
 
+test "processDatagram rejects truncated ACK ranges before allocation" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var conn = try QuicConnection.init(failing_allocator.allocator(), .server, .{});
+    defer conn.deinit();
+
+    const wire = [_]u8{
+        @intFromEnum(frame.FrameType.ack),
+        0x00, // largest acknowledged
+        0x00, // ack delay
+        0x01, // one additional ACK range
+        0x00, // first ACK range
+    };
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, &wire));
+}
+
 test "processDatagram rejects payloads larger than configured datagram size" {
     var conn = try QuicConnection.init(std.testing.allocator, .server, .{ .max_datagram_size = 3 });
     defer conn.deinit();

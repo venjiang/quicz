@@ -141,6 +141,13 @@ fn readerHasRemainingLen(comptime Reader: type) bool {
     };
 }
 
+fn validateAckRangeCountFitsReader(reader: anytype, range_count: usize) FrameError!void {
+    if (comptime readerHasRemainingLen(@TypeOf(reader))) {
+        const min_range_bytes = std.math.mul(usize, range_count, 2) catch return error.InvalidFrameLength;
+        if (min_range_bytes > reader.remainingLen()) return error.InvalidFrameLength;
+    }
+}
+
 /// Release any buffers owned by a decoded frame.
 pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
     switch (frame.*) {
@@ -298,6 +305,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         const first_ack_range = (try packet.decodeVarInt(reader)).value;
 
         const range_count = try varIntToUsize(ack_range_count);
+        try validateAckRangeCountFitsReader(reader, range_count);
         const ranges = try allocator.alloc(AckRange, range_count);
         errdefer if (ranges.len != 0) allocator.free(ranges);
 
@@ -602,6 +610,22 @@ test "ack frame additional ranges must not underflow packet numbers" {
 
     var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.InvalidAckRange, decodeFrame(in.reader(), std.testing.allocator));
+}
+
+test "ack frame range count must fit remaining payload before allocation" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const wire = [_]u8{
+        @intFromEnum(FrameType.ack),
+        0x00, // largest acknowledged
+        0x00, // ack delay
+        0x01, // one additional ACK range
+        0x00, // first ACK range
+    };
+
+    try std.testing.expectError(
+        error.InvalidFrameLength,
+        decodeFrameSlice(&wire, failing_allocator.allocator()),
+    );
 }
 
 test "ack frame first range cannot exceed largest acknowledged" {
