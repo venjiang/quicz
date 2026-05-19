@@ -16,7 +16,7 @@
 - [x] QUIC 变长整数（varint）编解码工具
 - [x] 最小 QUIC 包头（long/short）解析与序列化
 - [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK/ACK_ECN 多区间 / RESET_STREAM / STOP_SENDING / MAX_* / BLOCKED / NEW_TOKEN / NEW_CONNECTION_ID / RETIRE_CONNECTION_ID / PATH_CHALLENGE / PATH_RESPONSE / HANDSHAKE_DONE / CONNECTION_CLOSE 子集）
-- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转，含发送侧 STREAM 分片、入站 RESET_STREAM 与 STOP_SENDING 处理、PATH_CHALLENGE 响应排队、客户端侧 NEW_TOKEN/HANDSHAKE_DONE 接收校验、基础 connection/stream/stream-count 流量控制、严格 stream 方向校验与关闭状态处理
+- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转，含发送侧 STREAM 与 CRYPTO 分片、入站 CRYPTO 缓冲、RESET_STREAM 与 STOP_SENDING 处理、PATH_CHALLENGE 响应排队、客户端侧 NEW_TOKEN/HANDSHAKE_DONE 接收校验、基础 connection/stream/stream-count 流量控制、严格 stream 方向校验与关闭状态处理
 - [x] 简化丢包恢复与拥塞控制状态，含自动 ACK 生成、ACK range 处理、未发送 packet 的 ACK 拒绝与 ACK 驱动的 sent-packet tracking
 - [ ] 完整连接状态机与独立 packet number spaces
 - [ ] 完整 RFC 9002 丢包检测与拥塞控制（含 loss timer 与 packet threshold loss detection）
@@ -31,7 +31,7 @@
    - 支持 Initial / Handshake / 1-RTT 包
    - 支持基础 STREAM / ACK / PADDING / CONNECTION_CLOSE 帧
 2. **TLS 1.3 + 完整握手**
-   - 正式的 CRYPTO 帧
+   - 基于 CRYPTO 帧的 TLS 握手集成
    - 密钥派生与包加密保护
 3. **丢包检测与拥塞控制**
    - 基于 RFC 9002 的算法（初期会采用类似 NewReno 的实现）
@@ -86,6 +86,7 @@ pub fn main() !void {
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
+    try conn.sendCrypto("client-hello-bytes"[0..]);
     try conn.sendOnStream(stream_id, "hello, quicz"[0..], true);
 
     // 当前骨架行为：
@@ -95,21 +96,23 @@ pub fn main() !void {
     //   但会拒绝未观察到的对端 stream、未打开的本地 stream 与
     //   对端发起的 unidirectional stream ID
     // - 调用 conn.pollTx(...) 获取未加密的 frame payload 字节；
-    //   它可能发送 ACK-only payload、PATH_RESPONSE payload，或把待发送 ACK
-    //   与 STREAM / PATH_RESPONSE 数据合并
+    //   它可能发送 ACK-only、CRYPTO、PATH_RESPONSE、RESET_STREAM 或 STREAM
+    //   payload，并在空间允许时合并待发送 ACK
     // - 将对端 payload 字节喂给 conn.processDatagram(...)
+    // - 通过 conn.recvCrypto(...) 读取握手字节
     // - 通过 conn.recvOnStream(...) 读取应用层数据
-    // sendOnStream(...) 会按 max_datagram_size 分片较大的写入。
+    // sendCrypto(...) 与 sendOnStream(...) 会按 max_datagram_size 分片较大的写入。
     // processDatagram(...) 会校验入站 bidirectional / unidirectional stream
     // count，接收对端发起的 unidirectional stream，拒绝未打开的本地
     // bidirectional ID 与入站本地 unidirectional ID，并在 payload 无效时
     // 回滚本次部分状态变更。
-    // ACK、MAX_DATA、MAX_STREAM_DATA 与 MAX_STREAMS_BIDI/UNI 帧会更新内存态
-    // recovery 与流控状态；MAX_STREAM_DATA 会先校验 stream 状态再更新发送
-    // credit；PATH_CHALLENGE 会排队匹配的 PATH_RESPONSE；NEW_TOKEN 和
-    // HANDSHAKE_DONE 只允许 client 连接接收；STOP_SENDING 会关闭对应发送侧并
-    // 排队 RESET_STREAM；RESET_STREAM 会关闭接收侧，除非该 stream 已经以相同
-    // final size 完成。带 packet protection 的 packetization 仍不在这个 API 内。
+    // CRYPTO 帧会进入连续的内存态握手缓冲。ACK、MAX_DATA、
+    // MAX_STREAM_DATA 与 MAX_STREAMS_BIDI/UNI 帧会更新内存态 recovery 与流控
+    // 状态；MAX_STREAM_DATA 会先校验 stream 状态再更新发送 credit；
+    // PATH_CHALLENGE 会排队匹配的 PATH_RESPONSE；NEW_TOKEN 和 HANDSHAKE_DONE
+    // 只允许 client 连接接收；STOP_SENDING 会关闭对应发送侧并排队
+    // RESET_STREAM；RESET_STREAM 会关闭接收侧，除非该 stream 已经以相同 final
+    // size 完成。带 packet protection 的 packetization 仍不在这个 API 内。
     // 完整 UDP packetization、TLS 与 packet protection 仍未实现。
 }
 ```

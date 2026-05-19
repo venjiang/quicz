@@ -46,6 +46,11 @@ const PendingStreamFrame = struct {
     data: []u8,
 };
 
+const PendingCryptoFrame = struct {
+    offset: u64,
+    data: []u8,
+};
+
 const SentPacket = struct {
     packet_number: u64,
     sent_time_millis: i64,
@@ -74,6 +79,13 @@ fn streamFrameWireLen(stream_id: u64, offset: u64, data_len: usize) Error!usize 
     return addWireLen(len, data_len);
 }
 
+fn cryptoFrameWireLen(offset: u64, data_len: usize) Error!usize {
+    var len: usize = 1; // frame type
+    len = try addWireLen(len, try quicVarIntWireLen(offset));
+    len = try addWireLen(len, try quicVarIntWireLen(std.math.cast(u64, data_len) orelse return error.Internal));
+    return addWireLen(len, data_len);
+}
+
 fn maxStreamFrameDataLen(stream_id: u64, offset: u64, remaining: usize, max_datagram_size: usize) Error!usize {
     if (try streamFrameWireLen(stream_id, offset, 0) > max_datagram_size) return error.BufferTooSmall;
     if (remaining == 0) return 0;
@@ -84,6 +96,30 @@ fn maxStreamFrameDataLen(stream_id: u64, offset: u64, remaining: usize, max_data
     while (low <= high) {
         const mid = low + (high - low) / 2;
         const encoded_len = try streamFrameWireLen(stream_id, offset, mid);
+        if (encoded_len <= max_datagram_size) {
+            best = mid;
+            if (mid == std.math.maxInt(usize)) break;
+            low = mid + 1;
+        } else {
+            if (mid == 0) break;
+            high = mid - 1;
+        }
+    }
+
+    if (best == 0) return error.BufferTooSmall;
+    return best;
+}
+
+fn maxCryptoFrameDataLen(offset: u64, remaining: usize, max_datagram_size: usize) Error!usize {
+    if (try cryptoFrameWireLen(offset, 0) > max_datagram_size) return error.BufferTooSmall;
+    if (remaining == 0) return 0;
+
+    var best: usize = 0;
+    var low: usize = 1;
+    var high: usize = remaining;
+    while (low <= high) {
+        const mid = low + (high - low) / 2;
+        const encoded_len = try cryptoFrameWireLen(offset, mid);
         if (encoded_len <= max_datagram_size) {
             best = mid;
             if (mid == std.math.maxInt(usize)) break;
@@ -238,6 +274,10 @@ pub const QuicConnection = struct {
     recv_data_bytes: u64,
     recovery_state: recovery.Recovery,
     sent_packets: std.ArrayList(SentPacket),
+    crypto_send_offset: u64,
+    crypto_recv_buffer: std.ArrayList(u8),
+    crypto_read_offset: usize,
+    crypto_send_queue: std.ArrayList(PendingCryptoFrame),
     send_queue: std.ArrayList(PendingStreamFrame),
     pending_reset_streams: std.ArrayList(frame.ResetStreamFrame),
     send_streams: std.ArrayList(SendStreamState),
@@ -283,6 +323,10 @@ pub const QuicConnection = struct {
                 .initial_rtt_ms = config.initial_rtt_ms,
             }),
             .sent_packets = .empty,
+            .crypto_send_offset = 0,
+            .crypto_recv_buffer = .empty,
+            .crypto_read_offset = 0,
+            .crypto_send_queue = .empty,
             .send_queue = .empty,
             .pending_reset_streams = .empty,
             .send_streams = .empty,
@@ -293,11 +337,16 @@ pub const QuicConnection = struct {
 
     /// Release all buffers owned by this connection.
     pub fn deinit(self: *QuicConnection) void {
+        for (self.crypto_send_queue.items) |pending| {
+            self.allocator.free(pending.data);
+        }
         for (self.send_queue.items) |pending| {
             self.allocator.free(pending.data);
         }
         self.sent_packets.deinit(self.allocator);
         self.pending_path_responses.deinit(self.allocator);
+        self.crypto_recv_buffer.deinit(self.allocator);
+        self.crypto_send_queue.deinit(self.allocator);
         self.send_queue.deinit(self.allocator);
         self.pending_reset_streams.deinit(self.allocator);
         self.send_streams.deinit(self.allocator);
@@ -330,6 +379,8 @@ pub const QuicConnection = struct {
         const peer_max_streams_bidi_snapshot = self.peer_max_streams_bidi;
         const peer_max_streams_uni_snapshot = self.peer_max_streams_uni;
         const closed_snapshot = self.closed;
+        const crypto_recv_buffer_len_snapshot = self.crypto_recv_buffer.items.len;
+        const crypto_read_offset_snapshot = self.crypto_read_offset;
         const send_stream_count = self.send_streams.items.len;
         const send_stream_snapshots = self.allocator.alloc(SendStreamState, send_stream_count) catch return error.OutOfMemory;
         defer self.allocator.free(send_stream_snapshots);
@@ -359,6 +410,8 @@ pub const QuicConnection = struct {
             self.pending_path_responses.items.len = pending_path_response_count;
             self.pending_reset_streams.items.len = pending_reset_stream_count;
             self.closed = closed_snapshot;
+            self.crypto_recv_buffer.items.len = crypto_recv_buffer_len_snapshot;
+            self.crypto_read_offset = crypto_read_offset_snapshot;
             self.rollbackSentPackets(sent_packet_count, sent_packet_snapshots);
             self.recovery_state = recovery_snapshot;
         }
@@ -388,6 +441,7 @@ pub const QuicConnection = struct {
                 .path_challenge => |path_challenge| try self.receivePathChallengeFrame(path_challenge),
                 .stop_sending => |stop_sending| try self.receiveStopSendingFrame(stop_sending),
                 .reset_stream => |reset_stream| try self.receiveResetStreamFrame(reset_stream),
+                .crypto => |crypto| try self.receiveCryptoFrame(crypto),
                 .stream => |stream_frame| try self.receiveStreamFrame(stream_frame),
                 .new_token => if (self.side == .server) return error.InvalidPacket,
                 .handshake_done => if (self.side == .server) return error.InvalidPacket,
@@ -417,6 +471,9 @@ pub const QuicConnection = struct {
         }
         if (self.pending_reset_streams.items.len != 0) {
             return try self.pollResetStream(ack_to_send, now_millis, out_buf);
+        }
+        if (self.crypto_send_queue.items.len != 0) {
+            return try self.pollCryptoFrame(ack_to_send, now_millis, out_buf);
         }
 
         self.dropResetClosedStreamFrames();
@@ -530,6 +587,39 @@ pub const QuicConnection = struct {
         return stream_id;
     }
 
+    /// Queue CRYPTO data for transmission on the modeled handshake byte stream.
+    ///
+    /// The data is copied, split to fit `max_datagram_size`, and emitted as
+    /// CRYPTO frames by `pollTx`. Empty inputs are ignored because CRYPTO has no
+    /// FIN signal and carries only byte-stream progress in this skeleton.
+    pub fn sendCrypto(self: *QuicConnection, data: []const u8) Error!void {
+        if (self.closed) return error.ConnectionClosed;
+        if (data.len == 0) return;
+
+        const offset = self.crypto_send_offset;
+        const next_offset = streamEndOffset(offset, data.len) orelse return error.CryptoError;
+        _ = try maxCryptoFrameDataLen(offset, data.len, self.config.max_datagram_size);
+
+        const queue_snapshot = self.crypto_send_queue.items.len;
+        errdefer self.rollbackCryptoSendQueue(queue_snapshot);
+
+        var consumed: usize = 0;
+        var frame_offset = offset;
+        while (consumed < data.len) {
+            const chunk_len = try maxCryptoFrameDataLen(
+                frame_offset,
+                data.len - consumed,
+                self.config.max_datagram_size,
+            );
+            const next_consumed = consumed + chunk_len;
+            try self.queueCryptoFrame(frame_offset, data[consumed..next_consumed]);
+            frame_offset = streamEndOffset(frame_offset, chunk_len) orelse return error.Internal;
+            consumed = next_consumed;
+        }
+
+        self.crypto_send_offset = next_offset;
+    }
+
     /// Queue data for a stream. The data is copied and emitted by `pollTx`.
     pub fn sendOnStream(
         self: *QuicConnection,
@@ -608,6 +698,22 @@ pub const QuicConnection = struct {
         self.sent_stream_data_bytes = next_sent_total;
     }
 
+    /// Read received CRYPTO bytes from the modeled handshake byte stream.
+    ///
+    /// Returns null when no unread CRYPTO bytes are available. The current
+    /// connection skeleton requires CRYPTO frames to arrive contiguously by
+    /// offset and does not model separate packet number spaces yet.
+    pub fn recvCrypto(self: *QuicConnection, buf: []u8) Error!?usize {
+        if (self.closed) return error.ConnectionClosed;
+        if (self.crypto_read_offset >= self.crypto_recv_buffer.items.len) return null;
+
+        const available = self.crypto_recv_buffer.items[self.crypto_read_offset..];
+        const n = @min(buf.len, available.len);
+        @memcpy(buf[0..n], available[0..n]);
+        self.crypto_read_offset += n;
+        return n;
+    }
+
     /// Read queued data for a stream. Returns null when no data is available,
     /// or `StreamClosed` when the peer reset the receive side.
     pub fn recvOnStream(
@@ -663,6 +769,28 @@ pub const QuicConnection = struct {
             .fin = fin,
             .data = owned,
         }) catch return error.OutOfMemory;
+    }
+
+    fn queueCryptoFrame(
+        self: *QuicConnection,
+        offset: u64,
+        data: []const u8,
+    ) Error!void {
+        const owned = self.allocator.alloc(u8, data.len) catch return error.OutOfMemory;
+        errdefer self.allocator.free(owned);
+        @memcpy(owned, data);
+
+        self.crypto_send_queue.append(self.allocator, .{
+            .offset = offset,
+            .data = owned,
+        }) catch return error.OutOfMemory;
+    }
+
+    fn rollbackCryptoSendQueue(self: *QuicConnection, original_len: usize) void {
+        while (self.crypto_send_queue.items.len > original_len) {
+            const removed = self.crypto_send_queue.orderedRemove(self.crypto_send_queue.items.len - 1);
+            self.allocator.free(removed.data);
+        }
     }
 
     fn rollbackSendQueue(self: *QuicConnection, original_len: usize) void {
@@ -895,6 +1023,74 @@ pub const QuicConnection = struct {
         return written;
     }
 
+    fn pollCryptoFrame(
+        self: *QuicConnection,
+        ack_to_send: ?frame.AckFrame,
+        now_millis: i64,
+        out_buf: []u8,
+    ) Error!?[]u8 {
+        const pending = self.crypto_send_queue.items[0];
+        const crypto_encoded_len = try cryptoFrameWireLen(pending.offset, pending.data.len);
+        if (crypto_encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
+
+        var encoded_len = crypto_encoded_len;
+        var include_ack = false;
+        if (ack_to_send) |ack| {
+            const ack_encoded_len = try ackFrameWireLen(ack);
+            const coalesced_len = try addWireLen(ack_encoded_len, crypto_encoded_len);
+            if (coalesced_len <= self.config.max_datagram_size and out_buf.len >= coalesced_len and self.recovery_state.canSend(coalesced_len)) {
+                encoded_len = coalesced_len;
+                include_ack = true;
+            } else if (ack_encoded_len <= self.config.max_datagram_size and out_buf.len >= ack_encoded_len) {
+                return try self.pollAckOnly(ack, out_buf);
+            } else {
+                return error.BufferTooSmall;
+            }
+        }
+
+        if (!self.recovery_state.canSend(encoded_len)) return null;
+        if (out_buf.len < encoded_len) return error.BufferTooSmall;
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        var appended_sent_packet = false;
+        errdefer if (appended_sent_packet) {
+            self.sent_packets.items.len -= 1;
+        };
+
+        const packet_number = self.next_packet_number;
+        self.sent_packets.append(self.allocator, .{
+            .packet_number = packet_number,
+            .sent_time_millis = now_millis,
+            .bytes = encoded_len,
+        }) catch return error.OutOfMemory;
+        appended_sent_packet = true;
+
+        var out = buffer.fixedWriter(out_buf[0..encoded_len]);
+        if (include_ack) {
+            frame.encodeFrame(out.writer(), .{ .ack = ack_to_send.? }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(out.writer(), .{ .crypto = .{
+            .offset = pending.offset,
+            .data = pending.data,
+        } }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const written = out.getWritten();
+        std.debug.assert(written.len == encoded_len);
+
+        const removed = self.crypto_send_queue.orderedRemove(0);
+        self.allocator.free(removed.data);
+        if (include_ack) self.pending_ack_largest = null;
+        self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
+        self.recovery_state.onPacketSent(written.len);
+        return written;
+    }
+
     fn dropResetClosedStreamFrames(self: *QuicConnection) void {
         var i: usize = 0;
         while (i < self.send_queue.items.len) {
@@ -1065,6 +1261,14 @@ pub const QuicConnection = struct {
         stream_state.reset_error_code = reset.application_error_code;
     }
 
+    fn receiveCryptoFrame(self: *QuicConnection, crypto: frame.CryptoFrame) Error!void {
+        const expected_offset = std.math.cast(u64, self.crypto_recv_buffer.items.len) orelse return error.Internal;
+        if (crypto.offset != expected_offset) return error.InvalidPacket;
+        _ = streamEndOffset(crypto.offset, crypto.data.len) orelse return error.InvalidPacket;
+
+        self.crypto_recv_buffer.appendSlice(self.allocator, crypto.data) catch return error.OutOfMemory;
+    }
+
     fn receiveStreamFrame(self: *QuicConnection, stream_frame: frame.StreamFrame) Error!void {
         if (stream_frame.stream_id > max_quic_varint) return error.InvalidStream;
         try self.validateIncomingStreamCount(stream_frame.stream_id);
@@ -1157,6 +1361,164 @@ test "openUniStream allocates unidirectional stream ids and enforces MAX_STREAMS
 
     try std.testing.expectEqual(@as(u64, 6), try client.openUniStream());
     try std.testing.expectEqual(@as(u64, 2), client.opened_uni_streams);
+}
+
+test "sendCrypto fragments and pollTx emits crypto frame payloads" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 8 });
+    defer conn.deinit();
+
+    try conn.sendCrypto("hello world");
+    try std.testing.expectEqual(@as(u64, 11), conn.crypto_send_offset);
+    try std.testing.expectEqual(@as(usize, 3), conn.crypto_send_queue.items.len);
+
+    const Expected = struct {
+        offset: u64,
+        data: []const u8,
+    };
+    const expected = [_]Expected{
+        .{ .offset = 0, .data = "hello" },
+        .{ .offset = 5, .data = " worl" },
+        .{ .offset = 10, .data = "d" },
+    };
+
+    var out_buf: [8]u8 = undefined;
+    for (expected) |want| {
+        const payload = (try conn.pollTx(0, &out_buf)).?;
+        try std.testing.expect(payload.len <= out_buf.len);
+
+        var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+        defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+        switch (decoded.frame) {
+            .crypto => |crypto| {
+                try std.testing.expectEqual(want.offset, crypto.offset);
+                try std.testing.expectEqualStrings(want.data, crypto.data);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_send_queue.items.len);
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
+}
+
+test "processDatagram and recvCrypto move crypto data" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "hello ",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 6,
+        .data = "world",
+    } });
+    try conn.processDatagram(1, out.getWritten());
+
+    try std.testing.expectEqual(@as(?u64, 1), conn.pending_ack_largest);
+
+    var read_buf: [16]u8 = undefined;
+    const n = (try conn.recvCrypto(&read_buf)).?;
+    try std.testing.expectEqualStrings("hello world", read_buf[0..n]);
+    try std.testing.expectEqual(@as(?usize, null), try conn.recvCrypto(&read_buf));
+}
+
+test "pollTx coalesces pending ACK with queued CRYPTO payload" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", false);
+
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(20, (try client.pollTx(10, &datagram)).?);
+    try server.sendCrypto("hs");
+
+    const coalesced = (try server.pollTx(30, &datagram)).?;
+    try std.testing.expectEqual(@as(usize, 1), server.sent_packets.items.len);
+    try std.testing.expectEqual(@as(?u64, null), server.pending_ack_largest);
+
+    var first = try frame.decodeFrameSlice(coalesced, std.testing.allocator);
+    defer frame.deinitFrame(&first.frame, std.testing.allocator);
+    switch (first.frame) {
+        .ack => |ack| try std.testing.expectEqual(@as(u64, 0), ack.largest_acknowledged),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var second = try frame.decodeFrameSlice(coalesced[first.len..], std.testing.allocator);
+    defer frame.deinitFrame(&second.frame, std.testing.allocator);
+    switch (second.frame) {
+        .crypto => |crypto| {
+            try std.testing.expectEqual(@as(u64, 0), crypto.offset);
+            try std.testing.expectEqualStrings("hs", crypto.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "processDatagram rejects out-of-order crypto data" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [16]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 1,
+        .data = "x",
+    } });
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_buffer.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+}
+
+test "processDatagram rolls back crypto data when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "x",
+    } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_buffer.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_read_offset);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
+}
+
+test "sendCrypto rejects unsendable crypto frames before mutating state" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 2 });
+    defer conn.deinit();
+
+    try std.testing.expectError(error.BufferTooSmall, conn.sendCrypto("x"));
+    try std.testing.expectEqual(@as(u64, 0), conn.crypto_send_offset);
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_send_queue.items.len);
+
+    var out_buf: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
+}
+
+test "sendCrypto rolls back partial fragmentation when later offsets cannot fit" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 4 });
+    defer conn.deinit();
+
+    const data = [_]u8{'x'} ** 65;
+    try std.testing.expectError(error.BufferTooSmall, conn.sendCrypto(&data));
+    try std.testing.expectEqual(@as(u64, 0), conn.crypto_send_offset);
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_send_queue.items.len);
 }
 
 test "sendOnStream requires openStream for new local bidirectional streams" {
