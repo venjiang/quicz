@@ -702,7 +702,7 @@ pub const QuicConnection = struct {
     }
 
     fn validateIncomingStreamCount(self: *QuicConnection, stream_id: u64) Error!void {
-        if (!isBidirectionalStream(stream_id)) return;
+        if (!isBidirectionalStream(stream_id)) return error.InvalidPacket;
         if (isLocalBidirectionalStream(self.side, stream_id)) {
             if (self.findSendStream(stream_id) == null) return error.InvalidPacket;
             return;
@@ -1388,6 +1388,31 @@ test "processDatagram rejects local bidirectional streams that were not opened" 
     } });
     try conn.processDatagram(0, out.getWritten());
     try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items.len);
+}
+
+test "processDatagram rejects unidirectional stream receive state" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 2,
+        .offset = 0,
+        .fin = false,
+        .data = "x",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 2,
+        .application_error_code = 1,
+        .final_size = 0,
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
 }
 
 test "connection close frame closes public connection API" {
