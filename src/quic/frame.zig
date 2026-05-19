@@ -118,7 +118,6 @@ pub const Frame = union(enum) {
 
 pub const FrameError = error{
     UnsupportedFrameType,
-    UnsupportedAckRangeCount,
     InvalidAckRange,
     InvalidPaddingLength,
     InvalidFrameLength,
