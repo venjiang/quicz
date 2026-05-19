@@ -5,6 +5,8 @@ pub const frame = @import("quic/frame.zig");
 pub const recovery = @import("quic/recovery.zig");
 const buffer = @import("quic/buffer.zig");
 
+const max_quic_varint = 4611686018427387903;
+
 /// Public error set returned by the experimental connection API.
 pub const Error = error{
     ConnectionClosed,
@@ -14,6 +16,7 @@ pub const Error = error{
     OutOfMemory,
     BufferTooSmall,
     StreamClosed,
+    InvalidStream,
 };
 
 /// Runtime configuration for a `QuicConnection`.
@@ -42,7 +45,7 @@ const RecvStreamState = struct {
     stream_id: u64,
     data: std.ArrayList(u8) = .empty,
     read_offset: usize = 0,
-    fin_received: bool = false,
+    final_size: ?u64 = null,
 
     fn deinit(self: *RecvStreamState, allocator: std.mem.Allocator) void {
         self.data.deinit(allocator);
@@ -111,7 +114,10 @@ pub const QuicConnection = struct {
 
         var offset: usize = 0;
         while (offset < datagram.len) {
-            var decoded = frame.decodeFrameSlice(datagram[offset..], self.allocator) catch return error.InvalidPacket;
+            var decoded = frame.decodeFrameSlice(datagram[offset..], self.allocator) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidPacket,
+            };
             defer frame.deinitFrame(&decoded.frame, self.allocator);
 
             if (decoded.len == 0) return error.InvalidPacket;
@@ -163,6 +169,8 @@ pub const QuicConnection = struct {
     /// Open a locally initiated bidirectional stream and return its QUIC stream ID.
     pub fn openStream(self: *QuicConnection) Error!u64 {
         const stream_id = self.next_stream_id;
+        if (stream_id > max_quic_varint) return error.InvalidStream;
+
         const next_stream_id = std.math.add(u64, stream_id, 4) catch return error.Internal;
 
         self.send_streams.append(self.allocator, .{ .stream_id = stream_id }) catch return error.OutOfMemory;
@@ -177,6 +185,8 @@ pub const QuicConnection = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        if (stream_id > max_quic_varint) return error.InvalidStream;
+
         const state = try self.ensureSendStreamState(stream_id);
         if (state.fin_sent) return error.StreamClosed;
 
@@ -238,14 +248,20 @@ pub const QuicConnection = struct {
     }
 
     fn receiveStreamFrame(self: *QuicConnection, stream_frame: frame.StreamFrame) Error!void {
+        if (stream_frame.stream_id > max_quic_varint) return error.InvalidStream;
+
         const stream_state = try self.ensureRecvStreamState(stream_frame.stream_id);
-        if (stream_frame.offset != stream_state.data.items.len) {
+        if (stream_state.final_size != null) return error.InvalidPacket;
+
+        const expected_offset = std.math.cast(u64, stream_state.data.items.len) orelse return error.Internal;
+        if (stream_frame.offset != expected_offset) {
             return error.InvalidPacket;
         }
 
+        const end_offset = std.math.add(u64, stream_frame.offset, stream_frame.data.len) catch return error.InvalidPacket;
         stream_state.data.appendSlice(self.allocator, stream_frame.data) catch return error.OutOfMemory;
         if (stream_frame.fin) {
-            stream_state.fin_received = true;
+            stream_state.final_size = end_offset;
         }
     }
 };
@@ -345,4 +361,53 @@ test "pollTx keeps queued frame when output buffer is too small" {
         .stream => |stream_frame| try std.testing.expectEqualStrings("hello", stream_frame.data),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "processDatagram preserves out of memory from frame decoding" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var conn = try QuicConnection.init(failing_allocator.allocator(), .server, .{});
+    defer conn.deinit();
+
+    const wire = [_]u8{
+        0x0a, // STREAM with LEN bit
+        0x00, // stream id
+        0x01, // data length
+        'x',
+    };
+
+    try std.testing.expectError(error.OutOfMemory, conn.processDatagram(0, &wire));
+}
+
+test "receive stream rejects data after final size" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = true,
+        .data = "hello",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 5,
+        .fin = false,
+        .data = "!",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+}
+
+test "stream ids must fit QUIC varint range" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    try std.testing.expectError(error.InvalidStream, conn.sendOnStream(max_quic_varint + 1, "x", false));
+
+    conn.next_stream_id = max_quic_varint + 1;
+    try std.testing.expectError(error.InvalidStream, conn.openStream());
 }
