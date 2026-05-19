@@ -2,6 +2,14 @@
     .name = .quicz,
     .version = "0.0.1",
     .minimum_zig_version = "0.16.0",
-    .paths = .{""},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+        "docs",
+        "README.md",
+        "README_zh-CN.md",
+    },
     .fingerprint = 0xe7773e25ef7d6283,
 }
