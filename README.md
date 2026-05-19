@@ -16,7 +16,7 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] QUIC variable-length integer (varint) encode/decode helpers
 - [x] Minimal QUIC packet headers (long/short) parsing and serialization
 - [x] Basic frame model (STREAM/CRYPTO/PADDING/PING/ACK with ranges/RESET_STREAM/STOP_SENDING/MAX_* and CONNECTION_CLOSE subset)
-- [x] Minimal in-memory connection and stream queue/receive flow with basic connection/stream flow control
+- [x] Minimal in-memory connection and stream queue/receive flow with basic connection/stream flow control and close-state handling
 - [x] Simplified loss recovery and congestion-control state with automatic ACK generation and ACK-driven sent-packet tracking
 - [ ] Full connection state machine and distinct packet number spaces
 - [ ] Full RFC 9002 loss detection & congestion control with loss timers and packet threshold loss detection

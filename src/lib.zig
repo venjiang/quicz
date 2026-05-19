@@ -170,6 +170,7 @@ pub const QuicConnection = struct {
     send_queue: std.ArrayList(PendingStreamFrame),
     send_streams: std.ArrayList(SendStreamState),
     recv_streams: std.ArrayList(RecvStreamState),
+    closed: bool,
 
     /// Create a connection with empty send and receive state.
     pub fn init(
@@ -202,6 +203,7 @@ pub const QuicConnection = struct {
             .send_queue = .empty,
             .send_streams = .empty,
             .recv_streams = .empty,
+            .closed = false,
         };
     }
 
@@ -225,6 +227,7 @@ pub const QuicConnection = struct {
         now_millis: i64,
         datagram: []const u8,
     ) Error!void {
+        if (self.closed) return error.ConnectionClosed;
         if (datagram.len == 0 or datagram.len > self.config.max_datagram_size) return error.InvalidPacket;
 
         const recovery_snapshot = self.recovery_state;
@@ -236,6 +239,7 @@ pub const QuicConnection = struct {
         const next_peer_packet_number_snapshot = self.next_peer_packet_number;
         const pending_ack_largest_snapshot = self.pending_ack_largest;
         const peer_max_data_snapshot = self.peer_max_data;
+        const closed_snapshot = self.closed;
         const send_stream_count = self.send_streams.items.len;
         const send_stream_snapshots = self.allocator.alloc(SendStreamState, send_stream_count) catch return error.OutOfMemory;
         defer self.allocator.free(send_stream_snapshots);
@@ -259,6 +263,7 @@ pub const QuicConnection = struct {
             self.peer_max_data = peer_max_data_snapshot;
             self.next_peer_packet_number = next_peer_packet_number_snapshot;
             self.pending_ack_largest = pending_ack_largest_snapshot;
+            self.closed = closed_snapshot;
             self.rollbackSentPackets(sent_packet_count, sent_packet_snapshots);
             self.recovery_state = recovery_snapshot;
         }
@@ -283,13 +288,14 @@ pub const QuicConnection = struct {
                 .max_data => |max_data| self.receiveMaxDataFrame(max_data),
                 .max_stream_data => |max_stream_data| self.receiveMaxStreamDataFrame(max_stream_data),
                 .stream => |stream_frame| try self.receiveStreamFrame(stream_frame),
+                .connection_close, .application_close => self.closed = true,
                 else => {},
             }
 
             offset += decoded.len;
         }
 
-        if (ack_eliciting) {
+        if (ack_eliciting and !self.closed) {
             try self.queueAckForReceivedPacket();
         }
     }
@@ -300,6 +306,8 @@ pub const QuicConnection = struct {
         now_millis: i64,
         out_buf: []u8,
     ) Error!?[]u8 {
+        if (self.closed) return error.ConnectionClosed;
+
         const ack_to_send = self.pendingAckFrame();
         if (self.send_queue.items.len == 0) {
             if (ack_to_send) |ack| {
@@ -374,6 +382,8 @@ pub const QuicConnection = struct {
 
     /// Open a locally initiated bidirectional stream and return its QUIC stream ID.
     pub fn openStream(self: *QuicConnection) Error!u64 {
+        if (self.closed) return error.ConnectionClosed;
+
         const stream_id = self.next_stream_id;
         if (stream_id > max_quic_varint) return error.InvalidStream;
 
@@ -394,6 +404,7 @@ pub const QuicConnection = struct {
         data: []const u8,
         fin: bool,
     ) Error!void {
+        if (self.closed) return error.ConnectionClosed;
         if (stream_id > max_quic_varint) return error.InvalidStream;
 
         const existing_state = self.findSendStream(stream_id);
@@ -448,6 +459,8 @@ pub const QuicConnection = struct {
         stream_id: u64,
         buf: []u8,
     ) Error!?usize {
+        if (self.closed) return error.ConnectionClosed;
+
         const stream_state = self.findRecvStream(stream_id) orelse return null;
         if (stream_state.read_offset >= stream_state.data.items.len) return null;
 
@@ -921,6 +934,50 @@ test "processDatagram and recvOnStream move stream data" {
     const n = (try server.recvOnStream(stream_id, &read_buf)).?;
     try std.testing.expectEqualStrings("hello world", read_buf[0..n]);
     try std.testing.expectEqual(@as(?usize, null), try server.recvOnStream(stream_id, &read_buf));
+}
+
+test "connection close frame closes public connection API" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var close_buf: [64]u8 = undefined;
+    var close_out = buffer.fixedWriter(&close_buf);
+    try frame.encodeFrame(close_out.writer(), .{ .connection_close = .{
+        .error_code = 0,
+        .frame_type = @intFromEnum(frame.FrameType.stream),
+        .reason_phrase = "done",
+    } });
+
+    try conn.processDatagram(0, close_out.getWritten());
+    try std.testing.expect(conn.closed);
+
+    var out_buf: [32]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, conn.pollTx(0, &out_buf));
+    try std.testing.expectError(error.ConnectionClosed, conn.openStream());
+    try std.testing.expectError(error.ConnectionClosed, conn.sendOnStream(0, "x", false));
+
+    var recv_buf: [8]u8 = undefined;
+    try std.testing.expectError(error.ConnectionClosed, conn.recvOnStream(0, &recv_buf));
+
+    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    try std.testing.expectError(error.ConnectionClosed, conn.processDatagram(0, &ping));
+}
+
+test "invalid payload rolls back connection close state" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .application_close = .{
+        .error_code = 0,
+        .reason_phrase = "bad tail",
+    } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expect(!conn.closed);
+    try std.testing.expectEqual(@as(u64, 1), try conn.openStream());
 }
 
 test "pollTx returns null when congestion window is full" {
