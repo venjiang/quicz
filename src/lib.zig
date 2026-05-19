@@ -148,10 +148,13 @@ fn frameIsAckEliciting(decoded: frame.Frame) bool {
     };
 }
 
+fn isBidirectionalStream(stream_id: u64) bool {
+    return (stream_id & 0x02) == 0;
+}
+
 fn isLocalBidirectionalStream(side: ConnectionSide, stream_id: u64) bool {
-    const is_bidirectional = (stream_id & 0x02) == 0;
     const initiator: ConnectionSide = if ((stream_id & 0x01) == 0) .client else .server;
-    return is_bidirectional and initiator == side;
+    return isBidirectionalStream(stream_id) and initiator == side;
 }
 
 const SendStreamState = struct {
@@ -451,6 +454,7 @@ pub const QuicConnection = struct {
     ) Error!void {
         if (self.closed) return error.ConnectionClosed;
         if (stream_id > max_quic_varint) return error.InvalidStream;
+        if (!isBidirectionalStream(stream_id)) return error.InvalidStream;
 
         const existing_state = self.findSendStream(stream_id);
         if (existing_state) |state| {
@@ -808,6 +812,20 @@ test "sendOnStream requires openStream for new local bidirectional streams" {
     try std.testing.expectEqual(@as(u64, 0), stream_id);
     try conn.sendOnStream(stream_id, "x", false);
     try std.testing.expectEqual(@as(u64, 1), conn.opened_bidi_streams);
+}
+
+test "sendOnStream rejects unidirectional stream ids" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try std.testing.expectError(error.InvalidStream, client.sendOnStream(2, "x", false));
+    try std.testing.expectError(error.InvalidStream, client.sendOnStream(3, "x", false));
+    try std.testing.expectError(error.InvalidStream, server.sendOnStream(2, "x", false));
+    try std.testing.expectError(error.InvalidStream, server.sendOnStream(3, "x", false));
+    try std.testing.expectEqual(@as(usize, 0), client.send_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.send_streams.items.len);
 }
 
 test "processDatagram rolls back MAX_STREAMS_BIDI updates when payload is invalid" {
