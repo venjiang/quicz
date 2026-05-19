@@ -70,6 +70,19 @@ fn streamFrameWireLen(stream_id: u64, offset: u64, data_len: usize) Error!usize 
     return addWireLen(len, data_len);
 }
 
+fn ackFrameWireLen(ack: frame.AckFrame) Error!usize {
+    var len: usize = 1; // frame type
+    len = try addWireLen(len, try quicVarIntWireLen(ack.largest_acknowledged));
+    len = try addWireLen(len, try quicVarIntWireLen(ack.ack_delay));
+    len = try addWireLen(len, try quicVarIntWireLen(std.math.cast(u64, ack.ranges.len) orelse return error.Internal));
+    len = try addWireLen(len, try quicVarIntWireLen(ack.first_ack_range));
+    for (ack.ranges) |range| {
+        len = try addWireLen(len, try quicVarIntWireLen(range.gap));
+        len = try addWireLen(len, try quicVarIntWireLen(range.ack_range));
+    }
+    return len;
+}
+
 fn streamEndOffset(offset: u64, data_len: usize) ?u64 {
     const len = std.math.cast(u64, data_len) orelse return null;
     const end = std.math.add(u64, offset, len) catch return null;
@@ -100,6 +113,13 @@ fn ackFrameContains(ack: frame.AckFrame, packet_number: u64) bool {
     }
 
     return false;
+}
+
+fn frameIsAckEliciting(decoded: frame.Frame) bool {
+    return switch (decoded) {
+        .padding, .ack, .connection_close, .application_close => false,
+        else => true,
+    };
 }
 
 const SendStreamState = struct {
@@ -137,6 +157,8 @@ pub const QuicConnection = struct {
     side: ConnectionSide,
     next_stream_id: u64,
     next_packet_number: u64,
+    next_peer_packet_number: u64,
+    pending_ack_largest: ?u64,
     peer_max_data: u64,
     peer_initial_max_stream_data: u64,
     sent_stream_data_bytes: u64,
@@ -164,6 +186,8 @@ pub const QuicConnection = struct {
                 .server => 1,
             },
             .next_packet_number = 0,
+            .next_peer_packet_number = 0,
+            .pending_ack_largest = null,
             .peer_max_data = config.initial_max_data,
             .peer_initial_max_stream_data = config.initial_max_stream_data,
             .sent_stream_data_bytes = 0,
@@ -209,6 +233,8 @@ pub const QuicConnection = struct {
         defer self.allocator.free(sent_packet_snapshots);
         @memcpy(sent_packet_snapshots, self.sent_packets.items);
 
+        const next_peer_packet_number_snapshot = self.next_peer_packet_number;
+        const pending_ack_largest_snapshot = self.pending_ack_largest;
         const peer_max_data_snapshot = self.peer_max_data;
         const send_stream_count = self.send_streams.items.len;
         const send_stream_snapshots = self.allocator.alloc(SendStreamState, send_stream_count) catch return error.OutOfMemory;
@@ -231,10 +257,13 @@ pub const QuicConnection = struct {
             self.recv_data_bytes = recv_data_bytes_snapshot;
             self.rollbackSendStreams(send_stream_count, send_stream_snapshots);
             self.peer_max_data = peer_max_data_snapshot;
+            self.next_peer_packet_number = next_peer_packet_number_snapshot;
+            self.pending_ack_largest = pending_ack_largest_snapshot;
             self.rollbackSentPackets(sent_packet_count, sent_packet_snapshots);
             self.recovery_state = recovery_snapshot;
         }
 
+        var ack_eliciting = false;
         var offset: usize = 0;
         while (offset < datagram.len) {
             var decoded = frame.decodeFrameSlice(datagram[offset..], self.allocator) catch |err| switch (err) {
@@ -244,6 +273,10 @@ pub const QuicConnection = struct {
             defer frame.deinitFrame(&decoded.frame, self.allocator);
 
             if (decoded.len == 0) return error.InvalidPacket;
+
+            if (frameIsAckEliciting(decoded.frame)) {
+                ack_eliciting = true;
+            }
 
             switch (decoded.frame) {
                 .ack => |ack| self.receiveAckFrame(now_millis, ack),
@@ -255,6 +288,10 @@ pub const QuicConnection = struct {
 
             offset += decoded.len;
         }
+
+        if (ack_eliciting) {
+            try self.queueAckForReceivedPacket();
+        }
     }
 
     /// Return the next unencrypted packet payload to send, or null if idle.
@@ -263,11 +300,33 @@ pub const QuicConnection = struct {
         now_millis: i64,
         out_buf: []u8,
     ) Error!?[]u8 {
-        if (self.send_queue.items.len == 0) return null;
+        const ack_to_send = self.pendingAckFrame();
+        if (self.send_queue.items.len == 0) {
+            if (ack_to_send) |ack| {
+                return try self.pollAckOnly(ack, out_buf);
+            }
+            return null;
+        }
 
         const pending = self.send_queue.items[0];
-        const encoded_len = try streamFrameWireLen(pending.stream_id, pending.offset, pending.data.len);
-        if (encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
+        const stream_encoded_len = try streamFrameWireLen(pending.stream_id, pending.offset, pending.data.len);
+        if (stream_encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
+
+        var encoded_len = stream_encoded_len;
+        var include_ack = false;
+        if (ack_to_send) |ack| {
+            const ack_encoded_len = try ackFrameWireLen(ack);
+            const coalesced_len = try addWireLen(ack_encoded_len, stream_encoded_len);
+            if (coalesced_len <= self.config.max_datagram_size and out_buf.len >= coalesced_len and self.recovery_state.canSend(coalesced_len)) {
+                encoded_len = coalesced_len;
+                include_ack = true;
+            } else if (ack_encoded_len <= self.config.max_datagram_size and out_buf.len >= ack_encoded_len) {
+                return try self.pollAckOnly(ack, out_buf);
+            } else {
+                return error.BufferTooSmall;
+            }
+        }
+
         if (!self.recovery_state.canSend(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
@@ -285,12 +344,13 @@ pub const QuicConnection = struct {
         }) catch return error.OutOfMemory;
         appended_sent_packet = true;
 
-        var writable = out_buf;
-        if (writable.len > self.config.max_datagram_size) {
-            writable = writable[0..self.config.max_datagram_size];
+        var out = buffer.fixedWriter(out_buf[0..encoded_len]);
+        if (include_ack) {
+            frame.encodeFrame(out.writer(), .{ .ack = ack_to_send.? }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
         }
-
-        var out = buffer.fixedWriter(writable);
         frame.encodeFrame(out.writer(), .{ .stream = .{
             .stream_id = pending.stream_id,
             .offset = pending.offset,
@@ -306,6 +366,7 @@ pub const QuicConnection = struct {
 
         const removed = self.send_queue.orderedRemove(0);
         self.allocator.free(removed.data);
+        if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
         self.recovery_state.onPacketSent(written.len);
         return written;
@@ -475,6 +536,42 @@ pub const QuicConnection = struct {
         );
     }
 
+    fn pendingAckFrame(self: QuicConnection) ?frame.AckFrame {
+        const largest = self.pending_ack_largest orelse return null;
+        return .{
+            .largest_acknowledged = largest,
+            .ack_delay = 0,
+            .first_ack_range = largest,
+        };
+    }
+
+    fn pollAckOnly(
+        self: *QuicConnection,
+        ack: frame.AckFrame,
+        out_buf: []u8,
+    ) Error![]u8 {
+        const encoded_len = try ackFrameWireLen(ack);
+        if (encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
+        if (out_buf.len < encoded_len) return error.BufferTooSmall;
+
+        var out = buffer.fixedWriter(out_buf[0..encoded_len]);
+        frame.encodeFrame(out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        self.pending_ack_largest = null;
+        return out.getWritten();
+    }
+
+    fn queueAckForReceivedPacket(self: *QuicConnection) Error!void {
+        if (self.next_peer_packet_number > max_quic_varint) return error.InvalidPacket;
+
+        const packet_number = self.next_peer_packet_number;
+        self.pending_ack_largest = if (self.pending_ack_largest) |largest| @max(largest, packet_number) else packet_number;
+        self.next_peer_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
+    }
+
     fn receiveMaxDataFrame(self: *QuicConnection, max_data: frame.MaxDataFrame) void {
         self.peer_max_data = @max(self.peer_max_data, max_data.maximum_data);
     }
@@ -606,6 +703,116 @@ test "processDatagram ACK updates recovery and removes sent packets" {
     try std.testing.expectEqual(@as(usize, 0), conn.sent_packets.items.len);
     try std.testing.expectEqual(@as(usize, 0), conn.recovery_state.bytes_in_flight);
     try std.testing.expectEqual(@as(?u64, 50), conn.recovery_state.latest_rtt_ms);
+}
+
+test "processDatagram queues ACK for ack-eliciting payloads" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", false);
+
+    var datagram: [128]u8 = undefined;
+    const stream_payload = (try client.pollTx(10, &datagram)).?;
+    try server.processDatagram(20, stream_payload);
+
+    var ack_buf: [32]u8 = undefined;
+    const ack_payload = (try server.pollTx(30, &ack_buf)).?;
+    try std.testing.expectEqual(@as(usize, 0), server.sent_packets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.recovery_state.bytes_in_flight);
+
+    var decoded = try frame.decodeFrameSlice(ack_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ack => |ack| {
+            try std.testing.expectEqual(@as(u64, 0), ack.largest_acknowledged);
+            try std.testing.expectEqual(@as(u64, 0), ack.first_ack_range);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try client.processDatagram(60, ack_payload);
+    try std.testing.expectEqual(@as(usize, 0), client.sent_packets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.recovery_state.bytes_in_flight);
+    try std.testing.expectEqual(@as(?u64, 50), client.recovery_state.latest_rtt_ms);
+    try std.testing.expectEqual(@as(?[]u8, null), try client.pollTx(70, &datagram));
+}
+
+test "pollTx coalesces pending ACK with queued STREAM payload" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", true);
+
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(20, (try client.pollTx(10, &datagram)).?);
+
+    try server.sendOnStream(stream_id, "echo", true);
+    const coalesced = (try server.pollTx(30, &datagram)).?;
+    try std.testing.expectEqual(@as(usize, 1), server.sent_packets.items.len);
+    try std.testing.expectEqual(coalesced.len, server.sent_packets.items[0].bytes);
+
+    var first = try frame.decodeFrameSlice(coalesced, std.testing.allocator);
+    defer frame.deinitFrame(&first.frame, std.testing.allocator);
+    switch (first.frame) {
+        .ack => |ack| try std.testing.expectEqual(@as(u64, 0), ack.largest_acknowledged),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var second = try frame.decodeFrameSlice(coalesced[first.len..], std.testing.allocator);
+    defer frame.deinitFrame(&second.frame, std.testing.allocator);
+    switch (second.frame) {
+        .stream => |stream_frame| {
+            try std.testing.expectEqual(stream_id, stream_frame.stream_id);
+            try std.testing.expect(stream_frame.fin);
+            try std.testing.expectEqualStrings("echo", stream_frame.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try client.processDatagram(40, coalesced);
+    try std.testing.expectEqual(@as(usize, 0), client.sent_packets.items.len);
+
+    var recv_buf: [16]u8 = undefined;
+    const recv_len = (try client.recvOnStream(stream_id, &recv_buf)).?;
+    try std.testing.expectEqualStrings("echo", recv_buf[0..recv_len]);
+
+    const ack_back = (try client.pollTx(50, &datagram)).?;
+    try server.processDatagram(60, ack_back);
+    try std.testing.expectEqual(@as(usize, 0), server.sent_packets.items.len);
+}
+
+test "pollTx keeps queued STREAM when pending ACK cannot fit output buffer" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", false);
+
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(20, (try client.pollTx(10, &datagram)).?);
+    try server.sendOnStream(stream_id, "echo", false);
+
+    var tiny = [_]u8{0xaa};
+    try std.testing.expectError(error.BufferTooSmall, server.pollTx(30, &tiny));
+    try std.testing.expectEqual(@as(u8, 0xaa), tiny[0]);
+    try std.testing.expectEqual(@as(?u64, 0), server.pending_ack_largest);
+    try std.testing.expectEqual(@as(usize, 1), server.send_queue.items.len);
+
+    const coalesced = (try server.pollTx(40, &datagram)).?;
+    var decoded = try frame.decodeFrameSlice(coalesced, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ack => |ack| try std.testing.expectEqual(@as(u64, 0), ack.largest_acknowledged),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "ACK ranges keep unacknowledged sent packets in flight" {

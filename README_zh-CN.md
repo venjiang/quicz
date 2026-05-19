@@ -17,7 +17,7 @@
 - [x] 最小 QUIC 包头（long/short）解析与序列化
 - [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK 多区间 / RESET_STREAM / STOP_SENDING / MAX_* / CONNECTION_CLOSE 子集）
 - [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转，含基础 connection/stream 流量控制
-- [x] 简化丢包恢复与拥塞控制状态，含 ACK 驱动的 sent-packet tracking
+- [x] 简化丢包恢复与拥塞控制状态，含自动 ACK 生成与 ACK 驱动的 sent-packet tracking
 - [ ] 完整连接状态机与独立 packet number spaces
 - [ ] 完整 RFC 9002 丢包检测与拥塞控制（含 loss timer 与 packet threshold loss detection）
 - [ ] TLS 1.3 集成（RFC 9001）
@@ -87,11 +87,12 @@ pub fn main() !void {
     try conn.sendOnStream(stream_id, "hello, quicz"[0..], true);
 
     // 当前骨架行为：
-    // - 调用 conn.pollTx(...) 获取未加密的 frame payload 字节
+    // - 调用 conn.pollTx(...) 获取未加密的 frame payload 字节；
+    //   它可能发送 ACK-only payload，或把待发送 ACK 与 STREAM 数据合并
     // - 将对端 payload 字节喂给 conn.processDatagram(...)
     // - 通过 conn.recvOnStream(...) 读取应用层数据
-    // ACK 与 MAX_DATA/MAX_STREAM_DATA 帧会更新内存态 recovery 与流控状态，
-    // 但 packetization 仍不在这个 API 内。
+    // ACK 与 MAX_DATA/MAX_STREAM_DATA 帧会更新内存态 recovery 与流控状态；
+    // packetization 仍不在这个 API 内。
     // 完整 UDP packetization、TLS 与 packet protection 仍未实现。
 }
 ```

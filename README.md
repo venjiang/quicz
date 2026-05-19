@@ -17,7 +17,7 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] Minimal QUIC packet headers (long/short) parsing and serialization
 - [x] Basic frame model (STREAM/CRYPTO/PADDING/PING/ACK with ranges/RESET_STREAM/STOP_SENDING/MAX_* and CONNECTION_CLOSE subset)
 - [x] Minimal in-memory connection and stream queue/receive flow with basic connection/stream flow control
-- [x] Simplified loss recovery and congestion-control state with ACK-driven sent-packet tracking
+- [x] Simplified loss recovery and congestion-control state with automatic ACK generation and ACK-driven sent-packet tracking
 - [ ] Full connection state machine and distinct packet number spaces
 - [ ] Full RFC 9002 loss detection & congestion control with loss timers and packet threshold loss detection
 - [ ] TLS 1.3 integration for QUIC (RFC 9001)
@@ -84,11 +84,12 @@ pub fn main() !void {
     try conn.sendOnStream(stream_id, "hello, quicz"[0..], true);
 
     // Current skeleton behavior:
-    // - call conn.pollTx(...) to get unencrypted frame payload bytes
+    // - call conn.pollTx(...) to get unencrypted frame payload bytes;
+    //   it may emit ACK-only payloads or coalesce a pending ACK with STREAM data
     // - feed peer payload bytes into conn.processDatagram(...)
     // - read application data via conn.recvOnStream(...)
     // ACK frames and MAX_DATA/MAX_STREAM_DATA frames update in-memory recovery
-    // and flow-control state, but packetization is still outside this API.
+    // and flow-control state; packetization is still outside this API.
     // Full UDP packetization, TLS, and packet protection are still pending.
 }
 ```
