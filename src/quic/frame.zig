@@ -41,10 +41,12 @@ pub const CryptoFrame = struct {
 
 pub const PaddingFrame = struct { len: usize };
 
-/// ACK frame (simplified: largest acknowledged + ack delay + range count omitted for now).
+/// ACK frame for the minimal codec. Additional ACK ranges are intentionally not
+/// modeled yet; decoding rejects frames whose ACK range count is non-zero.
 pub const AckFrame = struct {
     largest_acknowledged: u64,
     ack_delay: u64,
+    first_ack_range: u64,
 };
 
 pub const ResetStreamFrame = struct {
@@ -105,10 +107,23 @@ pub const Frame = union(enum) {
 
 pub const FrameError = error{
     UnsupportedFrameType,
+    UnsupportedAckRangeCount,
     InvalidPaddingLength,
     InvalidFrameLength,
 };
 
+/// A decoded frame plus the number of payload bytes consumed. If `frame` owns
+/// buffers, callers release it with `deinitFrame`.
+pub const DecodedFrame = struct {
+    frame: Frame,
+    len: usize,
+};
+
+fn varIntToUsize(value: u64) FrameError!usize {
+    return std.math.cast(usize, value) orelse error.InvalidFrameLength;
+}
+
+/// Release any buffers owned by a decoded frame.
 pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
     switch (frame.*) {
         .stream => |stream| allocator.free(stream.data),
@@ -119,6 +134,7 @@ pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
     }
 }
 
+/// Encode one minimal QUIC frame to `writer`.
 pub fn encodeFrame(writer: anytype, frame: Frame) !void {
     switch (frame) {
         .padding => |padding| {
@@ -136,7 +152,7 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try packet.encodeVarInt(writer, ack.largest_acknowledged);
             try packet.encodeVarInt(writer, ack.ack_delay);
             try packet.encodeVarInt(writer, 0); // ack range count
-            try packet.encodeVarInt(writer, 0); // first ack range
+            try packet.encodeVarInt(writer, ack.first_ack_range);
         },
         .reset_stream => |reset| {
             try writer.writeByte(@intFromEnum(FrameType.reset_stream));
@@ -206,6 +222,24 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
     }
 }
 
+/// Decode the first frame in `data`, returning both the frame and byte count.
+/// This helper can aggregate consecutive PADDING bytes because it has packet
+/// payload boundaries, unlike the streaming reader API.
+pub fn decodeFrameSlice(data: []const u8, allocator: std.mem.Allocator) !DecodedFrame {
+    if (data.len == 0) return error.EndOfStream;
+
+    if (data[0] == @intFromEnum(FrameType.padding)) {
+        var len: usize = 0;
+        while (len < data.len and data[len] == @intFromEnum(FrameType.padding)) : (len += 1) {}
+        return .{ .frame = .{ .padding = .{ .len = len } }, .len = len };
+    }
+
+    var in = std.io.fixedBufferStream(data);
+    const decoded = try decodeFrame(in.reader(), allocator);
+    return .{ .frame = decoded, .len = in.pos };
+}
+
+/// Decode one minimal QUIC frame from `reader`.
 pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
     const frame_type = try reader.readByte();
 
@@ -220,12 +254,14 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
     if (frame_type == @intFromEnum(FrameType.ack)) {
         const largest_acknowledged = (try packet.decodeVarInt(reader)).value;
         const ack_delay = (try packet.decodeVarInt(reader)).value;
-        _ = try packet.decodeVarInt(reader); // ack range count
-        _ = try packet.decodeVarInt(reader); // first ack range
+        const ack_range_count = (try packet.decodeVarInt(reader)).value;
+        if (ack_range_count != 0) return error.UnsupportedAckRangeCount;
+        const first_ack_range = (try packet.decodeVarInt(reader)).value;
 
         return .{ .ack = .{
             .largest_acknowledged = largest_acknowledged,
             .ack_delay = ack_delay,
+            .first_ack_range = first_ack_range,
         } };
     }
 
@@ -254,7 +290,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
     if (frame_type == @intFromEnum(FrameType.crypto)) {
         const offset = (try packet.decodeVarInt(reader)).value;
         const data_len = (try packet.decodeVarInt(reader)).value;
-        const len_usize: usize = @intCast(data_len);
+        const len_usize = try varIntToUsize(data_len);
 
         const data = try allocator.alloc(u8, len_usize);
         errdefer allocator.free(data);
@@ -308,7 +344,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         }
 
         const data_len = (try packet.decodeVarInt(reader)).value;
-        const len_usize: usize = @intCast(data_len);
+        const len_usize = try varIntToUsize(data_len);
 
         const data = try allocator.alloc(u8, len_usize);
         errdefer allocator.free(data);
@@ -326,7 +362,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         const error_code = (try packet.decodeVarInt(reader)).value;
         const triggering_frame_type = (try packet.decodeVarInt(reader)).value;
         const reason_len = (try packet.decodeVarInt(reader)).value;
-        const len_usize: usize = @intCast(reason_len);
+        const len_usize = try varIntToUsize(reason_len);
 
         const reason_phrase = try allocator.alloc(u8, len_usize);
         errdefer allocator.free(reason_phrase);
@@ -342,7 +378,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
     if (frame_type == @intFromEnum(FrameType.application_close)) {
         const error_code = (try packet.decodeVarInt(reader)).value;
         const reason_len = (try packet.decodeVarInt(reader)).value;
-        const len_usize: usize = @intCast(reason_len);
+        const len_usize = try varIntToUsize(reason_len);
 
         const reason_phrase = try allocator.alloc(u8, len_usize);
         errdefer allocator.free(reason_phrase);
@@ -385,6 +421,30 @@ test "encode/decode stream frame roundtrip" {
     }
 }
 
+test "decodeFrameSlice aggregates consecutive padding" {
+    const wire = [_]u8{
+        @intFromEnum(FrameType.padding),
+        @intFromEnum(FrameType.padding),
+        @intFromEnum(FrameType.padding),
+        @intFromEnum(FrameType.ping),
+    };
+
+    const padding = try decodeFrameSlice(&wire, std.testing.allocator);
+    switch (padding.frame) {
+        .padding => |frame| {
+            try std.testing.expectEqual(@as(usize, 3), frame.len);
+            try std.testing.expectEqual(@as(usize, 3), padding.len);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const ping = try decodeFrameSlice(wire[padding.len..], std.testing.allocator);
+    switch (ping.frame) {
+        .ping => try std.testing.expectEqual(@as(usize, 1), ping.len),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "encode/decode crypto frame roundtrip" {
     var buf: [256]u8 = undefined;
     var out = std.io.fixedBufferStream(&buf);
@@ -416,6 +476,7 @@ test "encode/decode ack frame roundtrip" {
     const input = Frame{ .ack = .{
         .largest_acknowledged = 12345,
         .ack_delay = 42,
+        .first_ack_range = 7,
     } };
     try encodeFrame(out.writer(), input);
 
@@ -427,9 +488,23 @@ test "encode/decode ack frame roundtrip" {
         .ack => |frame| {
             try std.testing.expectEqual(@as(u64, 12345), frame.largest_acknowledged);
             try std.testing.expectEqual(@as(u64, 42), frame.ack_delay);
+            try std.testing.expectEqual(@as(u64, 7), frame.first_ack_range);
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "decode ack frame rejects additional ranges for minimal codec" {
+    const wire = [_]u8{
+        @intFromEnum(FrameType.ack),
+        0x01, // largest acknowledged
+        0x00, // ack delay
+        0x01, // one additional ACK range
+        0x01, // first ACK range
+    };
+
+    var in = std.io.fixedBufferStream(&wire);
+    try std.testing.expectError(error.UnsupportedAckRangeCount, decodeFrame(in.reader(), std.testing.allocator));
 }
 
 test "encode/decode reset_stream frame roundtrip" {
@@ -576,6 +651,18 @@ test "stream frame without LEN bit fails" {
     try std.testing.expectError(error.InvalidFrameLength, decodeFrame(in.reader(), std.testing.allocator));
 }
 
+test "stream frame with truncated payload fails" {
+    const wire = [_]u8{
+        0x0a, // STREAM with LEN bit
+        0x01, // stream id
+        0x03, // declared length
+        0xaa, 0xbb, // truncated data
+    };
+
+    var in = std.io.fixedBufferStream(&wire);
+    try std.testing.expectError(error.EndOfStream, decodeFrame(in.reader(), std.testing.allocator));
+}
+
 test "encode/decode connection_close frame roundtrip" {
     var buf: [256]u8 = undefined;
     var out = std.io.fixedBufferStream(&buf);
@@ -624,4 +711,18 @@ test "encode/decode application_close frame roundtrip" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "connection close with truncated reason fails" {
+    const wire = [_]u8{
+        @intFromEnum(FrameType.connection_close),
+        0x01, // error code
+        @intFromEnum(FrameType.stream),
+        0x04, // reason length
+        'n',
+        'o',
+    };
+
+    var in = std.io.fixedBufferStream(&wire);
+    try std.testing.expectError(error.EndOfStream, decodeFrame(in.reader(), std.testing.allocator));
 }
