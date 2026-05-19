@@ -35,6 +35,28 @@ const PendingStreamFrame = struct {
     data: []u8,
 };
 
+fn quicVarIntWireLen(value: u64) Error!usize {
+    if (value <= 63) return 1;
+    if (value <= 16383) return 2;
+    if (value <= 1073741823) return 4;
+    if (value <= max_quic_varint) return 8;
+    return error.Internal;
+}
+
+fn addWireLen(current: usize, extra: usize) Error!usize {
+    return std.math.add(usize, current, extra) catch return error.Internal;
+}
+
+fn streamFrameWireLen(pending: PendingStreamFrame) Error!usize {
+    var len: usize = 1; // frame type
+    len = try addWireLen(len, try quicVarIntWireLen(pending.stream_id));
+    if (pending.offset != 0) {
+        len = try addWireLen(len, try quicVarIntWireLen(pending.offset));
+    }
+    len = try addWireLen(len, try quicVarIntWireLen(std.math.cast(u64, pending.data.len) orelse return error.Internal));
+    return addWireLen(len, pending.data.len);
+}
+
 const SendStreamState = struct {
     stream_id: u64,
     next_offset: u64 = 0,
@@ -140,12 +162,18 @@ pub const QuicConnection = struct {
         _ = now_millis;
 
         if (self.send_queue.items.len == 0) return null;
+
+        const pending = self.send_queue.items[0];
+        const encoded_len = try streamFrameWireLen(pending);
+        if (encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
+        if (!self.recovery_state.canSend(encoded_len)) return null;
+        if (out_buf.len < encoded_len) return error.BufferTooSmall;
+
         var writable = out_buf;
         if (writable.len > self.config.max_datagram_size) {
             writable = writable[0..self.config.max_datagram_size];
         }
 
-        const pending = self.send_queue.items[0];
         var out = buffer.fixedWriter(writable);
         frame.encodeFrame(out.writer(), .{ .stream = .{
             .stream_id = pending.stream_id,
@@ -158,7 +186,7 @@ pub const QuicConnection = struct {
         };
 
         const written = out.getWritten();
-        if (!self.recovery_state.canSend(written.len)) return null;
+        std.debug.assert(written.len == encoded_len);
 
         const removed = self.send_queue.orderedRemove(0);
         self.allocator.free(removed.data);
@@ -340,6 +368,20 @@ test "pollTx returns null when congestion window is full" {
     conn.recovery_state.congestion_window = 128;
     const payload = (try conn.pollTx(0, &out_buf)).?;
     try std.testing.expect(payload.len > 0);
+}
+
+test "pollTx checks congestion before writing output buffer" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "hello", false);
+
+    conn.recovery_state.congestion_window = 0;
+
+    var tiny = [_]u8{0xaa};
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &tiny));
+    try std.testing.expectEqual(@as(u8, 0xaa), tiny[0]);
 }
 
 test "pollTx keeps queued frame when output buffer is too small" {
