@@ -47,14 +47,21 @@ fn addWireLen(current: usize, extra: usize) Error!usize {
     return std.math.add(usize, current, extra) catch return error.Internal;
 }
 
-fn streamFrameWireLen(pending: PendingStreamFrame) Error!usize {
+fn streamFrameWireLen(stream_id: u64, offset: u64, data_len: usize) Error!usize {
     var len: usize = 1; // frame type
-    len = try addWireLen(len, try quicVarIntWireLen(pending.stream_id));
-    if (pending.offset != 0) {
-        len = try addWireLen(len, try quicVarIntWireLen(pending.offset));
+    len = try addWireLen(len, try quicVarIntWireLen(stream_id));
+    if (offset != 0) {
+        len = try addWireLen(len, try quicVarIntWireLen(offset));
     }
-    len = try addWireLen(len, try quicVarIntWireLen(std.math.cast(u64, pending.data.len) orelse return error.Internal));
-    return addWireLen(len, pending.data.len);
+    len = try addWireLen(len, try quicVarIntWireLen(std.math.cast(u64, data_len) orelse return error.Internal));
+    return addWireLen(len, data_len);
+}
+
+fn streamEndOffset(offset: u64, data_len: usize) ?u64 {
+    const len = std.math.cast(u64, data_len) orelse return null;
+    const end = std.math.add(u64, offset, len) catch return null;
+    if (end > max_quic_varint) return null;
+    return end;
 }
 
 const SendStreamState = struct {
@@ -134,6 +141,8 @@ pub const QuicConnection = struct {
     ) Error!void {
         _ = now_millis;
 
+        if (datagram.len > self.config.max_datagram_size) return error.InvalidPacket;
+
         var offset: usize = 0;
         while (offset < datagram.len) {
             var decoded = frame.decodeFrameSlice(datagram[offset..], self.allocator) catch |err| switch (err) {
@@ -164,7 +173,7 @@ pub const QuicConnection = struct {
         if (self.send_queue.items.len == 0) return null;
 
         const pending = self.send_queue.items[0];
-        const encoded_len = try streamFrameWireLen(pending);
+        const encoded_len = try streamFrameWireLen(pending.stream_id, pending.offset, pending.data.len);
         if (encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
         if (!self.recovery_state.canSend(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
@@ -219,7 +228,9 @@ pub const QuicConnection = struct {
         if (state.fin_sent) return error.StreamClosed;
 
         const offset = state.next_offset;
-        const next_offset = std.math.add(u64, state.next_offset, data.len) catch return error.Internal;
+        const next_offset = streamEndOffset(offset, data.len) orelse return error.InvalidStream;
+        const encoded_len = try streamFrameWireLen(stream_id, offset, data.len);
+        if (encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
 
         const owned = self.allocator.alloc(u8, data.len) catch return error.OutOfMemory;
         errdefer self.allocator.free(owned);
@@ -286,7 +297,7 @@ pub const QuicConnection = struct {
             return error.InvalidPacket;
         }
 
-        const end_offset = std.math.add(u64, stream_frame.offset, stream_frame.data.len) catch return error.InvalidPacket;
+        const end_offset = streamEndOffset(stream_frame.offset, stream_frame.data.len) orelse return error.InvalidPacket;
         stream_state.data.appendSlice(self.allocator, stream_frame.data) catch return error.OutOfMemory;
         if (stream_frame.fin) {
             stream_state.final_size = end_offset;
@@ -405,6 +416,31 @@ test "pollTx keeps queued frame when output buffer is too small" {
     }
 }
 
+test "sendOnStream rejects unsendable stream frames before mutating state" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 8 });
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try std.testing.expectError(error.BufferTooSmall, conn.sendOnStream(stream_id, "too large", false));
+
+    var out_buf: [32]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
+
+    try conn.sendOnStream(stream_id, "x", true);
+    const payload = (try conn.pollTx(0, &out_buf)).?;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .stream => |stream_frame| {
+            try std.testing.expectEqual(@as(u64, 0), stream_frame.offset);
+            try std.testing.expect(stream_frame.fin);
+            try std.testing.expectEqualStrings("x", stream_frame.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "processDatagram preserves out of memory from frame decoding" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var conn = try QuicConnection.init(failing_allocator.allocator(), .server, .{});
@@ -418,6 +454,20 @@ test "processDatagram preserves out of memory from frame decoding" {
     };
 
     try std.testing.expectError(error.OutOfMemory, conn.processDatagram(0, &wire));
+}
+
+test "processDatagram rejects payloads larger than configured datagram size" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{ .max_datagram_size = 3 });
+    defer conn.deinit();
+
+    const wire = [_]u8{
+        0x0a, // STREAM with LEN bit
+        0x00, // stream id
+        0x01, // data length
+        'x',
+    };
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, &wire));
 }
 
 test "receive stream rejects data after final size" {
@@ -441,6 +491,22 @@ test "receive stream rejects data after final size" {
         .fin = false,
         .data = "!",
     } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+}
+
+test "receive stream rejects end offset beyond QUIC varint range" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = max_quic_varint,
+        .fin = true,
+        .data = "x",
+    } });
+
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
 }
 

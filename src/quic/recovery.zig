@@ -2,6 +2,18 @@ const std = @import("std");
 
 const timer_granularity_ms = 1;
 
+fn saturatingAddU64(a: u64, b: u64) u64 {
+    return std.math.add(u64, a, b) catch std.math.maxInt(u64);
+}
+
+fn saturatingMulU64(a: u64, b: u64) u64 {
+    return std.math.mul(u64, a, b) catch std.math.maxInt(u64);
+}
+
+fn saturatingMulUsize(a: usize, b: usize) usize {
+    return std.math.mul(usize, a, b) catch std.math.maxInt(usize);
+}
+
 /// Configuration for the simplified loss recovery and congestion state.
 pub const Config = struct {
     max_datagram_size: u16,
@@ -60,8 +72,12 @@ pub const Recovery = struct {
             self.congestion_window = std.math.add(usize, self.congestion_window, bytes) catch std.math.maxInt(usize);
             return;
         }
+        if (self.congestion_window == 0) {
+            self.congestion_window = @max(bytes, minimumCongestionWindow(self.max_datagram_size));
+            return;
+        }
 
-        const increase = @max(@as(usize, 1), (self.max_datagram_size * bytes) / self.congestion_window);
+        const increase = @max(@as(usize, 1), saturatingMulUsize(self.max_datagram_size, bytes) / self.congestion_window);
         self.congestion_window = std.math.add(usize, self.congestion_window, increase) catch std.math.maxInt(usize);
     }
 
@@ -81,8 +97,8 @@ pub const Recovery = struct {
 
     /// Current Probe Timeout in milliseconds.
     pub fn ptoMs(self: Recovery) u64 {
-        const variance_delay = @max(4 * self.rttvar_ms, timer_granularity_ms);
-        var timeout = self.smoothed_rtt_ms + variance_delay + self.max_ack_delay_ms;
+        const variance_delay = @max(saturatingMulU64(4, self.rttvar_ms), timer_granularity_ms);
+        var timeout = saturatingAddU64(saturatingAddU64(self.smoothed_rtt_ms, variance_delay), self.max_ack_delay_ms);
 
         var count = self.pto_count;
         while (count != 0) : (count -= 1) {
@@ -101,7 +117,7 @@ pub const Recovery = struct {
         self.min_rtt_ms = if (self.min_rtt_ms) |min_rtt| @min(min_rtt, latest_rtt_ms) else latest_rtt_ms;
 
         const min_rtt = self.min_rtt_ms.?;
-        const adjusted_rtt = if (latest_rtt_ms > min_rtt + ack_delay_ms)
+        const adjusted_rtt = if (latest_rtt_ms > saturatingAddU64(min_rtt, ack_delay_ms))
             latest_rtt_ms - ack_delay_ms
         else
             latest_rtt_ms;
@@ -117,19 +133,19 @@ pub const Recovery = struct {
         else
             adjusted_rtt - self.smoothed_rtt_ms;
 
-        self.rttvar_ms = (3 * self.rttvar_ms + rtt_delta) / 4;
-        self.smoothed_rtt_ms = (7 * self.smoothed_rtt_ms + adjusted_rtt) / 8;
+        self.rttvar_ms = saturatingAddU64(saturatingMulU64(3, self.rttvar_ms), rtt_delta) / 4;
+        self.smoothed_rtt_ms = saturatingAddU64(saturatingMulU64(7, self.smoothed_rtt_ms), adjusted_rtt) / 8;
     }
 };
 
 /// Compute the RFC 9002 initial congestion window in bytes.
 pub fn initialCongestionWindow(max_datagram_size: usize) usize {
-    return @min(10 * max_datagram_size, @max(2 * max_datagram_size, 14720));
+    return @min(saturatingMulUsize(10, max_datagram_size), @max(saturatingMulUsize(2, max_datagram_size), 14720));
 }
 
 /// Compute the minimum congestion window in bytes.
 pub fn minimumCongestionWindow(max_datagram_size: usize) usize {
-    return 2 * max_datagram_size;
+    return saturatingMulUsize(2, max_datagram_size);
 }
 
 test "initial and minimum congestion windows follow RFC 9002 bounds" {
@@ -166,4 +182,19 @@ test "pto uses rtt variance and exponential backoff" {
     recovery.onPacketAcked(0, 80, 0);
     try std.testing.expectEqual(@as(u8, 0), recovery.pto_count);
     try std.testing.expect(recovery.ptoMs() < 650);
+}
+
+test "recovery arithmetic saturates at numeric extremes" {
+    try std.testing.expectEqual(std.math.maxInt(usize), initialCongestionWindow(std.math.maxInt(usize)));
+    try std.testing.expectEqual(std.math.maxInt(usize), minimumCongestionWindow(std.math.maxInt(usize)));
+
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    recovery.smoothed_rtt_ms = std.math.maxInt(u64);
+    recovery.rttvar_ms = std.math.maxInt(u64);
+    try std.testing.expectEqual(std.math.maxInt(u64), recovery.ptoMs());
+
+    recovery.congestion_window = 1;
+    recovery.ssthresh = 0;
+    recovery.onPacketAcked(std.math.maxInt(usize), std.math.maxInt(u64), std.math.maxInt(u64));
+    try std.testing.expectEqual(std.math.maxInt(usize), recovery.congestion_window);
 }
