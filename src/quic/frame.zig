@@ -88,6 +88,16 @@ pub const MaxStreamsUniFrame = struct {
     maximum_streams: u64,
 };
 
+/// PATH_CHALLENGE frame carrying 8 bytes of path validation data.
+pub const PathChallengeFrame = struct {
+    data: [8]u8,
+};
+
+/// PATH_RESPONSE frame echoing 8 bytes from a received path challenge.
+pub const PathResponseFrame = struct {
+    data: [8]u8,
+};
+
 pub const ConnectionCloseFrame = struct {
     error_code: u64,
     frame_type: u64,
@@ -112,6 +122,8 @@ pub const Frame = union(enum) {
     max_stream_data: MaxStreamDataFrame,
     max_streams_bidi: MaxStreamsBidiFrame,
     max_streams_uni: MaxStreamsUniFrame,
+    path_challenge: PathChallengeFrame,
+    path_response: PathResponseFrame,
     connection_close: ConnectionCloseFrame,
     application_close: ApplicationCloseFrame,
 };
@@ -251,6 +263,14 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeByte(@intFromEnum(FrameType.max_streams_uni));
             try packet.encodeVarInt(writer, max_streams.maximum_streams);
         },
+        .path_challenge => |path_challenge| {
+            try writer.writeByte(@intFromEnum(FrameType.path_challenge));
+            try writer.writeAll(&path_challenge.data);
+        },
+        .path_response => |path_response| {
+            try writer.writeByte(@intFromEnum(FrameType.path_response));
+            try writer.writeAll(&path_response.data);
+        },
         .connection_close => |close| {
             try writer.writeByte(@intFromEnum(FrameType.connection_close));
             try packet.encodeVarInt(writer, close.error_code);
@@ -385,6 +405,18 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
     if (frame_type == @intFromEnum(FrameType.max_streams_uni)) {
         const maximum_streams = (try packet.decodeVarInt(reader)).value;
         return .{ .max_streams_uni = .{ .maximum_streams = maximum_streams } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.path_challenge)) {
+        var data: [8]u8 = undefined;
+        try reader.readNoEof(&data);
+        return .{ .path_challenge = .{ .data = data } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.path_response)) {
+        var data: [8]u8 = undefined;
+        try reader.readNoEof(&data);
+        return .{ .path_response = .{ .data = data } };
     }
 
     if ((frame_type & 0b1111_1000) == @intFromEnum(FrameType.stream)) {
@@ -779,6 +811,32 @@ test "encode/decode max_streams_uni frame roundtrip" {
         .max_streams_uni => |frame| {
             try std.testing.expectEqual(@as(u64, 40), frame.maximum_streams);
         },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "encode/decode path validation frames roundtrip" {
+    const payload = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
+
+    var challenge_buf: [16]u8 = undefined;
+    var challenge_out = buffer.fixedWriter(&challenge_buf);
+    try encodeFrame(challenge_out.writer(), .{ .path_challenge = .{ .data = payload } });
+
+    var challenge_in = buffer.fixedReader(challenge_out.getWritten());
+    const challenge = try decodeFrame(challenge_in.reader(), std.testing.allocator);
+    switch (challenge) {
+        .path_challenge => |frame| try std.testing.expectEqualSlices(u8, &payload, &frame.data),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var response_buf: [16]u8 = undefined;
+    var response_out = buffer.fixedWriter(&response_buf);
+    try encodeFrame(response_out.writer(), .{ .path_response = .{ .data = payload } });
+
+    var response_in = buffer.fixedReader(response_out.getWritten());
+    const response = try decodeFrame(response_in.reader(), std.testing.allocator);
+    switch (response) {
+        .path_response => |frame| try std.testing.expectEqualSlices(u8, &payload, &frame.data),
         else => return error.TestUnexpectedResult,
     }
 }

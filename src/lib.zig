@@ -111,6 +111,10 @@ fn ackFrameWireLen(ack: frame.AckFrame) Error!usize {
     return len;
 }
 
+fn pathResponseFrameWireLen() usize {
+    return 9; // frame type + 8-byte path validation data
+}
+
 fn streamEndOffset(offset: u64, data_len: usize) ?u64 {
     const len = std.math.cast(u64, data_len) orelse return null;
     const end = std.math.add(u64, offset, len) catch return null;
@@ -211,6 +215,7 @@ pub const QuicConnection = struct {
     next_packet_number: u64,
     next_peer_packet_number: u64,
     pending_ack_largest: ?u64,
+    pending_path_responses: std.ArrayList([8]u8),
     peer_max_data: u64,
     peer_initial_max_stream_data: u64,
     peer_max_streams_bidi: u64,
@@ -251,6 +256,7 @@ pub const QuicConnection = struct {
             .next_packet_number = 0,
             .next_peer_packet_number = 0,
             .pending_ack_largest = null,
+            .pending_path_responses = .empty,
             .peer_max_data = config.initial_max_data,
             .peer_initial_max_stream_data = config.initial_max_stream_data,
             .peer_max_streams_bidi = config.initial_max_streams_bidi,
@@ -281,6 +287,7 @@ pub const QuicConnection = struct {
             self.allocator.free(pending.data);
         }
         self.sent_packets.deinit(self.allocator);
+        self.pending_path_responses.deinit(self.allocator);
         self.send_queue.deinit(self.allocator);
         self.send_streams.deinit(self.allocator);
         for (self.recv_streams.items) |*stream| {
@@ -306,6 +313,7 @@ pub const QuicConnection = struct {
 
         const next_peer_packet_number_snapshot = self.next_peer_packet_number;
         const pending_ack_largest_snapshot = self.pending_ack_largest;
+        const pending_path_response_count = self.pending_path_responses.items.len;
         const peer_max_data_snapshot = self.peer_max_data;
         const peer_max_streams_bidi_snapshot = self.peer_max_streams_bidi;
         const peer_max_streams_uni_snapshot = self.peer_max_streams_uni;
@@ -336,6 +344,7 @@ pub const QuicConnection = struct {
             self.peer_max_data = peer_max_data_snapshot;
             self.next_peer_packet_number = next_peer_packet_number_snapshot;
             self.pending_ack_largest = pending_ack_largest_snapshot;
+            self.pending_path_responses.items.len = pending_path_response_count;
             self.closed = closed_snapshot;
             self.rollbackSentPackets(sent_packet_count, sent_packet_snapshots);
             self.recovery_state = recovery_snapshot;
@@ -362,6 +371,7 @@ pub const QuicConnection = struct {
                 .max_stream_data => |max_stream_data| self.receiveMaxStreamDataFrame(max_stream_data),
                 .max_streams_bidi => |max_streams| self.receiveMaxStreamsBidiFrame(max_streams),
                 .max_streams_uni => |max_streams| self.receiveMaxStreamsUniFrame(max_streams),
+                .path_challenge => |path_challenge| try self.receivePathChallengeFrame(path_challenge),
                 .reset_stream => |reset_stream| try self.receiveResetStreamFrame(reset_stream),
                 .stream => |stream_frame| try self.receiveStreamFrame(stream_frame),
                 .connection_close, .application_close => self.closed = true,
@@ -385,6 +395,10 @@ pub const QuicConnection = struct {
         if (self.closed) return error.ConnectionClosed;
 
         const ack_to_send = self.pendingAckFrame();
+        if (self.pending_path_responses.items.len != 0) {
+            return try self.pollPathResponse(ack_to_send, now_millis, out_buf);
+        }
+
         if (self.send_queue.items.len == 0) {
             if (ack_to_send) |ack| {
                 return try self.pollAckOnly(ack, out_buf);
@@ -731,6 +745,70 @@ pub const QuicConnection = struct {
         return out.getWritten();
     }
 
+    fn pollPathResponse(
+        self: *QuicConnection,
+        ack_to_send: ?frame.AckFrame,
+        now_millis: i64,
+        out_buf: []u8,
+    ) Error!?[]u8 {
+        const response_encoded_len = pathResponseFrameWireLen();
+        if (response_encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
+
+        var encoded_len = response_encoded_len;
+        var include_ack = false;
+        if (ack_to_send) |ack| {
+            const ack_encoded_len = try ackFrameWireLen(ack);
+            const coalesced_len = try addWireLen(ack_encoded_len, response_encoded_len);
+            if (coalesced_len <= self.config.max_datagram_size and out_buf.len >= coalesced_len and self.recovery_state.canSend(coalesced_len)) {
+                encoded_len = coalesced_len;
+                include_ack = true;
+            } else if (ack_encoded_len <= self.config.max_datagram_size and out_buf.len >= ack_encoded_len) {
+                return try self.pollAckOnly(ack, out_buf);
+            } else {
+                return error.BufferTooSmall;
+            }
+        }
+
+        if (!self.recovery_state.canSend(encoded_len)) return null;
+        if (out_buf.len < encoded_len) return error.BufferTooSmall;
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        var appended_sent_packet = false;
+        errdefer if (appended_sent_packet) {
+            self.sent_packets.items.len -= 1;
+        };
+
+        const packet_number = self.next_packet_number;
+        self.sent_packets.append(self.allocator, .{
+            .packet_number = packet_number,
+            .sent_time_millis = now_millis,
+            .bytes = encoded_len,
+        }) catch return error.OutOfMemory;
+        appended_sent_packet = true;
+
+        const response_data = self.pending_path_responses.items[0];
+        var out = buffer.fixedWriter(out_buf[0..encoded_len]);
+        if (include_ack) {
+            frame.encodeFrame(out.writer(), .{ .ack = ack_to_send.? }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(out.writer(), .{ .path_response = .{ .data = response_data } }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const written = out.getWritten();
+        std.debug.assert(written.len == encoded_len);
+
+        _ = self.pending_path_responses.orderedRemove(0);
+        if (include_ack) self.pending_ack_largest = null;
+        self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
+        self.recovery_state.onPacketSent(written.len);
+        return written;
+    }
+
     fn queueAckForReceivedPacket(self: *QuicConnection) Error!void {
         if (self.next_peer_packet_number > max_quic_varint) return error.InvalidPacket;
 
@@ -754,6 +832,10 @@ pub const QuicConnection = struct {
 
     fn receiveMaxStreamsUniFrame(self: *QuicConnection, max_streams: frame.MaxStreamsUniFrame) void {
         self.peer_max_streams_uni = @max(self.peer_max_streams_uni, max_streams.maximum_streams);
+    }
+
+    fn receivePathChallengeFrame(self: *QuicConnection, path_challenge: frame.PathChallengeFrame) Error!void {
+        self.pending_path_responses.append(self.allocator, path_challenge.data) catch return error.OutOfMemory;
     }
 
     fn validateIncomingStreamCount(self: *QuicConnection, stream_id: u64) Error!void {
@@ -1173,6 +1255,58 @@ test "processDatagram queues ACK for ack-eliciting payloads" {
     try std.testing.expectEqual(@as(usize, 0), client.recovery_state.bytes_in_flight);
     try std.testing.expectEqual(@as(?u64, 50), client.recovery_state.latest_rtt_ms);
     try std.testing.expectEqual(@as(?[]u8, null), try client.pollTx(70, &datagram));
+}
+
+test "PATH_CHALLENGE queues PATH_RESPONSE with pending ACK" {
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    const challenge_data = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0, 1, 2, 3 };
+    var challenge_buf: [16]u8 = undefined;
+    var challenge_out = buffer.fixedWriter(&challenge_buf);
+    try frame.encodeFrame(challenge_out.writer(), .{ .path_challenge = .{ .data = challenge_data } });
+
+    try server.processDatagram(20, challenge_out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), server.pending_path_responses.items.len);
+    try std.testing.expectEqual(@as(?u64, 0), server.pending_ack_largest);
+
+    var out_buf: [64]u8 = undefined;
+    const response_payload = (try server.pollTx(30, &out_buf)).?;
+    try std.testing.expectEqual(@as(usize, 1), server.sent_packets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_path_responses.items.len);
+    try std.testing.expectEqual(@as(?u64, null), server.pending_ack_largest);
+
+    var ack = try frame.decodeFrameSlice(response_payload, std.testing.allocator);
+    defer frame.deinitFrame(&ack.frame, std.testing.allocator);
+    switch (ack.frame) {
+        .ack => |ack_frame| try std.testing.expectEqual(@as(u64, 0), ack_frame.largest_acknowledged),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var response = try frame.decodeFrameSlice(response_payload[ack.len..], std.testing.allocator);
+    defer frame.deinitFrame(&response.frame, std.testing.allocator);
+    switch (response.frame) {
+        .path_response => |path_response| try std.testing.expectEqualSlices(u8, &challenge_data, &path_response.data),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "processDatagram rolls back PATH_RESPONSE state when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .path_challenge = .{ .data = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 } } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_path_responses.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
+
+    var out_buf: [64]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
 }
 
 test "pollTx coalesces pending ACK with queued STREAM payload" {
