@@ -1,30 +1,28 @@
 const std = @import("std");
+const quicz = @import("quicz");
 
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
-    _ = gpa; // reserved for future quicz integration
 
-    const stdout = std.fs.File.stdout();
+    var client = try quicz.QuicConnection.init(gpa, .client, .{});
+    defer client.deinit();
+    var server = try quicz.QuicConnection.init(gpa, .server, .{});
+    defer server.deinit();
 
-    try stdout.writeAll("quicz UDP echo server listening on 127.0.0.1:4443\n");
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello from quicz client", true);
 
-    // Bind UDP socket on 127.0.0.1:4443 using Zig 0.15.2 std.net API (posix-level UDP)
-    const address = try std.net.Address.parseIp4("127.0.0.1", 4443);
-    const sockfd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.CLOEXEC, std.posix.IPPROTO.UDP);
-    defer std.posix.close(sockfd);
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(0, (try client.pollTx(0, &datagram)).?);
 
-    try std.posix.bind(sockfd, &address.any, address.getOsSockLen());
+    var recv_buf: [128]u8 = undefined;
+    const recv_len = (try server.recvOnStream(stream_id, &recv_buf)).?;
+    const received = recv_buf[0..recv_len];
+    std.debug.print("[server] received: {s}\n", .{received});
 
-    var buf: [1024]u8 = undefined;
-    while (true) {
-        var src_addr: std.net.Address = undefined;
-        var src_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr);
-        const recv_len = try std.posix.recvfrom(sockfd, &buf, 0, &src_addr.any, &src_len);
-        const msg = buf[0..recv_len];
-        try stdout.writeAll("[server] received: ");
-        try stdout.writeAll(msg);
-        try stdout.writeAll("\n");
-        // Echo back to sender
-        _ = try std.posix.sendto(sockfd, msg, 0, &src_addr.any, src_len);
-    }
+    try server.sendOnStream(stream_id, received, true);
+    try client.processDatagram(0, (try server.pollTx(0, &datagram)).?);
+
+    const echo_len = (try client.recvOnStream(stream_id, &recv_buf)).?;
+    std.debug.print("[server] echoed: {s}\n", .{recv_buf[0..echo_len]});
 }

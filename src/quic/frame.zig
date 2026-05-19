@@ -1,4 +1,5 @@
 const std = @import("std");
+const buffer = @import("buffer.zig");
 const packet = @import("packet.zig");
 
 /// Basic subset of QUIC frames (RFC 9000 Section 19).
@@ -234,7 +235,7 @@ pub fn decodeFrameSlice(data: []const u8, allocator: std.mem.Allocator) !Decoded
         return .{ .frame = .{ .padding = .{ .len = len } }, .len = len };
     }
 
-    var in = std.io.fixedBufferStream(data);
+    var in = buffer.fixedReader(data);
     const decoded = try decodeFrame(in.reader(), allocator);
     return .{ .frame = decoded, .len = in.pos };
 }
@@ -395,7 +396,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
 
 test "encode/decode stream frame roundtrip" {
     var buf: [256]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buf);
+    var out = buffer.fixedWriter(&buf);
 
     const input = Frame{ .stream = .{
         .stream_id = 7,
@@ -406,7 +407,7 @@ test "encode/decode stream frame roundtrip" {
     try encodeFrame(out.writer(), input);
 
     const encoded = out.getWritten();
-    var in = std.io.fixedBufferStream(encoded);
+    var in = buffer.fixedReader(encoded);
     var parsed = try decodeFrame(in.reader(), std.testing.allocator);
     defer deinitFrame(&parsed, std.testing.allocator);
 
@@ -447,7 +448,7 @@ test "decodeFrameSlice aggregates consecutive padding" {
 
 test "encode/decode crypto frame roundtrip" {
     var buf: [256]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buf);
+    var out = buffer.fixedWriter(&buf);
 
     const input = Frame{ .crypto = .{
         .offset = 4096,
@@ -456,7 +457,7 @@ test "encode/decode crypto frame roundtrip" {
     try encodeFrame(out.writer(), input);
 
     const encoded = out.getWritten();
-    var in = std.io.fixedBufferStream(encoded);
+    var in = buffer.fixedReader(encoded);
     var parsed = try decodeFrame(in.reader(), std.testing.allocator);
     defer deinitFrame(&parsed, std.testing.allocator);
 
@@ -471,7 +472,7 @@ test "encode/decode crypto frame roundtrip" {
 
 test "encode/decode ack frame roundtrip" {
     var buf: [128]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buf);
+    var out = buffer.fixedWriter(&buf);
 
     const input = Frame{ .ack = .{
         .largest_acknowledged = 12345,
@@ -481,7 +482,7 @@ test "encode/decode ack frame roundtrip" {
     try encodeFrame(out.writer(), input);
 
     const encoded = out.getWritten();
-    var in = std.io.fixedBufferStream(encoded);
+    var in = buffer.fixedReader(encoded);
     const parsed = try decodeFrame(in.reader(), std.testing.allocator);
 
     switch (parsed) {
@@ -503,13 +504,13 @@ test "decode ack frame rejects additional ranges for minimal codec" {
         0x01, // first ACK range
     };
 
-    var in = std.io.fixedBufferStream(&wire);
+    var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.UnsupportedAckRangeCount, decodeFrame(in.reader(), std.testing.allocator));
 }
 
 test "encode/decode reset_stream frame roundtrip" {
     var buf: [128]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buf);
+    var out = buffer.fixedWriter(&buf);
 
     const input = Frame{ .reset_stream = .{
         .stream_id = 9,
@@ -519,7 +520,7 @@ test "encode/decode reset_stream frame roundtrip" {
     try encodeFrame(out.writer(), input);
 
     const encoded = out.getWritten();
-    var in = std.io.fixedBufferStream(encoded);
+    var in = buffer.fixedReader(encoded);
     const parsed = try decodeFrame(in.reader(), std.testing.allocator);
 
     switch (parsed) {
@@ -534,7 +535,7 @@ test "encode/decode reset_stream frame roundtrip" {
 
 test "encode/decode max_data frame roundtrip" {
     var buf: [64]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buf);
+    var out = buffer.fixedWriter(&buf);
 
     const input = Frame{ .max_data = .{
         .maximum_data = 1_000_000,
@@ -542,7 +543,7 @@ test "encode/decode max_data frame roundtrip" {
     try encodeFrame(out.writer(), input);
 
     const encoded = out.getWritten();
-    var in = std.io.fixedBufferStream(encoded);
+    var in = buffer.fixedReader(encoded);
     const parsed = try decodeFrame(in.reader(), std.testing.allocator);
 
     switch (parsed) {
@@ -555,7 +556,7 @@ test "encode/decode max_data frame roundtrip" {
 
 test "encode/decode stop_sending frame roundtrip" {
     var buf: [128]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buf);
+    var out = buffer.fixedWriter(&buf);
 
     const input = Frame{ .stop_sending = .{
         .stream_id = 9,
@@ -564,7 +565,7 @@ test "encode/decode stop_sending frame roundtrip" {
     try encodeFrame(out.writer(), input);
 
     const encoded = out.getWritten();
-    var in = std.io.fixedBufferStream(encoded);
+    var in = buffer.fixedReader(encoded);
     const parsed = try decodeFrame(in.reader(), std.testing.allocator);
 
     switch (parsed) {
@@ -578,7 +579,7 @@ test "encode/decode stop_sending frame roundtrip" {
 
 test "encode/decode max_stream_data frame roundtrip" {
     var buf: [128]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buf);
+    var out = buffer.fixedWriter(&buf);
 
     const input = Frame{ .max_stream_data = .{
         .stream_id = 5,
@@ -587,7 +588,7 @@ test "encode/decode max_stream_data frame roundtrip" {
     try encodeFrame(out.writer(), input);
 
     const encoded = out.getWritten();
-    var in = std.io.fixedBufferStream(encoded);
+    var in = buffer.fixedReader(encoded);
     const parsed = try decodeFrame(in.reader(), std.testing.allocator);
 
     switch (parsed) {
@@ -601,7 +602,7 @@ test "encode/decode max_stream_data frame roundtrip" {
 
 test "encode/decode max_streams_bidi frame roundtrip" {
     var buf: [64]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buf);
+    var out = buffer.fixedWriter(&buf);
 
     const input = Frame{ .max_streams_bidi = .{
         .maximum_streams = 24,
@@ -609,7 +610,7 @@ test "encode/decode max_streams_bidi frame roundtrip" {
     try encodeFrame(out.writer(), input);
 
     const encoded = out.getWritten();
-    var in = std.io.fixedBufferStream(encoded);
+    var in = buffer.fixedReader(encoded);
     const parsed = try decodeFrame(in.reader(), std.testing.allocator);
 
     switch (parsed) {
@@ -622,7 +623,7 @@ test "encode/decode max_streams_bidi frame roundtrip" {
 
 test "encode/decode max_streams_uni frame roundtrip" {
     var buf: [64]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buf);
+    var out = buffer.fixedWriter(&buf);
 
     const input = Frame{ .max_streams_uni = .{
         .maximum_streams = 40,
@@ -630,7 +631,7 @@ test "encode/decode max_streams_uni frame roundtrip" {
     try encodeFrame(out.writer(), input);
 
     const encoded = out.getWritten();
-    var in = std.io.fixedBufferStream(encoded);
+    var in = buffer.fixedReader(encoded);
     const parsed = try decodeFrame(in.reader(), std.testing.allocator);
 
     switch (parsed) {
@@ -647,7 +648,7 @@ test "stream frame without LEN bit fails" {
         0x01,
     };
 
-    var in = std.io.fixedBufferStream(&wire);
+    var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.InvalidFrameLength, decodeFrame(in.reader(), std.testing.allocator));
 }
 
@@ -659,13 +660,13 @@ test "stream frame with truncated payload fails" {
         0xaa, 0xbb, // truncated data
     };
 
-    var in = std.io.fixedBufferStream(&wire);
+    var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.EndOfStream, decodeFrame(in.reader(), std.testing.allocator));
 }
 
 test "encode/decode connection_close frame roundtrip" {
     var buf: [256]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buf);
+    var out = buffer.fixedWriter(&buf);
 
     const input = Frame{ .connection_close = .{
         .error_code = 0x0a,
@@ -675,7 +676,7 @@ test "encode/decode connection_close frame roundtrip" {
     try encodeFrame(out.writer(), input);
 
     const encoded = out.getWritten();
-    var in = std.io.fixedBufferStream(encoded);
+    var in = buffer.fixedReader(encoded);
     var parsed = try decodeFrame(in.reader(), std.testing.allocator);
     defer deinitFrame(&parsed, std.testing.allocator);
 
@@ -691,7 +692,7 @@ test "encode/decode connection_close frame roundtrip" {
 
 test "encode/decode application_close frame roundtrip" {
     var buf: [256]u8 = undefined;
-    var out = std.io.fixedBufferStream(&buf);
+    var out = buffer.fixedWriter(&buf);
 
     const input = Frame{ .application_close = .{
         .error_code = 0x1337,
@@ -700,7 +701,7 @@ test "encode/decode application_close frame roundtrip" {
     try encodeFrame(out.writer(), input);
 
     const encoded = out.getWritten();
-    var in = std.io.fixedBufferStream(encoded);
+    var in = buffer.fixedReader(encoded);
     var parsed = try decodeFrame(in.reader(), std.testing.allocator);
     defer deinitFrame(&parsed, std.testing.allocator);
 
@@ -723,6 +724,6 @@ test "connection close with truncated reason fails" {
         'o',
     };
 
-    var in = std.io.fixedBufferStream(&wire);
+    var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.EndOfStream, decodeFrame(in.reader(), std.testing.allocator));
 }

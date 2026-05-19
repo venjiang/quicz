@@ -1,4 +1,5 @@
 const std = @import("std");
+const buffer = @import("buffer.zig");
 
 /// QUIC version values (v1 + v2)
 pub const Version = enum(u32) {
@@ -309,7 +310,7 @@ pub fn parseShortHeader(reader: anytype, allocator: std.mem.Allocator, dcid_len:
 
 test "encode/parse long header roundtrip" {
     var out: [256]u8 = undefined;
-    var writer_fbs = std.io.fixedBufferStream(&out);
+    var writer_fbs = buffer.fixedWriter(&out);
 
     const input = LongHeader{
         .version = .v1,
@@ -324,7 +325,7 @@ test "encode/parse long header roundtrip" {
     try encodeLongHeader(writer_fbs.writer(), input);
 
     const encoded = writer_fbs.getWritten();
-    var reader_fbs = std.io.fixedBufferStream(encoded);
+    var reader_fbs = buffer.fixedReader(encoded);
     var parsed = try parseLongHeader(reader_fbs.reader(), std.testing.allocator);
     defer deinitLongHeader(&parsed, std.testing.allocator);
 
@@ -339,7 +340,7 @@ test "encode/parse long header roundtrip" {
 
 test "encode/parse short header roundtrip" {
     var out: [256]u8 = undefined;
-    var writer_fbs = std.io.fixedBufferStream(&out);
+    var writer_fbs = buffer.fixedWriter(&out);
 
     const input = ShortHeader{
         .dcid = &[_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff },
@@ -351,7 +352,7 @@ test "encode/parse short header roundtrip" {
 
     const encoded = writer_fbs.getWritten();
     try std.testing.expectEqual(@as(usize, 10), encoded.len);
-    var reader_fbs = std.io.fixedBufferStream(encoded);
+    var reader_fbs = buffer.fixedReader(encoded);
     var parsed = try parseShortHeader(reader_fbs.reader(), std.testing.allocator, input.dcid.len);
     defer deinitShortHeader(&parsed, std.testing.allocator);
 
@@ -370,20 +371,20 @@ test "parse long header rejects length shorter than packet number" {
         0x01, // length shorter than the 2-byte packet number
     };
 
-    var in = std.io.fixedBufferStream(&wire);
+    var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.InvalidLength, parseLongHeader(in.reader(), std.testing.allocator));
 }
 
 test "parse short header rejects invalid caller dcid length" {
     const wire = [_]u8{0x40};
 
-    var in = std.io.fixedBufferStream(&wire);
+    var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.InvalidConnectionIdLength, parseShortHeader(in.reader(), std.testing.allocator, 21));
 }
 
 test "encodeVarInt rejects values outside QUIC range" {
     var out: [8]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&out);
+    var fbs = buffer.fixedWriter(&out);
 
     try std.testing.expectError(error.InvalidVarInt, encodeVarInt(fbs.writer(), 4611686018427387904));
 }
@@ -407,7 +408,7 @@ test "encodeVarInt emits expected bytes at size boundaries" {
 
     for (cases) |c| {
         var out: [8]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&out);
+        var fbs = buffer.fixedWriter(&out);
         try encodeVarInt(fbs.writer(), c.value);
 
         const written = fbs.getWritten();
@@ -435,7 +436,7 @@ test "decodeVarInt parses expected values and lengths" {
     };
 
     for (cases) |c| {
-        var fbs = std.io.fixedBufferStream(c.encoded);
+        var fbs = buffer.fixedReader(c.encoded);
         const decoded = try decodeVarInt(fbs.reader());
 
         try std.testing.expectEqual(c.expected_value, decoded.value);
@@ -452,7 +453,7 @@ test "decodeVarInt fails on truncated inputs" {
     };
 
     for (cases) |encoded| {
-        var fbs = std.io.fixedBufferStream(encoded);
+        var fbs = buffer.fixedReader(encoded);
         try std.testing.expectError(error.EndOfStream, decodeVarInt(fbs.reader()));
     }
 }
@@ -475,11 +476,11 @@ test "encodeVarInt and decodeVarInt roundtrip representative values" {
 
     for (values) |value| {
         var out: [8]u8 = undefined;
-        var writer_fbs = std.io.fixedBufferStream(&out);
+        var writer_fbs = buffer.fixedWriter(&out);
         try encodeVarInt(writer_fbs.writer(), value);
 
         const encoded = writer_fbs.getWritten();
-        var reader_fbs = std.io.fixedBufferStream(encoded);
+        var reader_fbs = buffer.fixedReader(encoded);
         const decoded = try decodeVarInt(reader_fbs.reader());
 
         try std.testing.expectEqual(value, decoded.value);
@@ -504,7 +505,7 @@ test "encodeVarInt boundary values requested" {
 
     for (cases) |c| {
         var out: [8]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&out);
+        var fbs = buffer.fixedWriter(&out);
         try encodeVarInt(fbs.writer(), c.value);
 
         const written = fbs.getWritten();
@@ -530,7 +531,7 @@ test "decodeVarInt boundary values requested" {
     };
 
     for (cases) |c| {
-        var fbs = std.io.fixedBufferStream(c.encoded);
+        var fbs = buffer.fixedReader(c.encoded);
         const decoded = try decodeVarInt(fbs.reader());
 
         try std.testing.expectEqual(c.expected_value, decoded.value);
