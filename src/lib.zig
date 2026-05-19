@@ -148,6 +148,12 @@ fn frameIsAckEliciting(decoded: frame.Frame) bool {
     };
 }
 
+fn isLocalBidirectionalStream(side: ConnectionSide, stream_id: u64) bool {
+    const is_bidirectional = (stream_id & 0x02) == 0;
+    const initiator: ConnectionSide = if ((stream_id & 0x01) == 0) .client else .server;
+    return is_bidirectional and initiator == side;
+}
+
 const SendStreamState = struct {
     stream_id: u64,
     next_offset: u64 = 0,
@@ -449,6 +455,8 @@ pub const QuicConnection = struct {
         const existing_state = self.findSendStream(stream_id);
         if (existing_state) |state| {
             if (state.fin_sent) return error.StreamClosed;
+        } else if (isLocalBidirectionalStream(self.side, stream_id)) {
+            return error.InvalidStream;
         }
 
         const offset = if (existing_state) |state| state.next_offset else 0;
@@ -786,6 +794,20 @@ test "openStream enforces peer bidirectional stream limit until MAX_STREAMS_BIDI
 
     try std.testing.expectEqual(@as(u64, 4), try conn.openStream());
     try std.testing.expectEqual(@as(u64, 2), conn.opened_bidi_streams);
+}
+
+test "sendOnStream requires openStream for new local bidirectional streams" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    try std.testing.expectError(error.InvalidStream, conn.sendOnStream(0, "x", false));
+    try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.opened_bidi_streams);
+
+    const stream_id = try conn.openStream();
+    try std.testing.expectEqual(@as(u64, 0), stream_id);
+    try conn.sendOnStream(stream_id, "x", false);
+    try std.testing.expectEqual(@as(u64, 1), conn.opened_bidi_streams);
 }
 
 test "processDatagram rolls back MAX_STREAMS_BIDI updates when payload is invalid" {
@@ -1377,7 +1399,7 @@ test "sendOnStream does not create state for oversized new streams" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 3 });
     defer conn.deinit();
 
-    try std.testing.expectError(error.BufferTooSmall, conn.sendOnStream(4, "too large", false));
+    try std.testing.expectError(error.BufferTooSmall, conn.sendOnStream(1, "too large", false));
     try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
 }
 
@@ -1385,7 +1407,7 @@ test "sendOnStream rolls back partial fragmentation when later offsets cannot fi
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 4 });
     defer conn.deinit();
 
-    try std.testing.expectError(error.BufferTooSmall, conn.sendOnStream(0, "ab", false));
+    try std.testing.expectError(error.BufferTooSmall, conn.sendOnStream(1, "ab", false));
     try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
     try std.testing.expectEqual(@as(usize, 0), conn.send_queue.items.len);
     try std.testing.expectEqual(@as(u64, 0), conn.sent_stream_data_bytes);
@@ -1458,7 +1480,7 @@ test "sendOnStream does not create state for flow-control blocked new streams" {
     });
     defer conn.deinit();
 
-    try std.testing.expectError(error.FlowControlBlocked, conn.sendOnStream(4, "xx", false));
+    try std.testing.expectError(error.FlowControlBlocked, conn.sendOnStream(1, "xx", false));
     try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
     try std.testing.expectEqual(@as(u64, 0), conn.sent_stream_data_bytes);
 }

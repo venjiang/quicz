@@ -88,6 +88,7 @@ pub fn main() !void {
     try conn.sendOnStream(stream_id, "hello, quicz"[0..], true);
 
     // 当前骨架行为：
+    // - 本地发起的 bidirectional stream 需要先调用 conn.openStream()
     // - 调用 conn.pollTx(...) 获取未加密的 frame payload 字节；
     //   它可能发送 ACK-only payload，或把待发送 ACK 与 STREAM 数据合并
     // - 将对端 payload 字节喂给 conn.processDatagram(...)

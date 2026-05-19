@@ -85,6 +85,8 @@ pub fn main() !void {
     try conn.sendOnStream(stream_id, "hello, quicz"[0..], true);
 
     // Current skeleton behavior:
+    // - call conn.openStream() before sending on locally initiated
+    //   bidirectional streams
     // - call conn.pollTx(...) to get unencrypted frame payload bytes;
     //   it may emit ACK-only payloads or coalesce a pending ACK with STREAM data
     // - feed peer payload bytes into conn.processDatagram(...)
