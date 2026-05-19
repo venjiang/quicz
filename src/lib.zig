@@ -30,7 +30,7 @@ pub const Config = struct {
     initial_max_data: u64 = 65_536,
     /// Initial per-stream data limit in both send and receive directions.
     initial_max_stream_data: u64 = 65_536,
-    /// Initial number of peer-advertised bidirectional streams this endpoint may open.
+    /// Initial bidirectional stream-count limit in both send and receive directions.
     initial_max_streams_bidi: u64 = 64,
 };
 
@@ -157,6 +157,10 @@ fn isLocalBidirectionalStream(side: ConnectionSide, stream_id: u64) bool {
     return isBidirectionalStream(stream_id) and initiator == side;
 }
 
+fn streamCountForId(stream_id: u64) u64 {
+    return stream_id / 4 + 1;
+}
+
 const SendStreamState = struct {
     stream_id: u64,
     next_offset: u64 = 0,
@@ -203,6 +207,7 @@ pub const QuicConnection = struct {
     sent_stream_data_bytes: u64,
     recv_max_data: u64,
     recv_max_stream_data: u64,
+    recv_max_streams_bidi: u64,
     recv_data_bytes: u64,
     recovery_state: recovery.Recovery,
     sent_packets: std.ArrayList(SentPacket),
@@ -235,6 +240,7 @@ pub const QuicConnection = struct {
             .sent_stream_data_bytes = 0,
             .recv_max_data = config.initial_max_data,
             .recv_max_stream_data = config.initial_max_stream_data,
+            .recv_max_streams_bidi = config.initial_max_streams_bidi,
             .recv_data_bytes = 0,
             .recovery_state = recovery.Recovery.init(.{
                 .max_datagram_size = config.max_datagram_size,
@@ -695,8 +701,14 @@ pub const QuicConnection = struct {
         self.peer_max_streams_bidi = @max(self.peer_max_streams_bidi, max_streams.maximum_streams);
     }
 
+    fn validateIncomingStreamCount(self: QuicConnection, stream_id: u64) Error!void {
+        if (!isBidirectionalStream(stream_id) or isLocalBidirectionalStream(self.side, stream_id)) return;
+        if (streamCountForId(stream_id) > self.recv_max_streams_bidi) return error.InvalidPacket;
+    }
+
     fn receiveResetStreamFrame(self: *QuicConnection, reset: frame.ResetStreamFrame) Error!void {
         if (reset.stream_id > max_quic_varint) return error.InvalidStream;
+        try self.validateIncomingStreamCount(reset.stream_id);
         if (reset.final_size > self.recv_max_stream_data) return error.InvalidPacket;
 
         const existing_state = self.findRecvStream(reset.stream_id);
@@ -730,6 +742,7 @@ pub const QuicConnection = struct {
 
     fn receiveStreamFrame(self: *QuicConnection, stream_frame: frame.StreamFrame) Error!void {
         if (stream_frame.stream_id > max_quic_varint) return error.InvalidStream;
+        try self.validateIncomingStreamCount(stream_frame.stream_id);
 
         const existing_state = self.findRecvStream(stream_frame.stream_id);
         if (existing_state) |stream_state| {
@@ -1290,6 +1303,51 @@ test "RESET_STREAM flow-control violation does not create receive state" {
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
     try std.testing.expectEqual(@as(u64, 0), conn.recv_data_bytes);
     try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
+}
+
+test "processDatagram enforces inbound bidirectional stream count for STREAM" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_max_streams_bidi = 1 });
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 4,
+        .offset = 0,
+        .fin = false,
+        .data = "x",
+    } });
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.recv_data_bytes);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "ok",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items.len);
+}
+
+test "processDatagram enforces inbound bidirectional stream count for RESET_STREAM" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_max_streams_bidi = 1 });
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 4,
+        .application_error_code = 1,
+        .final_size = 0,
+    } });
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.recv_data_bytes);
 }
 
 test "connection close frame closes public connection API" {
