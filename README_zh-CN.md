@@ -16,7 +16,7 @@
 - [x] QUIC 变长整数（varint）编解码工具
 - [x] 最小 QUIC 包头（long/short）解析与序列化
 - [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK 多区间 / RESET_STREAM / STOP_SENDING / MAX_* / CONNECTION_CLOSE 子集）
-- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转，含发送侧 STREAM 分片、入站 RESET_STREAM 处理、基础 connection/stream/stream-count 流量控制、严格双向 stream 校验与关闭状态处理
+- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转，含发送侧 STREAM 分片、入站 RESET_STREAM 处理、基础 connection/stream/stream-count 流量控制、严格 stream 方向校验与关闭状态处理
 - [x] 简化丢包恢复与拥塞控制状态，含自动 ACK 生成、ACK range 处理、未发送 packet 的 ACK 拒绝与 ACK 驱动的 sent-packet tracking
 - [ ] 完整连接状态机与独立 packet number spaces
 - [ ] 完整 RFC 9002 丢包检测与拥塞控制（含 loss timer 与 packet threshold loss detection）
@@ -80,6 +80,7 @@ pub fn main() !void {
             .initial_max_data = 65_536,
             .initial_max_stream_data = 65_536,
             .initial_max_streams_bidi = 64,
+            .initial_max_streams_uni = 64,
         },
     );
     defer conn.deinit();
@@ -88,18 +89,21 @@ pub fn main() !void {
     try conn.sendOnStream(stream_id, "hello, quicz"[0..], true);
 
     // 当前骨架行为：
-    // - 本地发起的 bidirectional stream 需要先调用 conn.openStream()
+    // - 本地发起的 bidirectional / unidirectional stream 需要先调用
+    //   conn.openStream() 或 conn.openUniStream()
     // - sendOnStream(...) 可用于回复已观察到的对端 bidirectional stream，
-    //   但会拒绝未观察到的对端 stream 与 unidirectional stream ID
+    //   但会拒绝未观察到的对端 stream、未打开的本地 stream 与
+    //   对端发起的 unidirectional stream ID
     // - 调用 conn.pollTx(...) 获取未加密的 frame payload 字节；
     //   它可能发送 ACK-only payload，或把待发送 ACK 与 STREAM 数据合并
     // - 将对端 payload 字节喂给 conn.processDatagram(...)
     // - 通过 conn.recvOnStream(...) 读取应用层数据
     // sendOnStream(...) 会按 max_datagram_size 分片较大的写入。
-    // processDatagram(...) 会校验入站 bidirectional stream count，
-    // 拒绝未打开的本地 stream ID 和尚未建模的 unidirectional stream 状态，
-    // 并在 payload 无效时回滚本次部分状态变更。
-    // ACK、MAX_DATA、MAX_STREAM_DATA 与 MAX_STREAMS_BIDI 帧会更新内存态
+    // processDatagram(...) 会校验入站 bidirectional / unidirectional stream
+    // count，接收对端发起的 unidirectional stream，拒绝未打开的本地
+    // bidirectional ID 与入站本地 unidirectional ID，并在 payload 无效时
+    // 回滚本次部分状态变更。
+    // ACK、MAX_DATA、MAX_STREAM_DATA 与 MAX_STREAMS_BIDI/UNI 帧会更新内存态
     // recovery 与流控状态；RESET_STREAM 会关闭接收侧，除非该 stream 已经
     // 以相同 final size 完成。带 packet protection 的 packetization 仍不在这个 API 内。
     // 完整 UDP packetization、TLS 与 packet protection 仍未实现。
