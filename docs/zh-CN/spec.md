@@ -21,7 +21,7 @@
 
 ## 当前实现状态（Current Implementation Status）
 
-- 已实现：QUIC varint 工具、最小 long/short header codec，以及 STREAM、CRYPTO、PADDING、PING、ACK 多区间、RESET_STREAM、STOP_SENDING、MAX_DATA、MAX_STREAM_DATA、MAX_STREAMS_BIDI/UNI、DATA_BLOCKED、STREAM_DATA_BLOCKED、STREAMS_BLOCKED_BIDI/UNI、PATH_CHALLENGE/PATH_RESPONSE 与 connection-close 变体的基础 frame codec。
+- 已实现：QUIC varint 工具、最小 long/short header codec，以及 STREAM、CRYPTO、PADDING、PING、ACK 多区间、RESET_STREAM、STOP_SENDING、MAX_DATA、MAX_STREAM_DATA、MAX_STREAMS_BIDI/UNI、DATA_BLOCKED、STREAM_DATA_BLOCKED、STREAMS_BLOCKED_BIDI/UNI、NEW_TOKEN、NEW_CONNECTION_ID、RETIRE_CONNECTION_ID、PATH_CHALLENGE/PATH_RESPONSE 与 connection-close 变体的基础 frame codec。
 - `QuicConnection` 实现了内存态 stream 发送/接收骨架，包含发送侧 STREAM 分片、连续接收缓存、入站 RESET_STREAM 处理、STOP_SENDING 到 RESET_STREAM 的响应处理、最小 PATH_CHALLENGE 响应排队、基础 connection 和 stream 流量控制、双向与单向 stream-count 限制、CONNECTION_CLOSE/APPLICATION_CLOSE 关闭状态处理、针对 ACK-eliciting payload 的自动 ACK 生成、ACK-only 发送、空间允许时的 ACK 与 STREAM/PATH_RESPONSE/RESET_STREAM 合并、ACK 驱动的 sent-packet tracking，以及简化 recovery / congestion 状态对象。
 - 本地发起的 bidirectional stream 必须先通过 `openStream()` 创建，才能调用 `sendOnStream()`；`openStream()` 会遵守对端 bidirectional stream limit，直到收到更大的 MAX_STREAMS_BIDI 帧。
 - 本地发起的 unidirectional stream 必须先通过 `openUniStream()` 创建，才能调用 `sendOnStream()`；`openUniStream()` 会遵守对端 unidirectional stream limit，直到收到更大的 MAX_STREAMS_UNI 帧。

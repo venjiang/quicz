@@ -42,6 +42,11 @@ pub const CryptoFrame = struct {
 
 pub const PaddingFrame = struct { len: usize };
 
+/// NEW_TOKEN frame carrying an address validation token for future connections.
+pub const NewTokenFrame = struct {
+    token: []const u8,
+};
+
 /// One additional ACK range after `first_ack_range`.
 ///
 /// `gap` is the encoded count of missing packets between ranges, and
@@ -109,6 +114,19 @@ pub const StreamsBlockedUniFrame = struct {
     maximum_streams: u64,
 };
 
+/// NEW_CONNECTION_ID frame advertising a replacement connection ID.
+pub const NewConnectionIdFrame = struct {
+    sequence_number: u64,
+    retire_prior_to: u64,
+    connection_id: []const u8,
+    stateless_reset_token: [16]u8,
+};
+
+/// RETIRE_CONNECTION_ID frame asking the peer to retire a connection ID.
+pub const RetireConnectionIdFrame = struct {
+    sequence_number: u64,
+};
+
 /// PATH_CHALLENGE frame carrying 8 bytes of path validation data.
 pub const PathChallengeFrame = struct {
     data: [8]u8,
@@ -137,6 +155,7 @@ pub const Frame = union(enum) {
     ack: AckFrame,
     reset_stream: ResetStreamFrame,
     stop_sending: StopSendingFrame,
+    new_token: NewTokenFrame,
     stream: StreamFrame,
     crypto: CryptoFrame,
     max_data: MaxDataFrame,
@@ -147,6 +166,8 @@ pub const Frame = union(enum) {
     stream_data_blocked: StreamDataBlockedFrame,
     streams_blocked_bidi: StreamsBlockedBidiFrame,
     streams_blocked_uni: StreamsBlockedUniFrame,
+    new_connection_id: NewConnectionIdFrame,
+    retire_connection_id: RetireConnectionIdFrame,
     path_challenge: PathChallengeFrame,
     path_response: PathResponseFrame,
     connection_close: ConnectionCloseFrame,
@@ -157,7 +178,9 @@ pub const FrameError = error{
     UnsupportedFrameType,
     InvalidAckRange,
     InvalidPaddingLength,
+    InvalidConnectionIdLength,
     InvalidFrameLength,
+    InvalidFrameValue,
 };
 
 /// A decoded frame plus the number of payload bytes consumed. If `frame` owns
@@ -185,12 +208,25 @@ fn validateAckRangeCountFitsReader(reader: anytype, range_count: usize) FrameErr
     }
 }
 
+fn validateConnectionIdLen(len: usize) FrameError!void {
+    if (len == 0 or len > 20) return error.InvalidConnectionIdLength;
+}
+
+fn validateNewConnectionIdFrame(new_connection_id: NewConnectionIdFrame) FrameError!void {
+    try validateConnectionIdLen(new_connection_id.connection_id.len);
+    if (new_connection_id.retire_prior_to > new_connection_id.sequence_number) {
+        return error.InvalidFrameValue;
+    }
+}
+
 /// Release any buffers owned by a decoded frame.
 pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
     switch (frame.*) {
         .ack => |ack| if (ack.ranges.len != 0) allocator.free(ack.ranges),
         .stream => |stream| allocator.free(stream.data),
         .crypto => |crypto| allocator.free(crypto.data),
+        .new_token => |new_token| allocator.free(new_token.token),
+        .new_connection_id => |new_connection_id| allocator.free(new_connection_id.connection_id),
         .connection_close => |close| allocator.free(close.reason_phrase),
         .application_close => |close| allocator.free(close.reason_phrase),
         else => {},
@@ -246,6 +282,11 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeByte(@intFromEnum(FrameType.stop_sending));
             try packet.encodeVarInt(writer, stop_sending.stream_id);
             try packet.encodeVarInt(writer, stop_sending.application_error_code);
+        },
+        .new_token => |new_token| {
+            try writer.writeByte(@intFromEnum(FrameType.new_token));
+            try packet.encodeVarInt(writer, new_token.token.len);
+            try writer.writeAll(new_token.token);
         },
         .stream => |stream| {
             var frame_type: u8 = @intFromEnum(FrameType.stream);
@@ -304,6 +345,20 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
         .streams_blocked_uni => |streams_blocked| {
             try writer.writeByte(@intFromEnum(FrameType.streams_blocked_uni));
             try packet.encodeVarInt(writer, streams_blocked.maximum_streams);
+        },
+        .new_connection_id => |new_connection_id| {
+            try validateNewConnectionIdFrame(new_connection_id);
+
+            try writer.writeByte(@intFromEnum(FrameType.new_connection_id));
+            try packet.encodeVarInt(writer, new_connection_id.sequence_number);
+            try packet.encodeVarInt(writer, new_connection_id.retire_prior_to);
+            try writer.writeByte(@as(u8, @intCast(new_connection_id.connection_id.len)));
+            try writer.writeAll(new_connection_id.connection_id);
+            try writer.writeAll(&new_connection_id.stateless_reset_token);
+        },
+        .retire_connection_id => |retire_connection_id| {
+            try writer.writeByte(@intFromEnum(FrameType.retire_connection_id));
+            try packet.encodeVarInt(writer, retire_connection_id.sequence_number);
         },
         .path_challenge => |path_challenge| {
             try writer.writeByte(@intFromEnum(FrameType.path_challenge));
@@ -411,6 +466,14 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         } };
     }
 
+    if (frame_type == @intFromEnum(FrameType.new_token)) {
+        const token_len = (try packet.decodeVarInt(reader)).value;
+        const len_usize = try varIntToUsize(token_len);
+        const token = try buffer.readOwnedBytes(reader, allocator, len_usize);
+
+        return .{ .new_token = .{ .token = token } };
+    }
+
     if (frame_type == @intFromEnum(FrameType.crypto)) {
         const offset = (try packet.decodeVarInt(reader)).value;
         const data_len = (try packet.decodeVarInt(reader)).value;
@@ -471,6 +534,34 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
     if (frame_type == @intFromEnum(FrameType.streams_blocked_uni)) {
         const maximum_streams = (try packet.decodeVarInt(reader)).value;
         return .{ .streams_blocked_uni = .{ .maximum_streams = maximum_streams } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.new_connection_id)) {
+        const sequence_number = (try packet.decodeVarInt(reader)).value;
+        const retire_prior_to = (try packet.decodeVarInt(reader)).value;
+        const connection_id_len = try reader.readByte();
+        try validateConnectionIdLen(connection_id_len);
+        if (retire_prior_to > sequence_number) return error.InvalidFrameValue;
+
+        const connection_id = try buffer.readOwnedBytes(reader, allocator, connection_id_len);
+        errdefer allocator.free(connection_id);
+
+        var stateless_reset_token: [16]u8 = undefined;
+        try reader.readNoEof(&stateless_reset_token);
+
+        const new_connection_id = NewConnectionIdFrame{
+            .sequence_number = sequence_number,
+            .retire_prior_to = retire_prior_to,
+            .connection_id = connection_id,
+            .stateless_reset_token = stateless_reset_token,
+        };
+
+        return .{ .new_connection_id = new_connection_id };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.retire_connection_id)) {
+        const sequence_number = (try packet.decodeVarInt(reader)).value;
+        return .{ .retire_connection_id = .{ .sequence_number = sequence_number } };
     }
 
     if (frame_type == @intFromEnum(FrameType.path_challenge)) {
@@ -816,6 +907,26 @@ test "encode/decode stop_sending frame roundtrip" {
     }
 }
 
+test "encode/decode new_token frame roundtrip" {
+    var buf: [128]u8 = undefined;
+    var out = buffer.fixedWriter(&buf);
+
+    const input = Frame{ .new_token = .{
+        .token = "future-address-token",
+    } };
+    try encodeFrame(out.writer(), input);
+
+    const encoded = out.getWritten();
+    var in = buffer.fixedReader(encoded);
+    var parsed = try decodeFrame(in.reader(), std.testing.allocator);
+    defer deinitFrame(&parsed, std.testing.allocator);
+
+    switch (parsed) {
+        .new_token => |frame| try std.testing.expectEqualStrings("future-address-token", frame.token),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "encode/decode max_stream_data frame roundtrip" {
     var buf: [128]u8 = undefined;
     var out = buffer.fixedWriter(&buf);
@@ -957,6 +1068,99 @@ test "encode/decode path validation frames roundtrip" {
         .path_response => |frame| try std.testing.expectEqualSlices(u8, &payload, &frame.data),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "encode/decode connection id management frames roundtrip" {
+    const cid = [_]u8{ 0xca, 0xfe, 0xba, 0xbe };
+    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+
+    var new_cid_buf: [64]u8 = undefined;
+    var new_cid_out = buffer.fixedWriter(&new_cid_buf);
+    try encodeFrame(new_cid_out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 7,
+        .retire_prior_to = 3,
+        .connection_id = &cid,
+        .stateless_reset_token = token,
+    } });
+
+    var new_cid_in = buffer.fixedReader(new_cid_out.getWritten());
+    var new_cid = try decodeFrame(new_cid_in.reader(), std.testing.allocator);
+    defer deinitFrame(&new_cid, std.testing.allocator);
+    switch (new_cid) {
+        .new_connection_id => |frame| {
+            try std.testing.expectEqual(@as(u64, 7), frame.sequence_number);
+            try std.testing.expectEqual(@as(u64, 3), frame.retire_prior_to);
+            try std.testing.expectEqualSlices(u8, &cid, frame.connection_id);
+            try std.testing.expectEqualSlices(u8, &token, &frame.stateless_reset_token);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var retire_buf: [16]u8 = undefined;
+    var retire_out = buffer.fixedWriter(&retire_buf);
+    try encodeFrame(retire_out.writer(), .{ .retire_connection_id = .{ .sequence_number = 7 } });
+
+    var retire_in = buffer.fixedReader(retire_out.getWritten());
+    const retire = try decodeFrame(retire_in.reader(), std.testing.allocator);
+    switch (retire) {
+        .retire_connection_id => |frame| try std.testing.expectEqual(@as(u64, 7), frame.sequence_number),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "new_connection_id validates cid length retire order and token length" {
+    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+
+    var out_buf: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&out_buf);
+    try std.testing.expectError(error.InvalidConnectionIdLength, encodeFrame(out.writer(), .{
+        .new_connection_id = .{
+            .sequence_number = 1,
+            .retire_prior_to = 0,
+            .connection_id = &[_]u8{},
+            .stateless_reset_token = token,
+        },
+    }));
+
+    out = buffer.fixedWriter(&out_buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{
+        .new_connection_id = .{
+            .sequence_number = 1,
+            .retire_prior_to = 2,
+            .connection_id = &[_]u8{0xaa},
+            .stateless_reset_token = token,
+        },
+    }));
+
+    const zero_len_wire = [_]u8{
+        @intFromEnum(FrameType.new_connection_id),
+        0x01, // sequence number
+        0x00, // retire prior to
+        0x00, // invalid connection id length
+    };
+    var zero_len_in = buffer.fixedReader(&zero_len_wire);
+    try std.testing.expectError(error.InvalidConnectionIdLength, decodeFrame(zero_len_in.reader(), std.testing.allocator));
+
+    const bad_retire_wire = [_]u8{
+        @intFromEnum(FrameType.new_connection_id),
+        0x01, // sequence number
+        0x02, // retire prior to exceeds sequence number
+        0x01, // connection id length
+        0xaa, // connection id
+    } ++ token;
+    var bad_retire_in = buffer.fixedReader(&bad_retire_wire);
+    try std.testing.expectError(error.InvalidFrameValue, decodeFrame(bad_retire_in.reader(), std.testing.allocator));
+
+    const truncated_token_wire = [_]u8{
+        @intFromEnum(FrameType.new_connection_id),
+        0x01, // sequence number
+        0x00, // retire prior to
+        0x01, // connection id length
+        0xaa, // connection id
+        0x00, 0x01, // truncated stateless reset token
+    };
+    var truncated_token_in = buffer.fixedReader(&truncated_token_wire);
+    try std.testing.expectError(error.EndOfStream, decodeFrame(truncated_token_in.reader(), std.testing.allocator));
 }
 
 test "stream frame without LEN bit consumes remaining payload" {

@@ -15,7 +15,7 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] Basic API surface for `QuicConnection` (initial draft)
 - [x] QUIC variable-length integer (varint) encode/decode helpers
 - [x] Minimal QUIC packet headers (long/short) parsing and serialization
-- [x] Basic frame model (STREAM/CRYPTO/PADDING/PING/ACK with ranges/RESET_STREAM/STOP_SENDING/MAX_*/BLOCKED/PATH_CHALLENGE/PATH_RESPONSE and CONNECTION_CLOSE subset)
+- [x] Basic frame model (STREAM/CRYPTO/PADDING/PING/ACK with ranges/RESET_STREAM/STOP_SENDING/MAX_*/BLOCKED/NEW_TOKEN/NEW_CONNECTION_ID/RETIRE_CONNECTION_ID/PATH_CHALLENGE/PATH_RESPONSE and CONNECTION_CLOSE subset)
 - [x] Minimal in-memory connection and stream queue/receive flow with send-side STREAM fragmentation, inbound RESET_STREAM and STOP_SENDING handling, PATH_CHALLENGE response queuing, basic connection/stream/stream-count flow control, strict stream direction validation, and close-state handling
 - [x] Simplified loss recovery and congestion-control state with automatic ACK generation, ACK range handling, unsent-packet ACK rejection, and ACK-driven sent-packet tracking
 - [ ] Full connection state machine and distinct packet number spaces
