@@ -36,7 +36,7 @@ pub const Config = struct {
     initial_max_streams_uni: u64 = 64,
 };
 
-/// Endpoint role. It determines the locally initiated bidirectional stream IDs.
+/// Endpoint role. It determines the locally initiated stream IDs.
 pub const ConnectionSide = enum { client, server };
 
 const PendingStreamFrame = struct {
@@ -1613,6 +1613,16 @@ test "processDatagram rejects local unidirectional stream receive state" {
     } });
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
     try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
+}
+
+test "recvOnStream rejects locally initiated unidirectional streams" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openUniStream();
+
+    var read_buf: [8]u8 = undefined;
+    try std.testing.expectError(error.InvalidStream, conn.recvOnStream(stream_id, &read_buf));
 }
 
 test "connection close frame closes public connection API" {
