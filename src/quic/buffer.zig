@@ -60,6 +60,26 @@ pub fn fixedReader(data: []const u8) FixedReader {
     return .{ .data = data };
 }
 
+fn readerHasRemainingLen(comptime Reader: type) bool {
+    return switch (@typeInfo(Reader)) {
+        .pointer => |pointer| @hasDecl(pointer.child, "remainingLen"),
+        else => @hasDecl(Reader, "remainingLen"),
+    };
+}
+
+/// Read exactly `len` bytes into an owned buffer. Readers that expose
+/// `remainingLen()` can reject truncated lengths before allocating.
+pub fn readOwnedBytes(reader: anytype, allocator: std.mem.Allocator, len: usize) ![]u8 {
+    if (comptime readerHasRemainingLen(@TypeOf(reader))) {
+        if (len > reader.remainingLen()) return error.EndOfStream;
+    }
+
+    const data = try allocator.alloc(u8, len);
+    errdefer allocator.free(data);
+    try reader.readNoEof(data);
+    return data;
+}
+
 /// Create a fixed writer over caller-owned `buffer`.
 pub fn fixedWriter(buffer: []u8) FixedWriter {
     return .{ .buffer = buffer };

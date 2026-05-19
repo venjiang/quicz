@@ -244,9 +244,7 @@ pub fn parseLongHeader(reader: anytype, allocator: std.mem.Allocator) !LongHeade
         const token_len_varint = try decodeVarInt(reader);
         const token_len = std.math.cast(usize, token_len_varint.value) orelse return error.InvalidLength;
         if (token_len != 0) {
-            const owned_token = try allocator.alloc(u8, token_len);
-            token = owned_token;
-            try reader.readNoEof(owned_token);
+            token = try buffer.readOwnedBytes(reader, allocator, token_len);
         }
     }
 
@@ -389,6 +387,22 @@ test "parse long header frees token when trailing length is invalid" {
 
     var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.InvalidLength, parseLongHeader(in.reader(), std.testing.allocator));
+}
+
+test "parse long header rejects truncated token before allocating" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 2 });
+    const wire = [_]u8{
+        0xc0, // long + fixed + initial + 1-byte packet number
+        0x00, 0x00, 0x00, 0x01, // QUIC v1
+        0x01, // DCID len
+        0xaa, // DCID
+        0x01, // SCID len
+        0xbb, // SCID
+        0x40, 0x40, // token len 64, no token bytes left
+    };
+
+    var in = buffer.fixedReader(&wire);
+    try std.testing.expectError(error.EndOfStream, parseLongHeader(in.reader(), failing_allocator.allocator()));
 }
 
 test "parse short header rejects invalid caller dcid length" {

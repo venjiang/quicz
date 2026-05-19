@@ -109,6 +109,7 @@ pub const Frame = union(enum) {
 pub const FrameError = error{
     UnsupportedFrameType,
     UnsupportedAckRangeCount,
+    InvalidAckRange,
     InvalidPaddingLength,
     InvalidFrameLength,
 };
@@ -122,24 +123,6 @@ pub const DecodedFrame = struct {
 
 fn varIntToUsize(value: u64) FrameError!usize {
     return std.math.cast(usize, value) orelse error.InvalidFrameLength;
-}
-
-fn readerHasRemainingLen(comptime Reader: type) bool {
-    return switch (@typeInfo(Reader)) {
-        .pointer => |pointer| @hasDecl(pointer.child, "remainingLen"),
-        else => @hasDecl(Reader, "remainingLen"),
-    };
-}
-
-fn readOwnedBytes(reader: anytype, allocator: std.mem.Allocator, len: usize) ![]u8 {
-    if (comptime readerHasRemainingLen(@TypeOf(reader))) {
-        if (len > reader.remainingLen()) return error.EndOfStream;
-    }
-
-    const data = try allocator.alloc(u8, len);
-    errdefer allocator.free(data);
-    try reader.readNoEof(data);
-    return data;
 }
 
 /// Release any buffers owned by a decoded frame.
@@ -167,6 +150,8 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeByte(@intFromEnum(FrameType.ping));
         },
         .ack => |ack| {
+            if (ack.first_ack_range > ack.largest_acknowledged) return error.InvalidAckRange;
+
             try writer.writeByte(@intFromEnum(FrameType.ack));
             try packet.encodeVarInt(writer, ack.largest_acknowledged);
             try packet.encodeVarInt(writer, ack.ack_delay);
@@ -276,6 +261,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         const ack_range_count = (try packet.decodeVarInt(reader)).value;
         if (ack_range_count != 0) return error.UnsupportedAckRangeCount;
         const first_ack_range = (try packet.decodeVarInt(reader)).value;
+        if (first_ack_range > largest_acknowledged) return error.InvalidAckRange;
 
         return .{ .ack = .{
             .largest_acknowledged = largest_acknowledged,
@@ -311,7 +297,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         const data_len = (try packet.decodeVarInt(reader)).value;
         const len_usize = try varIntToUsize(data_len);
 
-        const data = try readOwnedBytes(reader, allocator, len_usize);
+        const data = try buffer.readOwnedBytes(reader, allocator, len_usize);
 
         return .{ .crypto = .{
             .offset = offset,
@@ -363,7 +349,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         const data_len = (try packet.decodeVarInt(reader)).value;
         const len_usize = try varIntToUsize(data_len);
 
-        const data = try readOwnedBytes(reader, allocator, len_usize);
+        const data = try buffer.readOwnedBytes(reader, allocator, len_usize);
 
         return .{ .stream = .{
             .stream_id = stream_id,
@@ -379,7 +365,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         const reason_len = (try packet.decodeVarInt(reader)).value;
         const len_usize = try varIntToUsize(reason_len);
 
-        const reason_phrase = try readOwnedBytes(reader, allocator, len_usize);
+        const reason_phrase = try buffer.readOwnedBytes(reader, allocator, len_usize);
 
         return .{ .connection_close = .{
             .error_code = error_code,
@@ -393,7 +379,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         const reason_len = (try packet.decodeVarInt(reader)).value;
         const len_usize = try varIntToUsize(reason_len);
 
-        const reason_phrase = try readOwnedBytes(reader, allocator, len_usize);
+        const reason_phrase = try buffer.readOwnedBytes(reader, allocator, len_usize);
 
         return .{ .application_close = .{
             .error_code = error_code,
@@ -516,6 +502,27 @@ test "decode ack frame rejects additional ranges for minimal codec" {
 
     var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.UnsupportedAckRangeCount, decodeFrame(in.reader(), std.testing.allocator));
+}
+
+test "ack frame first range cannot exceed largest acknowledged" {
+    var out_buf: [16]u8 = undefined;
+    var out = buffer.fixedWriter(&out_buf);
+    try std.testing.expectError(error.InvalidAckRange, encodeFrame(out.writer(), .{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 1,
+    } }));
+
+    const wire = [_]u8{
+        @intFromEnum(FrameType.ack),
+        0x00, // largest acknowledged
+        0x00, // ack delay
+        0x00, // no additional ACK ranges
+        0x01, // first ACK range larger than largest acknowledged
+    };
+
+    var in = buffer.fixedReader(&wire);
+    try std.testing.expectError(error.InvalidAckRange, decodeFrame(in.reader(), std.testing.allocator));
 }
 
 test "encode/decode reset_stream frame roundtrip" {
