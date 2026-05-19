@@ -32,6 +32,8 @@ pub const Config = struct {
     initial_max_stream_data: u64 = 65_536,
     /// Initial bidirectional stream-count limit in both send and receive directions.
     initial_max_streams_bidi: u64 = 64,
+    /// Initial unidirectional stream-count limit in both send and receive directions.
+    initial_max_streams_uni: u64 = 64,
 };
 
 /// Endpoint role. It determines the locally initiated bidirectional stream IDs.
@@ -152,9 +154,17 @@ fn isBidirectionalStream(stream_id: u64) bool {
     return (stream_id & 0x02) == 0;
 }
 
-fn isLocalBidirectionalStream(side: ConnectionSide, stream_id: u64) bool {
+fn isLocalStreamInitiator(side: ConnectionSide, stream_id: u64) bool {
     const initiator: ConnectionSide = if ((stream_id & 0x01) == 0) .client else .server;
-    return isBidirectionalStream(stream_id) and initiator == side;
+    return initiator == side;
+}
+
+fn isLocalBidirectionalStream(side: ConnectionSide, stream_id: u64) bool {
+    return isBidirectionalStream(stream_id) and isLocalStreamInitiator(side, stream_id);
+}
+
+fn isLocalUnidirectionalStream(side: ConnectionSide, stream_id: u64) bool {
+    return !isBidirectionalStream(stream_id) and isLocalStreamInitiator(side, stream_id);
 }
 
 fn streamCountForId(stream_id: u64) u64 {
@@ -197,17 +207,21 @@ pub const QuicConnection = struct {
     config: Config,
     side: ConnectionSide,
     next_stream_id: u64,
+    next_uni_stream_id: u64,
     next_packet_number: u64,
     next_peer_packet_number: u64,
     pending_ack_largest: ?u64,
     peer_max_data: u64,
     peer_initial_max_stream_data: u64,
     peer_max_streams_bidi: u64,
+    peer_max_streams_uni: u64,
     opened_bidi_streams: u64,
+    opened_uni_streams: u64,
     sent_stream_data_bytes: u64,
     recv_max_data: u64,
     recv_max_stream_data: u64,
     recv_max_streams_bidi: u64,
+    recv_max_streams_uni: u64,
     recv_data_bytes: u64,
     recovery_state: recovery.Recovery,
     sent_packets: std.ArrayList(SentPacket),
@@ -230,17 +244,24 @@ pub const QuicConnection = struct {
                 .client => 0,
                 .server => 1,
             },
+            .next_uni_stream_id = switch (side) {
+                .client => 2,
+                .server => 3,
+            },
             .next_packet_number = 0,
             .next_peer_packet_number = 0,
             .pending_ack_largest = null,
             .peer_max_data = config.initial_max_data,
             .peer_initial_max_stream_data = config.initial_max_stream_data,
             .peer_max_streams_bidi = config.initial_max_streams_bidi,
+            .peer_max_streams_uni = config.initial_max_streams_uni,
             .opened_bidi_streams = 0,
+            .opened_uni_streams = 0,
             .sent_stream_data_bytes = 0,
             .recv_max_data = config.initial_max_data,
             .recv_max_stream_data = config.initial_max_stream_data,
             .recv_max_streams_bidi = config.initial_max_streams_bidi,
+            .recv_max_streams_uni = config.initial_max_streams_uni,
             .recv_data_bytes = 0,
             .recovery_state = recovery.Recovery.init(.{
                 .max_datagram_size = config.max_datagram_size,
@@ -287,6 +308,7 @@ pub const QuicConnection = struct {
         const pending_ack_largest_snapshot = self.pending_ack_largest;
         const peer_max_data_snapshot = self.peer_max_data;
         const peer_max_streams_bidi_snapshot = self.peer_max_streams_bidi;
+        const peer_max_streams_uni_snapshot = self.peer_max_streams_uni;
         const closed_snapshot = self.closed;
         const send_stream_count = self.send_streams.items.len;
         const send_stream_snapshots = self.allocator.alloc(SendStreamState, send_stream_count) catch return error.OutOfMemory;
@@ -309,6 +331,7 @@ pub const QuicConnection = struct {
             self.rollbackRecvStreams(recv_stream_count, recv_snapshots);
             self.recv_data_bytes = recv_data_bytes_snapshot;
             self.rollbackSendStreams(send_stream_count, send_stream_snapshots);
+            self.peer_max_streams_uni = peer_max_streams_uni_snapshot;
             self.peer_max_streams_bidi = peer_max_streams_bidi_snapshot;
             self.peer_max_data = peer_max_data_snapshot;
             self.next_peer_packet_number = next_peer_packet_number_snapshot;
@@ -338,6 +361,7 @@ pub const QuicConnection = struct {
                 .max_data => |max_data| self.receiveMaxDataFrame(max_data),
                 .max_stream_data => |max_stream_data| self.receiveMaxStreamDataFrame(max_stream_data),
                 .max_streams_bidi => |max_streams| self.receiveMaxStreamsBidiFrame(max_streams),
+                .max_streams_uni => |max_streams| self.receiveMaxStreamsUniFrame(max_streams),
                 .reset_stream => |reset_stream| try self.receiveResetStreamFrame(reset_stream),
                 .stream => |stream_frame| try self.receiveStreamFrame(stream_frame),
                 .connection_close, .application_close => self.closed = true,
@@ -451,6 +475,25 @@ pub const QuicConnection = struct {
         return stream_id;
     }
 
+    /// Open a locally initiated unidirectional stream and return its QUIC stream ID.
+    pub fn openUniStream(self: *QuicConnection) Error!u64 {
+        if (self.closed) return error.ConnectionClosed;
+
+        const stream_id = self.next_uni_stream_id;
+        if (stream_id > max_quic_varint) return error.InvalidStream;
+
+        const next_stream_id = std.math.add(u64, stream_id, 4) catch return error.Internal;
+        if (self.opened_uni_streams >= self.peer_max_streams_uni) return error.FlowControlBlocked;
+
+        self.send_streams.append(self.allocator, .{
+            .stream_id = stream_id,
+            .max_data = self.peer_initial_max_stream_data,
+        }) catch return error.OutOfMemory;
+        self.next_uni_stream_id = next_stream_id;
+        self.opened_uni_streams = std.math.add(u64, self.opened_uni_streams, 1) catch return error.Internal;
+        return stream_id;
+    }
+
     /// Queue data for a stream. The data is copied and emitted by `pollTx`.
     pub fn sendOnStream(
         self: *QuicConnection,
@@ -460,12 +503,14 @@ pub const QuicConnection = struct {
     ) Error!void {
         if (self.closed) return error.ConnectionClosed;
         if (stream_id > max_quic_varint) return error.InvalidStream;
-        if (!isBidirectionalStream(stream_id)) return error.InvalidStream;
+        if (!isBidirectionalStream(stream_id) and !isLocalUnidirectionalStream(self.side, stream_id)) {
+            return error.InvalidStream;
+        }
 
         const existing_state = self.findSendStream(stream_id);
         if (existing_state) |state| {
             if (state.fin_sent) return error.StreamClosed;
-        } else if (isLocalBidirectionalStream(self.side, stream_id)) {
+        } else if (isLocalBidirectionalStream(self.side, stream_id) or isLocalUnidirectionalStream(self.side, stream_id)) {
             return error.InvalidStream;
         } else if (self.findRecvStream(stream_id) == null) {
             return error.InvalidStream;
@@ -535,6 +580,10 @@ pub const QuicConnection = struct {
         buf: []u8,
     ) Error!?usize {
         if (self.closed) return error.ConnectionClosed;
+        if (stream_id > max_quic_varint) return error.InvalidStream;
+        if (!isBidirectionalStream(stream_id) and isLocalStreamInitiator(self.side, stream_id)) {
+            return error.InvalidStream;
+        }
 
         const stream_state = self.findRecvStream(stream_id) orelse return null;
         if (stream_state.reset_error_code != null) return error.StreamClosed;
@@ -703,13 +752,21 @@ pub const QuicConnection = struct {
         self.peer_max_streams_bidi = @max(self.peer_max_streams_bidi, max_streams.maximum_streams);
     }
 
+    fn receiveMaxStreamsUniFrame(self: *QuicConnection, max_streams: frame.MaxStreamsUniFrame) void {
+        self.peer_max_streams_uni = @max(self.peer_max_streams_uni, max_streams.maximum_streams);
+    }
+
     fn validateIncomingStreamCount(self: *QuicConnection, stream_id: u64) Error!void {
-        if (!isBidirectionalStream(stream_id)) return error.InvalidPacket;
         if (isLocalBidirectionalStream(self.side, stream_id)) {
             if (self.findSendStream(stream_id) == null) return error.InvalidPacket;
             return;
         }
-        if (streamCountForId(stream_id) > self.recv_max_streams_bidi) return error.InvalidPacket;
+        if (isBidirectionalStream(stream_id)) {
+            if (streamCountForId(stream_id) > self.recv_max_streams_bidi) return error.InvalidPacket;
+            return;
+        }
+        if (isLocalStreamInitiator(self.side, stream_id)) return error.InvalidPacket;
+        if (streamCountForId(stream_id) > self.recv_max_streams_uni) return error.InvalidPacket;
     }
 
     fn receiveResetStreamFrame(self: *QuicConnection, reset: frame.ResetStreamFrame) Error!void {
@@ -819,6 +876,27 @@ test "openStream enforces peer bidirectional stream limit until MAX_STREAMS_BIDI
     try std.testing.expectEqual(@as(u64, 2), conn.opened_bidi_streams);
 }
 
+test "openUniStream allocates unidirectional stream ids and enforces MAX_STREAMS_UNI" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_uni = 1 });
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try std.testing.expectEqual(@as(u64, 2), try client.openUniStream());
+    try std.testing.expectError(error.FlowControlBlocked, client.openUniStream());
+    try std.testing.expectEqual(@as(u64, 1), client.opened_uni_streams);
+    try std.testing.expectEqual(@as(usize, 1), client.send_streams.items.len);
+    try std.testing.expectEqual(@as(u64, 3), try server.openUniStream());
+
+    var update_buf: [16]u8 = undefined;
+    var update_out = buffer.fixedWriter(&update_buf);
+    try frame.encodeFrame(update_out.writer(), .{ .max_streams_uni = .{ .maximum_streams = 2 } });
+    try client.processDatagram(0, update_out.getWritten());
+
+    try std.testing.expectEqual(@as(u64, 6), try client.openUniStream());
+    try std.testing.expectEqual(@as(u64, 2), client.opened_uni_streams);
+}
+
 test "sendOnStream requires openStream for new local bidirectional streams" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
@@ -833,7 +911,7 @@ test "sendOnStream requires openStream for new local bidirectional streams" {
     try std.testing.expectEqual(@as(u64, 1), conn.opened_bidi_streams);
 }
 
-test "sendOnStream rejects unidirectional stream ids" {
+test "sendOnStream requires opened local unidirectional streams" {
     var client = try QuicConnection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     var server = try QuicConnection.init(std.testing.allocator, .server, .{});
@@ -845,6 +923,29 @@ test "sendOnStream rejects unidirectional stream ids" {
     try std.testing.expectError(error.InvalidStream, server.sendOnStream(3, "x", false));
     try std.testing.expectEqual(@as(usize, 0), client.send_streams.items.len);
     try std.testing.expectEqual(@as(usize, 0), server.send_streams.items.len);
+}
+
+test "sendOnStream and pollTx emit opened local unidirectional stream frames" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openUniStream();
+    try conn.sendOnStream(stream_id, "uni", true);
+
+    var out_buf: [128]u8 = undefined;
+    const payload = (try conn.pollTx(0, &out_buf)).?;
+
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .stream => |stream_frame| {
+            try std.testing.expectEqual(@as(u64, 2), stream_frame.stream_id);
+            try std.testing.expectEqualStrings("uni", stream_frame.data);
+            try std.testing.expect(stream_frame.fin);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "sendOnStream requires observed peer bidirectional streams" {
@@ -882,6 +983,23 @@ test "processDatagram rolls back MAX_STREAMS_BIDI updates when payload is invali
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
     try std.testing.expectEqual(@as(u64, 1), conn.peer_max_streams_bidi);
     try std.testing.expectError(error.FlowControlBlocked, conn.openStream());
+}
+
+test "processDatagram rolls back MAX_STREAMS_UNI updates when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_uni = 1 });
+    defer conn.deinit();
+
+    try std.testing.expectEqual(@as(u64, 2), try conn.openUniStream());
+    try std.testing.expectError(error.FlowControlBlocked, conn.openUniStream());
+
+    var datagram: [16]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .max_streams_uni = .{ .maximum_streams = 2 } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(u64, 1), conn.peer_max_streams_uni);
+    try std.testing.expectError(error.FlowControlBlocked, conn.openUniStream());
 }
 
 test "sendOnStream and pollTx emit stream frame payloads" {
@@ -1376,6 +1494,34 @@ test "processDatagram enforces inbound bidirectional stream count for RESET_STRE
     try std.testing.expectEqual(@as(u64, 0), conn.recv_data_bytes);
 }
 
+test "processDatagram enforces inbound unidirectional stream count" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_max_streams_uni = 1 });
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 6,
+        .offset = 0,
+        .fin = false,
+        .data = "x",
+    } });
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.recv_data_bytes);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 2,
+        .offset = 0,
+        .fin = false,
+        .data = "ok",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items.len);
+}
+
 test "processDatagram rejects local bidirectional streams that were not opened" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
@@ -1412,7 +1558,7 @@ test "processDatagram rejects local bidirectional streams that were not opened" 
     try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items.len);
 }
 
-test "processDatagram rejects unidirectional stream receive state" {
+test "processDatagram accepts peer unidirectional stream receive state" {
     var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
@@ -1424,12 +1570,44 @@ test "processDatagram rejects unidirectional stream receive state" {
         .fin = false,
         .data = "x",
     } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items.len);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvOnStream(2, &read_buf)).?;
+    try std.testing.expectEqualStrings("x", read_buf[0..n]);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 6,
+        .application_error_code = 1,
+        .final_size = 1,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 2), conn.recv_streams.items.len);
+    try std.testing.expectEqual(@as(?u64, 1), conn.findRecvStream(6).?.reset_error_code);
+}
+
+test "processDatagram rejects local unidirectional stream receive state" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    _ = try conn.openUniStream();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 3,
+        .offset = 0,
+        .fin = false,
+        .data = "x",
+    } });
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
     try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
 
     out = buffer.fixedWriter(&datagram);
     try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
-        .stream_id = 2,
+        .stream_id = 3,
         .application_error_code = 1,
         .final_size = 0,
     } });
@@ -1455,6 +1633,7 @@ test "connection close frame closes public connection API" {
     var out_buf: [32]u8 = undefined;
     try std.testing.expectError(error.ConnectionClosed, conn.pollTx(0, &out_buf));
     try std.testing.expectError(error.ConnectionClosed, conn.openStream());
+    try std.testing.expectError(error.ConnectionClosed, conn.openUniStream());
     try std.testing.expectError(error.ConnectionClosed, conn.sendOnStream(0, "x", false));
 
     var recv_buf: [8]u8 = undefined;
@@ -1927,4 +2106,7 @@ test "stream ids must fit QUIC varint range" {
 
     conn.next_stream_id = max_quic_varint + 1;
     try std.testing.expectError(error.InvalidStream, conn.openStream());
+
+    conn.next_uni_stream_id = max_quic_varint + 1;
+    try std.testing.expectError(error.InvalidStream, conn.openUniStream());
 }
