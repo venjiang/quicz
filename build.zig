@@ -14,6 +14,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const lib = b.addLibrary(.{
+        .name = "quicz",
+        .root_module = quicz_mod,
+    });
+    b.installArtifact(lib);
+
     // Echo server executable
     const exe_server = b.addExecutable(.{
         .name = "quicz-echo-server",
@@ -59,4 +65,13 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_client_cmd.addArgs(args);
     }
+
+    const lib_tests = b.addTest(.{
+        .name = "quicz-tests",
+        .root_module = quicz_mod,
+    });
+    const run_lib_tests = b.addRunArtifact(lib_tests);
+
+    const test_step = b.step("test", "Run quicz unit tests");
+    test_step.dependOn(&run_lib_tests.step);
 }
