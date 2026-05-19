@@ -22,10 +22,11 @@
 ## 当前实现状态（Current Implementation Status）
 
 - 已实现：QUIC varint 工具、最小 long/short header codec，以及 STREAM、CRYPTO、PADDING、PING、ACK/ACK_ECN 多区间、RESET_STREAM、STOP_SENDING、MAX_DATA、MAX_STREAM_DATA、带 stream-count 上限校验的 MAX_STREAMS_BIDI/UNI、DATA_BLOCKED、STREAM_DATA_BLOCKED、带 stream-count 上限校验的 STREAMS_BLOCKED_BIDI/UNI、带非空 token 校验的 NEW_TOKEN、NEW_CONNECTION_ID、RETIRE_CONNECTION_ID、PATH_CHALLENGE/PATH_RESPONSE、HANDSHAKE_DONE 与 connection-close 变体的基础 frame codec。
-- `QuicConnection` 实现了内存态 stream 发送/接收骨架，包含发送侧 STREAM 分片、连续接收缓存、入站 RESET_STREAM 处理、STOP_SENDING 到 RESET_STREAM 的响应处理、最小 PATH_CHALLENGE 响应排队、NEW_TOKEN/HANDSHAKE_DONE 角色校验、基础 connection 和 stream 流量控制、双向与单向 stream-count 限制、CONNECTION_CLOSE/APPLICATION_CLOSE 关闭状态处理、针对 ACK-eliciting payload 的自动 ACK 生成、ACK-only 发送、空间允许时的 ACK 与 STREAM/PATH_RESPONSE/RESET_STREAM 合并、ACK 驱动的 sent-packet tracking，以及简化 recovery / congestion 状态对象。
+- `QuicConnection` 实现了内存态 stream 发送/接收骨架，包含发送侧 STREAM 分片、连续接收缓存、入站 RESET_STREAM 处理、STOP_SENDING 到 RESET_STREAM 的响应处理、最小 PATH_CHALLENGE 响应排队、NEW_TOKEN/HANDSHAKE_DONE 角色校验、MAX_STREAM_DATA stream 状态校验、基础 connection 和 stream 流量控制、双向与单向 stream-count 限制、CONNECTION_CLOSE/APPLICATION_CLOSE 关闭状态处理、针对 ACK-eliciting payload 的自动 ACK 生成、ACK-only 发送、空间允许时的 ACK 与 STREAM/PATH_RESPONSE/RESET_STREAM 合并、ACK 驱动的 sent-packet tracking，以及简化 recovery / congestion 状态对象。
 - 本地发起的 bidirectional stream 必须先通过 `openStream()` 创建，才能调用 `sendOnStream()`；`openStream()` 会遵守对端 bidirectional stream limit，直到收到更大的 MAX_STREAMS_BIDI 帧。
 - 本地发起的 unidirectional stream 必须先通过 `openUniStream()` 创建，才能调用 `sendOnStream()`；`openUniStream()` 会遵守对端 unidirectional stream limit，直到收到更大的 MAX_STREAMS_UNI 帧。
 - `sendOnStream()` 可用于回复已观察到的对端发起 bidirectional stream，当前内存态 echo 示例依赖这个行为；也可用于已打开的本地 unidirectional stream。它会拒绝未观察到的对端发起 stream、未打开的本地发起 stream、对端发起的 unidirectional stream ID、已经发送 FIN 的 stream，以及被流控阻塞的写入。
+- 入站 `MAX_STREAM_DATA` 只会更新本端拥有发送侧的 stream credit。未创建的本地发起 stream 与 receive-only 的对端单向 stream 会被拒绝；对于已观察到的对端发起 bidirectional stream，它可以预创建发送状态，让后续回复使用对端通告的 credit。
 - `processDatagram()` 接受已建模的 bidirectional STREAM/RESET_STREAM 接收状态，以及对端发起的 unidirectional STREAM/RESET_STREAM 接收状态。它会拒绝未打开的本地 bidirectional stream ID、入站本地 unidirectional stream ID、超过接收 stream-count limit 的对端发起 stream、乱序新 stream 数据、final size 之后的数据、final size 不一致的 RESET_STREAM、超出大小限制的 frame payload，以及确认从未发送 packet number 的 ACK。
 - 入站 `STOP_SENDING` 只接受本端拥有发送侧的 stream。它会关闭该发送侧，使用当前 final size 排队 `RESET_STREAM`，在 reset 发出后丢弃该 stream 未发送的 STREAM 数据，并在 reset 已排队后忽略重复 stop 请求。
 - 入站 `NEW_TOKEN` 只允许 client 连接接收；server 侧收到该帧会把整个 payload 判为无效，并回滚本 payload 中更早的状态变更。

@@ -382,7 +382,7 @@ pub const QuicConnection = struct {
                 .ack => |ack| try self.receiveAckFrame(now_millis, ack),
                 .ack_ecn => |ack_ecn| try self.receiveAckFrame(now_millis, ack_ecn.ack),
                 .max_data => |max_data| self.receiveMaxDataFrame(max_data),
-                .max_stream_data => |max_stream_data| self.receiveMaxStreamDataFrame(max_stream_data),
+                .max_stream_data => |max_stream_data| try self.receiveMaxStreamDataFrame(max_stream_data),
                 .max_streams_bidi => |max_streams| self.receiveMaxStreamsBidiFrame(max_streams),
                 .max_streams_uni => |max_streams| self.receiveMaxStreamsUniFrame(max_streams),
                 .path_challenge => |path_challenge| try self.receivePathChallengeFrame(path_challenge),
@@ -925,8 +925,33 @@ pub const QuicConnection = struct {
         self.peer_max_data = @max(self.peer_max_data, max_data.maximum_data);
     }
 
-    fn receiveMaxStreamDataFrame(self: *QuicConnection, max_stream_data: frame.MaxStreamDataFrame) void {
-        const stream_state = self.findSendStream(max_stream_data.stream_id) orelse return;
+    fn receiveMaxStreamDataFrame(self: *QuicConnection, max_stream_data: frame.MaxStreamDataFrame) Error!void {
+        if (max_stream_data.stream_id > max_quic_varint) return error.InvalidStream;
+
+        if (!isBidirectionalStream(max_stream_data.stream_id)) {
+            if (!isLocalStreamInitiator(self.side, max_stream_data.stream_id)) return error.InvalidPacket;
+            const stream_state = self.findSendStream(max_stream_data.stream_id) orelse return error.InvalidPacket;
+            stream_state.max_data = @max(stream_state.max_data, max_stream_data.maximum_stream_data);
+            return;
+        }
+
+        if (isLocalStreamInitiator(self.side, max_stream_data.stream_id)) {
+            const stream_state = self.findSendStream(max_stream_data.stream_id) orelse return error.InvalidPacket;
+            stream_state.max_data = @max(stream_state.max_data, max_stream_data.maximum_stream_data);
+            return;
+        }
+
+        if (streamCountForId(max_stream_data.stream_id) > self.recv_max_streams_bidi) return error.InvalidPacket;
+        if (self.findRecvStream(max_stream_data.stream_id) == null) return error.InvalidPacket;
+
+        const existing_state = self.findSendStream(max_stream_data.stream_id);
+        const stream_state = existing_state orelse blk: {
+            self.send_streams.append(self.allocator, .{
+                .stream_id = max_stream_data.stream_id,
+                .max_data = self.peer_initial_max_stream_data,
+            }) catch return error.OutOfMemory;
+            break :blk &self.send_streams.items[self.send_streams.items.len - 1];
+        };
         stream_state.max_data = @max(stream_state.max_data, max_stream_data.maximum_stream_data);
     }
 
@@ -2385,6 +2410,95 @@ test "sendOnStream enforces stream flow control until MAX_STREAM_DATA" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "MAX_STREAM_DATA rejects unopened local and receive-only streams" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    var update_buf: [32]u8 = undefined;
+    var update_out = buffer.fixedWriter(&update_buf);
+    try frame.encodeFrame(update_out.writer(), .{ .max_stream_data = .{
+        .stream_id = 0,
+        .maximum_stream_data = 10,
+    } });
+    try std.testing.expectError(error.InvalidPacket, client.processDatagram(0, update_out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), client.send_streams.items.len);
+    try std.testing.expectEqual(@as(?u64, null), client.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), client.next_peer_packet_number);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    update_out = buffer.fixedWriter(&update_buf);
+    try frame.encodeFrame(update_out.writer(), .{ .max_stream_data = .{
+        .stream_id = 2,
+        .maximum_stream_data = 10,
+    } });
+    try std.testing.expectError(error.InvalidPacket, server.processDatagram(0, update_out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), server.send_streams.items.len);
+}
+
+test "MAX_STREAM_DATA updates observed peer bidirectional reply credit" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 10,
+        .initial_max_stream_data = 1,
+    });
+    defer conn.deinit();
+
+    var peer_stream_buf: [16]u8 = undefined;
+    var peer_stream_out = buffer.fixedWriter(&peer_stream_buf);
+    try frame.encodeFrame(peer_stream_out.writer(), .{ .stream = .{
+        .stream_id = 1,
+        .offset = 0,
+        .fin = false,
+        .data = "",
+    } });
+    try conn.processDatagram(0, peer_stream_out.getWritten());
+
+    try std.testing.expectError(error.FlowControlBlocked, conn.sendOnStream(1, "xx", false));
+    try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
+
+    var update_buf: [32]u8 = undefined;
+    var update_out = buffer.fixedWriter(&update_buf);
+    try frame.encodeFrame(update_out.writer(), .{ .max_stream_data = .{
+        .stream_id = 1,
+        .maximum_stream_data = 2,
+    } });
+    try conn.processDatagram(1, update_out.getWritten());
+
+    try std.testing.expectEqual(@as(usize, 1), conn.send_streams.items.len);
+    try std.testing.expectEqual(@as(u64, 2), conn.findSendStream(1).?.max_data);
+    try conn.sendOnStream(1, "xx", false);
+    try std.testing.expectEqual(@as(usize, 1), conn.send_queue.items.len);
+}
+
+test "MAX_STREAM_DATA send-state creation rolls back when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    var peer_stream_buf: [16]u8 = undefined;
+    var peer_stream_out = buffer.fixedWriter(&peer_stream_buf);
+    try frame.encodeFrame(peer_stream_out.writer(), .{ .stream = .{
+        .stream_id = 1,
+        .offset = 0,
+        .fin = false,
+        .data = "",
+    } });
+    try conn.processDatagram(0, peer_stream_out.getWritten());
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .max_stream_data = .{
+        .stream_id = 1,
+        .maximum_stream_data = 2,
+    } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 1), conn.next_peer_packet_number);
 }
 
 test "sendOnStream does not create state for flow-control blocked new streams" {

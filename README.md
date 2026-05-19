@@ -102,12 +102,13 @@ pub fn main() !void {
     // unopened local bidirectional IDs and inbound local unidirectional IDs,
     // and rolls back partial state changes when a payload is invalid.
     // ACK, MAX_DATA, MAX_STREAM_DATA, and MAX_STREAMS_BIDI/UNI frames update
-    // in-memory recovery and flow-control state; PATH_CHALLENGE queues a
-    // matching PATH_RESPONSE; NEW_TOKEN and HANDSHAKE_DONE are accepted only by
-    // client connections; STOP_SENDING closes the matching send side and queues
+    // in-memory recovery and flow-control state; MAX_STREAM_DATA validates the
+    // stream state before updating send credit; PATH_CHALLENGE queues a matching
+    // PATH_RESPONSE; NEW_TOKEN and HANDSHAKE_DONE are accepted only by client
+    // connections; STOP_SENDING closes the matching send side and queues
     // RESET_STREAM; RESET_STREAM marks the receive side closed unless the stream
-    // already finished with the same final size. Protected packetization is
-    // still outside this API.
+    // already finished with the same final size. Protected packetization is still
+    // outside this API.
     // Full UDP packetization, TLS, and packet protection are still pending.
 }
 ```
