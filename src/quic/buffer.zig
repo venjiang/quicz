@@ -22,6 +22,10 @@ pub const FixedReader = struct {
         @memcpy(out, self.data[self.pos..][0..out.len]);
         self.pos += out.len;
     }
+
+    pub fn remainingLen(self: FixedReader) usize {
+        return self.data.len - self.pos;
+    }
 };
 
 /// Fixed in-memory writer used by packet/frame codecs. It returns

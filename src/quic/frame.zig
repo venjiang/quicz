@@ -124,6 +124,24 @@ fn varIntToUsize(value: u64) FrameError!usize {
     return std.math.cast(usize, value) orelse error.InvalidFrameLength;
 }
 
+fn readerHasRemainingLen(comptime Reader: type) bool {
+    return switch (@typeInfo(Reader)) {
+        .pointer => |pointer| @hasDecl(pointer.child, "remainingLen"),
+        else => @hasDecl(Reader, "remainingLen"),
+    };
+}
+
+fn readOwnedBytes(reader: anytype, allocator: std.mem.Allocator, len: usize) ![]u8 {
+    if (comptime readerHasRemainingLen(@TypeOf(reader))) {
+        if (len > reader.remainingLen()) return error.EndOfStream;
+    }
+
+    const data = try allocator.alloc(u8, len);
+    errdefer allocator.free(data);
+    try reader.readNoEof(data);
+    return data;
+}
+
 /// Release any buffers owned by a decoded frame.
 pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
     switch (frame.*) {
@@ -293,9 +311,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         const data_len = (try packet.decodeVarInt(reader)).value;
         const len_usize = try varIntToUsize(data_len);
 
-        const data = try allocator.alloc(u8, len_usize);
-        errdefer allocator.free(data);
-        try reader.readNoEof(data);
+        const data = try readOwnedBytes(reader, allocator, len_usize);
 
         return .{ .crypto = .{
             .offset = offset,
@@ -347,9 +363,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         const data_len = (try packet.decodeVarInt(reader)).value;
         const len_usize = try varIntToUsize(data_len);
 
-        const data = try allocator.alloc(u8, len_usize);
-        errdefer allocator.free(data);
-        try reader.readNoEof(data);
+        const data = try readOwnedBytes(reader, allocator, len_usize);
 
         return .{ .stream = .{
             .stream_id = stream_id,
@@ -365,9 +379,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         const reason_len = (try packet.decodeVarInt(reader)).value;
         const len_usize = try varIntToUsize(reason_len);
 
-        const reason_phrase = try allocator.alloc(u8, len_usize);
-        errdefer allocator.free(reason_phrase);
-        try reader.readNoEof(reason_phrase);
+        const reason_phrase = try readOwnedBytes(reader, allocator, len_usize);
 
         return .{ .connection_close = .{
             .error_code = error_code,
@@ -381,9 +393,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         const reason_len = (try packet.decodeVarInt(reader)).value;
         const len_usize = try varIntToUsize(reason_len);
 
-        const reason_phrase = try allocator.alloc(u8, len_usize);
-        errdefer allocator.free(reason_phrase);
-        try reader.readNoEof(reason_phrase);
+        const reason_phrase = try readOwnedBytes(reader, allocator, len_usize);
 
         return .{ .application_close = .{
             .error_code = error_code,
@@ -662,6 +672,17 @@ test "stream frame with truncated payload fails" {
 
     var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.EndOfStream, decodeFrame(in.reader(), std.testing.allocator));
+}
+
+test "decodeFrameSlice rejects truncated payload before allocating" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const wire = [_]u8{
+        0x0a, // STREAM with LEN bit
+        0x00, // stream id
+        0x40, 0x40, // declared length 64, no payload bytes left
+    };
+
+    try std.testing.expectError(error.EndOfStream, decodeFrameSlice(&wire, failing_allocator.allocator()));
 }
 
 test "encode/decode connection_close frame roundtrip" {

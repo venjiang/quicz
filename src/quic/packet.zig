@@ -239,13 +239,14 @@ pub fn parseLongHeader(reader: anytype, allocator: std.mem.Allocator) !LongHeade
     try reader.readNoEof(scid);
 
     var token: []const u8 = &[_]u8{};
+    errdefer if (token.len != 0) allocator.free(token);
     if (packet_type == .initial) {
         const token_len_varint = try decodeVarInt(reader);
         const token_len = std.math.cast(usize, token_len_varint.value) orelse return error.InvalidLength;
         if (token_len != 0) {
-            token = try allocator.alloc(u8, token_len);
-            errdefer allocator.free(token);
-            try reader.readNoEof(@constCast(token));
+            const owned_token = try allocator.alloc(u8, token_len);
+            token = owned_token;
+            try reader.readNoEof(owned_token);
         }
     }
 
@@ -368,6 +369,21 @@ test "parse long header rejects length shorter than packet number" {
         0x00, // DCID len
         0x00, // SCID len
         0x00, // token len
+        0x01, // length shorter than the 2-byte packet number
+    };
+
+    var in = buffer.fixedReader(&wire);
+    try std.testing.expectError(error.InvalidLength, parseLongHeader(in.reader(), std.testing.allocator));
+}
+
+test "parse long header frees token when trailing length is invalid" {
+    const wire = [_]u8{
+        0xc1, // long + fixed + initial + 2-byte packet number
+        0x00, 0x00, 0x00, 0x01, // QUIC v1
+        0x00, // DCID len
+        0x00, // SCID len
+        0x01, // token len
+        0xaa, // token
         0x01, // length shorter than the 2-byte packet number
     };
 
