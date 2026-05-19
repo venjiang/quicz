@@ -16,7 +16,7 @@
 - [x] QUIC 变长整数（varint）编解码工具
 - [x] 最小 QUIC 包头（long/short）解析与序列化
 - [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK/ACK_ECN 多区间 / RESET_STREAM / STOP_SENDING / MAX_* / BLOCKED / NEW_TOKEN / NEW_CONNECTION_ID / RETIRE_CONNECTION_ID / PATH_CHALLENGE / PATH_RESPONSE / HANDSHAKE_DONE / CONNECTION_CLOSE 子集）
-- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转，含发送侧 STREAM 与 CRYPTO 分片、入站 CRYPTO 缓冲、RESET_STREAM 与 STOP_SENDING 处理、PATH_CHALLENGE 响应排队、客户端侧 NEW_TOKEN/HANDSHAKE_DONE 接收校验、基础 connection/stream/stream-count 流量控制、严格 stream 方向校验与关闭状态处理
+- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转，含发送侧 STREAM 与 CRYPTO 分片、入站 CRYPTO 缓冲、RESET_STREAM 与 STOP_SENDING 处理、PATH_CHALLENGE 响应排队、无匹配挑战的 PATH_RESPONSE 拒绝、客户端侧 NEW_TOKEN/HANDSHAKE_DONE 接收校验、基础 connection/stream/stream-count 流量控制、严格 stream 方向校验与关闭状态处理
 - [x] 简化丢包恢复与拥塞控制状态，含自动 ACK 生成、ACK range 处理、未发送 packet 的 ACK 拒绝与 ACK 驱动的 sent-packet tracking
 - [ ] 完整连接状态机与独立 packet number spaces
 - [ ] 完整 RFC 9002 丢包检测与拥塞控制（含 loss timer 与 packet threshold loss detection）
@@ -109,7 +109,8 @@ pub fn main() !void {
     // CRYPTO 帧会进入连续的内存态握手缓冲。ACK、MAX_DATA、
     // MAX_STREAM_DATA 与 MAX_STREAMS_BIDI/UNI 帧会更新内存态 recovery 与流控
     // 状态；MAX_STREAM_DATA 会先校验 stream 状态再更新发送 credit；
-    // PATH_CHALLENGE 会排队匹配的 PATH_RESPONSE；NEW_TOKEN 和 HANDSHAKE_DONE
+    // PATH_CHALLENGE 会排队匹配的 PATH_RESPONSE；在 outbound challenge 跟踪
+    // 尚未实现前，PATH_RESPONSE 会被拒绝；NEW_TOKEN 和 HANDSHAKE_DONE
     // 只允许 client 连接接收；STOP_SENDING 会关闭对应发送侧并排队
     // RESET_STREAM；RESET_STREAM 会关闭接收侧，除非该 stream 已经以相同 final
     // size 完成。带 packet protection 的 packetization 仍不在这个 API 内。

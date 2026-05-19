@@ -444,6 +444,7 @@ pub const QuicConnection = struct {
                 .max_streams_bidi => |max_streams| self.receiveMaxStreamsBidiFrame(max_streams),
                 .max_streams_uni => |max_streams| self.receiveMaxStreamsUniFrame(max_streams),
                 .path_challenge => |path_challenge| try self.receivePathChallengeFrame(path_challenge),
+                .path_response => return error.InvalidPacket,
                 .stop_sending => |stop_sending| try self.receiveStopSendingFrame(stop_sending),
                 .reset_stream => |reset_stream| try self.receiveResetStreamFrame(reset_stream),
                 .crypto => |crypto| try self.receiveCryptoFrame(crypto),
@@ -1907,6 +1908,21 @@ test "processDatagram rolls back PATH_RESPONSE state when payload is invalid" {
 
     var out_buf: [64]u8 = undefined;
     try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
+}
+
+test "processDatagram rejects PATH_RESPONSE without outstanding challenge" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .path_challenge = .{ .data = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 } } });
+    try frame.encodeFrame(out.writer(), .{ .path_response = .{ .data = [_]u8{ 7, 6, 5, 4, 3, 2, 1, 0 } } });
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_path_responses.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
 }
 
 test "STOP_SENDING queues RESET_STREAM and drops unsent stream data" {
