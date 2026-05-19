@@ -125,6 +125,13 @@ fn varIntToUsize(value: u64) FrameError!usize {
     return std.math.cast(usize, value) orelse error.InvalidFrameLength;
 }
 
+fn readerHasRemainingLen(comptime Reader: type) bool {
+    return switch (@typeInfo(Reader)) {
+        .pointer => |pointer| @hasDecl(pointer.child, "remainingLen"),
+        else => @hasDecl(Reader, "remainingLen"),
+    };
+}
+
 /// Release any buffers owned by a decoded frame.
 pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
     switch (frame.*) {
@@ -243,7 +250,9 @@ pub fn decodeFrameSlice(data: []const u8, allocator: std.mem.Allocator) !Decoded
     return .{ .frame = decoded, .len = in.pos };
 }
 
-/// Decode one minimal QUIC frame from `reader`.
+/// Decode one minimal QUIC frame from `reader`. STREAM frames without a Length
+/// field require a reader that exposes `remainingLen()` so the decoder can
+/// consume the rest of the packet payload.
 pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
     const frame_type = try reader.readByte();
 
@@ -342,12 +351,15 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
             offset = (try packet.decodeVarInt(reader)).value;
         }
 
-        if (!has_len) {
+        const len_usize = if (has_len) blk: {
+            const data_len = (try packet.decodeVarInt(reader)).value;
+            break :blk try varIntToUsize(data_len);
+        } else blk: {
+            if (comptime readerHasRemainingLen(@TypeOf(reader))) {
+                break :blk reader.remainingLen();
+            }
             return error.InvalidFrameLength;
-        }
-
-        const data_len = (try packet.decodeVarInt(reader)).value;
-        const len_usize = try varIntToUsize(data_len);
+        };
 
         const data = try buffer.readOwnedBytes(reader, allocator, len_usize);
 
@@ -659,13 +671,60 @@ test "encode/decode max_streams_uni frame roundtrip" {
     }
 }
 
-test "stream frame without LEN bit fails" {
+test "stream frame without LEN bit consumes remaining payload" {
     const wire = [_]u8{
-        0x08,
-        0x01,
+        0x08, // STREAM without LEN bit
+        0x01, // stream id
+        'h',
+        'i',
     };
 
     var in = buffer.fixedReader(&wire);
+    var parsed = try decodeFrame(in.reader(), std.testing.allocator);
+    defer deinitFrame(&parsed, std.testing.allocator);
+
+    switch (parsed) {
+        .stream => |frame| {
+            try std.testing.expectEqual(@as(u64, 1), frame.stream_id);
+            try std.testing.expectEqual(@as(u64, 0), frame.offset);
+            try std.testing.expect(!frame.fin);
+            try std.testing.expectEqualStrings("hi", frame.data);
+            try std.testing.expectEqual(wire.len, in.pos);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "stream frame without LEN bit needs payload boundary" {
+    const StreamingReader = struct {
+        data: []const u8,
+        pos: usize = 0,
+
+        pub fn reader(self: *@This()) *@This() {
+            return self;
+        }
+
+        pub fn readByte(self: *@This()) !u8 {
+            if (self.pos >= self.data.len) return error.EndOfStream;
+            const value = self.data[self.pos];
+            self.pos += 1;
+            return value;
+        }
+
+        pub fn readNoEof(self: *@This(), out: []u8) !void {
+            if (self.data.len - self.pos < out.len) return error.EndOfStream;
+            @memcpy(out, self.data[self.pos..][0..out.len]);
+            self.pos += out.len;
+        }
+    };
+
+    const wire = [_]u8{
+        0x08, // STREAM without LEN bit
+        0x01, // stream id
+        'h',
+    };
+
+    var in = StreamingReader{ .data = &wire };
     try std.testing.expectError(error.InvalidFrameLength, decodeFrame(in.reader(), std.testing.allocator));
 }
 

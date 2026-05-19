@@ -543,6 +543,24 @@ test "processDatagram rejects empty payloads" {
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, &[_]u8{}));
 }
 
+test "processDatagram accepts stream frame without length field" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    const wire = [_]u8{
+        0x08, // STREAM without LEN bit
+        0x00, // stream id
+        'o',
+        'k',
+    };
+
+    try conn.processDatagram(0, &wire);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvOnStream(0, &read_buf)).?;
+    try std.testing.expectEqualStrings("ok", read_buf[0..n]);
+}
+
 test "processDatagram rolls back stream state when payload is invalid" {
     var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
