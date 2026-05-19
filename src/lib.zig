@@ -115,6 +115,13 @@ fn pathResponseFrameWireLen() usize {
     return 9; // frame type + 8-byte path validation data
 }
 
+fn resetStreamFrameWireLen(reset: frame.ResetStreamFrame) Error!usize {
+    var len: usize = 1; // frame type
+    len = try addWireLen(len, try quicVarIntWireLen(reset.stream_id));
+    len = try addWireLen(len, try quicVarIntWireLen(reset.application_error_code));
+    return addWireLen(len, try quicVarIntWireLen(reset.final_size));
+}
+
 fn streamEndOffset(offset: u64, data_len: usize) ?u64 {
     const len = std.math.cast(u64, data_len) orelse return null;
     const end = std.math.add(u64, offset, len) catch return null;
@@ -180,6 +187,7 @@ const SendStreamState = struct {
     next_offset: u64 = 0,
     max_data: u64,
     fin_sent: bool = false,
+    reset_sent: bool = false,
 };
 
 const RecvStreamState = struct {
@@ -231,6 +239,7 @@ pub const QuicConnection = struct {
     recovery_state: recovery.Recovery,
     sent_packets: std.ArrayList(SentPacket),
     send_queue: std.ArrayList(PendingStreamFrame),
+    pending_reset_streams: std.ArrayList(frame.ResetStreamFrame),
     send_streams: std.ArrayList(SendStreamState),
     recv_streams: std.ArrayList(RecvStreamState),
     closed: bool,
@@ -275,6 +284,7 @@ pub const QuicConnection = struct {
             }),
             .sent_packets = .empty,
             .send_queue = .empty,
+            .pending_reset_streams = .empty,
             .send_streams = .empty,
             .recv_streams = .empty,
             .closed = false,
@@ -289,6 +299,7 @@ pub const QuicConnection = struct {
         self.sent_packets.deinit(self.allocator);
         self.pending_path_responses.deinit(self.allocator);
         self.send_queue.deinit(self.allocator);
+        self.pending_reset_streams.deinit(self.allocator);
         self.send_streams.deinit(self.allocator);
         for (self.recv_streams.items) |*stream| {
             stream.deinit(self.allocator);
@@ -314,6 +325,7 @@ pub const QuicConnection = struct {
         const next_peer_packet_number_snapshot = self.next_peer_packet_number;
         const pending_ack_largest_snapshot = self.pending_ack_largest;
         const pending_path_response_count = self.pending_path_responses.items.len;
+        const pending_reset_stream_count = self.pending_reset_streams.items.len;
         const peer_max_data_snapshot = self.peer_max_data;
         const peer_max_streams_bidi_snapshot = self.peer_max_streams_bidi;
         const peer_max_streams_uni_snapshot = self.peer_max_streams_uni;
@@ -345,6 +357,7 @@ pub const QuicConnection = struct {
             self.next_peer_packet_number = next_peer_packet_number_snapshot;
             self.pending_ack_largest = pending_ack_largest_snapshot;
             self.pending_path_responses.items.len = pending_path_response_count;
+            self.pending_reset_streams.items.len = pending_reset_stream_count;
             self.closed = closed_snapshot;
             self.rollbackSentPackets(sent_packet_count, sent_packet_snapshots);
             self.recovery_state = recovery_snapshot;
@@ -372,6 +385,7 @@ pub const QuicConnection = struct {
                 .max_streams_bidi => |max_streams| self.receiveMaxStreamsBidiFrame(max_streams),
                 .max_streams_uni => |max_streams| self.receiveMaxStreamsUniFrame(max_streams),
                 .path_challenge => |path_challenge| try self.receivePathChallengeFrame(path_challenge),
+                .stop_sending => |stop_sending| try self.receiveStopSendingFrame(stop_sending),
                 .reset_stream => |reset_stream| try self.receiveResetStreamFrame(reset_stream),
                 .stream => |stream_frame| try self.receiveStreamFrame(stream_frame),
                 .connection_close, .application_close => self.closed = true,
@@ -398,6 +412,11 @@ pub const QuicConnection = struct {
         if (self.pending_path_responses.items.len != 0) {
             return try self.pollPathResponse(ack_to_send, now_millis, out_buf);
         }
+        if (self.pending_reset_streams.items.len != 0) {
+            return try self.pollResetStream(ack_to_send, now_millis, out_buf);
+        }
+
+        self.dropResetClosedStreamFrames();
 
         if (self.send_queue.items.len == 0) {
             if (ack_to_send) |ack| {
@@ -809,6 +828,88 @@ pub const QuicConnection = struct {
         return written;
     }
 
+    fn pollResetStream(
+        self: *QuicConnection,
+        ack_to_send: ?frame.AckFrame,
+        now_millis: i64,
+        out_buf: []u8,
+    ) Error!?[]u8 {
+        const reset = self.pending_reset_streams.items[0];
+        const reset_encoded_len = try resetStreamFrameWireLen(reset);
+        if (reset_encoded_len > self.config.max_datagram_size) return error.BufferTooSmall;
+
+        var encoded_len = reset_encoded_len;
+        var include_ack = false;
+        if (ack_to_send) |ack| {
+            const ack_encoded_len = try ackFrameWireLen(ack);
+            const coalesced_len = try addWireLen(ack_encoded_len, reset_encoded_len);
+            if (coalesced_len <= self.config.max_datagram_size and out_buf.len >= coalesced_len and self.recovery_state.canSend(coalesced_len)) {
+                encoded_len = coalesced_len;
+                include_ack = true;
+            } else if (ack_encoded_len <= self.config.max_datagram_size and out_buf.len >= ack_encoded_len) {
+                return try self.pollAckOnly(ack, out_buf);
+            } else {
+                return error.BufferTooSmall;
+            }
+        }
+
+        if (!self.recovery_state.canSend(encoded_len)) return null;
+        if (out_buf.len < encoded_len) return error.BufferTooSmall;
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        var appended_sent_packet = false;
+        errdefer if (appended_sent_packet) {
+            self.sent_packets.items.len -= 1;
+        };
+
+        const packet_number = self.next_packet_number;
+        self.sent_packets.append(self.allocator, .{
+            .packet_number = packet_number,
+            .sent_time_millis = now_millis,
+            .bytes = encoded_len,
+        }) catch return error.OutOfMemory;
+        appended_sent_packet = true;
+
+        var out = buffer.fixedWriter(out_buf[0..encoded_len]);
+        if (include_ack) {
+            frame.encodeFrame(out.writer(), .{ .ack = ack_to_send.? }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(out.writer(), .{ .reset_stream = reset }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const written = out.getWritten();
+        std.debug.assert(written.len == encoded_len);
+
+        _ = self.pending_reset_streams.orderedRemove(0);
+        if (include_ack) self.pending_ack_largest = null;
+        self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
+        self.recovery_state.onPacketSent(written.len);
+        return written;
+    }
+
+    fn dropResetClosedStreamFrames(self: *QuicConnection) void {
+        var i: usize = 0;
+        while (i < self.send_queue.items.len) {
+            const pending = self.send_queue.items[i];
+            const stream_state = self.findSendStream(pending.stream_id) orelse {
+                i += 1;
+                continue;
+            };
+            if (!stream_state.reset_sent) {
+                i += 1;
+                continue;
+            }
+
+            const removed = self.send_queue.orderedRemove(i);
+            self.allocator.free(removed.data);
+        }
+    }
+
     fn queueAckForReceivedPacket(self: *QuicConnection) Error!void {
         if (self.next_peer_packet_number > max_quic_varint) return error.InvalidPacket;
 
@@ -836,6 +937,57 @@ pub const QuicConnection = struct {
 
     fn receivePathChallengeFrame(self: *QuicConnection, path_challenge: frame.PathChallengeFrame) Error!void {
         self.pending_path_responses.append(self.allocator, path_challenge.data) catch return error.OutOfMemory;
+    }
+
+    fn receiveStopSendingFrame(self: *QuicConnection, stop_sending: frame.StopSendingFrame) Error!void {
+        if (stop_sending.stream_id > max_quic_varint) return error.InvalidStream;
+
+        if (!isBidirectionalStream(stop_sending.stream_id)) {
+            if (!isLocalStreamInitiator(self.side, stop_sending.stream_id)) return error.InvalidPacket;
+            const stream_state = self.findSendStream(stop_sending.stream_id) orelse return error.InvalidPacket;
+            try self.queueResetStreamForStopSending(stream_state, stop_sending.application_error_code);
+            return;
+        }
+
+        if (isLocalStreamInitiator(self.side, stop_sending.stream_id)) {
+            const stream_state = self.findSendStream(stop_sending.stream_id) orelse return error.InvalidPacket;
+            try self.queueResetStreamForStopSending(stream_state, stop_sending.application_error_code);
+            return;
+        }
+
+        if (streamCountForId(stop_sending.stream_id) > self.recv_max_streams_bidi) return error.InvalidPacket;
+
+        const existing_state = self.findSendStream(stop_sending.stream_id);
+        var appended_send_state = false;
+        errdefer if (appended_send_state) {
+            _ = self.send_streams.orderedRemove(self.send_streams.items.len - 1);
+        };
+
+        const stream_state = existing_state orelse blk: {
+            self.send_streams.append(self.allocator, .{
+                .stream_id = stop_sending.stream_id,
+                .max_data = self.peer_initial_max_stream_data,
+            }) catch return error.OutOfMemory;
+            appended_send_state = true;
+            break :blk &self.send_streams.items[self.send_streams.items.len - 1];
+        };
+        try self.queueResetStreamForStopSending(stream_state, stop_sending.application_error_code);
+    }
+
+    fn queueResetStreamForStopSending(
+        self: *QuicConnection,
+        stream_state: *SendStreamState,
+        application_error_code: u64,
+    ) Error!void {
+        if (stream_state.reset_sent) return;
+
+        self.pending_reset_streams.append(self.allocator, .{
+            .stream_id = stream_state.stream_id,
+            .application_error_code = application_error_code,
+            .final_size = stream_state.next_offset,
+        }) catch return error.OutOfMemory;
+        stream_state.fin_sent = true;
+        stream_state.reset_sent = true;
     }
 
     fn validateIncomingStreamCount(self: *QuicConnection, stream_id: u64) Error!void {
@@ -1307,6 +1459,154 @@ test "processDatagram rolls back PATH_RESPONSE state when payload is invalid" {
 
     var out_buf: [64]u8 = undefined;
     try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
+}
+
+test "STOP_SENDING queues RESET_STREAM and drops unsent stream data" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "hello", false);
+
+    var stop_buf: [16]u8 = undefined;
+    var stop_out = buffer.fixedWriter(&stop_buf);
+    try frame.encodeFrame(stop_out.writer(), .{ .stop_sending = .{
+        .stream_id = stream_id,
+        .application_error_code = 7,
+    } });
+    try conn.processDatagram(10, stop_out.getWritten());
+
+    try std.testing.expect(conn.findSendStream(stream_id).?.reset_sent);
+    try std.testing.expectError(error.StreamClosed, conn.sendOnStream(stream_id, "again", false));
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_reset_streams.items.len);
+
+    var out_buf: [64]u8 = undefined;
+    const reset_payload = (try conn.pollTx(20, &out_buf)).?;
+
+    var ack = try frame.decodeFrameSlice(reset_payload, std.testing.allocator);
+    defer frame.deinitFrame(&ack.frame, std.testing.allocator);
+    switch (ack.frame) {
+        .ack => |ack_frame| try std.testing.expectEqual(@as(u64, 0), ack_frame.largest_acknowledged),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var reset = try frame.decodeFrameSlice(reset_payload[ack.len..], std.testing.allocator);
+    defer frame.deinitFrame(&reset.frame, std.testing.allocator);
+    switch (reset.frame) {
+        .reset_stream => |reset_frame| {
+            try std.testing.expectEqual(stream_id, reset_frame.stream_id);
+            try std.testing.expectEqual(@as(u64, 7), reset_frame.application_error_code);
+            try std.testing.expectEqual(@as(u64, 5), reset_frame.final_size);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), conn.send_queue.items.len);
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(30, &out_buf));
+    try std.testing.expectEqual(@as(usize, 0), conn.send_queue.items.len);
+}
+
+test "STOP_SENDING on peer bidirectional stream prevents later reply" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var stop_buf: [16]u8 = undefined;
+    var stop_out = buffer.fixedWriter(&stop_buf);
+    try frame.encodeFrame(stop_out.writer(), .{ .stop_sending = .{
+        .stream_id = 0,
+        .application_error_code = 9,
+    } });
+    try conn.processDatagram(0, stop_out.getWritten());
+
+    try std.testing.expectError(error.StreamClosed, conn.sendOnStream(0, "reply", false));
+
+    var out_buf: [64]u8 = undefined;
+    const reset_payload = (try conn.pollTx(0, &out_buf)).?;
+    var ack = try frame.decodeFrameSlice(reset_payload, std.testing.allocator);
+    defer frame.deinitFrame(&ack.frame, std.testing.allocator);
+    switch (ack.frame) {
+        .ack => |ack_frame| try std.testing.expectEqual(@as(u64, 0), ack_frame.largest_acknowledged),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var reset = try frame.decodeFrameSlice(reset_payload[ack.len..], std.testing.allocator);
+    defer frame.deinitFrame(&reset.frame, std.testing.allocator);
+    switch (reset.frame) {
+        .reset_stream => |reset_frame| {
+            try std.testing.expectEqual(@as(u64, 0), reset_frame.stream_id);
+            try std.testing.expectEqual(@as(u64, 9), reset_frame.application_error_code);
+            try std.testing.expectEqual(@as(u64, 0), reset_frame.final_size);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "STOP_SENDING rolls back reset state when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stop_sending = .{
+        .stream_id = stream_id,
+        .application_error_code = 1,
+    } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expect(!conn.findSendStream(stream_id).?.reset_sent);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
+
+    try conn.sendOnStream(stream_id, "ok", false);
+}
+
+test "STOP_SENDING validates stream direction and count before queuing reset" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_streams_bidi = 1,
+        .initial_max_streams_uni = 1,
+    });
+    defer conn.deinit();
+
+    var datagram: [16]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stop_sending = .{
+        .stream_id = 2,
+        .application_error_code = 1,
+    } });
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stop_sending = .{
+        .stream_id = 4,
+        .application_error_code = 1,
+    } });
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
+}
+
+test "duplicate STOP_SENDING does not queue duplicate RESET_STREAM" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    var stop_buf: [16]u8 = undefined;
+    var stop_out = buffer.fixedWriter(&stop_buf);
+    try frame.encodeFrame(stop_out.writer(), .{ .stop_sending = .{
+        .stream_id = stream_id,
+        .application_error_code = 1,
+    } });
+
+    try conn.processDatagram(0, stop_out.getWritten());
+    try conn.processDatagram(1, stop_out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_reset_streams.items.len);
 }
 
 test "pollTx coalesces pending ACK with queued STREAM payload" {

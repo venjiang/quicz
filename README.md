@@ -16,7 +16,7 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] QUIC variable-length integer (varint) encode/decode helpers
 - [x] Minimal QUIC packet headers (long/short) parsing and serialization
 - [x] Basic frame model (STREAM/CRYPTO/PADDING/PING/ACK with ranges/RESET_STREAM/STOP_SENDING/MAX_*/PATH_CHALLENGE/PATH_RESPONSE and CONNECTION_CLOSE subset)
-- [x] Minimal in-memory connection and stream queue/receive flow with send-side STREAM fragmentation, inbound RESET_STREAM handling, PATH_CHALLENGE response queuing, basic connection/stream/stream-count flow control, strict stream direction validation, and close-state handling
+- [x] Minimal in-memory connection and stream queue/receive flow with send-side STREAM fragmentation, inbound RESET_STREAM and STOP_SENDING handling, PATH_CHALLENGE response queuing, basic connection/stream/stream-count flow control, strict stream direction validation, and close-state handling
 - [x] Simplified loss recovery and congestion-control state with automatic ACK generation, ACK range handling, unsent-packet ACK rejection, and ACK-driven sent-packet tracking
 - [ ] Full connection state machine and distinct packet number spaces
 - [ ] Full RFC 9002 loss detection & congestion control with loss timers and packet threshold loss detection
@@ -103,9 +103,10 @@ pub fn main() !void {
     // and rolls back partial state changes when a payload is invalid.
     // ACK, MAX_DATA, MAX_STREAM_DATA, and MAX_STREAMS_BIDI/UNI frames update
     // in-memory recovery and flow-control state; PATH_CHALLENGE queues a
-    // matching PATH_RESPONSE; RESET_STREAM marks the receive side closed unless
-    // the stream already finished with the same final size. Protected
-    // packetization is still outside this API.
+    // matching PATH_RESPONSE; STOP_SENDING closes the matching send side and
+    // queues RESET_STREAM; RESET_STREAM marks the receive side closed unless the
+    // stream already finished with the same final size. Protected packetization
+    // is still outside this API.
     // Full UDP packetization, TLS, and packet protection are still pending.
 }
 ```
