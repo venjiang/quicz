@@ -17,6 +17,9 @@ pub const PacketType = enum(u2) {
 
 pub const HeaderForm = enum { long, short };
 
+/// Parsed QUIC long header fields. The `payload_length` is the wire length
+/// after the packet number, while QUIC's length field also includes the packet
+/// number bytes.
 pub const LongHeader = struct {
     version: Version,
     dcid: []const u8,
@@ -24,8 +27,11 @@ pub const LongHeader = struct {
     packet_type: PacketType,
     token: []const u8, // Initial: token, others: empty
     packet_number: u64, // decoded PN
+    payload_length: u64,
 };
 
+/// Parsed QUIC short header fields. The destination CID length is connection
+/// context and must be supplied by callers when decoding.
 pub const ShortHeader = struct {
     dcid: []const u8,
     key_phase: bool,
@@ -44,9 +50,10 @@ pub const PacketError = error{
     InvalidPacketNumber,
     UnexpectedToken,
     InvalidLength,
+    InvalidVarInt,
 };
 
-fn packetNumberLen(packet_number: u64) PacketError!u2 {
+fn packetNumberLen(packet_number: u64) PacketError!u8 {
     if (packet_number <= 0xff) return 1;
     if (packet_number <= 0xffff) return 2;
     if (packet_number <= 0xffffff) return 3;
@@ -54,7 +61,7 @@ fn packetNumberLen(packet_number: u64) PacketError!u2 {
     return error.InvalidPacketNumber;
 }
 
-fn encodePacketNumber(writer: anytype, packet_number: u64, pn_len: u2) !void {
+fn encodePacketNumber(writer: anytype, packet_number: u64, pn_len: u8) !void {
     var buf: [4]u8 = undefined;
     const pn_len_usize: usize = pn_len;
 
@@ -67,7 +74,7 @@ fn encodePacketNumber(writer: anytype, packet_number: u64, pn_len: u2) !void {
     try writer.writeAll(buf[0..pn_len_usize]);
 }
 
-fn decodePacketNumber(reader: anytype, pn_len: u2) !u64 {
+fn decodePacketNumber(reader: anytype, pn_len: u8) !u64 {
     var value: u64 = 0;
     var i: usize = 0;
     while (i < pn_len) : (i += 1) {
@@ -92,7 +99,7 @@ pub fn encodeVarInt(writer: anytype, value: u64) !void {
         tmp[2] = @as(u8, @intCast((value >> 8) & 0xff));
         tmp[3] = @as(u8, @intCast(value & 0xff));
         try writer.writeAll(&tmp);
-    } else {
+    } else if (value <= 4611686018427387903) {
         var tmp: [8]u8 = undefined;
         tmp[0] = 0b11_00_0000 | @as(u8, @intCast(value >> 56));
         tmp[1] = @as(u8, @intCast((value >> 48) & 0xff));
@@ -103,6 +110,8 @@ pub fn encodeVarInt(writer: anytype, value: u64) !void {
         tmp[6] = @as(u8, @intCast((value >> 8) & 0xff));
         tmp[7] = @as(u8, @intCast(value & 0xff));
         try writer.writeAll(&tmp);
+    } else {
+        return error.InvalidVarInt;
     }
 }
 
@@ -147,6 +156,22 @@ pub fn parseHeaderForm(first_byte: u8) HeaderForm {
     return if ((first_byte & 0x80) != 0) .long else .short;
 }
 
+/// Release connection-id and token buffers owned by a parsed long header.
+pub fn deinitLongHeader(header: *LongHeader, allocator: std.mem.Allocator) void {
+    allocator.free(header.dcid);
+    allocator.free(header.scid);
+    if (header.token.len != 0) {
+        allocator.free(header.token);
+    }
+}
+
+/// Release the destination connection-id buffer owned by a parsed short header.
+pub fn deinitShortHeader(header: *ShortHeader, allocator: std.mem.Allocator) void {
+    allocator.free(header.dcid);
+}
+
+/// Serialize a minimal QUIC long header. Payload bytes are not written here;
+/// `payload_length` records the bytes expected after the packet number.
 pub fn encodeLongHeader(writer: anytype, header: LongHeader) !void {
     if (header.dcid.len > 20 or header.scid.len > 20) {
         return error.InvalidConnectionIdLength;
@@ -156,12 +181,13 @@ pub fn encodeLongHeader(writer: anytype, header: LongHeader) !void {
     }
 
     const pn_len = try packetNumberLen(header.packet_number);
+    const wire_length = std.math.add(u64, header.payload_length, pn_len) catch return error.InvalidLength;
 
     var first_byte: u8 = 0;
     first_byte |= 0x80; // Header Form = long
     first_byte |= 0x40; // Fixed Bit
     first_byte |= @as(u8, @intCast(@intFromEnum(header.packet_type))) << 4;
-    first_byte |= @as(u8, pn_len - 1);
+    first_byte |= @as(u8, @intCast(pn_len - 1));
 
     try writer.writeByte(first_byte);
 
@@ -181,18 +207,19 @@ pub fn encodeLongHeader(writer: anytype, header: LongHeader) !void {
         try writer.writeAll(header.token);
     }
 
-    // Simplified: encode payload length as packet number length only.
-    try encodeVarInt(writer, pn_len);
+    try encodeVarInt(writer, wire_length);
     try encodePacketNumber(writer, header.packet_number, pn_len);
 }
 
-pub fn parseLongHeader(reader: anytype) !LongHeader {
+/// Parse a minimal QUIC long header and allocate copied CID/token slices using
+/// `allocator`; callers must release the result with `deinitLongHeader`.
+pub fn parseLongHeader(reader: anytype, allocator: std.mem.Allocator) !LongHeader {
     const first_byte = try reader.readByte();
     if ((first_byte & 0x80) == 0) return error.InvalidHeaderForm;
     if ((first_byte & 0x40) == 0) return error.InvalidFixedBit;
 
     const packet_type: PacketType = @enumFromInt(@as(u2, @intCast((first_byte >> 4) & 0x03)));
-    const pn_len: u2 = @as(u2, @intCast(first_byte & 0x03)) + 1;
+    const pn_len: u8 = @as(u8, @intCast(first_byte & 0x03)) + 1;
 
     var version_buf: [4]u8 = undefined;
     try reader.readNoEof(&version_buf);
@@ -200,24 +227,30 @@ pub fn parseLongHeader(reader: anytype) !LongHeader {
 
     const dcid_len = try reader.readByte();
     if (dcid_len > 20) return error.InvalidConnectionIdLength;
-    const dcid = try std.heap.page_allocator.alloc(u8, dcid_len);
+    const dcid = try allocator.alloc(u8, dcid_len);
+    errdefer allocator.free(dcid);
     try reader.readNoEof(dcid);
 
     const scid_len = try reader.readByte();
     if (scid_len > 20) return error.InvalidConnectionIdLength;
-    const scid = try std.heap.page_allocator.alloc(u8, scid_len);
+    const scid = try allocator.alloc(u8, scid_len);
+    errdefer allocator.free(scid);
     try reader.readNoEof(scid);
 
     var token: []const u8 = &[_]u8{};
     if (packet_type == .initial) {
         const token_len_varint = try decodeVarInt(reader);
-        const token_len = token_len_varint.value;
-        token = try std.heap.page_allocator.alloc(u8, token_len);
-        try reader.readNoEof(@constCast(token));
+        const token_len = std.math.cast(usize, token_len_varint.value) orelse return error.InvalidLength;
+        if (token_len != 0) {
+            token = try allocator.alloc(u8, token_len);
+            errdefer allocator.free(token);
+            try reader.readNoEof(@constCast(token));
+        }
     }
 
     const length_varint = try decodeVarInt(reader);
     if (length_varint.value < pn_len) return error.InvalidLength;
+    const payload_length = length_varint.value - pn_len;
 
     const packet_number = try decodePacketNumber(reader, pn_len);
 
@@ -228,9 +261,11 @@ pub fn parseLongHeader(reader: anytype) !LongHeader {
         .packet_type = packet_type,
         .token = token,
         .packet_number = packet_number,
+        .payload_length = payload_length,
     };
 }
 
+/// Serialize a minimal QUIC short header using the supplied destination CID.
 pub fn encodeShortHeader(writer: anytype, header: ShortHeader) !void {
     if (header.dcid.len > 20) {
         return error.InvalidConnectionIdLength;
@@ -241,27 +276,26 @@ pub fn encodeShortHeader(writer: anytype, header: ShortHeader) !void {
     var first_byte: u8 = 0;
     first_byte |= 0x40; // Fixed Bit
     if (header.key_phase) first_byte |= 0x04;
-    first_byte |= @as(u8, pn_len - 1);
+    first_byte |= @as(u8, @intCast(pn_len - 1));
 
     try writer.writeByte(first_byte);
-
-    // Simplified encoding: prefix short-header DCID with length.
-    try writer.writeByte(@as(u8, @intCast(header.dcid.len)));
     try writer.writeAll(header.dcid);
     try encodePacketNumber(writer, header.packet_number, pn_len);
 }
 
-pub fn parseShortHeader(reader: anytype) !ShortHeader {
+/// Parse a minimal QUIC short header. `dcid_len` comes from connection context,
+/// because short headers do not carry a destination CID length on the wire.
+pub fn parseShortHeader(reader: anytype, allocator: std.mem.Allocator, dcid_len: usize) !ShortHeader {
     const first_byte = try reader.readByte();
     if ((first_byte & 0x80) != 0) return error.InvalidHeaderForm;
     if ((first_byte & 0x40) == 0) return error.InvalidFixedBit;
 
     const key_phase = (first_byte & 0x04) != 0;
-    const pn_len: u2 = @as(u2, @intCast(first_byte & 0x03)) + 1;
+    const pn_len: u8 = @as(u8, @intCast(first_byte & 0x03)) + 1;
 
-    const dcid_len = try reader.readByte();
     if (dcid_len > 20) return error.InvalidConnectionIdLength;
-    const dcid = try std.heap.page_allocator.alloc(u8, dcid_len);
+    const dcid = try allocator.alloc(u8, dcid_len);
+    errdefer allocator.free(dcid);
     try reader.readNoEof(dcid);
 
     const packet_number = try decodePacketNumber(reader, pn_len);
@@ -284,17 +318,20 @@ test "encode/parse long header roundtrip" {
         .packet_type = .initial,
         .token = &[_]u8{ 0xde, 0xad },
         .packet_number = 0x1234,
+        .payload_length = 10,
     };
 
     try encodeLongHeader(writer_fbs.writer(), input);
 
     const encoded = writer_fbs.getWritten();
     var reader_fbs = std.io.fixedBufferStream(encoded);
-    const parsed = try parseLongHeader(reader_fbs.reader());
+    var parsed = try parseLongHeader(reader_fbs.reader(), std.testing.allocator);
+    defer deinitLongHeader(&parsed, std.testing.allocator);
 
     try std.testing.expectEqual(input.version, parsed.version);
     try std.testing.expectEqual(input.packet_type, parsed.packet_type);
     try std.testing.expectEqual(input.packet_number, parsed.packet_number);
+    try std.testing.expectEqual(input.payload_length, parsed.payload_length);
     try std.testing.expectEqualSlices(u8, input.dcid, parsed.dcid);
     try std.testing.expectEqualSlices(u8, input.scid, parsed.scid);
     try std.testing.expectEqualSlices(u8, input.token, parsed.token);
@@ -313,12 +350,42 @@ test "encode/parse short header roundtrip" {
     try encodeShortHeader(writer_fbs.writer(), input);
 
     const encoded = writer_fbs.getWritten();
+    try std.testing.expectEqual(@as(usize, 10), encoded.len);
     var reader_fbs = std.io.fixedBufferStream(encoded);
-    const parsed = try parseShortHeader(reader_fbs.reader());
+    var parsed = try parseShortHeader(reader_fbs.reader(), std.testing.allocator, input.dcid.len);
+    defer deinitShortHeader(&parsed, std.testing.allocator);
 
     try std.testing.expectEqual(input.key_phase, parsed.key_phase);
     try std.testing.expectEqual(input.packet_number, parsed.packet_number);
     try std.testing.expectEqualSlices(u8, input.dcid, parsed.dcid);
+}
+
+test "parse long header rejects length shorter than packet number" {
+    const wire = [_]u8{
+        0xc1, // long + fixed + initial + 2-byte packet number
+        0x00, 0x00, 0x00, 0x01, // QUIC v1
+        0x00, // DCID len
+        0x00, // SCID len
+        0x00, // token len
+        0x01, // length shorter than the 2-byte packet number
+    };
+
+    var in = std.io.fixedBufferStream(&wire);
+    try std.testing.expectError(error.InvalidLength, parseLongHeader(in.reader(), std.testing.allocator));
+}
+
+test "parse short header rejects invalid caller dcid length" {
+    const wire = [_]u8{0x40};
+
+    var in = std.io.fixedBufferStream(&wire);
+    try std.testing.expectError(error.InvalidConnectionIdLength, parseShortHeader(in.reader(), std.testing.allocator, 21));
+}
+
+test "encodeVarInt rejects values outside QUIC range" {
+    var out: [8]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&out);
+
+    try std.testing.expectError(error.InvalidVarInt, encodeVarInt(fbs.writer(), 4611686018427387904));
 }
 
 test "encodeVarInt emits expected bytes at size boundaries" {
