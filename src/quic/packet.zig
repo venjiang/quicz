@@ -47,8 +47,10 @@ pub const ParsedHeader = union(HeaderForm) {
 pub const PacketError = error{
     InvalidHeaderForm,
     InvalidFixedBit,
+    InvalidReservedBits,
     InvalidConnectionIdLength,
     InvalidPacketNumber,
+    UnsupportedPacketType,
     UnexpectedToken,
     InvalidLength,
     InvalidVarInt,
@@ -177,6 +179,9 @@ pub fn encodeLongHeader(writer: anytype, header: LongHeader) !void {
     if (header.dcid.len > 20 or header.scid.len > 20) {
         return error.InvalidConnectionIdLength;
     }
+    if (header.packet_type == .retry) {
+        return error.UnsupportedPacketType;
+    }
     if (header.packet_type != .initial and header.token.len != 0) {
         return error.UnexpectedToken;
     }
@@ -218,8 +223,10 @@ pub fn parseLongHeader(reader: anytype, allocator: std.mem.Allocator) !LongHeade
     const first_byte = try reader.readByte();
     if ((first_byte & 0x80) == 0) return error.InvalidHeaderForm;
     if ((first_byte & 0x40) == 0) return error.InvalidFixedBit;
+    if ((first_byte & 0x0c) != 0) return error.InvalidReservedBits;
 
     const packet_type: PacketType = @enumFromInt(@as(u2, @intCast((first_byte >> 4) & 0x03)));
+    if (packet_type == .retry) return error.UnsupportedPacketType;
     const pn_len: u8 = @as(u8, @intCast(first_byte & 0x03)) + 1;
 
     var version_buf: [4]u8 = undefined;
@@ -289,6 +296,7 @@ pub fn parseShortHeader(reader: anytype, allocator: std.mem.Allocator, dcid_len:
     const first_byte = try reader.readByte();
     if ((first_byte & 0x80) != 0) return error.InvalidHeaderForm;
     if ((first_byte & 0x40) == 0) return error.InvalidFixedBit;
+    if ((first_byte & 0x18) != 0) return error.InvalidReservedBits;
 
     const key_phase = (first_byte & 0x04) != 0;
     const pn_len: u8 = @as(u8, @intCast(first_byte & 0x03)) + 1;
@@ -374,6 +382,37 @@ test "parse long header rejects length shorter than packet number" {
     try std.testing.expectError(error.InvalidLength, parseLongHeader(in.reader(), std.testing.allocator));
 }
 
+test "long header rejects non-zero reserved bits" {
+    const wire = [_]u8{
+        0xcc, // long + fixed + initial + reserved bits set
+    };
+
+    var in = buffer.fixedReader(&wire);
+    try std.testing.expectError(error.InvalidReservedBits, parseLongHeader(in.reader(), std.testing.allocator));
+}
+
+test "retry long header is outside the minimal codec" {
+    var out: [64]u8 = undefined;
+    var writer_fbs = buffer.fixedWriter(&out);
+
+    const retry = LongHeader{
+        .version = .v1,
+        .dcid = &[_]u8{0xaa},
+        .scid = &[_]u8{0xbb},
+        .packet_type = .retry,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    };
+    try std.testing.expectError(error.UnsupportedPacketType, encodeLongHeader(writer_fbs.writer(), retry));
+
+    const wire = [_]u8{
+        0xf0, // long + fixed + retry
+    };
+    var in = buffer.fixedReader(&wire);
+    try std.testing.expectError(error.UnsupportedPacketType, parseLongHeader(in.reader(), std.testing.allocator));
+}
+
 test "parse long header frees token when trailing length is invalid" {
     const wire = [_]u8{
         0xc1, // long + fixed + initial + 2-byte packet number
@@ -410,6 +449,15 @@ test "parse short header rejects invalid caller dcid length" {
 
     var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.InvalidConnectionIdLength, parseShortHeader(in.reader(), std.testing.allocator, 21));
+}
+
+test "short header rejects non-zero reserved bits" {
+    const wire = [_]u8{
+        0x58, // short + fixed + reserved bits set
+    };
+
+    var in = buffer.fixedReader(&wire);
+    try std.testing.expectError(error.InvalidReservedBits, parseShortHeader(in.reader(), std.testing.allocator, 0));
 }
 
 test "encodeVarInt rejects values outside QUIC range" {
