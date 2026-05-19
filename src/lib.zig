@@ -283,13 +283,6 @@ pub const QuicConnection = struct {
         return null;
     }
 
-    fn ensureRecvStreamState(self: *QuicConnection, stream_id: u64) Error!*RecvStreamState {
-        if (self.findRecvStream(stream_id)) |stream| return stream;
-
-        self.recv_streams.append(self.allocator, .{ .stream_id = stream_id }) catch return error.OutOfMemory;
-        return &self.recv_streams.items[self.recv_streams.items.len - 1];
-    }
-
     fn findRecvStream(self: *QuicConnection, stream_id: u64) ?*RecvStreamState {
         for (self.recv_streams.items) |*stream| {
             if (stream.stream_id == stream_id) return stream;
@@ -300,15 +293,33 @@ pub const QuicConnection = struct {
     fn receiveStreamFrame(self: *QuicConnection, stream_frame: frame.StreamFrame) Error!void {
         if (stream_frame.stream_id > max_quic_varint) return error.InvalidStream;
 
-        const stream_state = try self.ensureRecvStreamState(stream_frame.stream_id);
-        if (stream_state.final_size != null) return error.InvalidPacket;
+        const existing_state = self.findRecvStream(stream_frame.stream_id);
+        if (existing_state) |stream_state| {
+            if (stream_state.final_size != null) return error.InvalidPacket;
+        }
 
-        const expected_offset = std.math.cast(u64, stream_state.data.items.len) orelse return error.Internal;
+        const expected_offset = if (existing_state) |stream_state|
+            std.math.cast(u64, stream_state.data.items.len) orelse return error.Internal
+        else
+            0;
         if (stream_frame.offset != expected_offset) {
             return error.InvalidPacket;
         }
 
         const end_offset = streamEndOffset(stream_frame.offset, stream_frame.data.len) orelse return error.InvalidPacket;
+
+        var appended_recv_state = false;
+        errdefer if (appended_recv_state) {
+            var removed = self.recv_streams.orderedRemove(self.recv_streams.items.len - 1);
+            removed.deinit(self.allocator);
+        };
+
+        const stream_state = existing_state orelse blk: {
+            self.recv_streams.append(self.allocator, .{ .stream_id = stream_frame.stream_id }) catch return error.OutOfMemory;
+            appended_recv_state = true;
+            break :blk &self.recv_streams.items[self.recv_streams.items.len - 1];
+        };
+
         stream_state.data.appendSlice(self.allocator, stream_frame.data) catch return error.OutOfMemory;
         if (stream_frame.fin) {
             stream_state.final_size = end_offset;
@@ -487,6 +498,23 @@ test "processDatagram rejects payloads larger than configured datagram size" {
     };
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, &wire));
+}
+
+test "processDatagram does not create state for out-of-order new streams" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 1,
+        .fin = false,
+        .data = "x",
+    } });
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
 }
 
 test "receive stream rejects data after final size" {
