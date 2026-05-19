@@ -160,6 +160,7 @@ const RecvStreamState = struct {
     data: std.ArrayList(u8) = .empty,
     read_offset: usize = 0,
     final_size: ?u64 = null,
+    reset_error_code: ?u64 = null,
 
     fn deinit(self: *RecvStreamState, allocator: std.mem.Allocator) void {
         self.data.deinit(allocator);
@@ -170,6 +171,7 @@ const RecvStreamSnapshot = struct {
     data_len: usize,
     read_offset: usize,
     final_size: ?u64,
+    reset_error_code: ?u64,
 };
 
 /// Experimental QUIC connection handle.
@@ -285,6 +287,7 @@ pub const QuicConnection = struct {
                 .data_len = stream.data.items.len,
                 .read_offset = stream.read_offset,
                 .final_size = stream.final_size,
+                .reset_error_code = stream.reset_error_code,
             };
         }
         errdefer {
@@ -320,6 +323,7 @@ pub const QuicConnection = struct {
                 .max_data => |max_data| self.receiveMaxDataFrame(max_data),
                 .max_stream_data => |max_stream_data| self.receiveMaxStreamDataFrame(max_stream_data),
                 .max_streams_bidi => |max_streams| self.receiveMaxStreamsBidiFrame(max_streams),
+                .reset_stream => |reset_stream| try self.receiveResetStreamFrame(reset_stream),
                 .stream => |stream_frame| try self.receiveStreamFrame(stream_frame),
                 .connection_close, .application_close => self.closed = true,
                 else => {},
@@ -503,7 +507,8 @@ pub const QuicConnection = struct {
         self.sent_stream_data_bytes = next_sent_total;
     }
 
-    /// Read queued data for a stream. Returns null when no data is available.
+    /// Read queued data for a stream. Returns null when no data is available,
+    /// or `StreamClosed` when the peer reset the receive side.
     pub fn recvOnStream(
         self: *QuicConnection,
         stream_id: u64,
@@ -512,6 +517,7 @@ pub const QuicConnection = struct {
         if (self.closed) return error.ConnectionClosed;
 
         const stream_state = self.findRecvStream(stream_id) orelse return null;
+        if (stream_state.reset_error_code != null) return error.StreamClosed;
         if (stream_state.read_offset >= stream_state.data.items.len) return null;
 
         const available = stream_state.data.items[stream_state.read_offset..];
@@ -576,6 +582,7 @@ pub const QuicConnection = struct {
             stream.data.items.len = snapshot.data_len;
             stream.read_offset = snapshot.read_offset;
             stream.final_size = snapshot.final_size;
+            stream.reset_error_code = snapshot.reset_error_code;
         }
     }
 
@@ -674,6 +681,42 @@ pub const QuicConnection = struct {
 
     fn receiveMaxStreamsBidiFrame(self: *QuicConnection, max_streams: frame.MaxStreamsBidiFrame) void {
         self.peer_max_streams_bidi = @max(self.peer_max_streams_bidi, max_streams.maximum_streams);
+    }
+
+    fn receiveResetStreamFrame(self: *QuicConnection, reset: frame.ResetStreamFrame) Error!void {
+        if (reset.stream_id > max_quic_varint) return error.InvalidStream;
+        if (reset.final_size > self.recv_max_stream_data) return error.InvalidPacket;
+
+        const existing_state = self.findRecvStream(reset.stream_id);
+        var appended_recv_state = false;
+        errdefer if (appended_recv_state) {
+            var removed = self.recv_streams.orderedRemove(self.recv_streams.items.len - 1);
+            removed.deinit(self.allocator);
+        };
+
+        const stream_state = existing_state orelse blk: {
+            self.recv_streams.append(self.allocator, .{ .stream_id = reset.stream_id }) catch return error.OutOfMemory;
+            appended_recv_state = true;
+            break :blk &self.recv_streams.items[self.recv_streams.items.len - 1];
+        };
+
+        const current_size = std.math.cast(u64, stream_state.data.items.len) orelse return error.Internal;
+        if (reset.final_size < current_size) return error.InvalidPacket;
+        if (stream_state.final_size) |final_size| {
+            if (final_size != reset.final_size) return error.InvalidPacket;
+            if (stream_state.reset_error_code == null) {
+                stream_state.reset_error_code = reset.application_error_code;
+            }
+            return;
+        }
+
+        const delta = reset.final_size - current_size;
+        const next_recv_total = std.math.add(u64, self.recv_data_bytes, delta) catch return error.InvalidPacket;
+        if (next_recv_total > self.recv_max_data) return error.InvalidPacket;
+
+        self.recv_data_bytes = next_recv_total;
+        stream_state.final_size = reset.final_size;
+        stream_state.reset_error_code = reset.application_error_code;
     }
 
     fn receiveStreamFrame(self: *QuicConnection, stream_frame: frame.StreamFrame) Error!void {
@@ -1091,6 +1134,96 @@ test "processDatagram and recvOnStream move stream data" {
     const n = (try server.recvOnStream(stream_id, &read_buf)).?;
     try std.testing.expectEqualStrings("hello world", read_buf[0..n]);
     try std.testing.expectEqual(@as(?usize, null), try server.recvOnStream(stream_id, &read_buf));
+}
+
+test "RESET_STREAM closes receive stream and accounts final size once" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 10,
+    });
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 0,
+        .application_error_code = 42,
+        .final_size = 5,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+    try std.testing.expectEqual(@as(?u64, 42), conn.recv_streams.items[0].reset_error_code);
+
+    var read_buf: [8]u8 = undefined;
+    try std.testing.expectError(error.StreamClosed, conn.recvOnStream(0, &read_buf));
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 0,
+        .application_error_code = 99,
+        .final_size = 5,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+    try std.testing.expectEqual(@as(?u64, 42), conn.recv_streams.items[0].reset_error_code);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 4,
+        .offset = 0,
+        .fin = false,
+        .data = "x",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+}
+
+test "RESET_STREAM rejects inconsistent final size and rolls back state" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "abc",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 0,
+        .application_error_code = 1,
+        .final_size = 2,
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(u64, 3), conn.recv_data_bytes);
+    try std.testing.expectEqual(@as(?u64, null), conn.recv_streams.items[0].reset_error_code);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvOnStream(0, &read_buf)).?;
+    try std.testing.expectEqualStrings("abc", read_buf[0..n]);
+}
+
+test "RESET_STREAM flow-control violation does not create receive state" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 2,
+        .initial_max_stream_data = 10,
+    });
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 0,
+        .application_error_code = 1,
+        .final_size = 3,
+    } });
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(u64, 0), conn.recv_data_bytes);
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
 }
 
 test "connection close frame closes public connection API" {
