@@ -704,9 +704,6 @@ pub const QuicConnection = struct {
         if (reset.final_size < current_size) return error.InvalidPacket;
         if (stream_state.final_size) |final_size| {
             if (final_size != reset.final_size) return error.InvalidPacket;
-            if (stream_state.reset_error_code == null) {
-                stream_state.reset_error_code = reset.application_error_code;
-            }
             return;
         }
 
@@ -1204,6 +1201,35 @@ test "RESET_STREAM rejects inconsistent final size and rolls back state" {
     var read_buf: [8]u8 = undefined;
     const n = (try conn.recvOnStream(0, &read_buf)).?;
     try std.testing.expectEqualStrings("abc", read_buf[0..n]);
+}
+
+test "RESET_STREAM after FIN with same final size keeps received data readable" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = true,
+        .data = "abc",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 0,
+        .application_error_code = 1,
+        .final_size = 3,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(?u64, null), conn.recv_streams.items[0].reset_error_code);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvOnStream(0, &read_buf)).?;
+    try std.testing.expectEqualStrings("abc", read_buf[0..n]);
+    try std.testing.expectEqual(@as(?usize, null), try conn.recvOnStream(0, &read_buf));
 }
 
 test "RESET_STREAM flow-control violation does not create receive state" {
