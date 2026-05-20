@@ -108,14 +108,16 @@ pub fn main() !void {
     // CRYPTO frames are received into a contiguous in-memory handshake buffer.
     // sendPing() queues an ack-eliciting PING frame. ACK, MAX_DATA,
     // MAX_STREAM_DATA, and MAX_STREAMS_BIDI/UNI frames update
-    // in-memory recovery and flow-control state; MAX_STREAM_DATA validates the
-    // stream state before updating send credit; PATH_CHALLENGE queues a matching
-    // PATH_RESPONSE; PATH_RESPONSE is rejected until outbound challenge tracking
-    // exists; NEW_TOKEN and HANDSHAKE_DONE are accepted only by client
+    // in-memory recovery and flow-control state; ACK_ECN uses the ACK ranges for
+    // recovery but ECN counter validation is not modeled yet. MAX_STREAM_DATA
+    // validates the stream state before updating send credit; PATH_CHALLENGE
+    // queues a matching PATH_RESPONSE; PATH_RESPONSE is rejected until outbound
+    // challenge tracking exists; NEW_TOKEN and HANDSHAKE_DONE are accepted only by client
     // connections; STOP_SENDING closes the matching send side and queues
     // RESET_STREAM; RESET_STREAM marks the receive side closed unless the stream
-    // already finished with the same final size. Protected packetization is still
-    // outside this API.
+    // already finished with the same final size. BLOCKED and connection-id
+    // frames are codec-level only in the connection skeleton. Protected
+    // packetization is still outside this API.
     // Full UDP packetization, TLS, and packet protection are still pending.
 }
 ```

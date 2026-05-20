@@ -26,13 +26,15 @@
 - 本地发起的 bidirectional stream 必须先通过 `openStream()` 创建，才能调用 `sendOnStream()`；`openStream()` 会遵守对端 bidirectional stream limit，直到收到更大的 MAX_STREAMS_BIDI 帧。
 - 本地发起的 unidirectional stream 必须先通过 `openUniStream()` 创建，才能调用 `sendOnStream()`；`openUniStream()` 会遵守对端 unidirectional stream limit，直到收到更大的 MAX_STREAMS_UNI 帧。
 - `sendOnStream()` 可用于回复已观察到的对端发起 bidirectional stream，当前内存态 echo 示例依赖这个行为；也可用于已打开的本地 unidirectional stream。它会拒绝未观察到的对端发起 stream、未打开的本地发起 stream、对端发起的 unidirectional stream ID、已经发送 FIN 的 stream，以及被流控阻塞的写入。
+- `recvOnStream()` 可读取 bidirectional stream 与对端发起的 unidirectional 接收流。本地发起的 unidirectional stream ID 只有发送侧语义，在接收 API 上会被拒绝。
 - 入站 `MAX_STREAM_DATA` 只会更新本端拥有发送侧的 stream credit。未创建的本地发起 stream 与 receive-only 的对端单向 stream 会被拒绝；对于已观察到的对端发起 bidirectional stream，它可以预创建发送状态，让后续回复使用对端通告的 credit。
 - `processDatagram()` 接受已建模的 bidirectional STREAM/RESET_STREAM 接收状态，以及对端发起的 unidirectional STREAM/RESET_STREAM 接收状态。它会拒绝未打开的本地 bidirectional stream ID、入站本地 unidirectional stream ID、超过接收 stream-count limit 的对端发起 stream、乱序新 stream 数据、final size 之后的数据、final size 不一致的 RESET_STREAM、超出大小限制的 frame payload，以及确认从未发送 packet number 的 ACK。
+- ACK_ECN 帧会复用普通 ACK 的 range 处理来更新 sent-packet recovery。ECN counter 目前只在 frame 层解析，connection 骨架尚未建模 ECN 校验。
 - 入站 `STOP_SENDING` 只接受本端拥有发送侧的 stream。它会关闭该发送侧，使用当前 final size 排队 `RESET_STREAM`，在 reset 发出后丢弃该 stream 未发送的 STREAM 数据，并在 reset 已排队后忽略重复 stop 请求。
 - 入站 `NEW_TOKEN` 只允许 client 连接接收；server 侧收到该帧会把整个 payload 判为无效，并回滚本 payload 中更早的状态变更。
 - 入站 `HANDSHAKE_DONE` 只允许 client 连接接收；server 侧收到该帧会把整个 payload 判为无效，并回滚本 payload 中更早的状态变更。
 - 无效的多帧 payload 会回滚本次 payload 中已经改变的状态，包括 CRYPTO 接收缓存、stream 接收缓存、RESET_STREAM 状态、已排队 PATH_RESPONSE/RESET_STREAM 值、MAX_DATA/MAX_STREAMS_BIDI/UNI 更新、待发送 ACK 状态、sent-packet recovery 状态与关闭状态。
-- 当前 `pollTx` / `processDatagram` 只流转未加密 QUIC frame payload 字节。`pollTx` 可能发送 ACK-only payload、已排队 CRYPTO、PATH_RESPONSE、RESET_STREAM 或 STREAM payload，或在空间允许时合并待发送 ACK；它还不会生成或消费带 packet protection 的真实 UDP QUIC packet。
-- 尚未实现：TLS 1.3 集成、packet protection、独立 packet number spaces、完整 RFC 9002 loss timer 和 packet-threshold loss detection、UDP 四元组连接归属、乱序 stream 重组、QUIC v2 行为、完整路径迁移策略与 stateless reset。
+- 当前 `pollTx` / `processDatagram` 只流转未加密 QUIC frame payload 字节。`pollTx` 可能发送 ACK-only payload、已排队 PING、CRYPTO、PATH_RESPONSE、RESET_STREAM 或 STREAM payload，或在空间允许时合并待发送 ACK；它还不会生成或消费带 packet protection 的真实 UDP QUIC packet。
+- 尚未实现：TLS 1.3 集成、packet protection、独立 packet number spaces、完整 RFC 9002 loss timer 和 packet-threshold loss detection、UDP 四元组连接归属、乱序 stream 重组、ECN 校验、outbound path challenge 跟踪、token 存储、connection-id 生命周期处理、BLOCKED 帧状态响应、QUIC v2 行为、完整路径迁移策略与 stateless reset。
 
 后续阶段会逐步扩展，最终覆盖完整 RFC 范围。

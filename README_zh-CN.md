@@ -110,12 +110,14 @@ pub fn main() !void {
     // CRYPTO 帧会进入连续的内存态握手缓冲。sendPing() 会排队一个
     // ack-eliciting PING 帧。ACK、MAX_DATA、MAX_STREAM_DATA 与
     // MAX_STREAMS_BIDI/UNI 帧会更新内存态 recovery 与流控
-    // 状态；MAX_STREAM_DATA 会先校验 stream 状态再更新发送 credit；
+    // 状态；ACK_ECN 只使用其中的 ACK ranges 更新 recovery，尚未建模 ECN
+    // counter 校验。MAX_STREAM_DATA 会先校验 stream 状态再更新发送 credit；
     // PATH_CHALLENGE 会排队匹配的 PATH_RESPONSE；在 outbound challenge 跟踪
     // 尚未实现前，PATH_RESPONSE 会被拒绝；NEW_TOKEN 和 HANDSHAKE_DONE
     // 只允许 client 连接接收；STOP_SENDING 会关闭对应发送侧并排队
     // RESET_STREAM；RESET_STREAM 会关闭接收侧，除非该 stream 已经以相同 final
-    // size 完成。带 packet protection 的 packetization 仍不在这个 API 内。
+    // size 完成。BLOCKED 与 connection-id 相关帧目前只在 codec 层支持。
+    // 带 packet protection 的 packetization 仍不在这个 API 内。
     // 完整 UDP packetization、TLS 与 packet protection 仍未实现。
 }
 ```
