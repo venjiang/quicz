@@ -21,6 +21,9 @@ fn readCryptoRequired(
 
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const initial_secrets = try quicz.protection.deriveInitialSecrets(.v1, &dcid);
 
     var client = try quicz.QuicConnection.init(gpa, .client, .{});
     defer client.deinit();
@@ -33,9 +36,20 @@ pub fn main() !void {
 
     try client.sendCryptoInSpace(.initial, "client initial flight");
     const initial_payload = try pollRequired(&client, .initial, 0, &datagram);
-    try server.processDatagramInSpace(.initial, 1, initial_payload);
+    const initial_packet_number: u64 = 0;
+    const protected_initial = try quicz.protection.protectLongPacketAes128(gpa, .{
+        .version = .v1,
+        .dcid = &dcid,
+        .scid = &client_scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = initial_packet_number,
+        .payload_length = 0,
+    }, try quicz.packet.encodePacketNumberForHeader(initial_packet_number, null), initial_secrets.client, initial_payload);
+    defer gpa.free(protected_initial);
+    try server.processInitialProtectedDatagram(1, initial_secrets.client, protected_initial);
     const initial_bytes = try readCryptoRequired(&server, .initial, &crypto_buf);
-    std.debug.print("[crypto] initial recv={s} pending_ack={?}\n", .{
+    std.debug.print("[crypto] protected_initial recv={s} pending_ack={?}\n", .{
         initial_bytes,
         server.pendingAckLargest(.initial),
     });

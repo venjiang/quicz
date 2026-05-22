@@ -22,8 +22,9 @@ Deferred standards and extensions:
 - Multipath and other in-progress QUIC WG drafts
 
 The current codebase is still an experimental frame-payload transport skeleton.
-`pollTx` and `processDatagram` move unencrypted QUIC frame payload bytes. They
-do not yet produce or consume protected QUIC packets over UDP.
+`pollTx` and `processDatagram` move unencrypted QUIC frame payload bytes. The
+connection layer now has one receive-side Initial protected long-packet bridge,
+but it does not yet fully produce or consume QUIC packets over UDP.
 
 ## Task Matrix
 
@@ -34,8 +35,8 @@ do not yet produce or consume protected QUIC packets over UDP.
 | RFC 9000 frame codec | Frame set present + partial packet-type validation | Cover all RFC 9000 transport frames with strict value validation and stable error mapping. | Per-frame encode/decode tests for valid, truncated, invalid, and unknown inputs. |
 | Transport parameters | Partial connection exposure | Add typed transport parameter parsing, serialization, validation, and handshake exposure. | Roundtrip tests, duplicate/invalid parameter tests, connection apply/export tests, and default-value tests. |
 | Connection state machine | Partial close-state + idle timeout | Model Initial, Handshake, 0-RTT, 1-RTT, idle timeout, closing, draining, and closed states. | Existing tests cover close/drain transitions, close expiry, idle expiry, and invalid-packet rollback; later protected-packet tests cover key-state transitions. |
-| Packet number spaces | Partial frame-payload ACK/recovery + CRYPTO isolation + frame-type filtering + discard cleanup | Maintain distinct Initial, Handshake, and Application packet number spaces, then route protected packets into the matching space with real TLS key discard rules. | Existing ACK/recovery, CRYPTO isolation, forbidden-frame, and discard tests prove isolation and cleanup between spaces; later protected-packet tests prove routing. |
-| Real datagram API | Initial protected long-packet helper only | Add protected QUIC datagram receive/transmit APIs above the existing frame-payload skeleton. | Existing helper tests cover one protected Initial packet; later local client/server loopback must exchange protected packets. |
+| Packet number spaces | Partial frame-payload ACK/recovery + CRYPTO isolation + Initial protected receive bridge + frame-type filtering + discard cleanup | Maintain distinct Initial, Handshake, and Application packet number spaces, then route protected packets into the matching space with real TLS key discard rules. | Existing ACK/recovery, CRYPTO isolation, Initial protected receive, forbidden-frame, and discard tests prove isolation and cleanup between spaces; later protected transmit/coalesced tests prove full routing. |
+| Real datagram API | Initial protected receive bridge + protected long-packet helper | Add protected QUIC datagram receive/transmit APIs above the existing frame-payload skeleton. | Existing helper tests cover one protected Initial packet; connection tests cover protected Initial decryption and CRYPTO delivery; later local client/server loopback must exchange protected packets. |
 | TLS integration | CRYPTO bridge hooks present, TLS backend missing | Use a pluggable TLS backend interface driven by CRYPTO frames. | Handshake transcript tests and local 1-RTT establishment test. |
 | Packet protection | Partial v1 Initial keys + AES-GCM payload/header protection + protected long-packet helpers | Implement Initial, Handshake, 0-RTT, and 1-RTT key derivation, header protection, AEAD protection, key discard, and key update. | RFC-vector or fixed-vector tests for key derivation and packet protection. |
 | Streams | Partial receive reassembly + FIN completion + local reset/stop observability | Complete stream state machines, FIN/reset rules, and read/write behavior beyond the current in-memory reassembly skeleton. | Bidirectional, unidirectional, FIN, reset, STOP_SENDING, out-of-order, overlap, rollback, and final-size tests. |
@@ -304,13 +305,26 @@ do not yet produce or consume protected QUIC packets over UDP.
   roundtrip, authentication failure, and too-short header-protection sample
   rejection. Endpoint routing, coalesced-packet receive loops, Handshake/1-RTT
   traffic secrets, key discard, and key update remain pending.
-- 2026-05-22: Added `retryIntegrityTag()` and `verifyRetryIntegrityTag()` for
-  RFC 9001 Retry Packet Integrity. The helper builds the Retry pseudo-packet
-  from the Original Destination Connection ID and the transmitted Retry bytes
-  without the final tag, then computes the fixed-key AEAD_AES_128_GCM tag.
-  Tests cover the RFC 9001 Appendix A.4 Retry vector, tamper rejection, invalid
-  Original DCID length, and too-short Retry datagrams. Cryptographic Retry token
-  generation, expiration, and address binding remain pending endpoint policy.
+- 2026-05-22: Added `QuicConnection.processInitialProtectedDatagram()`. This
+  connection-layer bridge opens one QUIC v1 protected Initial long packet with
+  caller-supplied RFC 9001 Initial keys, validates the packet type, packet
+  number, and single-packet datagram boundary, then routes the plaintext frame
+  payload into the Initial packet number space. Tests cover protected Initial
+  CRYPTO delivery, ACK generation, next peer packet-number advancement, and
+  tampered-packet rollback. Protected transmit packetization, coalesced receive
+  loops, Handshake/1-RTT traffic secrets, key discard, and key update remain
+  pending.
+- 2026-05-22: Added `retryIntegrityTag()`, `verifyRetryIntegrityTag()`,
+  `encodeRetryPacketWithIntegrity()`, and `parseRetryPacketWithIntegrity()` for
+  RFC 9001 Retry Packet Integrity. The lower-level helper builds the Retry
+  pseudo-packet from the Original Destination Connection ID and the transmitted
+  Retry bytes without the final tag, then computes the fixed-key
+  AEAD_AES_128_GCM tag. The integrated helpers serialize a QUIC v1 Retry packet
+  with a valid tag and verify before parsing. Tests cover the RFC 9001 Appendix
+  A.4 Retry vector, integrated encode/verify/parse, tamper rejection, invalid
+  Original DCID length, unsupported version rejection, and too-short Retry
+  datagrams. Cryptographic Retry token generation, expiration, and address
+  binding remain pending endpoint policy.
 - 2026-05-22: Added `examples/initial_keys.zig` and
   `zig build run-initial-keys`. The example prints the RFC 9001 Appendix A
   v1 Initial client/server key, IV, AES header-protection mask, and protected
@@ -394,8 +408,10 @@ do not yet produce or consume protected QUIC packets over UDP.
   `sendCryptoInSpace()`, `recvCryptoInSpace()`, and `pollTxInSpace()`. Initial,
   Handshake, and Application CRYPTO offsets, queues, receive buffers, ACKs, and
   sent-packet tracking are now independently testable. `examples/crypto_stream.zig`
-  and `zig build run-crypto-stream` demonstrate the modeled TLS bridge flow.
-  A real TLS backend and packet protection remain pending.
+  and `zig build run-crypto-stream` demonstrate the modeled TLS bridge flow;
+  the Initial flight now passes through the protected Initial receive bridge.
+  A real TLS backend, protected transmit, and later encryption levels remain
+  pending.
 
 ## Public Interface Plan
 
@@ -444,7 +460,7 @@ run from `build.zig`.
 | `loss_recovery` | Current frame-payload packet-threshold loss, time-threshold loss, NewReno recovery period, persistent congestion, and ACK-delay handling. | Present |
 | `pto_recovery` | Current frame-payload Initial/Handshake/Application PTO PING timeout hooks. | Present |
 | `address_validation` | Current modeled server anti-amplification budget and explicit peer-address validation. | Present |
-| `retry_token` | Current Retry packet integrity-tag generation/verification, token loopback, one-time token consumption, and address-validation unblocking. | Present |
+| `retry_token` | Current Retry packet integrity-tag encode/verify/parse, token loopback, one-time token consumption, and address-validation unblocking. | Present |
 | `interop_client` | Manual or optional external-server interop check. | Planned |
 
 ## Verification Rules

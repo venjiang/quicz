@@ -1750,6 +1750,46 @@ pub const QuicConnection = struct {
         );
     }
 
+    /// Remove Initial packet protection and process the decrypted frame payload.
+    ///
+    /// This is the first protected-packet bridge for the connection skeleton. It
+    /// accepts exactly one QUIC v1 Initial long packet, decrypts it with caller
+    /// supplied Initial keys, requires the packet number to match the next
+    /// expected Initial packet number, then routes the plaintext through the
+    /// existing Initial packet number space frame handler. Coalesced packets,
+    /// Retry, Handshake, 0-RTT, and 1-RTT protection remain endpoint work.
+    pub fn processInitialProtectedDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) Error!void {
+        const expected_packet_number = self.nextPeerPacketNumber(.initial);
+        var decoded = protection.unprotectLongPacketAes128(
+            self.allocator,
+            keys,
+            datagram,
+            expected_packet_number,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidPacket,
+        };
+        defer protection.deinitProtectedLongPacket(&decoded, self.allocator);
+
+        if (decoded.len != datagram.len) return error.InvalidPacket;
+        if (decoded.packet.header.version != .v1 or decoded.packet.header.packet_type != .initial) {
+            return error.InvalidPacket;
+        }
+        if (decoded.packet.header.packet_number != expected_packet_number) return error.InvalidPacket;
+
+        try self.processDatagramInSpaceWithPacketType(
+            .initial,
+            .initial,
+            now_millis,
+            decoded.packet.plaintext,
+        );
+    }
+
     /// Process one frame-payload datagram using RFC 9000 packet-type frame rules.
     ///
     /// 0-RTT and 1-RTT both use the Application packet number space, but 0-RTT
@@ -6002,6 +6042,69 @@ test "discardPacketNumberSpace clears Initial recovery and prevents reuse" {
     const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
     try std.testing.expectError(error.InvalidPacket, conn.processDatagramInSpace(.initial, 700, &ping));
     try std.testing.expectError(error.InvalidPacket, conn.discardPacketNumberSpace(.application));
+}
+
+test "processInitialProtectedDatagram opens Initial packet into Initial space" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try client.sendCryptoInSpace(.initial, "client initial");
+    var payload_buf: [128]u8 = undefined;
+    const payload = (try client.pollTxInSpace(.initial, 0, &payload_buf)) orelse return error.TestUnexpectedResult;
+
+    const packet_number: u64 = 0;
+    const protected = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &dcid,
+        .scid = &scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = packet_number,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(packet_number, null), secrets.client, payload);
+    defer std.testing.allocator.free(protected);
+
+    try server.processInitialProtectedDatagram(1, secrets.client, protected);
+
+    var crypto_buf: [32]u8 = undefined;
+    const recv_len = (try server.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("client initial", crypto_buf[0..recv_len]);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
+}
+
+test "processInitialProtectedDatagram rejects tampered packet without state changes" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    const protected = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &dcid,
+        .scid = &scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, "plaintext");
+    defer std.testing.allocator.free(protected);
+
+    const tampered = try std.testing.allocator.dupe(u8, protected);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+
+    try std.testing.expectError(error.InvalidPacket, server.processInitialProtectedDatagram(1, secrets.client, tampered));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
 }
 
 test "packet number spaces reject frames forbidden by RFC 9000 packet type rules" {
