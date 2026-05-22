@@ -1790,6 +1790,96 @@ pub const QuicConnection = struct {
         );
     }
 
+    /// Return the next protected Initial CRYPTO datagram, or null if idle.
+    ///
+    /// The returned datagram is allocated with the connection allocator and must
+    /// be freed by the caller. This bridges the Initial CRYPTO send queue to the
+    /// RFC 9001 long-packet protection helper while preserving packet-number,
+    /// sent-packet, recovery, anti-amplification, and idle-timeout accounting.
+    /// ACK-only, PING-only, coalesced packets, Retry, Handshake, 0-RTT, and
+    /// 1-RTT protected transmit remain endpoint work.
+    pub fn pollInitialProtectedDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+        token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+    ) Error!?[]u8 {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+
+        var packet_space = self.packetNumberSpace(.initial);
+        if (packet_space.discarded.*) return error.InvalidPacket;
+        if (packet_space.crypto_send_queue.items.len == 0) return null;
+        if (packet_space.next_packet_number.* > max_quic_varint) return error.Internal;
+
+        const pending = packet_space.crypto_send_queue.items[0];
+        const crypto_encoded_len = try cryptoFrameWireLen(pending.offset, pending.data.len);
+        const packet_number = packet_space.next_packet_number.*;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            packet_space.largest_acknowledged.*,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(crypto_encoded_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        frame.encodeFrame(plaintext_out.writer(), .{ .crypto = .{
+            .offset = pending.offset,
+            .data = pending.data,
+        } }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectLongPacketAes128(self.allocator, .{
+            .version = .v1,
+            .dcid = dcid,
+            .scid = scid,
+            .packet_type = .initial,
+            .token = token,
+            .packet_number = packet_number,
+            .payload_length = 0,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) {
+            self.allocator.free(datagram);
+            return error.BufferTooSmall;
+        }
+        if (!packet_space.recovery_state.canSend(datagram.len) or !self.canSendToPeerAddress(datagram.len)) {
+            self.allocator.free(datagram);
+            return null;
+        }
+
+        packet_space.sent_packets.append(self.allocator, .{
+            .packet_number = packet_number,
+            .sent_time_millis = now_millis,
+            .bytes = datagram.len,
+        }) catch return error.OutOfMemory;
+        errdefer _ = packet_space.sent_packets.orderedRemove(packet_space.sent_packets.items.len - 1);
+
+        const removed = packet_space.crypto_send_queue.orderedRemove(0);
+        self.allocator.free(removed.data);
+        packet_space.next_packet_number.* = std.math.add(u64, packet_number, 1) catch return error.Internal;
+        packet_space.recovery_state.onPacketSent(datagram.len);
+        self.recordPeerAddressBytesSent(datagram.len);
+        self.recordPacketActivity(now_millis);
+        return datagram;
+    }
+
     /// Process one frame-payload datagram using RFC 9000 packet-type frame rules.
     ///
     /// 0-RTT and 1-RTT both use the Application packet number space, but 0-RTT
@@ -6105,6 +6195,57 @@ test "processInitialProtectedDatagram rejects tampered packet without state chan
     try std.testing.expectError(error.InvalidPacket, server.processInitialProtectedDatagram(1, secrets.client, tampered));
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.initial));
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
+}
+
+test "pollInitialProtectedDatagram emits protected Initial CRYPTO packet" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try client.sendCryptoInSpace(.initial, "client initial");
+    const protected = (try client.pollInitialProtectedDatagram(
+        0,
+        &dcid,
+        &scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.initial));
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.initial));
+    try std.testing.expectEqual(protected.len, client.bytesInFlight(.initial));
+
+    try server.processInitialProtectedDatagram(1, secrets.client, protected);
+    var crypto_buf: [32]u8 = undefined;
+    const recv_len = (try server.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("client initial", crypto_buf[0..recv_len]);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
+}
+
+test "pollInitialProtectedDatagram leaves Initial space idle when no CRYPTO is queued" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    try std.testing.expectEqual(@as(?[]u8, null), try client.pollInitialProtectedDatagram(
+        0,
+        &dcid,
+        &scid,
+        &[_]u8{},
+        secrets.client,
+    ));
+    try std.testing.expectEqual(@as(u64, 0), client.nextPacketNumber(.initial));
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.initial));
 }
 
 test "packet number spaces reject frames forbidden by RFC 9000 packet type rules" {

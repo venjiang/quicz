@@ -35,17 +35,13 @@ pub fn main() !void {
     var crypto_buf: [128]u8 = undefined;
 
     try client.sendCryptoInSpace(.initial, "client initial flight");
-    const initial_payload = try pollRequired(&client, .initial, 0, &datagram);
-    const initial_packet_number: u64 = 0;
-    const protected_initial = try quicz.protection.protectLongPacketAes128(gpa, .{
-        .version = .v1,
-        .dcid = &dcid,
-        .scid = &client_scid,
-        .packet_type = .initial,
-        .token = &[_]u8{},
-        .packet_number = initial_packet_number,
-        .payload_length = 0,
-    }, try quicz.packet.encodePacketNumberForHeader(initial_packet_number, null), initial_secrets.client, initial_payload);
+    const protected_initial = (try client.pollInitialProtectedDatagram(
+        0,
+        &dcid,
+        &client_scid,
+        &[_]u8{},
+        initial_secrets.client,
+    )) orelse return error.UnexpectedState;
     defer gpa.free(protected_initial);
     try server.processInitialProtectedDatagram(1, initial_secrets.client, protected_initial);
     const initial_bytes = try readCryptoRequired(&server, .initial, &crypto_buf);

@@ -213,9 +213,10 @@ pub fn main() !void {
     // closes active connections at the modeled idle deadline. connectionState()
     // exposes active/closing/draining/closed lifecycle state.
     // DCID routing is still outside this skeleton.
-    // The connection layer can receive one protected Initial long packet through
-    // processInitialProtectedDatagram(); protected transmit, coalescing, full UDP
-    // packetization, TLS, and later encryption levels are still pending.
+    // The connection layer can send Initial CRYPTO through
+    // pollInitialProtectedDatagram() and receive one protected Initial long packet
+    // through processInitialProtectedDatagram(); coalescing, full UDP packetization,
+    // TLS, and later encryption levels are still pending.
 }
 ```
 

@@ -204,9 +204,10 @@ pub fn main() !void {
     // 收发会刷新 idleTimeoutDeadlineMillis()，checkIdleTimeouts() 会在建模的
     // idle deadline 到期时关闭 active 连接。connectionState() 会暴露 active/closing/draining/closed
     // 生命周期状态。DCID routing 仍不在这个骨架内。
-    // 连接层现在可通过 processInitialProtectedDatagram() 接收单个 protected
-    // Initial long packet；protected transmit、coalescing、完整 UDP
-    // packetization、TLS 和后续 encryption level 仍未实现。
+    // 连接层现在可通过 pollInitialProtectedDatagram() 发送 Initial CRYPTO，
+    // 并通过 processInitialProtectedDatagram() 接收单个 protected Initial
+    // long packet；coalescing、完整 UDP packetization、TLS 和后续 encryption
+    // level 仍未实现。
 }
 ```
 
