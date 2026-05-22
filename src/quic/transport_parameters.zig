@@ -1,0 +1,487 @@
+const std = @import("std");
+const buffer = @import("buffer.zig");
+const packet = @import("packet.zig");
+
+const max_connection_id_len = 20;
+const max_udp_payload_size_default = 65_527;
+const max_stream_count = @as(u64, 1) << 60;
+
+/// RFC 9000 transport parameter identifiers.
+pub const ParameterId = enum(u64) {
+    original_destination_connection_id = 0x00,
+    max_idle_timeout = 0x01,
+    stateless_reset_token = 0x02,
+    max_udp_payload_size = 0x03,
+    initial_max_data = 0x04,
+    initial_max_stream_data_bidi_local = 0x05,
+    initial_max_stream_data_bidi_remote = 0x06,
+    initial_max_stream_data_uni = 0x07,
+    initial_max_streams_bidi = 0x08,
+    initial_max_streams_uni = 0x09,
+    ack_delay_exponent = 0x0a,
+    max_ack_delay = 0x0b,
+    disable_active_migration = 0x0c,
+    preferred_address = 0x0d,
+    active_connection_id_limit = 0x0e,
+    initial_source_connection_id = 0x0f,
+    retry_source_connection_id = 0x10,
+
+    _,
+};
+
+/// Server preferred address transport parameter value.
+pub const PreferredAddress = struct {
+    ipv4_address: [4]u8,
+    ipv4_port: u16,
+    ipv6_address: [16]u8,
+    ipv6_port: u16,
+    connection_id: []const u8,
+    stateless_reset_token: [16]u8,
+};
+
+/// Typed RFC 9000 transport parameters.
+///
+/// Optional byte slices and the preferred-address connection ID are owned by
+/// decoded values and released by `deinit`. Callers that construct values for
+/// encoding retain ownership of their provided slices.
+pub const TransportParameters = struct {
+    original_destination_connection_id: ?[]const u8 = null,
+    max_idle_timeout: u64 = 0,
+    stateless_reset_token: ?[16]u8 = null,
+    max_udp_payload_size: u64 = max_udp_payload_size_default,
+    initial_max_data: u64 = 0,
+    initial_max_stream_data_bidi_local: u64 = 0,
+    initial_max_stream_data_bidi_remote: u64 = 0,
+    initial_max_stream_data_uni: u64 = 0,
+    initial_max_streams_bidi: u64 = 0,
+    initial_max_streams_uni: u64 = 0,
+    ack_delay_exponent: u64 = 3,
+    max_ack_delay: u64 = 25,
+    disable_active_migration: bool = false,
+    preferred_address: ?PreferredAddress = null,
+    active_connection_id_limit: u64 = 2,
+    initial_source_connection_id: ?[]const u8 = null,
+    retry_source_connection_id: ?[]const u8 = null,
+
+    /// Release buffers owned by transport parameters decoded with `parse`.
+    pub fn deinit(self: *TransportParameters, allocator: std.mem.Allocator) void {
+        if (self.original_destination_connection_id) |cid| allocator.free(cid);
+        if (self.initial_source_connection_id) |cid| allocator.free(cid);
+        if (self.retry_source_connection_id) |cid| allocator.free(cid);
+        if (self.preferred_address) |preferred| allocator.free(preferred.connection_id);
+        self.* = .{};
+    }
+};
+
+fn cloneBytes(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
+    const owned = try allocator.alloc(u8, data.len);
+    @memcpy(owned, data);
+    return owned;
+}
+
+fn validateConnectionIdLen(cid: []const u8) !void {
+    if (cid.len > max_connection_id_len) return error.InvalidParameterValue;
+}
+
+fn validatePreferredAddressConnectionIdLen(cid: []const u8) !void {
+    if (cid.len == 0 or cid.len > max_connection_id_len) return error.InvalidParameterValue;
+}
+
+fn validateIntegerParameter(id: ParameterId, value: u64) !void {
+    switch (id) {
+        .max_udp_payload_size => if (value < 1200) return error.InvalidParameterValue,
+        .initial_max_streams_bidi, .initial_max_streams_uni => if (value > max_stream_count) return error.InvalidParameterValue,
+        .ack_delay_exponent => if (value > 20) return error.InvalidParameterValue,
+        .max_ack_delay => if (value >= (@as(u64, 1) << 14)) return error.InvalidParameterValue,
+        .active_connection_id_limit => if (value < 2) return error.InvalidParameterValue,
+        else => {},
+    }
+}
+
+fn parseIntegerValue(id: ParameterId, value: []const u8) !u64 {
+    var reader_fbs = buffer.fixedReader(value);
+    const parsed = try packet.decodeVarInt(reader_fbs.reader());
+    if (parsed.len != value.len) return error.InvalidParameterLength;
+    try validateIntegerParameter(id, parsed.value);
+    return parsed.value;
+}
+
+fn encodeIntegerValue(writer: anytype, id: ParameterId, value: u64) !void {
+    try validateIntegerParameter(id, value);
+    try encodeUncheckedIntegerValue(writer, id, value);
+}
+
+fn encodeUncheckedIntegerValue(writer: anytype, id: ParameterId, value: u64) !void {
+    var raw: [8]u8 = undefined;
+    var value_writer = buffer.fixedWriter(&raw);
+    try packet.encodeVarInt(value_writer.writer(), value);
+    try encodeBytesValue(writer, id, value_writer.getWritten());
+}
+
+fn encodeBytesValue(writer: anytype, id: ParameterId, value: []const u8) !void {
+    try packet.encodeVarInt(writer, @intFromEnum(id));
+    try packet.encodeVarInt(writer, value.len);
+    try writer.writeAll(value);
+}
+
+fn encodeConnectionIdValue(writer: anytype, id: ParameterId, cid: []const u8) !void {
+    try validateConnectionIdLen(cid);
+    try encodeBytesValue(writer, id, cid);
+}
+
+fn encodeZeroLengthValue(writer: anytype, id: ParameterId) !void {
+    try packet.encodeVarInt(writer, @intFromEnum(id));
+    try packet.encodeVarInt(writer, 0);
+}
+
+fn encodeStatelessResetToken(writer: anytype, token: [16]u8) !void {
+    try encodeBytesValue(writer, .stateless_reset_token, &token);
+}
+
+fn encodePreferredAddress(writer: anytype, preferred: PreferredAddress) !void {
+    try validatePreferredAddressConnectionIdLen(preferred.connection_id);
+
+    var raw: [61]u8 = undefined;
+    var value_writer = buffer.fixedWriter(&raw);
+    try value_writer.writeAll(&preferred.ipv4_address);
+
+    var port_buf: [2]u8 = undefined;
+    std.mem.writeInt(u16, &port_buf, preferred.ipv4_port, .big);
+    try value_writer.writeAll(&port_buf);
+
+    try value_writer.writeAll(&preferred.ipv6_address);
+    std.mem.writeInt(u16, &port_buf, preferred.ipv6_port, .big);
+    try value_writer.writeAll(&port_buf);
+
+    try value_writer.writeByte(@intCast(preferred.connection_id.len));
+    try value_writer.writeAll(preferred.connection_id);
+    try value_writer.writeAll(&preferred.stateless_reset_token);
+
+    try encodeBytesValue(writer, .preferred_address, value_writer.getWritten());
+}
+
+fn parsePreferredAddress(value: []const u8, allocator: std.mem.Allocator) !PreferredAddress {
+    if (value.len < 41) return error.InvalidParameterLength;
+
+    var reader_fbs = buffer.fixedReader(value);
+    const reader = reader_fbs.reader();
+
+    var ipv4_address: [4]u8 = undefined;
+    try reader.readNoEof(&ipv4_address);
+
+    var port_buf: [2]u8 = undefined;
+    try reader.readNoEof(&port_buf);
+    const ipv4_port = std.mem.readInt(u16, &port_buf, .big);
+
+    var ipv6_address: [16]u8 = undefined;
+    try reader.readNoEof(&ipv6_address);
+
+    try reader.readNoEof(&port_buf);
+    const ipv6_port = std.mem.readInt(u16, &port_buf, .big);
+
+    const cid_len = try reader.readByte();
+    if (cid_len == 0 or cid_len > max_connection_id_len) return error.InvalidParameterValue;
+    const remaining = reader.remainingLen();
+    if (remaining != @as(usize, cid_len) + 16) return error.InvalidParameterLength;
+
+    const connection_id = try buffer.readOwnedBytes(reader, allocator, cid_len);
+    errdefer allocator.free(connection_id);
+
+    var stateless_reset_token: [16]u8 = undefined;
+    try reader.readNoEof(&stateless_reset_token);
+
+    return .{
+        .ipv4_address = ipv4_address,
+        .ipv4_port = ipv4_port,
+        .ipv6_address = ipv6_address,
+        .ipv6_port = ipv6_port,
+        .connection_id = connection_id,
+        .stateless_reset_token = stateless_reset_token,
+    };
+}
+
+fn readValueSlice(reader: *buffer.FixedReader, value_len: u64) ![]const u8 {
+    const len = std.math.cast(usize, value_len) orelse return error.InvalidParameterLength;
+    if (len > reader.remainingLen()) return error.EndOfStream;
+    const start = reader.pos;
+    reader.pos += len;
+    return reader.data[start..reader.pos];
+}
+
+fn rememberParameterId(seen: *std.ArrayList(u64), id: u64, allocator: std.mem.Allocator) !void {
+    for (seen.items) |existing| {
+        if (existing == id) return error.DuplicateParameter;
+    }
+    try seen.append(allocator, id);
+}
+
+/// Serialize typed transport parameters into RFC 9000 wire format.
+pub fn encode(writer: anytype, params: TransportParameters) !void {
+    if (params.original_destination_connection_id) |cid| {
+        try encodeConnectionIdValue(writer, .original_destination_connection_id, cid);
+    }
+    if (params.max_idle_timeout != 0) {
+        try encodeIntegerValue(writer, .max_idle_timeout, params.max_idle_timeout);
+    }
+    if (params.stateless_reset_token) |token| {
+        try encodeStatelessResetToken(writer, token);
+    }
+    if (params.max_udp_payload_size != max_udp_payload_size_default) {
+        try encodeIntegerValue(writer, .max_udp_payload_size, params.max_udp_payload_size);
+    }
+    if (params.initial_max_data != 0) {
+        try encodeIntegerValue(writer, .initial_max_data, params.initial_max_data);
+    }
+    if (params.initial_max_stream_data_bidi_local != 0) {
+        try encodeIntegerValue(writer, .initial_max_stream_data_bidi_local, params.initial_max_stream_data_bidi_local);
+    }
+    if (params.initial_max_stream_data_bidi_remote != 0) {
+        try encodeIntegerValue(writer, .initial_max_stream_data_bidi_remote, params.initial_max_stream_data_bidi_remote);
+    }
+    if (params.initial_max_stream_data_uni != 0) {
+        try encodeIntegerValue(writer, .initial_max_stream_data_uni, params.initial_max_stream_data_uni);
+    }
+    if (params.initial_max_streams_bidi != 0) {
+        try encodeIntegerValue(writer, .initial_max_streams_bidi, params.initial_max_streams_bidi);
+    }
+    if (params.initial_max_streams_uni != 0) {
+        try encodeIntegerValue(writer, .initial_max_streams_uni, params.initial_max_streams_uni);
+    }
+    if (params.ack_delay_exponent != 3) {
+        try encodeIntegerValue(writer, .ack_delay_exponent, params.ack_delay_exponent);
+    }
+    if (params.max_ack_delay != 25) {
+        try encodeIntegerValue(writer, .max_ack_delay, params.max_ack_delay);
+    }
+    if (params.disable_active_migration) {
+        try encodeZeroLengthValue(writer, .disable_active_migration);
+    }
+    if (params.preferred_address) |preferred| {
+        try encodePreferredAddress(writer, preferred);
+    }
+    if (params.active_connection_id_limit != 2) {
+        try encodeIntegerValue(writer, .active_connection_id_limit, params.active_connection_id_limit);
+    }
+    if (params.initial_source_connection_id) |cid| {
+        try encodeConnectionIdValue(writer, .initial_source_connection_id, cid);
+    }
+    if (params.retry_source_connection_id) |cid| {
+        try encodeConnectionIdValue(writer, .retry_source_connection_id, cid);
+    }
+}
+
+/// Parse RFC 9000 transport parameters, ignoring unknown parameter IDs.
+pub fn parse(data: []const u8, allocator: std.mem.Allocator) !TransportParameters {
+    var result = TransportParameters{};
+    errdefer result.deinit(allocator);
+
+    var seen: std.ArrayList(u64) = .empty;
+    defer seen.deinit(allocator);
+
+    var reader_fbs = buffer.fixedReader(data);
+    while (reader_fbs.remainingLen() != 0) {
+        const id_raw = (try packet.decodeVarInt(reader_fbs.reader())).value;
+        const value_len = (try packet.decodeVarInt(reader_fbs.reader())).value;
+        try rememberParameterId(&seen, id_raw, allocator);
+        const value = try readValueSlice(&reader_fbs, value_len);
+
+        const id: ParameterId = @enumFromInt(id_raw);
+        switch (id) {
+            .original_destination_connection_id => {
+                try validateConnectionIdLen(value);
+                result.original_destination_connection_id = try cloneBytes(allocator, value);
+            },
+            .max_idle_timeout => result.max_idle_timeout = try parseIntegerValue(id, value),
+            .stateless_reset_token => {
+                if (value.len != 16) return error.InvalidParameterLength;
+                var token: [16]u8 = undefined;
+                @memcpy(&token, value);
+                result.stateless_reset_token = token;
+            },
+            .max_udp_payload_size => result.max_udp_payload_size = try parseIntegerValue(id, value),
+            .initial_max_data => result.initial_max_data = try parseIntegerValue(id, value),
+            .initial_max_stream_data_bidi_local => result.initial_max_stream_data_bidi_local = try parseIntegerValue(id, value),
+            .initial_max_stream_data_bidi_remote => result.initial_max_stream_data_bidi_remote = try parseIntegerValue(id, value),
+            .initial_max_stream_data_uni => result.initial_max_stream_data_uni = try parseIntegerValue(id, value),
+            .initial_max_streams_bidi => result.initial_max_streams_bidi = try parseIntegerValue(id, value),
+            .initial_max_streams_uni => result.initial_max_streams_uni = try parseIntegerValue(id, value),
+            .ack_delay_exponent => result.ack_delay_exponent = try parseIntegerValue(id, value),
+            .max_ack_delay => result.max_ack_delay = try parseIntegerValue(id, value),
+            .disable_active_migration => {
+                if (value.len != 0) return error.InvalidParameterLength;
+                result.disable_active_migration = true;
+            },
+            .preferred_address => result.preferred_address = try parsePreferredAddress(value, allocator),
+            .active_connection_id_limit => result.active_connection_id_limit = try parseIntegerValue(id, value),
+            .initial_source_connection_id => {
+                try validateConnectionIdLen(value);
+                result.initial_source_connection_id = try cloneBytes(allocator, value);
+            },
+            .retry_source_connection_id => {
+                try validateConnectionIdLen(value);
+                result.retry_source_connection_id = try cloneBytes(allocator, value);
+            },
+            _ => {},
+        }
+    }
+
+    return result;
+}
+
+test "transport parameters parse defaults from empty extension" {
+    var params = try parse(&[_]u8{}, std.testing.allocator);
+    defer params.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u64, 0), params.max_idle_timeout);
+    try std.testing.expectEqual(@as(u64, max_udp_payload_size_default), params.max_udp_payload_size);
+    try std.testing.expectEqual(@as(u64, 3), params.ack_delay_exponent);
+    try std.testing.expectEqual(@as(u64, 25), params.max_ack_delay);
+    try std.testing.expectEqual(@as(u64, 2), params.active_connection_id_limit);
+    try std.testing.expect(!params.disable_active_migration);
+}
+
+test "transport parameters encode and parse typed values" {
+    const reset_token = [_]u8{
+        0x00, 0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06, 0x07,
+        0x08, 0x09, 0x0a, 0x0b,
+        0x0c, 0x0d, 0x0e, 0x0f,
+    };
+    const preferred_token = [_]u8{
+        0xf0, 0xf1, 0xf2, 0xf3,
+        0xf4, 0xf5, 0xf6, 0xf7,
+        0xf8, 0xf9, 0xfa, 0xfb,
+        0xfc, 0xfd, 0xfe, 0xff,
+    };
+    const preferred_cid = [_]u8{ 0xc1, 0xc2, 0xc3 };
+    const params = TransportParameters{
+        .original_destination_connection_id = &[_]u8{ 0xaa, 0xbb },
+        .max_idle_timeout = 30_000,
+        .stateless_reset_token = reset_token,
+        .max_udp_payload_size = 1400,
+        .initial_max_data = 65_536,
+        .initial_max_stream_data_bidi_local = 1000,
+        .initial_max_stream_data_bidi_remote = 2000,
+        .initial_max_stream_data_uni = 3000,
+        .initial_max_streams_bidi = 8,
+        .initial_max_streams_uni = 4,
+        .ack_delay_exponent = 10,
+        .max_ack_delay = 50,
+        .disable_active_migration = true,
+        .preferred_address = .{
+            .ipv4_address = .{ 127, 0, 0, 1 },
+            .ipv4_port = 4433,
+            .ipv6_address = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+            .ipv6_port = 4434,
+            .connection_id = &preferred_cid,
+            .stateless_reset_token = preferred_token,
+        },
+        .active_connection_id_limit = 4,
+        .initial_source_connection_id = &[_]u8{0x11},
+        .retry_source_connection_id = &[_]u8{0x22},
+    };
+
+    var raw: [512]u8 = undefined;
+    var writer = buffer.fixedWriter(&raw);
+    try encode(writer.writer(), params);
+
+    var parsed = try parse(writer.getWritten(), std.testing.allocator);
+    defer parsed.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualSlices(u8, params.original_destination_connection_id.?, parsed.original_destination_connection_id.?);
+    try std.testing.expectEqual(params.max_idle_timeout, parsed.max_idle_timeout);
+    try std.testing.expectEqualSlices(u8, &reset_token, &parsed.stateless_reset_token.?);
+    try std.testing.expectEqual(params.max_udp_payload_size, parsed.max_udp_payload_size);
+    try std.testing.expectEqual(params.initial_max_data, parsed.initial_max_data);
+    try std.testing.expectEqual(params.initial_max_stream_data_bidi_local, parsed.initial_max_stream_data_bidi_local);
+    try std.testing.expectEqual(params.initial_max_stream_data_bidi_remote, parsed.initial_max_stream_data_bidi_remote);
+    try std.testing.expectEqual(params.initial_max_stream_data_uni, parsed.initial_max_stream_data_uni);
+    try std.testing.expectEqual(params.initial_max_streams_bidi, parsed.initial_max_streams_bidi);
+    try std.testing.expectEqual(params.initial_max_streams_uni, parsed.initial_max_streams_uni);
+    try std.testing.expectEqual(params.ack_delay_exponent, parsed.ack_delay_exponent);
+    try std.testing.expectEqual(params.max_ack_delay, parsed.max_ack_delay);
+    try std.testing.expect(parsed.disable_active_migration);
+    try std.testing.expectEqual(params.active_connection_id_limit, parsed.active_connection_id_limit);
+    try std.testing.expectEqualSlices(u8, params.initial_source_connection_id.?, parsed.initial_source_connection_id.?);
+    try std.testing.expectEqualSlices(u8, params.retry_source_connection_id.?, parsed.retry_source_connection_id.?);
+
+    const preferred = parsed.preferred_address.?;
+    try std.testing.expectEqualSlices(u8, &params.preferred_address.?.ipv4_address, &preferred.ipv4_address);
+    try std.testing.expectEqual(params.preferred_address.?.ipv4_port, preferred.ipv4_port);
+    try std.testing.expectEqualSlices(u8, &params.preferred_address.?.ipv6_address, &preferred.ipv6_address);
+    try std.testing.expectEqual(params.preferred_address.?.ipv6_port, preferred.ipv6_port);
+    try std.testing.expectEqualSlices(u8, params.preferred_address.?.connection_id, preferred.connection_id);
+    try std.testing.expectEqualSlices(u8, &params.preferred_address.?.stateless_reset_token, &preferred.stateless_reset_token);
+}
+
+test "transport parameters ignore unknown parameters but reject duplicates" {
+    var raw: [32]u8 = undefined;
+    var writer = buffer.fixedWriter(&raw);
+    try encodeBytesValue(writer.writer(), @enumFromInt(27), &[_]u8{ 0xaa, 0xbb });
+    try encodeIntegerValue(writer.writer(), .initial_max_data, 42);
+
+    var parsed = try parse(writer.getWritten(), std.testing.allocator);
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 42), parsed.initial_max_data);
+
+    var duplicate_raw: [16]u8 = undefined;
+    var duplicate_writer = buffer.fixedWriter(&duplicate_raw);
+    try encodeIntegerValue(duplicate_writer.writer(), .initial_max_data, 1);
+    try encodeIntegerValue(duplicate_writer.writer(), .initial_max_data, 2);
+
+    try std.testing.expectError(error.DuplicateParameter, parse(duplicate_writer.getWritten(), std.testing.allocator));
+}
+
+test "transport parameters reject invalid values and lengths" {
+    var raw: [32]u8 = undefined;
+    var writer = buffer.fixedWriter(&raw);
+    try encodeUncheckedIntegerValue(writer.writer(), .max_udp_payload_size, 1199);
+    try std.testing.expectError(error.InvalidParameterValue, parse(writer.getWritten(), std.testing.allocator));
+
+    writer = buffer.fixedWriter(&raw);
+    try encodeBytesValue(writer.writer(), .stateless_reset_token, &[_]u8{0xaa});
+    try std.testing.expectError(error.InvalidParameterLength, parse(writer.getWritten(), std.testing.allocator));
+
+    writer = buffer.fixedWriter(&raw);
+    try encodeUncheckedIntegerValue(writer.writer(), .ack_delay_exponent, 21);
+    try std.testing.expectError(error.InvalidParameterValue, parse(writer.getWritten(), std.testing.allocator));
+
+    writer = buffer.fixedWriter(&raw);
+    try encodeUncheckedIntegerValue(writer.writer(), .max_ack_delay, 1 << 14);
+    try std.testing.expectError(error.InvalidParameterValue, parse(writer.getWritten(), std.testing.allocator));
+
+    writer = buffer.fixedWriter(&raw);
+    try encodeUncheckedIntegerValue(writer.writer(), .active_connection_id_limit, 1);
+    try std.testing.expectError(error.InvalidParameterValue, parse(writer.getWritten(), std.testing.allocator));
+}
+
+test "transport parameters reject malformed zero-length and preferred-address values" {
+    var raw: [80]u8 = undefined;
+    var writer = buffer.fixedWriter(&raw);
+    try encodeBytesValue(writer.writer(), .disable_active_migration, &[_]u8{0x00});
+    try std.testing.expectError(error.InvalidParameterLength, parse(writer.getWritten(), std.testing.allocator));
+
+    writer = buffer.fixedWriter(&raw);
+    const preferred = PreferredAddress{
+        .ipv4_address = .{ 127, 0, 0, 1 },
+        .ipv4_port = 4433,
+        .ipv6_address = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+        .ipv6_port = 4434,
+        .connection_id = &[_]u8{},
+        .stateless_reset_token = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 },
+    };
+    try std.testing.expectError(error.InvalidParameterValue, encodePreferredAddress(writer.writer(), preferred));
+
+    writer = buffer.fixedWriter(&raw);
+    try encodeBytesValue(writer.writer(), .preferred_address, &[_]u8{0x00});
+    try std.testing.expectError(error.InvalidParameterLength, parse(writer.getWritten(), std.testing.allocator));
+}
+
+test "transport parameter parser preserves allocation failures" {
+    var raw: [16]u8 = undefined;
+    var writer = buffer.fixedWriter(&raw);
+    try encodeConnectionIdValue(writer.writer(), .initial_source_connection_id, &[_]u8{ 0xaa, 0xbb });
+
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    try std.testing.expectError(error.OutOfMemory, parse(writer.getWritten(), failing_allocator.allocator()));
+}

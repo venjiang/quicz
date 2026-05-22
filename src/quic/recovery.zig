@@ -1,6 +1,9 @@
 const std = @import("std");
 
-const timer_granularity_ms = 1;
+pub const timer_granularity_ms: u64 = 1;
+pub const time_threshold_numerator: u64 = 9;
+pub const time_threshold_denominator: u64 = 8;
+pub const persistent_congestion_threshold: u64 = 3;
 
 fn saturatingAddU64(a: u64, b: u64) u64 {
     return std.math.add(u64, a, b) catch std.math.maxInt(u64);
@@ -12,6 +15,13 @@ fn saturatingMulU64(a: u64, b: u64) u64 {
 
 fn saturatingMulUsize(a: usize, b: usize) usize {
     return std.math.mul(usize, a, b) catch std.math.maxInt(usize);
+}
+
+fn saturatingCeilMulDivU64(value: u64, numerator: u64, denominator: u64) u64 {
+    const product = saturatingMulU64(value, numerator);
+    if (product == std.math.maxInt(u64)) return product;
+    const rounded = saturatingAddU64(product, denominator - 1);
+    return rounded / denominator;
 }
 
 /// Configuration for the simplified loss recovery and congestion state.
@@ -36,6 +46,7 @@ pub const Recovery = struct {
     pto_count: u8 = 0,
     bytes_in_flight: usize = 0,
     congestion_window: usize,
+    congestion_recovery_start_time_millis: ?i64 = null,
     ssthresh: usize = std.math.maxInt(usize),
 
     /// Initialize recovery state with RFC 9002-style initial RTT and window.
@@ -63,10 +74,17 @@ pub const Recovery = struct {
     }
 
     /// Record an acknowledged packet and update RTT/congestion state.
-    pub fn onPacketAcked(self: *Recovery, bytes: usize, latest_rtt_ms: u64, ack_delay_ms: u64) void {
+    pub fn onPacketAcked(
+        self: *Recovery,
+        bytes: usize,
+        sent_time_millis: i64,
+        latest_rtt_ms: u64,
+        ack_delay_ms: u64,
+    ) void {
         self.removeBytesInFlight(bytes);
         self.updateRtt(latest_rtt_ms, ack_delay_ms);
         self.pto_count = 0;
+        if (self.inCongestionRecovery(sent_time_millis)) return;
 
         if (self.congestion_window < self.ssthresh) {
             self.congestion_window = std.math.add(usize, self.congestion_window, bytes) catch std.math.maxInt(usize);
@@ -81,9 +99,12 @@ pub const Recovery = struct {
         self.congestion_window = std.math.add(usize, self.congestion_window, increase) catch std.math.maxInt(usize);
     }
 
-    /// Record packet loss and reduce the congestion window to at least 2 packets.
-    pub fn onPacketLost(self: *Recovery, bytes: usize) void {
+    /// Record packet loss and start a congestion recovery period if needed.
+    pub fn onPacketLost(self: *Recovery, bytes: usize, lost_packet_sent_time_millis: i64, now_millis: i64) void {
         self.removeBytesInFlight(bytes);
+        if (self.inCongestionRecovery(lost_packet_sent_time_millis)) return;
+
+        self.congestion_recovery_start_time_millis = now_millis;
         self.ssthresh = @max(self.congestion_window / 2, minimumCongestionWindow(self.max_datagram_size));
         self.congestion_window = self.ssthresh;
     }
@@ -105,6 +126,22 @@ pub const Recovery = struct {
             timeout = std.math.mul(u64, timeout, 2) catch return std.math.maxInt(u64);
         }
         return timeout;
+    }
+
+    /// Persistent congestion duration from RFC 9002 Section 7.6.1.
+    pub fn persistentCongestionDurationMs(self: Recovery) u64 {
+        return std.math.mul(u64, self.ptoMs(), persistent_congestion_threshold) catch std.math.maxInt(u64);
+    }
+
+    /// Apply the persistent congestion response by reducing cwnd to kMinimumWindow.
+    pub fn onPersistentCongestion(self: *Recovery) void {
+        self.congestion_window = minimumCongestionWindow(self.max_datagram_size);
+        self.congestion_recovery_start_time_millis = null;
+    }
+
+    fn inCongestionRecovery(self: Recovery, sent_time_millis: i64) bool {
+        const recovery_start = self.congestion_recovery_start_time_millis orelse return false;
+        return sent_time_millis <= recovery_start;
     }
 
     fn removeBytesInFlight(self: *Recovery, bytes: usize) void {
@@ -148,9 +185,27 @@ pub fn minimumCongestionWindow(max_datagram_size: usize) usize {
     return saturatingMulUsize(2, max_datagram_size);
 }
 
+/// Compute the RFC 9002 time-threshold loss delay in milliseconds.
+///
+/// The current connection skeleton uses this for ACK-driven time-threshold
+/// loss detection. A future endpoint timer will use the same delay to arm the
+/// loss detection timer.
+pub fn timeThresholdLossDelayMs(latest_rtt_ms: ?u64, smoothed_rtt_ms: u64) u64 {
+    const rtt_basis = if (latest_rtt_ms) |latest_rtt| @max(latest_rtt, smoothed_rtt_ms) else smoothed_rtt_ms;
+    const loss_delay = saturatingCeilMulDivU64(rtt_basis, time_threshold_numerator, time_threshold_denominator);
+    return @max(loss_delay, timer_granularity_ms);
+}
+
 test "initial and minimum congestion windows follow RFC 9002 bounds" {
     try std.testing.expectEqual(@as(usize, 13500), initialCongestionWindow(1350));
     try std.testing.expectEqual(@as(usize, 2400), minimumCongestionWindow(1200));
+}
+
+test "time threshold loss delay follows RFC 9002 multiplier and granularity" {
+    try std.testing.expectEqual(@as(u64, 375), timeThresholdLossDelayMs(null, 333));
+    try std.testing.expectEqual(@as(u64, 452), timeThresholdLossDelayMs(401, 333));
+    try std.testing.expectEqual(@as(u64, 1), timeThresholdLossDelayMs(0, 0));
+    try std.testing.expectEqual(std.math.maxInt(u64), timeThresholdLossDelayMs(std.math.maxInt(u64), 1));
 }
 
 test "sent acked and lost packets update bytes in flight and congestion window" {
@@ -161,13 +216,13 @@ test "sent acked and lost packets update bytes in flight and congestion window" 
     recovery.onPacketSent(1200);
     try std.testing.expectEqual(@as(usize, 1200), recovery.bytes_in_flight);
 
-    recovery.onPacketAcked(1200, 100, 0);
+    recovery.onPacketAcked(1200, 0, 100, 0);
     try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
     try std.testing.expect(recovery.congestion_window > initial_window);
     try std.testing.expectEqual(@as(u8, 0), recovery.pto_count);
 
     recovery.onPacketSent(2400);
-    recovery.onPacketLost(2400);
+    recovery.onPacketLost(2400, 100, 200);
     try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
     try std.testing.expect(recovery.congestion_window >= minimumCongestionWindow(1200));
 }
@@ -179,9 +234,44 @@ test "pto uses rtt variance and exponential backoff" {
     recovery.onPtoExpired();
     try std.testing.expectEqual(@as(u64, 650), recovery.ptoMs());
 
-    recovery.onPacketAcked(0, 80, 0);
+    recovery.onPacketAcked(0, 0, 80, 0);
     try std.testing.expectEqual(@as(u8, 0), recovery.pto_count);
     try std.testing.expect(recovery.ptoMs() < 650);
+}
+
+test "congestion recovery period avoids repeated loss reduction and ACK growth" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    const initial_window = recovery.congestion_window;
+
+    recovery.onPacketSent(3600);
+    recovery.onPacketLost(1200, 10, 100);
+    const recovery_window = recovery.congestion_window;
+    try std.testing.expect(recovery_window < initial_window);
+    try std.testing.expectEqual(@as(?i64, 100), recovery.congestion_recovery_start_time_millis);
+
+    recovery.onPacketLost(1200, 20, 110);
+    try std.testing.expectEqual(recovery_window, recovery.congestion_window);
+
+    recovery.onPacketAcked(1200, 50, 100, 0);
+    try std.testing.expectEqual(recovery_window, recovery.congestion_window);
+
+    recovery.onPacketSent(1200);
+    recovery.onPacketAcked(1200, 150, 100, 0);
+    try std.testing.expect(recovery.congestion_window > recovery_window);
+}
+
+test "persistent congestion duration and response follow RFC 9002 bounds" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100, .max_ack_delay_ms = 25 });
+
+    try std.testing.expectEqual(@as(u64, 975), recovery.persistentCongestionDurationMs());
+
+    recovery.congestion_window = 12_000;
+    recovery.ssthresh = 6_000;
+    recovery.congestion_recovery_start_time_millis = 42;
+    recovery.onPersistentCongestion();
+    try std.testing.expectEqual(minimumCongestionWindow(1200), recovery.congestion_window);
+    try std.testing.expectEqual(@as(usize, 6_000), recovery.ssthresh);
+    try std.testing.expectEqual(@as(?i64, null), recovery.congestion_recovery_start_time_millis);
 }
 
 test "recovery arithmetic saturates at numeric extremes" {
@@ -195,6 +285,6 @@ test "recovery arithmetic saturates at numeric extremes" {
 
     recovery.congestion_window = 1;
     recovery.ssthresh = 0;
-    recovery.onPacketAcked(std.math.maxInt(usize), std.math.maxInt(u64), std.math.maxInt(u64));
+    recovery.onPacketAcked(std.math.maxInt(usize), 0, std.math.maxInt(u64), std.math.maxInt(u64));
     try std.testing.expectEqual(std.math.maxInt(usize), recovery.congestion_window);
 }
