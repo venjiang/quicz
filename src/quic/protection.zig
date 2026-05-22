@@ -224,6 +224,46 @@ pub fn verifyRetryIntegrityTag(
     return std.crypto.timing_safe.eql([aead_tag_len]u8, computed, received);
 }
 
+/// Serialize a QUIC v1 Retry packet and fill its RFC 9001 Integrity Tag.
+///
+/// The packet codec writes Retry unused bits in its canonical form; the
+/// integrity tag is computed over those transmitted bytes plus the Original
+/// Destination Connection ID from the client Initial that caused this Retry.
+pub fn encodeRetryPacketWithIntegrity(
+    allocator: std.mem.Allocator,
+    original_destination_connection_id: []const u8,
+    retry: packet.RetryPacket,
+) ![]u8 {
+    if (retry.version != .v1) return error.UnsupportedVersion;
+
+    var tagged_retry = retry;
+    tagged_retry.integrity_tag = [_]u8{0} ** aead_tag_len;
+
+    const datagram = try allocator.alloc(u8, try retryPacketLen(tagged_retry));
+    errdefer allocator.free(datagram);
+
+    var out = buffer.fixedWriter(datagram);
+    try packet.encodeRetryPacket(out.writer(), tagged_retry);
+    std.debug.assert(out.getWritten().len == datagram.len);
+
+    const tag_offset = datagram.len - aead_tag_len;
+    const tag = try retryIntegrityTag(allocator, original_destination_connection_id, datagram[0..tag_offset]);
+    @memcpy(datagram[tag_offset..], &tag);
+    return datagram;
+}
+
+/// Verify and parse a QUIC v1 Retry packet.
+pub fn parseRetryPacketWithIntegrity(
+    allocator: std.mem.Allocator,
+    original_destination_connection_id: []const u8,
+    retry_datagram: []const u8,
+) !packet.RetryPacket {
+    if (!try verifyRetryIntegrityTag(allocator, original_destination_connection_id, retry_datagram)) {
+        return error.AuthenticationFailed;
+    }
+    return packet.parseRetryPacket(retry_datagram, allocator);
+}
+
 /// Release buffers owned by a decoded protected long-header packet.
 pub fn deinitProtectedLongPacket(decoded: *DecodedProtectedLongPacket, allocator: std.mem.Allocator) void {
     packet.deinitLongHeader(&decoded.packet.header, allocator);
@@ -460,6 +500,17 @@ fn copyOwned(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
     return owned;
 }
 
+fn retryPacketLen(retry: packet.RetryPacket) !usize {
+    if (retry.dcid.len > max_connection_id_len or retry.scid.len > max_connection_id_len) return error.InvalidConnectionIdLength;
+    if (retry.token.len == 0) return error.InvalidRetryPacket;
+
+    var len: usize = 1 + 4 + 1 + 1 + aead_tag_len;
+    len = std.math.add(usize, len, retry.dcid.len) catch return error.InvalidPayloadLength;
+    len = std.math.add(usize, len, retry.scid.len) catch return error.InvalidPayloadLength;
+    len = std.math.add(usize, len, retry.token.len) catch return error.InvalidPayloadLength;
+    return len;
+}
+
 fn hkdfExpandLabel(
     secret: [initial_secret_len]u8,
     label: []const u8,
@@ -674,6 +725,37 @@ test "retryIntegrityTag matches RFC 9001 Appendix A.4 Retry packet" {
     var tampered = retry_packet;
     tampered[1] ^= 0x01;
     try std.testing.expect(!try verifyRetryIntegrityTag(std.testing.allocator, &original_dcid, &tampered));
+}
+
+test "encodeRetryPacketWithIntegrity produces verifiable Retry packet" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const retry = packet.RetryPacket{
+        .version = .v1,
+        .dcid = &[_]u8{ 0xaa, 0xbb, 0xcc, 0xdd },
+        .scid = &[_]u8{ 0x10, 0x20, 0x30, 0x40 },
+        .token = "token",
+        .integrity_tag = [_]u8{0} ** aead_tag_len,
+    };
+
+    const datagram = try encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
+    defer std.testing.allocator.free(datagram);
+    try std.testing.expect(try verifyRetryIntegrityTag(std.testing.allocator, &original_dcid, datagram));
+
+    var parsed = try parseRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, datagram);
+    defer packet.deinitRetryPacket(&parsed, std.testing.allocator);
+    try std.testing.expectEqual(packet.Version.v1, parsed.version);
+    try std.testing.expectEqualSlices(u8, retry.dcid, parsed.dcid);
+    try std.testing.expectEqualSlices(u8, retry.scid, parsed.scid);
+    try std.testing.expectEqualSlices(u8, retry.token, parsed.token);
+
+    var tampered = try std.testing.allocator.dupe(u8, datagram);
+    defer std.testing.allocator.free(tampered);
+    tampered[5] ^= 0x01;
+    try std.testing.expectError(error.AuthenticationFailed, parseRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, tampered));
+
+    var v2_retry = retry;
+    v2_retry.version = .v2;
+    try std.testing.expectError(error.UnsupportedVersion, encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, v2_retry));
 }
 
 test "retry integrity validates input bounds" {

@@ -3,35 +3,6 @@ const quicz = @import("quicz");
 
 const ExampleError = error{RetryTokenExampleFailed};
 
-const FixedWriter = struct {
-    buffer: []u8,
-    pos: usize = 0,
-
-    pub fn writer(self: *FixedWriter) *FixedWriter {
-        return self;
-    }
-
-    pub fn writeByte(self: *FixedWriter, byte: u8) !void {
-        if (self.pos >= self.buffer.len) return error.NoSpaceLeft;
-        self.buffer[self.pos] = byte;
-        self.pos += 1;
-    }
-
-    pub fn writeAll(self: *FixedWriter, bytes: []const u8) !void {
-        if (self.buffer.len - self.pos < bytes.len) return error.NoSpaceLeft;
-        @memcpy(self.buffer[self.pos..][0..bytes.len], bytes);
-        self.pos += bytes.len;
-    }
-
-    pub fn getWritten(self: FixedWriter) []const u8 {
-        return self.buffer[0..self.pos];
-    }
-};
-
-fn fixedWriter(buffer: []u8) FixedWriter {
-    return .{ .buffer = buffer };
-}
-
 pub fn main() !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer _ = debug_allocator.deinit();
@@ -44,7 +15,7 @@ pub fn main() !void {
     try server.issueRetryToken(retry_token);
 
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
-    var retry = quicz.packet.RetryPacket{
+    const retry = quicz.packet.RetryPacket{
         .version = .v1,
         .dcid = &[_]u8{ 0xaa, 0xbb, 0xcc, 0xdd },
         .scid = &[_]u8{ 0x10, 0x20, 0x30, 0x40 },
@@ -52,21 +23,12 @@ pub fn main() !void {
         .integrity_tag = [_]u8{0} ** quicz.protection.aead_tag_len,
     };
 
-    var retry_raw: [128]u8 = undefined;
-    var retry_out = fixedWriter(&retry_raw);
-    try quicz.packet.encodeRetryPacket(retry_out.writer(), retry);
-    retry.integrity_tag = try quicz.protection.retryIntegrityTag(
-        allocator,
-        &original_dcid,
-        retry_out.getWritten()[0 .. retry_out.getWritten().len - quicz.protection.aead_tag_len],
-    );
-
-    retry_out = fixedWriter(&retry_raw);
-    try quicz.packet.encodeRetryPacket(retry_out.writer(), retry);
-    const retry_integrity_valid = try quicz.protection.verifyRetryIntegrityTag(allocator, &original_dcid, retry_out.getWritten());
+    const retry_datagram = try quicz.protection.encodeRetryPacketWithIntegrity(allocator, &original_dcid, retry);
+    defer allocator.free(retry_datagram);
+    const retry_integrity_valid = try quicz.protection.verifyRetryIntegrityTag(allocator, &original_dcid, retry_datagram);
     if (!retry_integrity_valid) return error.RetryTokenExampleFailed;
 
-    var parsed = try quicz.packet.parseRetryPacket(retry_out.getWritten(), allocator);
+    var parsed = try quicz.protection.parseRetryPacketWithIntegrity(allocator, &original_dcid, retry_datagram);
     defer quicz.packet.deinitRetryPacket(&parsed, allocator);
 
     try server.sendPing();
