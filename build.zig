@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 const required_zig_version = "0.16.0";
 
 // Build script for the current Zig stable template.
-// - Builds two example executables: quicz-echo-server and quicz-echo-client
+// - Builds the current example executables.
 // - Uses src/lib.zig as a shared module imported by both executables.
 pub fn build(b: *std.Build) void {
     // Keep build semantics tied to the Zig version this repository is tested with.
@@ -58,6 +58,258 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_client);
 
+    // Codec roundtrip executable
+    const exe_codec = b.addExecutable(.{
+        .name = "quicz-codec-roundtrip",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/codec_roundtrip.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_codec);
+
+    // Flow-control executable
+    const exe_flow_control = b.addExecutable(.{
+        .name = "quicz-flow-control",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/flow_control.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_flow_control);
+
+    // Unidirectional stream executable
+    const exe_uni_stream = b.addExecutable(.{
+        .name = "quicz-uni-stream",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/uni_stream.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_uni_stream);
+
+    // Stream reset executable
+    const exe_stream_reset = b.addExecutable(.{
+        .name = "quicz-stream-reset",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/stream_reset.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_stream_reset);
+
+    // STOP_SENDING executable
+    const exe_stop_sending = b.addExecutable(.{
+        .name = "quicz-stop-sending",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/stop_sending.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_stop_sending);
+
+    // Crypto stream executable
+    const exe_crypto_stream = b.addExecutable(.{
+        .name = "quicz-crypto-stream",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/crypto_stream.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_crypto_stream);
+
+    // Graceful close executable
+    const exe_graceful_close = b.addExecutable(.{
+        .name = "quicz-graceful-close",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/graceful_close.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_graceful_close);
+
+    // Idle timeout executable
+    const exe_idle_timeout = b.addExecutable(.{
+        .name = "quicz-idle-timeout",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/idle_timeout.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_idle_timeout);
+
+    // Packet-number-space executable
+    const exe_packet_spaces = b.addExecutable(.{
+        .name = "quicz-packet-spaces",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/packet_spaces.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_packet_spaces);
+
+    // ECN validation executable
+    const exe_ecn_validation = b.addExecutable(.{
+        .name = "quicz-ecn-validation",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/ecn_validation.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_ecn_validation);
+
+    // Loss recovery executable
+    const exe_loss_recovery = b.addExecutable(.{
+        .name = "quicz-loss-recovery",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/loss_recovery.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_loss_recovery);
+
+    // PTO recovery executable
+    const exe_pto_recovery = b.addExecutable(.{
+        .name = "quicz-pto-recovery",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/pto_recovery.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_pto_recovery);
+
+    // Path validation executable
+    const exe_path_validation = b.addExecutable(.{
+        .name = "quicz-path-validation",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/path_validation.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_path_validation);
+
+    // Address validation executable
+    const exe_address_validation = b.addExecutable(.{
+        .name = "quicz-address-validation",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/address_validation.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_address_validation);
+
+    // Retry token executable
+    const exe_retry_token = b.addExecutable(.{
+        .name = "quicz-retry-token",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/retry_token.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_retry_token);
+
+    // Connection ID executable
+    const exe_connection_ids = b.addExecutable(.{
+        .name = "quicz-connection-ids",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/connection_ids.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_connection_ids);
+
+    // Stateless reset executable
+    const exe_stateless_reset = b.addExecutable(.{
+        .name = "quicz-stateless-reset",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/stateless_reset.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_stateless_reset);
+
+    // Initial keys executable
+    const exe_initial_keys = b.addExecutable(.{
+        .name = "quicz-initial-keys",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/initial_keys.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_initial_keys);
+
     // zig build run-server
     const run_server = b.step("run-server", "Run quicz echo server");
     const run_server_cmd = b.addRunArtifact(exe_server);
@@ -74,6 +326,168 @@ pub fn build(b: *std.Build) void {
     run_client_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_client_cmd.addArgs(args);
+    }
+
+    // zig build run-codec
+    const run_codec = b.step("run-codec", "Run quicz codec roundtrip example");
+    const run_codec_cmd = b.addRunArtifact(exe_codec);
+    run_codec.dependOn(&run_codec_cmd.step);
+    run_codec_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_codec_cmd.addArgs(args);
+    }
+
+    // zig build run-flow-control
+    const run_flow_control = b.step("run-flow-control", "Run quicz flow-control example");
+    const run_flow_control_cmd = b.addRunArtifact(exe_flow_control);
+    run_flow_control.dependOn(&run_flow_control_cmd.step);
+    run_flow_control_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_flow_control_cmd.addArgs(args);
+    }
+
+    // zig build run-uni-stream
+    const run_uni_stream = b.step("run-uni-stream", "Run quicz unidirectional stream example");
+    const run_uni_stream_cmd = b.addRunArtifact(exe_uni_stream);
+    run_uni_stream.dependOn(&run_uni_stream_cmd.step);
+    run_uni_stream_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_uni_stream_cmd.addArgs(args);
+    }
+
+    // zig build run-stream-reset
+    const run_stream_reset = b.step("run-stream-reset", "Run quicz stream reset example");
+    const run_stream_reset_cmd = b.addRunArtifact(exe_stream_reset);
+    run_stream_reset.dependOn(&run_stream_reset_cmd.step);
+    run_stream_reset_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_stream_reset_cmd.addArgs(args);
+    }
+
+    // zig build run-stop-sending
+    const run_stop_sending = b.step("run-stop-sending", "Run quicz STOP_SENDING example");
+    const run_stop_sending_cmd = b.addRunArtifact(exe_stop_sending);
+    run_stop_sending.dependOn(&run_stop_sending_cmd.step);
+    run_stop_sending_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_stop_sending_cmd.addArgs(args);
+    }
+
+    // zig build run-crypto-stream
+    const run_crypto_stream = b.step("run-crypto-stream", "Run quicz crypto stream example");
+    const run_crypto_stream_cmd = b.addRunArtifact(exe_crypto_stream);
+    run_crypto_stream.dependOn(&run_crypto_stream_cmd.step);
+    run_crypto_stream_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_crypto_stream_cmd.addArgs(args);
+    }
+
+    // zig build run-graceful-close
+    const run_graceful_close = b.step("run-graceful-close", "Run quicz graceful close example");
+    const run_graceful_close_cmd = b.addRunArtifact(exe_graceful_close);
+    run_graceful_close.dependOn(&run_graceful_close_cmd.step);
+    run_graceful_close_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_graceful_close_cmd.addArgs(args);
+    }
+
+    // zig build run-idle-timeout
+    const run_idle_timeout = b.step("run-idle-timeout", "Run quicz idle timeout example");
+    const run_idle_timeout_cmd = b.addRunArtifact(exe_idle_timeout);
+    run_idle_timeout.dependOn(&run_idle_timeout_cmd.step);
+    run_idle_timeout_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_idle_timeout_cmd.addArgs(args);
+    }
+
+    // zig build run-packet-spaces
+    const run_packet_spaces = b.step("run-packet-spaces", "Run quicz packet-number-space example");
+    const run_packet_spaces_cmd = b.addRunArtifact(exe_packet_spaces);
+    run_packet_spaces.dependOn(&run_packet_spaces_cmd.step);
+    run_packet_spaces_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_packet_spaces_cmd.addArgs(args);
+    }
+
+    // zig build run-ecn-validation
+    const run_ecn_validation = b.step("run-ecn-validation", "Run quicz ECN validation example");
+    const run_ecn_validation_cmd = b.addRunArtifact(exe_ecn_validation);
+    run_ecn_validation.dependOn(&run_ecn_validation_cmd.step);
+    run_ecn_validation_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_ecn_validation_cmd.addArgs(args);
+    }
+
+    // zig build run-loss-recovery
+    const run_loss_recovery = b.step("run-loss-recovery", "Run quicz loss recovery example");
+    const run_loss_recovery_cmd = b.addRunArtifact(exe_loss_recovery);
+    run_loss_recovery.dependOn(&run_loss_recovery_cmd.step);
+    run_loss_recovery_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_loss_recovery_cmd.addArgs(args);
+    }
+
+    // zig build run-pto-recovery
+    const run_pto_recovery = b.step("run-pto-recovery", "Run quicz PTO recovery example");
+    const run_pto_recovery_cmd = b.addRunArtifact(exe_pto_recovery);
+    run_pto_recovery.dependOn(&run_pto_recovery_cmd.step);
+    run_pto_recovery_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_pto_recovery_cmd.addArgs(args);
+    }
+
+    // zig build run-path-validation
+    const run_path_validation = b.step("run-path-validation", "Run quicz path validation example");
+    const run_path_validation_cmd = b.addRunArtifact(exe_path_validation);
+    run_path_validation.dependOn(&run_path_validation_cmd.step);
+    run_path_validation_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_path_validation_cmd.addArgs(args);
+    }
+
+    // zig build run-address-validation
+    const run_address_validation = b.step("run-address-validation", "Run quicz address validation example");
+    const run_address_validation_cmd = b.addRunArtifact(exe_address_validation);
+    run_address_validation.dependOn(&run_address_validation_cmd.step);
+    run_address_validation_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_address_validation_cmd.addArgs(args);
+    }
+
+    // zig build run-retry-token
+    const run_retry_token = b.step("run-retry-token", "Run quicz Retry token example");
+    const run_retry_token_cmd = b.addRunArtifact(exe_retry_token);
+    run_retry_token.dependOn(&run_retry_token_cmd.step);
+    run_retry_token_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_retry_token_cmd.addArgs(args);
+    }
+
+    // zig build run-connection-ids
+    const run_connection_ids = b.step("run-connection-ids", "Run quicz connection ID example");
+    const run_connection_ids_cmd = b.addRunArtifact(exe_connection_ids);
+    run_connection_ids.dependOn(&run_connection_ids_cmd.step);
+    run_connection_ids_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_connection_ids_cmd.addArgs(args);
+    }
+
+    // zig build run-stateless-reset
+    const run_stateless_reset = b.step("run-stateless-reset", "Run quicz stateless reset example");
+    const run_stateless_reset_cmd = b.addRunArtifact(exe_stateless_reset);
+    run_stateless_reset.dependOn(&run_stateless_reset_cmd.step);
+    run_stateless_reset_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_stateless_reset_cmd.addArgs(args);
+    }
+
+    // zig build run-initial-keys
+    const run_initial_keys = b.step("run-initial-keys", "Run quicz Initial key derivation example");
+    const run_initial_keys_cmd = b.addRunArtifact(exe_initial_keys);
+    run_initial_keys.dependOn(&run_initial_keys_cmd.step);
+    run_initial_keys_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_initial_keys_cmd.addArgs(args);
     }
 
     const lib_tests = b.addTest(.{
