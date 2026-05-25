@@ -343,7 +343,7 @@ loss-recovery including ACK-delay, recovery-period, and persistent congestion ha
 PTO-recovery, path-validation, address-validation including token version binding, Retry-token processing and v1/v2 integrity-tag,
 connection-ID, stateless-reset, v1/v2 Initial key, key-update/protected-packet/header-protection,
 endpoint-routing/client-Initial route registration/accepted-Initial route registration/Retry-DCID/preferred-address/stateless-reset-token lookup APIs,
-socket-backed UDP endpoint routing, caller-keyed protected UDP packet loopbacks, socket-backed UDP Retry/address-validation routing, and socket-backed UDP stateless-reset emission; they are not yet interoperable
+socket-backed UDP endpoint routing with client-side Version Negotiation selection, caller-keyed protected UDP packet loopbacks, socket-backed UDP Retry/address-validation routing, and socket-backed UDP stateless-reset emission; they are not yet interoperable
 QUIC-over-UDP programs.
 
 ## 中文说明（Chinese Overview）

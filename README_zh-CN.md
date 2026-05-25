@@ -317,7 +317,7 @@ API、flow-control API、unidirectional stream API、stream-reset API、STOP_SEN
 close-state API、idle-timeout API、handshake-state API、packet-number-space discard 与 0-RTT frame filtering API、
 ECN-validation API、包含 ACK-delay、recovery-period 与 persistent congestion 处理的
 loss-recovery API、PTO-recovery API、
-path-validation API、包含 token version binding 的 address-validation API、Retry-token 处理与 v1/v2 integrity-tag API、connection-ID API、stateless-reset API、v1/v2 Initial key、key-update/protected-packet/header-protection API、endpoint-routing/Retry-DCID/preferred-address/stateless-reset-token lookup API、真实 loopback UDP endpoint routing、调用方 key protected UDP packet、socket-backed UDP Retry/address-validation routing 和 socket-backed UDP stateless-reset emission 示例，并不是
+path-validation API、包含 token version binding 的 address-validation API、Retry-token 处理与 v1/v2 integrity-tag API、connection-ID API、stateless-reset API、v1/v2 Initial key、key-update/protected-packet/header-protection API、endpoint-routing/Retry-DCID/preferred-address/stateless-reset-token lookup API、带 client-side Version Negotiation selection 的真实 loopback UDP endpoint routing、调用方 key protected UDP packet、socket-backed UDP Retry/address-validation routing 和 socket-backed UDP stateless-reset emission 示例，并不是
 可互通的 QUIC-over-UDP 程序。
 
 ## 文档结构（Documentation Layout）

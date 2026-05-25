@@ -115,13 +115,15 @@ pub fn main() !void {
     const supported_versions = [_]quicz.packet.Version{ .v1, .v2 };
     const reset_prefix = [_]u8{ 0x40, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0x99 };
 
+    const unsupported_version: quicz.packet.Version = @enumFromInt(0xfa_ce_b0_0c);
+    const client_versions = [_]quicz.packet.Version{ .v2, .v1, unsupported_version };
     const original_dcid = [_]u8{ 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88 };
     const client_initial_scid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
 
     var unsupported_initial_raw: [64]u8 = undefined;
     const unsupported_initial = try buildInitialDatagram(
         &unsupported_initial_raw,
-        @enumFromInt(0xfa_ce_b0_0c),
+        unsupported_version,
         &original_dcid,
         &client_initial_scid,
         &.{},
@@ -158,6 +160,20 @@ pub fn main() !void {
     try require(std.mem.eql(u8, parsed_version_negotiation.dcid, &client_initial_scid));
     try require(std.mem.eql(u8, parsed_version_negotiation.scid, &original_dcid));
     try require(parsed_version_negotiation.versions.len == supported_versions.len);
+
+    var version_negotiation_client = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{
+        .chosen_version = unsupported_version,
+        .available_versions = &client_versions,
+    });
+    defer version_negotiation_client.deinit();
+    const selected_version = (try version_negotiation_client.processVersionNegotiationDatagram(
+        0,
+        &original_dcid,
+        &client_initial_scid,
+        version_negotiation_received.data,
+    )) orelse return error.UnexpectedState;
+    try require(selected_version == .v2);
+    try require(version_negotiation_client.versionNegotiationSelectedVersion() == .v2);
 
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
     _ = try client_router.registerClientInitialSourceConnectionId(31, &client_initial_scid, client_path, .{
@@ -229,10 +245,11 @@ pub fn main() !void {
     try require(server_route.connection_id == 21);
     try require(std.mem.eql(u8, server_route.destination_connection_id.asSlice(), &server_initial_scid));
 
-    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} accepted={} client_route={} server_route={} response_bytes={}\n", .{
+    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} accepted={} client_route={} server_route={} response_bytes={}\n", .{
         client_local.port,
         server_local.port,
         parsed_version_negotiation.versions.len,
+        @intFromEnum(selected_version),
         accepted_route.server_source_route.connection_id,
         client_route.connection_id,
         server_route.connection_id,
