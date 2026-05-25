@@ -8,11 +8,20 @@ pub fn main() !void {
 
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &dcid);
+    const v2_secrets = try quicz.protection.deriveInitialSecrets(.v2, &dcid);
 
     const client_key_hex = std.fmt.bytesToHex(secrets.client.key, .lower);
     const client_iv_hex = std.fmt.bytesToHex(secrets.client.iv, .lower);
     const server_key_hex = std.fmt.bytesToHex(secrets.server.key, .lower);
     const server_iv_hex = std.fmt.bytesToHex(secrets.server.iv, .lower);
+    const v2_client_key_hex = std.fmt.bytesToHex(v2_secrets.client.key, .lower);
+    const v2_client_iv_hex = std.fmt.bytesToHex(v2_secrets.client.iv, .lower);
+    const v2_server_key_hex = std.fmt.bytesToHex(v2_secrets.server.key, .lower);
+    const v2_server_iv_hex = std.fmt.bytesToHex(v2_secrets.server.iv, .lower);
+    const next_client = quicz.protection.nextAes128PacketProtectionKeys(secrets.client);
+    const next_client_secret_hex = std.fmt.bytesToHex(next_client.secret, .lower);
+    const next_client_key_hex = std.fmt.bytesToHex(next_client.key, .lower);
+    const next_client_iv_hex = std.fmt.bytesToHex(next_client.iv, .lower);
     const sample = [_]u8{
         0xd1, 0xb1, 0xc9, 0x8d, 0xd7, 0x68, 0x9f, 0xb8,
         0xec, 0x11, 0xd2, 0x42, 0xb1, 0x23, 0xdc, 0x9b,
@@ -51,6 +60,22 @@ pub fn main() !void {
     std.debug.print("[initial-keys] server_key={s} server_iv={s}\n", .{
         &server_key_hex,
         &server_iv_hex,
+    });
+    std.debug.print("[initial-keys] v2_client_key={s} v2_client_iv={s}\n", .{
+        &v2_client_key_hex,
+        &v2_client_iv_hex,
+    });
+    std.debug.print("[initial-keys] v2_server_key={s} v2_server_iv={s} differs_from_v1={}\n", .{
+        &v2_server_key_hex,
+        &v2_server_iv_hex,
+        !std.mem.eql(u8, &secrets.client.key, &v2_secrets.client.key) and
+            !std.mem.eql(u8, &secrets.server.key, &v2_secrets.server.key),
+    });
+    std.debug.print("[initial-keys] key_update_secret={s} next_key={s} next_iv={s} hp_retained={}\n", .{
+        &next_client_secret_hex,
+        &next_client_key_hex,
+        &next_client_iv_hex,
+        std.mem.eql(u8, &secrets.client.hp, &next_client.hp),
     });
     std.debug.print("[initial-keys] client_hp_mask={s} protected_first=0x{x} protected_pn={s}\n", .{
         &mask_hex,

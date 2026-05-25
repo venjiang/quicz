@@ -25,6 +25,7 @@ pub const ParameterId = enum(u64) {
     active_connection_id_limit = 0x0e,
     initial_source_connection_id = 0x0f,
     retry_source_connection_id = 0x10,
+    version_information = 0x11,
 
     _,
 };
@@ -39,11 +40,26 @@ pub const PreferredAddress = struct {
     stateless_reset_token: [16]u8,
 };
 
+/// RFC 9368 version_information transport parameter value.
+pub const VersionInformation = struct {
+    chosen_version: packet.Version,
+    available_versions: []const packet.Version,
+
+    /// Return whether `version` is present in the Available Versions list.
+    pub fn containsAvailableVersion(self: VersionInformation, version: packet.Version) bool {
+        for (self.available_versions) |available| {
+            if (@intFromEnum(available) == @intFromEnum(version)) return true;
+        }
+        return false;
+    }
+};
+
 /// Typed RFC 9000 transport parameters.
 ///
-/// Optional byte slices and the preferred-address connection ID are owned by
-/// decoded values and released by `deinit`. Callers that construct values for
-/// encoding retain ownership of their provided slices.
+/// Optional byte slices, the preferred-address connection ID, and
+/// `version_information.available_versions` are owned by decoded values and
+/// released by `deinit`. Callers that construct values for encoding retain
+/// ownership of their provided slices.
 pub const TransportParameters = struct {
     original_destination_connection_id: ?[]const u8 = null,
     max_idle_timeout: u64 = 0,
@@ -62,6 +78,7 @@ pub const TransportParameters = struct {
     active_connection_id_limit: u64 = 2,
     initial_source_connection_id: ?[]const u8 = null,
     retry_source_connection_id: ?[]const u8 = null,
+    version_information: ?VersionInformation = null,
 
     /// Release buffers owned by transport parameters decoded with `parse`.
     pub fn deinit(self: *TransportParameters, allocator: std.mem.Allocator) void {
@@ -69,6 +86,7 @@ pub const TransportParameters = struct {
         if (self.initial_source_connection_id) |cid| allocator.free(cid);
         if (self.retry_source_connection_id) |cid| allocator.free(cid);
         if (self.preferred_address) |preferred| allocator.free(preferred.connection_id);
+        if (self.version_information) |version_information| allocator.free(version_information.available_versions);
         self.* = .{};
     }
 };
@@ -160,6 +178,29 @@ fn encodePreferredAddress(writer: anytype, preferred: PreferredAddress) !void {
     try encodeBytesValue(writer, .preferred_address, value_writer.getWritten());
 }
 
+fn validateVersion(version: packet.Version) !void {
+    if (@intFromEnum(version) == 0) return error.InvalidParameterValue;
+}
+
+fn encodeVersionInformation(writer: anytype, version_information: VersionInformation) !void {
+    try validateVersion(version_information.chosen_version);
+    for (version_information.available_versions) |available| {
+        try validateVersion(available);
+    }
+
+    const value_len = 4 + 4 * version_information.available_versions.len;
+    try packet.encodeVarInt(writer, @intFromEnum(ParameterId.version_information));
+    try packet.encodeVarInt(writer, value_len);
+
+    var version_buf: [4]u8 = undefined;
+    std.mem.writeInt(u32, &version_buf, @intFromEnum(version_information.chosen_version), .big);
+    try writer.writeAll(&version_buf);
+    for (version_information.available_versions) |available| {
+        std.mem.writeInt(u32, &version_buf, @intFromEnum(available), .big);
+        try writer.writeAll(&version_buf);
+    }
+}
+
 fn parsePreferredAddress(value: []const u8, allocator: std.mem.Allocator) !PreferredAddress {
     if (value.len < 41) return error.InvalidParameterLength;
 
@@ -197,6 +238,29 @@ fn parsePreferredAddress(value: []const u8, allocator: std.mem.Allocator) !Prefe
         .ipv6_port = ipv6_port,
         .connection_id = connection_id,
         .stateless_reset_token = stateless_reset_token,
+    };
+}
+
+fn parseVersionInformation(value: []const u8, allocator: std.mem.Allocator) !VersionInformation {
+    if (value.len < 4 or value.len % 4 != 0) return error.InvalidParameterLength;
+
+    const chosen_version: packet.Version = @enumFromInt(std.mem.readInt(u32, value[0..4], .big));
+    try validateVersion(chosen_version);
+
+    const available_count = value.len / 4 - 1;
+    const available_versions = try allocator.alloc(packet.Version, available_count);
+    errdefer allocator.free(available_versions);
+
+    var offset: usize = 4;
+    for (available_versions) |*available| {
+        available.* = @enumFromInt(std.mem.readInt(u32, value[offset..][0..4], .big));
+        try validateVersion(available.*);
+        offset += 4;
+    }
+
+    return .{
+        .chosen_version = chosen_version,
+        .available_versions = available_versions,
     };
 }
 
@@ -268,6 +332,9 @@ pub fn encode(writer: anytype, params: TransportParameters) !void {
     if (params.retry_source_connection_id) |cid| {
         try encodeConnectionIdValue(writer, .retry_source_connection_id, cid);
     }
+    if (params.version_information) |version_information| {
+        try encodeVersionInformation(writer, version_information);
+    }
 }
 
 /// Parse RFC 9000 transport parameters, ignoring unknown parameter IDs.
@@ -321,6 +388,7 @@ pub fn parse(data: []const u8, allocator: std.mem.Allocator) !TransportParameter
                 try validateConnectionIdLen(value);
                 result.retry_source_connection_id = try cloneBytes(allocator, value);
             },
+            .version_information => result.version_information = try parseVersionInformation(value, allocator),
             _ => {},
         }
     }
@@ -353,6 +421,7 @@ test "transport parameters encode and parse typed values" {
         0xf8, 0xf9, 0xfa, 0xfb,
         0xfc, 0xfd, 0xfe, 0xff,
     };
+    const available_versions = [_]packet.Version{ .v2, .v1 };
     const preferred_cid = [_]u8{ 0xc1, 0xc2, 0xc3 };
     const params = TransportParameters{
         .original_destination_connection_id = &[_]u8{ 0xaa, 0xbb },
@@ -379,6 +448,10 @@ test "transport parameters encode and parse typed values" {
         .active_connection_id_limit = 4,
         .initial_source_connection_id = &[_]u8{0x11},
         .retry_source_connection_id = &[_]u8{0x22},
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &available_versions,
+        },
     };
 
     var raw: [512]u8 = undefined;
@@ -404,6 +477,9 @@ test "transport parameters encode and parse typed values" {
     try std.testing.expectEqual(params.active_connection_id_limit, parsed.active_connection_id_limit);
     try std.testing.expectEqualSlices(u8, params.initial_source_connection_id.?, parsed.initial_source_connection_id.?);
     try std.testing.expectEqualSlices(u8, params.retry_source_connection_id.?, parsed.retry_source_connection_id.?);
+    try std.testing.expectEqual(params.version_information.?.chosen_version, parsed.version_information.?.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, params.version_information.?.available_versions, parsed.version_information.?.available_versions);
+    try std.testing.expect(parsed.version_information.?.containsAvailableVersion(.v2));
 
     const preferred = parsed.preferred_address.?;
     try std.testing.expectEqualSlices(u8, &params.preferred_address.?.ipv4_address, &preferred.ipv4_address);
@@ -412,6 +488,33 @@ test "transport parameters encode and parse typed values" {
     try std.testing.expectEqual(params.preferred_address.?.ipv6_port, preferred.ipv6_port);
     try std.testing.expectEqualSlices(u8, params.preferred_address.?.connection_id, preferred.connection_id);
     try std.testing.expectEqualSlices(u8, &params.preferred_address.?.stateless_reset_token, &preferred.stateless_reset_token);
+}
+
+test "transport parameters reject malformed version information" {
+    var raw: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&raw);
+    try encodeBytesValue(writer.writer(), .version_information, &[_]u8{ 0x00, 0x00, 0x00 });
+    try std.testing.expectError(error.InvalidParameterLength, parse(writer.getWritten(), std.testing.allocator));
+
+    writer = buffer.fixedWriter(&raw);
+    try encodeBytesValue(writer.writer(), .version_information, &[_]u8{ 0x00, 0x00, 0x00, 0x00 });
+    try std.testing.expectError(error.InvalidParameterValue, parse(writer.getWritten(), std.testing.allocator));
+
+    writer = buffer.fixedWriter(&raw);
+    try encodeBytesValue(writer.writer(), .version_information, &[_]u8{
+        0x00, 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x00,
+    });
+    try std.testing.expectError(error.InvalidParameterValue, parse(writer.getWritten(), std.testing.allocator));
+
+    const too_long = [_]packet.Version{ .v1, .v2 };
+    writer = buffer.fixedWriter(raw[0..9]);
+    try std.testing.expectError(error.NoSpaceLeft, encode(writer.writer(), .{
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &too_long,
+        },
+    }));
 }
 
 test "transport parameters ignore unknown parameters but reject duplicates" {

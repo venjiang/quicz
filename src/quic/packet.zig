@@ -140,6 +140,36 @@ pub const PacketError = error{
     InvalidRetryPacket,
 };
 
+/// Return the long-header wire type bits for a packet type and QUIC version.
+///
+/// QUIC v2 deliberately changes these bits from QUIC v1. Unknown versions keep
+/// the v1 mapping so existing version-independent codec callers preserve their
+/// previous behavior until a version-specific profile is added.
+pub fn longHeaderPacketTypeBits(version: Version, packet_type: PacketType) u2 {
+    return switch (version) {
+        .v2 => switch (packet_type) {
+            .initial => 0b01,
+            .zero_rtt => 0b10,
+            .handshake => 0b11,
+            .retry => 0b00,
+        },
+        else => @intFromEnum(packet_type),
+    };
+}
+
+/// Interpret long-header wire type bits for a QUIC version.
+pub fn longHeaderPacketTypeFromBits(version: Version, bits: u2) PacketType {
+    return switch (version) {
+        .v2 => switch (bits) {
+            0b00 => .retry,
+            0b01 => .initial,
+            0b10 => .zero_rtt,
+            0b11 => .handshake,
+        },
+        else => @enumFromInt(bits),
+    };
+}
+
 fn packetNumberLen(packet_number: u64) PacketError!u8 {
     if (packet_number <= 0xff) return 1;
     if (packet_number <= 0xffff) return 2;
@@ -413,7 +443,7 @@ pub fn encodeLongHeaderWithPacketNumberEncoding(
     var first_byte: u8 = 0;
     first_byte |= 0x80; // Header Form = long
     first_byte |= 0x40; // Fixed Bit
-    first_byte |= @as(u8, @intCast(@intFromEnum(header.packet_type))) << 4;
+    first_byte |= @as(u8, @intCast(longHeaderPacketTypeBits(header.version, header.packet_type))) << 4;
     first_byte |= @as(u8, @intCast(packet_number_encoding.len - 1));
 
     try writer.writeByte(first_byte);
@@ -463,13 +493,14 @@ fn parseLongHeaderInternal(
     if ((first_byte & 0x40) == 0) return error.InvalidFixedBit;
     if ((first_byte & 0x0c) != 0) return error.InvalidReservedBits;
 
-    const packet_type: PacketType = @enumFromInt(@as(u2, @intCast((first_byte >> 4) & 0x03)));
-    if (packet_type == .retry) return error.UnsupportedPacketType;
     const pn_len: u8 = @as(u8, @intCast(first_byte & 0x03)) + 1;
+    const packet_type_bits: u2 = @intCast((first_byte >> 4) & 0x03);
 
     var version_buf: [4]u8 = undefined;
     try reader.readNoEof(&version_buf);
     const version: Version = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
+    const packet_type = longHeaderPacketTypeFromBits(version, packet_type_bits);
+    if (packet_type == .retry) return error.UnsupportedPacketType;
 
     const dcid_len = try reader.readByte();
     if (dcid_len > 20) return error.InvalidConnectionIdLength;
@@ -800,7 +831,8 @@ pub fn encodeRetryPacket(writer: anytype, retry: RetryPacket) !void {
     try validateLongHeaderCidLen(retry.scid.len);
     if (retry.token.len == 0) return error.InvalidRetryPacket;
 
-    try writer.writeByte(0xf0); // Long + fixed + retry + zero unused bits.
+    const type_bits = longHeaderPacketTypeBits(retry.version, .retry);
+    try writer.writeByte(0x80 | 0x40 | (@as(u8, @intCast(type_bits)) << 4)); // Long + fixed + Retry + zero unused bits.
 
     const raw_version = @as(u32, @intFromEnum(retry.version));
     var version_buf: [4]u8 = undefined;
@@ -825,12 +857,13 @@ pub fn parseRetryPacket(data: []const u8, allocator: std.mem.Allocator) !RetryPa
     const first_byte = try reader.readByte();
     if ((first_byte & 0x80) == 0) return error.InvalidHeaderForm;
     if ((first_byte & 0x40) == 0) return error.InvalidFixedBit;
-    const packet_type: PacketType = @enumFromInt(@as(u2, @intCast((first_byte >> 4) & 0x03)));
-    if (packet_type != .retry) return error.InvalidRetryPacket;
+    const packet_type_bits: u2 = @intCast((first_byte >> 4) & 0x03);
 
     var version_buf: [4]u8 = undefined;
     try reader.readNoEof(&version_buf);
     const version: Version = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
+    const packet_type = longHeaderPacketTypeFromBits(version, packet_type_bits);
+    if (packet_type != .retry) return error.InvalidRetryPacket;
 
     const dcid_len = try reader.readByte();
     try validateLongHeaderCidLen(dcid_len);
@@ -873,7 +906,7 @@ pub fn statelessResetTokenCandidate(datagram: []const u8) ?[stateless_reset_toke
 
 pub fn matchesStatelessReset(datagram: []const u8, expected_token: [stateless_reset_token_len]u8) bool {
     const candidate = statelessResetTokenCandidate(datagram) orelse return false;
-    return std.mem.eql(u8, &candidate, &expected_token);
+    return std.crypto.timing_safe.eql([stateless_reset_token_len]u8, candidate, expected_token);
 }
 
 /// Serialize a stateless reset datagram with caller-provided unpredictable bytes.
@@ -913,6 +946,43 @@ test "encode/parse long header roundtrip" {
     try std.testing.expectEqualSlices(u8, input.dcid, parsed.dcid);
     try std.testing.expectEqualSlices(u8, input.scid, parsed.scid);
     try std.testing.expectEqualSlices(u8, input.token, parsed.token);
+}
+
+test "encode/parse QUIC v2 long header packet type bits" {
+    const cases = [_]struct {
+        packet_type: PacketType,
+        expected_first_byte: u8,
+        token: []const u8,
+    }{
+        .{ .packet_type = .initial, .expected_first_byte = 0xd0, .token = &[_]u8{0xaa} },
+        .{ .packet_type = .zero_rtt, .expected_first_byte = 0xe0, .token = &[_]u8{} },
+        .{ .packet_type = .handshake, .expected_first_byte = 0xf0, .token = &[_]u8{} },
+    };
+
+    for (cases) |case| {
+        const input = LongHeader{
+            .version = .v2,
+            .dcid = &[_]u8{ 0xaa, 0xbb },
+            .scid = &[_]u8{ 0x11, 0x22 },
+            .packet_type = case.packet_type,
+            .token = case.token,
+            .packet_number = 0,
+            .payload_length = 1,
+        };
+
+        var raw: [64]u8 = undefined;
+        var out = buffer.fixedWriter(&raw);
+        try encodeLongHeader(out.writer(), input);
+        try std.testing.expectEqual(case.expected_first_byte, out.getWritten()[0]);
+
+        var in = buffer.fixedReader(out.getWritten());
+        var parsed = try parseLongHeader(in.reader(), std.testing.allocator);
+        defer deinitLongHeader(&parsed, std.testing.allocator);
+
+        try std.testing.expectEqual(Version.v2, parsed.version);
+        try std.testing.expectEqual(case.packet_type, parsed.packet_type);
+        try std.testing.expectEqualSlices(u8, case.token, parsed.token);
+    }
 }
 
 test "encode/parse long packet roundtrip derives payload length" {
@@ -1374,6 +1444,35 @@ test "encode/parse retry packet roundtrip" {
     try std.testing.expectEqualSlices(u8, &input.integrity_tag, &parsed.integrity_tag);
 }
 
+test "encode/parse QUIC v2 retry packet type bits" {
+    const input = RetryPacket{
+        .version = .v2,
+        .dcid = &[_]u8{ 0xaa, 0xbb },
+        .scid = &[_]u8{ 0x11, 0x22 },
+        .token = &[_]u8{ 0xde, 0xad },
+        .integrity_tag = .{
+            0x00, 0x01, 0x02, 0x03,
+            0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0a, 0x0b,
+            0x0c, 0x0d, 0x0e, 0x0f,
+        },
+    };
+
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try encodeRetryPacket(out.writer(), input);
+    try std.testing.expectEqual(@as(u8, 0xc0), out.getWritten()[0]);
+
+    var parsed = try parseRetryPacket(out.getWritten(), std.testing.allocator);
+    defer deinitRetryPacket(&parsed, std.testing.allocator);
+
+    try std.testing.expectEqual(Version.v2, parsed.version);
+    try std.testing.expectEqualSlices(u8, input.dcid, parsed.dcid);
+    try std.testing.expectEqualSlices(u8, input.scid, parsed.scid);
+    try std.testing.expectEqualSlices(u8, input.token, parsed.token);
+    try std.testing.expectEqualSlices(u8, &input.integrity_tag, &parsed.integrity_tag);
+}
+
 test "retry parser ignores unused bits" {
     const wire = [_]u8{
         0xff, // Long + fixed + retry + unused bits set.
@@ -1409,6 +1508,40 @@ test "retry parser ignores unused bits" {
 
     try std.testing.expectEqual(Version.v1, parsed.version);
     try std.testing.expectEqualSlices(u8, &[_]u8{0xcc}, parsed.token);
+
+    const v2_wire = [_]u8{
+        0xcf, // Long + fixed + v2 retry + unused bits set.
+        0x6b,
+        0x33,
+        0x43,
+        0xcf,
+        0x01,
+        0xaa,
+        0x01,
+        0xbb,
+        0xcc,
+        0x00,
+        0x01,
+        0x02,
+        0x03,
+        0x04,
+        0x05,
+        0x06,
+        0x07,
+        0x08,
+        0x09,
+        0x0a,
+        0x0b,
+        0x0c,
+        0x0d,
+        0x0e,
+        0x0f,
+    };
+    var parsed_v2 = try parseRetryPacket(&v2_wire, std.testing.allocator);
+    defer deinitRetryPacket(&parsed_v2, std.testing.allocator);
+
+    try std.testing.expectEqual(Version.v2, parsed_v2.version);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0xcc}, parsed_v2.token);
 }
 
 test "stateless reset helpers encode and match trailing token" {
@@ -1474,7 +1607,13 @@ test "retry packet rejects empty token and invalid header fields" {
     const missing_fixed = [_]u8{0xb0};
     try std.testing.expectError(error.InvalidFixedBit, parseRetryPacket(&missing_fixed, std.testing.allocator));
 
-    const initial_type = [_]u8{0xc0};
+    const initial_type = [_]u8{
+        0xc0,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+    };
     try std.testing.expectError(error.InvalidRetryPacket, parseRetryPacket(&initial_type, std.testing.allocator));
 }
 
@@ -1608,10 +1747,24 @@ test "retry long header is outside the minimal codec" {
     try std.testing.expectError(error.UnsupportedPacketType, encodeLongHeader(writer_fbs.writer(), retry));
 
     const wire = [_]u8{
-        0xf0, // long + fixed + retry
+        0xf0, // long + fixed + v1 retry
+        0x00,
+        0x00,
+        0x00,
+        0x01,
     };
     var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.UnsupportedPacketType, parseLongHeader(in.reader(), std.testing.allocator));
+
+    const v2_wire = [_]u8{
+        0xc0, // long + fixed + v2 retry
+        0x6b,
+        0x33,
+        0x43,
+        0xcf,
+    };
+    var v2_in = buffer.fixedReader(&v2_wire);
+    try std.testing.expectError(error.UnsupportedPacketType, parseLongHeader(v2_in.reader(), std.testing.allocator));
 }
 
 test "parse long header frees token when trailing length is invalid" {

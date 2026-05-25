@@ -19,6 +19,7 @@ pub const TransportErrorCode = enum(u64) {
     key_update_error = 0x0e,
     aead_limit_reached = 0x0f,
     no_viable_path = 0x10,
+    version_negotiation_error = 0x11,
 
     _,
 };
@@ -36,7 +37,7 @@ pub fn codeValue(code: TransportErrorCode) u64 {
 /// Return true when `raw_code` is one of the fixed RFC 9000 transport errors.
 pub fn isKnownFixedCode(raw_code: u64) bool {
     return switch (raw_code) {
-        0x00...0x10 => true,
+        0x00...0x11 => true,
         else => false,
     };
 }
@@ -85,12 +86,13 @@ test "transport error enum exposes RFC 9000 fixed code values" {
     try std.testing.expectEqual(@as(u64, 0x0e), codeValue(.key_update_error));
     try std.testing.expectEqual(@as(u64, 0x0f), codeValue(.aead_limit_reached));
     try std.testing.expectEqual(@as(u64, 0x10), codeValue(.no_viable_path));
+    try std.testing.expectEqual(@as(u64, 0x11), codeValue(.version_negotiation_error));
 }
 
 test "transport error helpers recognize fixed and crypto ranges" {
     try std.testing.expect(isKnownFixedCode(0x00));
-    try std.testing.expect(isKnownFixedCode(0x10));
-    try std.testing.expect(!isKnownFixedCode(0x11));
+    try std.testing.expect(isKnownFixedCode(0x11));
+    try std.testing.expect(!isKnownFixedCode(0x12));
 
     try std.testing.expect(isCryptoErrorCode(0x0100));
     try std.testing.expect(isCryptoErrorCode(0x01ff));
@@ -99,7 +101,8 @@ test "transport error helpers recognize fixed and crypto ranges" {
 
     try std.testing.expect(isKnownCode(0x0a));
     try std.testing.expect(isKnownCode(0x0100));
-    try std.testing.expect(!isKnownCode(0x11));
+    try std.testing.expect(isKnownCode(0x11));
+    try std.testing.expect(!isKnownCode(0x12));
 }
 
 test "crypto error helpers map TLS alert values" {

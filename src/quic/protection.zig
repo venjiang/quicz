@@ -13,7 +13,14 @@ pub const initial_salt_v1 = [_]u8{
     0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a,
 };
 
+/// RFC 9369 QUIC v2 Initial salt.
+pub const initial_salt_v2 = [_]u8{
+    0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93,
+    0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb, 0xf9, 0xbd, 0x2e, 0xd9,
+};
+
 pub const initial_secret_len = HkdfSha256.prk_length;
+pub const traffic_secret_len = HkdfSha256.prk_length;
 pub const aes_128_key_len = 16;
 pub const iv_len = 12;
 pub const aes_128_hp_key_len = 16;
@@ -32,6 +39,17 @@ pub const retry_integrity_nonce = [_]u8{
     0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb,
 };
 
+/// RFC 9369 fixed key used only for QUIC v2 Retry Integrity Tag generation.
+pub const retry_integrity_key_v2 = [_]u8{
+    0x8f, 0xb4, 0xb0, 0x1b, 0x56, 0xac, 0x48, 0xe2,
+    0x60, 0xfb, 0xcb, 0xce, 0xad, 0x7c, 0xcc, 0x92,
+};
+
+/// RFC 9369 fixed nonce used only for QUIC v2 Retry Integrity Tag generation.
+pub const retry_integrity_nonce_v2 = [_]u8{
+    0xd8, 0x69, 0x69, 0xbc, 0x2d, 0x7c, 0x6d, 0x99, 0x90, 0xef, 0xb0, 0x4a,
+};
+
 pub const ProtectionError = error{
     UnsupportedVersion,
     InvalidConnectionIdLength,
@@ -41,10 +59,41 @@ pub const ProtectionError = error{
     AuthenticationFailed,
 };
 
+const HkdfLabelSet = struct {
+    key: []const u8,
+    iv: []const u8,
+    hp: []const u8,
+    ku: []const u8,
+};
+
+const hkdf_labels_v1 = HkdfLabelSet{
+    .key = "quic key",
+    .iv = "quic iv",
+    .hp = "quic hp",
+    .ku = "quic ku",
+};
+
+const hkdf_labels_v2 = HkdfLabelSet{
+    .key = "quicv2 key",
+    .iv = "quicv2 iv",
+    .hp = "quicv2 hp",
+    .ku = "quicv2 ku",
+};
+
+const InitialProtectionProfile = struct {
+    salt: *const [initial_salt_v1.len]u8,
+    labels: HkdfLabelSet,
+};
+
+const RetryIntegrityProfile = struct {
+    key: [aes_128_key_len]u8,
+    nonce: [iv_len]u8,
+};
+
 /// Packet protection material derived from one QUIC packet protection secret.
 pub const Aes128PacketProtectionKeys = struct {
     /// Packet protection secret for one endpoint direction.
-    secret: [initial_secret_len]u8,
+    secret: [traffic_secret_len]u8,
     /// AEAD_AES_128_GCM packet protection key.
     key: [aes_128_key_len]u8,
     /// Per-direction packet protection IV.
@@ -78,30 +127,164 @@ pub const DecodedProtectedLongPacket = struct {
     len: usize,
 };
 
-/// Derive RFC 9001 QUIC v1 Initial packet protection keys.
+/// Short-header packet opened after QUIC packet protection is removed.
+pub const OpenedShortPacket = struct {
+    /// Unprotected short-header fields reconstructed with connection CID context.
+    header: packet.ShortHeader,
+    /// Decrypted QUIC packet payload bytes.
+    plaintext: []const u8,
+};
+
+/// Opened short-header packet plus the number of datagram bytes consumed.
+pub const DecodedProtectedShortPacket = struct {
+    packet: OpenedShortPacket,
+    len: usize,
+};
+
+/// Current and next 1-RTT keys used while a QUIC key update is in progress.
+pub const ShortPacketKeyUpdateKeys = struct {
+    /// Keys for the currently active key phase.
+    current: Aes128PacketProtectionKeys,
+    /// Keys derived with `nextAes128PacketProtectionKeys(current)`.
+    next: Aes128PacketProtectionKeys,
+    /// Short-header key phase bit corresponding to `current`.
+    current_key_phase: bool,
+};
+
+/// Caller-owned key-phase state for one 1-RTT packet-protection direction.
+///
+/// This tracks current and next keys without owning TLS traffic-secret
+/// production. Endpoints normally keep separate instances for local send keys
+/// and peer receive keys.
+pub const Aes128KeyPhaseState = struct {
+    current: Aes128PacketProtectionKeys,
+    next: Aes128PacketProtectionKeys,
+    current_key_phase: bool,
+
+    /// Initialize key-phase state from the currently active 1-RTT keys.
+    pub fn init(current: Aes128PacketProtectionKeys, current_key_phase: bool) Aes128KeyPhaseState {
+        return .{
+            .current = current,
+            .next = nextAes128PacketProtectionKeys(current),
+            .current_key_phase = current_key_phase,
+        };
+    }
+
+    /// Keys and phase used to protect the next locally sent packet.
+    pub fn currentKeys(self: Aes128KeyPhaseState) Aes128PacketProtectionKeys {
+        return self.current;
+    }
+
+    /// Short-header key phase bit corresponding to `currentKeys()`.
+    pub fn currentKeyPhase(self: Aes128KeyPhaseState) bool {
+        return self.current_key_phase;
+    }
+
+    /// Current and next keys for opening a packet that might use either phase.
+    pub fn keyUpdateKeys(self: Aes128KeyPhaseState) ShortPacketKeyUpdateKeys {
+        return .{
+            .current = self.current,
+            .next = self.next,
+            .current_key_phase = self.current_key_phase,
+        };
+    }
+
+    /// Start a local key update before sending with the next key phase.
+    pub fn initiateKeyUpdate(self: *Aes128KeyPhaseState) void {
+        self.advance();
+    }
+
+    /// Advance after a peer packet using the next key phase was authenticated.
+    ///
+    /// Returns true only when the peer key phase differed from the active phase.
+    pub fn updateAfterReceiving(self: *Aes128KeyPhaseState, peer_key_phase: bool) bool {
+        if (peer_key_phase == self.current_key_phase) return false;
+        self.advance();
+        return true;
+    }
+
+    fn advance(self: *Aes128KeyPhaseState) void {
+        self.current = self.next;
+        self.next = nextAes128PacketProtectionKeys(self.current);
+        self.current_key_phase = !self.current_key_phase;
+    }
+};
+
+/// Header-visible metadata for one protected long-header packet.
+///
+/// Packet type, version, and consumed length are available before header
+/// protection is removed. Payload bytes and packet number still require the
+/// packet protection keys.
+pub const ProtectedLongPacketInfo = struct {
+    /// QUIC long-header version field.
+    version: packet.Version,
+    /// Long-header packet type carried in byte 0.
+    packet_type: packet.PacketType,
+    /// Number of datagram bytes consumed by this protected long packet.
+    len: usize,
+};
+
+/// Derive Initial packet protection keys for supported QUIC versions.
 ///
 /// `client_initial_dcid` is the Destination Connection ID from the first client
-/// Initial packet. QUIC v2 uses a different salt and is intentionally rejected
-/// until v2 support is in scope.
+/// Initial packet. QUIC v1 follows RFC 9001; QUIC v2 follows RFC 9369's
+/// Initial salt and `quicv2` packet-protection labels.
 pub fn deriveInitialSecrets(
     version: packet.Version,
     client_initial_dcid: []const u8,
 ) ProtectionError!InitialSecrets {
     if (client_initial_dcid.len > max_connection_id_len) return error.InvalidConnectionIdLength;
-    const salt = switch (version) {
-        .v1 => &initial_salt_v1,
+    const profile = switch (version) {
+        .v1 => InitialProtectionProfile{ .salt = &initial_salt_v1, .labels = hkdf_labels_v1 },
+        .v2 => InitialProtectionProfile{ .salt = &initial_salt_v2, .labels = hkdf_labels_v2 },
         else => return error.UnsupportedVersion,
     };
 
-    const initial_secret = HkdfSha256.extract(salt, client_initial_dcid);
+    const initial_secret = HkdfSha256.extract(profile.salt, client_initial_dcid);
     const client_secret = hkdfExpandLabel(initial_secret, "client in", initial_secret_len);
     const server_secret = hkdfExpandLabel(initial_secret, "server in", initial_secret_len);
 
     return .{
         .initial_secret = initial_secret,
-        .client = deriveAes128PacketProtectionKeys(client_secret),
-        .server = deriveAes128PacketProtectionKeys(server_secret),
+        .client = deriveAes128PacketProtectionKeysWithLabels(client_secret, profile.labels),
+        .server = deriveAes128PacketProtectionKeysWithLabels(server_secret, profile.labels),
     };
+}
+
+/// Derive AEAD and header-protection keys from one QUIC packet protection secret.
+///
+/// The secret can be an Initial secret or a TLS-produced Handshake, 0-RTT, or
+/// 1-RTT traffic secret for an AES-128-GCM QUIC cipher suite.
+pub fn deriveAes128PacketProtectionKeys(secret: [traffic_secret_len]u8) Aes128PacketProtectionKeys {
+    return deriveAes128PacketProtectionKeysWithLabels(secret, hkdf_labels_v1);
+}
+
+fn deriveAes128PacketProtectionKeysWithLabels(
+    secret: [traffic_secret_len]u8,
+    labels: HkdfLabelSet,
+) Aes128PacketProtectionKeys {
+    return .{
+        .secret = secret,
+        .key = hkdfExpandLabel(secret, labels.key, aes_128_key_len),
+        .iv = hkdfExpandLabel(secret, labels.iv, iv_len),
+        .hp = hkdfExpandLabel(secret, labels.hp, aes_128_hp_key_len),
+    };
+}
+
+/// Derive the next 1-RTT traffic secret for QUIC key update.
+pub fn nextAes128TrafficSecret(secret: [traffic_secret_len]u8) [traffic_secret_len]u8 {
+    return hkdfExpandLabel(secret, hkdf_labels_v1.ku, traffic_secret_len);
+}
+
+/// Derive the next packet protection keys for a QUIC 1-RTT key update.
+///
+/// QUIC key update changes the packet protection key and IV from the next
+/// traffic secret. The header protection key is retained across updates.
+pub fn nextAes128PacketProtectionKeys(current: Aes128PacketProtectionKeys) Aes128PacketProtectionKeys {
+    const next_secret = nextAes128TrafficSecret(current.secret);
+    var next = deriveAes128PacketProtectionKeys(next_secret);
+    next.hp = current.hp;
+    return next;
 }
 
 /// Produce the RFC 9001 AES-based header protection mask.
@@ -182,18 +365,20 @@ pub fn unprotectAes128Payload(
     Aes128Gcm.decrypt(plaintext, ciphertext, tag, associated_data, nonce, keys.key) catch return error.AuthenticationFailed;
 }
 
-/// Compute the RFC 9001 Retry Integrity Tag for a transmitted Retry packet.
+/// Compute the Retry Integrity Tag for a transmitted Retry packet.
 ///
 /// `retry_without_integrity_tag` is the exact Retry packet bytes as sent on the
 /// wire, excluding the final 16-byte Retry Integrity Tag. The Original
 /// Destination Connection ID comes from the client Initial packet that caused
-/// this Retry and is prepended only in the Retry pseudo-packet.
+/// this Retry and is prepended only in the Retry pseudo-packet. QUIC v1 uses
+/// RFC 9001 fixed key material; QUIC v2 uses RFC 9369 fixed key material.
 pub fn retryIntegrityTag(
     allocator: std.mem.Allocator,
     original_destination_connection_id: []const u8,
     retry_without_integrity_tag: []const u8,
 ) ![aead_tag_len]u8 {
     if (original_destination_connection_id.len > max_connection_id_len) return error.InvalidConnectionIdLength;
+    const profile = try retryIntegrityProfileForDatagram(retry_without_integrity_tag);
     const pseudo_len = 1 + original_destination_connection_id.len + retry_without_integrity_tag.len;
     const pseudo_packet = try allocator.alloc(u8, pseudo_len);
     defer allocator.free(pseudo_packet);
@@ -205,11 +390,11 @@ pub fn retryIntegrityTag(
     var ciphertext: [0]u8 = .{};
     const plaintext: [0]u8 = .{};
     var tag: [aead_tag_len]u8 = undefined;
-    Aes128Gcm.encrypt(&ciphertext, &tag, &plaintext, pseudo_packet, retry_integrity_nonce, retry_integrity_key);
+    Aes128Gcm.encrypt(&ciphertext, &tag, &plaintext, pseudo_packet, profile.nonce, profile.key);
     return tag;
 }
 
-/// Verify the final 16 bytes of a Retry packet as the RFC 9001 Integrity Tag.
+/// Verify the final 16 bytes of a Retry packet as the version-specific Integrity Tag.
 pub fn verifyRetryIntegrityTag(
     allocator: std.mem.Allocator,
     original_destination_connection_id: []const u8,
@@ -224,7 +409,7 @@ pub fn verifyRetryIntegrityTag(
     return std.crypto.timing_safe.eql([aead_tag_len]u8, computed, received);
 }
 
-/// Serialize a QUIC v1 Retry packet and fill its RFC 9001 Integrity Tag.
+/// Serialize a QUIC Retry packet and fill its version-specific Integrity Tag.
 ///
 /// The packet codec writes Retry unused bits in its canonical form; the
 /// integrity tag is computed over those transmitted bytes plus the Original
@@ -234,7 +419,7 @@ pub fn encodeRetryPacketWithIntegrity(
     original_destination_connection_id: []const u8,
     retry: packet.RetryPacket,
 ) ![]u8 {
-    if (retry.version != .v1) return error.UnsupportedVersion;
+    _ = try retryIntegrityProfileForVersion(retry.version);
 
     var tagged_retry = retry;
     tagged_retry.integrity_tag = [_]u8{0} ** aead_tag_len;
@@ -252,7 +437,7 @@ pub fn encodeRetryPacketWithIntegrity(
     return datagram;
 }
 
-/// Verify and parse a QUIC v1 Retry packet.
+/// Verify and parse a QUIC Retry packet.
 pub fn parseRetryPacketWithIntegrity(
     allocator: std.mem.Allocator,
     original_destination_connection_id: []const u8,
@@ -264,9 +449,37 @@ pub fn parseRetryPacketWithIntegrity(
     return packet.parseRetryPacket(retry_datagram, allocator);
 }
 
+/// Return header-visible metadata for the first protected long-header packet.
+///
+/// This is used by coalesced-datagram receivers to decide which packet number
+/// space and keys are needed before attempting AEAD opening. Retry packets are
+/// intentionally rejected because they are not protected long-header packets.
+pub fn peekProtectedLongPacketInfo(datagram: []const u8) !ProtectedLongPacketInfo {
+    const prefix = try parseProtectedLongPrefix(datagram);
+    if (prefix.length < @as(u64, aead_tag_len + 1)) return error.InvalidPayloadLength;
+
+    const packet_end = try protectedLongPacketEnd(prefix);
+    if (packet_end > datagram.len) return error.InvalidPayloadLength;
+    try validateHeaderProtectionSample(packet_end, prefix.pn_offset);
+
+    return .{
+        .version = prefix.version,
+        .packet_type = prefix.packet_type,
+        .len = packet_end,
+    };
+}
+
 /// Release buffers owned by a decoded protected long-header packet.
 pub fn deinitProtectedLongPacket(decoded: *DecodedProtectedLongPacket, allocator: std.mem.Allocator) void {
     packet.deinitLongHeader(&decoded.packet.header, allocator);
+    if (decoded.packet.plaintext.len != 0) {
+        allocator.free(decoded.packet.plaintext);
+    }
+}
+
+/// Release buffers owned by a decoded protected short-header packet.
+pub fn deinitProtectedShortPacket(decoded: *DecodedProtectedShortPacket, allocator: std.mem.Allocator) void {
+    packet.deinitShortHeader(&decoded.packet.header, allocator);
     if (decoded.packet.plaintext.len != 0) {
         allocator.free(decoded.packet.plaintext);
     }
@@ -383,13 +596,149 @@ pub fn unprotectLongPacketAes128(
     };
 }
 
-fn deriveAes128PacketProtectionKeys(secret: [initial_secret_len]u8) Aes128PacketProtectionKeys {
+/// Serialize and protect one QUIC short-header packet with AEAD_AES_128_GCM.
+///
+/// The destination CID length is encoded by the caller through the supplied
+/// header. Short headers do not carry a payload length, so the whole returned
+/// datagram is one protected 1-RTT packet.
+pub fn protectShortPacketAes128(
+    allocator: std.mem.Allocator,
+    header: packet.ShortHeader,
+    packet_number_encoding: packet.PacketNumberEncoding,
+    keys: Aes128PacketProtectionKeys,
+    plaintext: []const u8,
+) ![]u8 {
+    const protected_payload_len = std.math.add(usize, plaintext.len, aead_tag_len) catch return error.InvalidPayloadLength;
+    const header_len = try shortHeaderLen(header, packet_number_encoding.len);
+    const pn_offset = header_len - packet_number_encoding.len;
+    const total_len = std.math.add(usize, header_len, protected_payload_len) catch return error.InvalidPayloadLength;
+    try validateHeaderProtectionSample(total_len, pn_offset);
+
+    const datagram = try allocator.alloc(u8, total_len);
+    errdefer allocator.free(datagram);
+
+    var writer = buffer.fixedWriter(datagram[0..header_len]);
+    try packet.encodeShortHeaderWithPacketNumberEncoding(writer.writer(), header, packet_number_encoding);
+    std.debug.assert(writer.getWritten().len == header_len);
+
+    const ciphertext = datagram[header_len..][0..plaintext.len];
+    var tag: [aead_tag_len]u8 = undefined;
+    try protectAes128Payload(keys, header.packet_number, datagram[0..header_len], plaintext, ciphertext, &tag);
+    @memcpy(datagram[header_len + plaintext.len ..][0..aead_tag_len], &tag);
+
+    var sample: [header_protection_sample_len]u8 = undefined;
+    @memcpy(&sample, datagram[pn_offset + 4 ..][0..header_protection_sample_len]);
+    const mask = aes128HeaderProtectionMask(keys.hp, sample);
+    try applyHeaderProtectionMask(.short, &datagram[0], datagram[pn_offset..header_len], mask);
+
+    return datagram;
+}
+
+/// Reveal the short-header spin bit without removing header protection.
+///
+/// QUIC header protection does not mask the spin bit. This helper does not
+/// authenticate the packet payload and should only be used for routing,
+/// observability, or deterministic spin-bit policy tests.
+pub fn peekShortPacketSpinBit(datagram: []const u8) ProtectionError!bool {
+    if (datagram.len == 0) return error.InvalidPayloadLength;
+    if ((datagram[0] & 0x80) != 0) return error.InvalidPayloadLength;
+    if ((datagram[0] & 0x40) == 0) return error.InvalidPayloadLength;
+    return (datagram[0] & 0x20) != 0;
+}
+
+/// Reveal the short-header key phase bit using AES header protection.
+///
+/// The destination CID length is endpoint routing context. This does not
+/// authenticate the packet payload; use it only to select the AEAD key for a
+/// subsequent open attempt.
+pub fn peekShortPacketKeyPhaseAes128(
+    hp_key: [aes_128_hp_key_len]u8,
+    datagram: []const u8,
+    dcid_len: usize,
+) ProtectionError!bool {
+    const first_byte = try unmaskShortPacketFirstByte(hp_key, datagram, dcid_len);
+    return (first_byte & 0x04) != 0;
+}
+
+/// Remove protection from one AEAD_AES_128_GCM short-header packet.
+///
+/// `dcid_len` comes from connection routing context because short headers do
+/// not carry a destination connection-id length. `expected_packet_number` is
+/// the next packet number expected in the Application packet number space.
+pub fn unprotectShortPacketAes128(
+    allocator: std.mem.Allocator,
+    keys: Aes128PacketProtectionKeys,
+    datagram: []const u8,
+    dcid_len: usize,
+    expected_packet_number: u64,
+) !DecodedProtectedShortPacket {
+    if (dcid_len > max_connection_id_len) return error.InvalidConnectionIdLength;
+    if (datagram.len <= 1 + dcid_len) return error.InvalidPayloadLength;
+    if ((datagram[0] & 0x80) != 0) return error.InvalidPayloadLength;
+    if ((datagram[0] & 0x40) == 0) return error.InvalidPayloadLength;
+
+    const pn_offset = 1 + dcid_len;
+    try validateHeaderProtectionSample(datagram.len, pn_offset);
+
+    var sample: [header_protection_sample_len]u8 = undefined;
+    @memcpy(&sample, datagram[pn_offset + 4 ..][0..header_protection_sample_len]);
+    const mask = aes128HeaderProtectionMask(keys.hp, sample);
+
+    const first_byte = datagram[0] ^ (mask[0] & 0x1f);
+    const pn_len: u8 = @as(u8, @intCast(first_byte & 0x03)) + 1;
+    const payload_start = pn_offset + @as(usize, pn_len);
+    const ciphertext_end = datagram.len - aead_tag_len;
+    if (payload_start > ciphertext_end) return error.InvalidPayloadLength;
+
+    const aad = try allocator.alloc(u8, payload_start);
+    defer allocator.free(aad);
+    @memcpy(aad, datagram[0..payload_start]);
+    try applyHeaderProtectionMask(.short, &aad[0], aad[pn_offset..payload_start], mask);
+    std.debug.assert(aad[0] == first_byte);
+
+    var reader = buffer.fixedReader(aad);
+    var header = try packet.parseShortHeaderWithExpectedPacketNumber(
+        reader.reader(),
+        allocator,
+        dcid_len,
+        expected_packet_number,
+    );
+    errdefer packet.deinitShortHeader(&header, allocator);
+
+    const packet_number = header.packet_number;
+    const ciphertext = datagram[payload_start..ciphertext_end];
+    var tag: [aead_tag_len]u8 = undefined;
+    @memcpy(&tag, datagram[ciphertext_end..]);
+
+    const plaintext = try allocator.alloc(u8, ciphertext.len);
+    errdefer allocator.free(plaintext);
+
+    try unprotectAes128Payload(keys, packet_number, aad, ciphertext, tag, plaintext);
+
     return .{
-        .secret = secret,
-        .key = hkdfExpandLabel(secret, "quic key", aes_128_key_len),
-        .iv = hkdfExpandLabel(secret, "quic iv", iv_len),
-        .hp = hkdfExpandLabel(secret, "quic hp", aes_128_hp_key_len),
+        .packet = .{
+            .header = header,
+            .plaintext = plaintext,
+        },
+        .len = datagram.len,
     };
+}
+
+/// Remove protection from a 1-RTT short packet that can use current or next keys.
+///
+/// The key phase bit is revealed with the current header-protection key, then
+/// the packet is authenticated with either `current` or `next`. This models the
+/// QUIC key update key selection rule without owning endpoint key-phase state.
+pub fn unprotectShortPacketAes128WithKeyUpdate(
+    allocator: std.mem.Allocator,
+    keys: ShortPacketKeyUpdateKeys,
+    datagram: []const u8,
+    dcid_len: usize,
+    expected_packet_number: u64,
+) !DecodedProtectedShortPacket {
+    const key_phase = try peekShortPacketKeyPhaseAes128(keys.current.hp, datagram, dcid_len);
+    const selected = if (key_phase == keys.current_key_phase) keys.current else keys.next;
+    return unprotectShortPacketAes128(allocator, selected, datagram, dcid_len, expected_packet_number);
 }
 
 const ProtectedLongPrefix = struct {
@@ -430,6 +779,42 @@ fn validateHeaderProtectionSample(packet_len: usize, pn_offset: usize) Protectio
     if (sample_end > packet_len) return error.InvalidPayloadLength;
 }
 
+fn unmaskShortPacketFirstByte(
+    hp_key: [aes_128_hp_key_len]u8,
+    datagram: []const u8,
+    dcid_len: usize,
+) ProtectionError!u8 {
+    if (dcid_len > max_connection_id_len) return error.InvalidConnectionIdLength;
+    if (datagram.len <= 1 + dcid_len) return error.InvalidPayloadLength;
+    if ((datagram[0] & 0x80) != 0) return error.InvalidPayloadLength;
+    if ((datagram[0] & 0x40) == 0) return error.InvalidPayloadLength;
+
+    const pn_offset = 1 + dcid_len;
+    try validateHeaderProtectionSample(datagram.len, pn_offset);
+
+    var sample: [header_protection_sample_len]u8 = undefined;
+    @memcpy(&sample, datagram[pn_offset + 4 ..][0..header_protection_sample_len]);
+    const mask = aes128HeaderProtectionMask(hp_key, sample);
+    return datagram[0] ^ (mask[0] & 0x1f);
+}
+
+fn retryIntegrityProfileForVersion(version: packet.Version) ProtectionError!RetryIntegrityProfile {
+    return switch (version) {
+        .v1 => .{ .key = retry_integrity_key, .nonce = retry_integrity_nonce },
+        .v2 => .{ .key = retry_integrity_key_v2, .nonce = retry_integrity_nonce_v2 },
+        else => error.UnsupportedVersion,
+    };
+}
+
+fn retryIntegrityProfileForDatagram(retry_without_integrity_tag: []const u8) ProtectionError!RetryIntegrityProfile {
+    if (retry_without_integrity_tag.len < 5) return error.InvalidPayloadLength;
+    if ((retry_without_integrity_tag[0] & 0x80) == 0) return error.InvalidPayloadLength;
+    if ((retry_without_integrity_tag[0] & 0x40) == 0) return error.InvalidPayloadLength;
+
+    const version: packet.Version = @enumFromInt(std.mem.readInt(u32, retry_without_integrity_tag[1..5], .big));
+    return retryIntegrityProfileForVersion(version);
+}
+
 fn parseProtectedLongPrefix(datagram: []const u8) !ProtectedLongPrefix {
     var reader = buffer.fixedReader(datagram);
 
@@ -437,12 +822,13 @@ fn parseProtectedLongPrefix(datagram: []const u8) !ProtectedLongPrefix {
     if ((first_byte & 0x80) == 0) return error.InvalidHeaderForm;
     if ((first_byte & 0x40) == 0) return error.InvalidFixedBit;
 
-    const packet_type: packet.PacketType = @enumFromInt(@as(u2, @intCast((first_byte >> 4) & 0x03)));
-    if (packet_type == .retry) return error.UnsupportedPacketType;
+    const packet_type_bits: u2 = @intCast((first_byte >> 4) & 0x03);
 
     var version_buf: [4]u8 = undefined;
     try reader.readNoEof(&version_buf);
     const version: packet.Version = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
+    const packet_type = packet.longHeaderPacketTypeFromBits(version, packet_type_bits);
+    if (packet_type == .retry) return error.UnsupportedPacketType;
 
     const dcid_len = try reader.readByte();
     if (dcid_len > 20) return error.InvalidConnectionIdLength;
@@ -511,8 +897,17 @@ fn retryPacketLen(retry: packet.RetryPacket) !usize {
     return len;
 }
 
+fn shortHeaderLen(header: packet.ShortHeader, pn_len: u8) !usize {
+    if (header.dcid.len > max_connection_id_len) return error.InvalidConnectionIdLength;
+    if (pn_len == 0 or pn_len > 4) return error.InvalidPacketNumberLength;
+    var len: usize = 1;
+    len = std.math.add(usize, len, header.dcid.len) catch return error.InvalidPayloadLength;
+    len = std.math.add(usize, len, pn_len) catch return error.InvalidPayloadLength;
+    return len;
+}
+
 fn hkdfExpandLabel(
-    secret: [initial_secret_len]u8,
+    secret: [traffic_secret_len]u8,
     label: []const u8,
     comptime len: usize,
 ) [len]u8 {
@@ -542,12 +937,74 @@ test "deriveInitialSecrets matches RFC 9001 Appendix A.1 vectors" {
     try expectHex("c206b8d9b9f0f37644430b490eeaa314", &secrets.server.hp);
 }
 
+test "deriveInitialSecrets matches RFC 9369 Appendix A.1 vectors" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try deriveInitialSecrets(.v2, &dcid);
+
+    try expectHex("2062e8b3cd8d52092614b8071d0aa1fb7c2e3ac193f78b280e72d8f5751f6aba", &secrets.initial_secret);
+
+    try expectHex("14ec9d6eb9fd7af83bf5a668bc17a7e283766aade7ecd0891f70f9ff7f4bf47b", &secrets.client.secret);
+    try expectHex("8b1a0bc121284290a29e0971b5cd045d", &secrets.client.key);
+    try expectHex("91f73e2351d8fa91660e909f", &secrets.client.iv);
+    try expectHex("45b95e15235d6f45a6b19cbcb0294ba9", &secrets.client.hp);
+
+    try expectHex("0263db1782731bf4588e7e4d93b7463907cb8cd8200b5da55a8bd488eafc37c1", &secrets.server.secret);
+    try expectHex("82db637861d55e1d011f19ea71d5d2a7", &secrets.server.key);
+    try expectHex("dd13c276499c0249d3310652", &secrets.server.iv);
+    try expectHex("edf6d05c83121201b436e16877593c3a", &secrets.server.hp);
+}
+
 test "deriveInitialSecrets rejects unsupported versions and invalid CID length" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
-    try std.testing.expectError(error.UnsupportedVersion, deriveInitialSecrets(.v2, &dcid));
+    const unknown_version: packet.Version = @enumFromInt(0x0a0a0a0a);
+    try std.testing.expectError(error.UnsupportedVersion, deriveInitialSecrets(unknown_version, &dcid));
 
     const long_dcid = [_]u8{0xaa} ** 21;
     try std.testing.expectError(error.InvalidConnectionIdLength, deriveInitialSecrets(.v1, &long_dcid));
+    try std.testing.expectError(error.InvalidConnectionIdLength, deriveInitialSecrets(.v2, &long_dcid));
+}
+
+test "nextAes128PacketProtectionKeys derives QUIC key update material" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try deriveInitialSecrets(.v1, &dcid);
+    const next_client = nextAes128PacketProtectionKeys(secrets.client);
+
+    try expectHex("4428ffa195ad665b9ebf9456945b99e8ff848512cab93d0426436409047d666c", &next_client.secret);
+    try expectHex("e85fece7a6f1b06576c46503cabcfa0d", &next_client.key);
+    try expectHex("994107a30fb5ed593e8976f2", &next_client.iv);
+    try expectHex("9f50449e04a0e810283a1e9933adedd2", &next_client.hp);
+
+    const direct_next_secret = nextAes128TrafficSecret(secrets.client.secret);
+    try std.testing.expectEqualSlices(u8, &next_client.secret, &direct_next_secret);
+    try std.testing.expect(!std.mem.eql(u8, &secrets.client.key, &next_client.key));
+    try std.testing.expect(!std.mem.eql(u8, &secrets.client.iv, &next_client.iv));
+    try std.testing.expectEqualSlices(u8, &secrets.client.hp, &next_client.hp);
+}
+
+test "Aes128KeyPhaseState advances send and receive phases" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try deriveInitialSecrets(.v1, &dcid);
+
+    var state = Aes128KeyPhaseState.init(secrets.client, false);
+    const first_next = state.next;
+    try std.testing.expect(!state.currentKeyPhase());
+    const first_current = state.currentKeys();
+    try std.testing.expectEqualSlices(u8, &secrets.client.secret, &first_current.secret);
+    try std.testing.expectEqualSlices(u8, &first_next.secret, &state.keyUpdateKeys().next.secret);
+
+    state.initiateKeyUpdate();
+    try std.testing.expect(state.currentKeyPhase());
+    const updated_current = state.currentKeys();
+    const updated_keys = state.keyUpdateKeys();
+    try std.testing.expectEqualSlices(u8, &first_next.secret, &updated_current.secret);
+    try std.testing.expectEqualSlices(u8, &secrets.client.hp, &updated_current.hp);
+    try std.testing.expectEqualSlices(u8, &updated_current.secret, &updated_keys.current.secret);
+    try std.testing.expectEqual(true, updated_keys.current_key_phase);
+
+    try std.testing.expect(!state.updateAfterReceiving(true));
+    try std.testing.expect(state.updateAfterReceiving(false));
+    try std.testing.expect(!state.currentKeyPhase());
+    try std.testing.expectEqual(false, state.keyUpdateKeys().current_key_phase);
 }
 
 test "AES header protection mask matches RFC 9001 Appendix A.2 sample" {
@@ -690,6 +1147,174 @@ test "protectLongPacketAes128 matches RFC 9001 Appendix A.3 server Initial" {
     try std.testing.expectError(error.AuthenticationFailed, unprotectLongPacketAes128(std.testing.allocator, secrets.server, &tampered, 0));
 }
 
+test "protectLongPacketAes128 roundtrips QUIC v2 Initial packet type bits" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try deriveInitialSecrets(.v2, &dcid);
+    const plaintext = "quic v2 initial protected payload";
+
+    const protected = try protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v2,
+        .dcid = &dcid,
+        .scid = &scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, plaintext);
+    defer std.testing.allocator.free(protected);
+
+    try std.testing.expectEqual(@as(u8, 0xd0), protected[0] & 0xf0);
+
+    const info = try peekProtectedLongPacketInfo(protected);
+    try std.testing.expectEqual(packet.Version.v2, info.version);
+    try std.testing.expectEqual(packet.PacketType.initial, info.packet_type);
+    try std.testing.expectEqual(protected.len, info.len);
+
+    var opened = try unprotectLongPacketAes128(std.testing.allocator, secrets.client, protected, 0);
+    defer deinitProtectedLongPacket(&opened, std.testing.allocator);
+
+    try std.testing.expectEqual(packet.Version.v2, opened.packet.header.version);
+    try std.testing.expectEqual(packet.PacketType.initial, opened.packet.header.packet_type);
+    try std.testing.expectEqualSlices(u8, plaintext, opened.packet.plaintext);
+}
+
+test "protectShortPacketAes128 roundtrips a protected short packet" {
+    const dcid = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    const secrets = try deriveInitialSecrets(.v1, &dcid);
+    const plaintext = [_]u8{
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+    };
+    const header = packet.ShortHeader{
+        .dcid = &dcid,
+        .spin_bit = true,
+        .key_phase = false,
+        .packet_number = 7,
+    };
+
+    const protected = try protectShortPacketAes128(std.testing.allocator, header, .{
+        .len = 1,
+        .truncated_packet_number = 7,
+    }, secrets.client, &plaintext);
+    defer std.testing.allocator.free(protected);
+
+    try std.testing.expect((protected[0] & 0x80) == 0);
+    try std.testing.expect((protected[0] & 0x40) != 0);
+    try std.testing.expect((protected[0] & 0x20) != 0);
+    try std.testing.expect(try peekShortPacketSpinBit(protected));
+    try std.testing.expectError(error.InvalidPayloadLength, peekShortPacketSpinBit(&[_]u8{}));
+
+    var opened = try unprotectShortPacketAes128(std.testing.allocator, secrets.client, protected, dcid.len, 0);
+    defer deinitProtectedShortPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqual(protected.len, opened.len);
+    try std.testing.expectEqual(@as(u64, 7), opened.packet.header.packet_number);
+    try std.testing.expect(opened.packet.header.spin_bit);
+    try std.testing.expect(!opened.packet.header.key_phase);
+    try std.testing.expectEqualSlices(u8, &dcid, opened.packet.header.dcid);
+    try std.testing.expectEqualSlices(u8, &plaintext, opened.packet.plaintext);
+
+    protected[protected.len - 1] ^= 0x01;
+    try std.testing.expectError(error.AuthenticationFailed, unprotectShortPacketAes128(std.testing.allocator, secrets.client, protected, dcid.len, 0));
+}
+
+test "unprotectShortPacketAes128WithKeyUpdate selects next key phase" {
+    const dcid = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    const secrets = try deriveInitialSecrets(.v1, &dcid);
+    const next_client = nextAes128PacketProtectionKeys(secrets.client);
+    const plaintext = [_]u8{
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+    };
+
+    const protected = try protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &dcid,
+        .spin_bit = false,
+        .key_phase = true,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), next_client, &plaintext);
+    defer std.testing.allocator.free(protected);
+
+    try std.testing.expect(try peekShortPacketKeyPhaseAes128(secrets.client.hp, protected, dcid.len));
+    try std.testing.expectError(error.AuthenticationFailed, unprotectShortPacketAes128(std.testing.allocator, secrets.client, protected, dcid.len, 0));
+
+    var opened = try unprotectShortPacketAes128WithKeyUpdate(std.testing.allocator, .{
+        .current = secrets.client,
+        .next = next_client,
+        .current_key_phase = false,
+    }, protected, dcid.len, 0);
+    defer deinitProtectedShortPacket(&opened, std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u64, 0), opened.packet.header.packet_number);
+    try std.testing.expect(opened.packet.header.key_phase);
+    try std.testing.expectEqualSlices(u8, &plaintext, opened.packet.plaintext);
+}
+
+test "protectShortPacketAes128 rejects packets without a header protection sample" {
+    const dcid = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    const secrets = try deriveInitialSecrets(.v1, &dcid);
+    const plaintext = [_]u8{0x01};
+    const header = packet.ShortHeader{
+        .dcid = &dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    };
+
+    try std.testing.expectError(error.InvalidPayloadLength, protectShortPacketAes128(std.testing.allocator, header, .{
+        .len = 1,
+        .truncated_packet_number = 0,
+    }, secrets.client, &plaintext));
+}
+
+test "peekProtectedLongPacketInfo returns protected long packet boundaries" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try deriveInitialSecrets(.v1, &dcid);
+
+    const initial = try protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &dcid,
+        .scid = &scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, "initial protected payload");
+    defer std.testing.allocator.free(initial);
+
+    const handshake = try protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &dcid,
+        .scid = &scid,
+        .packet_type = .handshake,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.server, "handshake protected payload");
+    defer std.testing.allocator.free(handshake);
+
+    const coalesced = try std.testing.allocator.alloc(u8, initial.len + handshake.len);
+    defer std.testing.allocator.free(coalesced);
+    @memcpy(coalesced[0..initial.len], initial);
+    @memcpy(coalesced[initial.len..], handshake);
+
+    const first = try peekProtectedLongPacketInfo(coalesced);
+    try std.testing.expectEqual(packet.Version.v1, first.version);
+    try std.testing.expectEqual(packet.PacketType.initial, first.packet_type);
+    try std.testing.expectEqual(initial.len, first.len);
+
+    const second = try peekProtectedLongPacketInfo(coalesced[first.len..]);
+    try std.testing.expectEqual(packet.Version.v1, second.version);
+    try std.testing.expectEqual(packet.PacketType.handshake, second.packet_type);
+    try std.testing.expectEqual(handshake.len, second.len);
+}
+
 test "protectLongPacketAes128 rejects packets without a header protection sample" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const secrets = try deriveInitialSecrets(.v1, &dcid);
@@ -723,7 +1348,32 @@ test "retryIntegrityTag matches RFC 9001 Appendix A.4 Retry packet" {
     try std.testing.expect(try verifyRetryIntegrityTag(std.testing.allocator, &original_dcid, &retry_packet));
 
     var tampered = retry_packet;
-    tampered[1] ^= 0x01;
+    tampered[tampered.len - 1] ^= 0x01;
+    try std.testing.expect(!try verifyRetryIntegrityTag(std.testing.allocator, &original_dcid, &tampered));
+}
+
+test "retryIntegrityTag matches RFC 9369 Appendix A.4 Retry packet" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const retry_hex =
+        "cf6b3343cf0008f067a5502a4262b5746f6b656e" ++
+        "c8646ce8bfe33952d955543665dcc7b6";
+    var retry_packet: [retry_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&retry_packet, retry_hex);
+
+    const tag_offset = retry_packet.len - aead_tag_len;
+    const tag = try retryIntegrityTag(std.testing.allocator, &original_dcid, retry_packet[0..tag_offset]);
+    try expectHex("c8646ce8bfe33952d955543665dcc7b6", &tag);
+    try std.testing.expect(try verifyRetryIntegrityTag(std.testing.allocator, &original_dcid, &retry_packet));
+
+    var parsed = try parseRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, &retry_packet);
+    defer packet.deinitRetryPacket(&parsed, std.testing.allocator);
+    try std.testing.expectEqual(packet.Version.v2, parsed.version);
+    try std.testing.expectEqualSlices(u8, &[_]u8{}, parsed.dcid);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5 }, parsed.scid);
+    try std.testing.expectEqualSlices(u8, "token", parsed.token);
+
+    var tampered = retry_packet;
+    tampered[tampered.len - 1] ^= 0x01;
     try std.testing.expect(!try verifyRetryIntegrityTag(std.testing.allocator, &original_dcid, &tampered));
 }
 
@@ -748,14 +1398,28 @@ test "encodeRetryPacketWithIntegrity produces verifiable Retry packet" {
     try std.testing.expectEqualSlices(u8, retry.scid, parsed.scid);
     try std.testing.expectEqualSlices(u8, retry.token, parsed.token);
 
+    var v2_retry = retry;
+    v2_retry.version = .v2;
+    const v2_datagram = try encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, v2_retry);
+    defer std.testing.allocator.free(v2_datagram);
+    try std.testing.expectEqual(@as(u8, 0xc0), v2_datagram[0]);
+    try std.testing.expect(try verifyRetryIntegrityTag(std.testing.allocator, &original_dcid, v2_datagram));
+
+    var parsed_v2 = try parseRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, v2_datagram);
+    defer packet.deinitRetryPacket(&parsed_v2, std.testing.allocator);
+    try std.testing.expectEqual(packet.Version.v2, parsed_v2.version);
+    try std.testing.expectEqualSlices(u8, v2_retry.dcid, parsed_v2.dcid);
+    try std.testing.expectEqualSlices(u8, v2_retry.scid, parsed_v2.scid);
+    try std.testing.expectEqualSlices(u8, v2_retry.token, parsed_v2.token);
+
     var tampered = try std.testing.allocator.dupe(u8, datagram);
     defer std.testing.allocator.free(tampered);
     tampered[5] ^= 0x01;
     try std.testing.expectError(error.AuthenticationFailed, parseRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, tampered));
 
-    var v2_retry = retry;
-    v2_retry.version = .v2;
-    try std.testing.expectError(error.UnsupportedVersion, encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, v2_retry));
+    var unknown_retry = retry;
+    unknown_retry.version = @enumFromInt(0x0a0a0a0a);
+    try std.testing.expectError(error.UnsupportedVersion, encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, unknown_retry));
 }
 
 test "retry integrity validates input bounds" {
@@ -764,6 +1428,12 @@ test "retry integrity validates input bounds" {
     try std.testing.expectError(error.InvalidConnectionIdLength, retryIntegrityTag(std.testing.allocator, &long_original_dcid, &retry_without_tag));
 
     const original_dcid = [_]u8{0x83};
+    const too_short_retry_without_tag = [_]u8{ 0xff, 0x00, 0x00, 0x00 };
+    try std.testing.expectError(error.InvalidPayloadLength, retryIntegrityTag(std.testing.allocator, &original_dcid, &too_short_retry_without_tag));
+
+    const unknown_version_retry = [_]u8{ 0xff, 0x0a, 0x0a, 0x0a, 0x0a };
+    try std.testing.expectError(error.UnsupportedVersion, retryIntegrityTag(std.testing.allocator, &original_dcid, &unknown_version_retry));
+
     const too_short_retry = [_]u8{0xff} ** aead_tag_len;
     try std.testing.expectError(error.InvalidPayloadLength, verifyRetryIntegrityTag(std.testing.allocator, &original_dcid, &too_short_retry));
 }

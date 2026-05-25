@@ -310,6 +310,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_initial_keys);
 
+    // Endpoint routing executable
+    const exe_endpoint_routing = b.addExecutable(.{
+        .name = "quicz-endpoint-routing",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/endpoint_routing.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_endpoint_routing);
+
     // zig build run-server
     const run_server = b.step("run-server", "Run quicz echo server");
     const run_server_cmd = b.addRunArtifact(exe_server);
@@ -488,6 +502,15 @@ pub fn build(b: *std.Build) void {
     run_initial_keys_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_initial_keys_cmd.addArgs(args);
+    }
+
+    // zig build run-endpoint-routing
+    const run_endpoint_routing = b.step("run-endpoint-routing", "Run quicz endpoint routing example");
+    const run_endpoint_routing_cmd = b.addRunArtifact(exe_endpoint_routing);
+    run_endpoint_routing.dependOn(&run_endpoint_routing_cmd.step);
+    run_endpoint_routing_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_endpoint_routing_cmd.addArgs(args);
     }
 
     const lib_tests = b.addTest(.{

@@ -33,8 +33,35 @@ pub fn main() !void {
         .{ deadline, payload.len },
     );
 
-    var spaces = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    var stream_probe = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer stream_probe.deinit();
+    const stream_id = try stream_probe.openStream();
+    try stream_probe.sendOnStream(stream_id, "old", false);
+    _ = (try stream_probe.pollTx(10, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
+    try stream_probe.sendOnStream(stream_id, "new", false);
+    const stream_probe_deadline = stream_probe.ptoDeadlineMillis(.application) orelse return error.PtoRecoveryExampleFailed;
+    try stream_probe.checkPtoTimeouts(stream_probe_deadline);
+
+    const stream_probe_payload = (try stream_probe.pollTx(stream_probe_deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
+    var stream_probe_decoded = try quicz.frame.decodeFrameSlice(stream_probe_payload, allocator);
+    defer quicz.frame.deinitFrame(&stream_probe_decoded.frame, allocator);
+    switch (stream_probe_decoded.frame) {
+        .stream => |stream_frame| {
+            if (stream_frame.stream_id != stream_id) return error.PtoRecoveryExampleFailed;
+            if (stream_frame.offset != 3) return error.PtoRecoveryExampleFailed;
+            if (!std.mem.eql(u8, stream_frame.data, "new")) return error.PtoRecoveryExampleFailed;
+        },
+        else => return error.PtoRecoveryExampleFailed,
+    }
+
+    std.debug.print(
+        "[pto] queued STREAM data used as PTO probe bytes={d}\n",
+        .{stream_probe_payload.len},
+    );
+
+    var spaces = try quicz.QuicConnection.init(allocator, .server, .{ .initial_rtt_ms = 100 });
     defer spaces.deinit();
+    try spaces.validatePeerAddress();
 
     _ = try spaces.recordPacketSentInSpace(.initial, 10, 100);
     _ = try spaces.recordPacketSentInSpace(.handshake, 20, 100);

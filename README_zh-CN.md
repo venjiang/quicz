@@ -14,16 +14,17 @@
 - [x] 项目骨架：Zig 构建集成 + 内存态示例 echo client/server
 - [x] `QuicConnection` 的基础 API 设计（初版）
 - [x] QUIC 变长整数（varint）编解码工具
-- [x] 最小 QUIC 包头（long/short，含 short-header spin-bit 保留）、header-level packet number 截断/重建、RFC 9000 long/short packet envelope 解析/序列化、packet number 编码选择/重建、Retry packet codec 与 RFC 8999 Version Negotiation packet 解析/序列化
-- [x] RFC 9000 transport parameter 类型化 codec，含默认值、重复参数拒绝、未知参数忽略、preferred_address 支持，以及 `QuicConnection` 导出/应用 helper
-- [x] RFC 9000 transport error code helper，含固定错误码与 CRYPTO_ERROR TLS alert 映射
-- [x] RFC 9001 QUIC v1 Initial secret/key/IV/header-protection key 派生、AEAD_AES_128_GCM payload protection helper、protected long-packet seal/open、Retry Integrity Tag 校验与 AES header-protection mask 应用，覆盖 Appendix A 向量
-- [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK/ACK_ECN 多区间 / RESET_STREAM / STOP_SENDING / MAX_* / BLOCKED / NEW_TOKEN / NEW_CONNECTION_ID / RETIRE_CONNECTION_ID / PATH_CHALLENGE / PATH_RESPONSE / HANDSHAKE_DONE / CONNECTION_CLOSE 子集）
-- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转，含发送侧 PING 与 STREAM/按 packet number space 隔离的 CRYPTO 分片、入站 CRYPTO 缓冲、乱序 STREAM 接收重组、本端 RESET_STREAM 与 STOP_SENDING 发出、入站 RESET_STREAM 与 STOP_SENDING 处理、PATH_CHALLENGE 响应排队、outbound PATH_CHALLENGE 跟踪、PTO 驱动重试、失败计数与匹配 PATH_RESPONSE 校验、建模的 server anti-amplification 发送限制、显式 peer-address validation 与 Retry token 消费、对端签发 connection ID 跟踪与 RETIRE_CONNECTION_ID 排队、本端 NEW_CONNECTION_ID 签发与对端 RETIRE 处理、客户端侧 NEW_TOKEN 存储、HANDSHAKE_DONE 接收校验与 handshake confirmation、基础 connection/stream/stream-count 流量控制、outbound BLOCKED 上报、接收侧 MAX_DATA/MAX_STREAM_DATA/MAX_STREAMS_BIDI/UNI credit 刷新、对端 BLOCKED 可观测状态与旧 limit MAX 重发、严格 stream 方向校验、max_idle_timeout 处理与关闭状态处理
-- [x] 简化丢包恢复与拥塞控制状态，含自动 ACK 生成、ACK range 处理、未发送 packet 的 ACK 拒绝、ACK 驱动的 sent-packet tracking、ACK delay exponent / handshake confirmed 后 max_ack_delay 截断、packet/time-threshold loss detection、确定性的 loss-timeout hook、NewReno-style recovery period、persistent congestion 响应与 packet-number-space PTO PING hook
-- [x] 实验性的 Initial/Handshake/Application packet number space 模型，用于 frame-payload ACK/recovery 隔离、RFC 9000 Initial/Handshake/0-RTT frame-type filtering，并包含建模的 Initial/Handshake discard cleanup
-- [x] 针对已建模 ECT(0)/ECT(1) 发送 packet 的 frame-payload ACK_ECN counter 校验
-- [x] Stateless reset packet helper，以及针对对端签发 CID 的连接层 reset-token 检测
+- [x] 最小 QUIC 包头（long/short，含 RFC 9369 QUIC v2 long-header packet type bits、short-header spin-bit 保留与 protected short-packet spin-bit peeking）、header-level packet number 截断/重建、RFC 9000 long/short packet envelope 解析/序列化、packet number 编码选择/重建、Retry packet codec、RFC 8999 Version Negotiation packet 解析/序列化，以及带 RFC 9368 downgrade-check handoff 的 client-side Version Negotiation validation/selection state
+- [x] RFC 9000 transport parameter 类型化 codec，含默认值、重复参数拒绝、未知参数忽略、preferred_address 支持、RFC 9368 `version_information`、包含 VN 后 server Version Information downgrade validation 的 `QuicConnection` 导出/应用 helper，以及 TLS extension byte 编码/应用 helper
+- [x] RFC 9000/RFC 9368 transport error code helper，含固定错误码、VERSION_NEGOTIATION_ERROR 与 CRYPTO_ERROR TLS alert 映射
+- [x] RFC 9001 QUIC v1 和 RFC 9369 QUIC v2 Initial secret/key/IV/header-protection key 派生、RFC 9001 `quic ku` key-update 派生、调用方持有和连接已安装的 short-packet key-phase 状态与 selection，并带 ACK-gated installed-key update initiation、mock backend Handshake/0-RTT/1-RTT traffic-secret handoff、显式 installed-key 0-RTT accept/reject 与 discard cleanup、建模 1-RTT 边界的 0-RTT key discard、AEAD_AES_128_GCM payload protection helper、protected long/short-packet seal/open、v1/v2 Retry Integrity Tag 校验与 AES header-protection mask 应用，覆盖 Appendix A 向量
+- [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK/ACK_ECN 多区间 / RESET_STREAM / STOP_SENDING / MAX_* / BLOCKED / NEW_TOKEN / NEW_CONNECTION_ID / RETIRE_CONNECTION_ID / PATH_CHALLENGE / PATH_RESPONSE / HANDSHAKE_DONE / CONNECTION_CLOSE 子集），包含 frame type 最短 varint 编码校验与未知 frame type 拒绝
+- [x] 最小内存态连接与 stream 发送队列 / 接收缓存流转，含发送侧 PING 与 STREAM/按 packet number space 隔离的 CRYPTO 分片、protected Initial/Handshake CRYPTO/ACK/PING（含首个 client Initial DCID 长度、server Initial token 校验与 RFC 9000 Initial UDP datagram 1200 字节扩展/丢弃检查）、使用调用方 key 或连接已安装 key 的 0-RTT STREAM/RESET_STREAM/STOP_SENDING long-packet bridge、使用连接已安装 key 的 protected Handshake long-packet CRYPTO/ACK/PING bridge、使用调用方 key 和连接已安装 key 的 protected 1-RTT short-packet PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_RESPONSE/RETIRE_CONNECTION_ID/MAX_*/BLOCKED/STREAM/RESET_STREAM/STOP_SENDING/CONNECTION_CLOSE transmit 和 receive bridge，并带 key-phase 状态 helper 与可配置的单路径 spin-bit signaling、入站乱序 CRYPTO 缓冲与相同重复重传丢弃、可插拔 `CryptoBackend` 驱动的按 space CRYPTO 投递/输出排队、transport-parameter byte handoff、mock Handshake/0-RTT/1-RTT traffic-secret handoff 和建模 handshake confirmation、乱序 STREAM 接收重组与相同重复重传丢弃、本端 RESET_STREAM 与 STOP_SENDING 发出、入站 RESET_STREAM 与 STOP_SENDING 处理、PATH_CHALLENGE 响应排队、outbound PATH_CHALLENGE 跟踪、PTO 驱动重试、失败计数、匹配 PATH_RESPONSE 校验，以及 protected PATH_RESPONSE 验证后的 endpoint route update、建模的 server anti-amplification 发送限制、显式 peer-address validation、HMAC-SHA256 地址绑定、带过期时间并绑定 originating version 的 address-validation token、endpoint peer-address binding 和内存态 `AddressValidationPolicy` secret/replay snapshot 导出恢复与 replay 拒绝、Retry token 消费、server 侧 Retry datagram 签发、客户端侧 Retry datagram 处理与 handshake CID transport-parameter 校验/导出、带 stateless-reset-token uniqueness checks 的对端签发 connection ID 跟踪与 RETIRE_CONNECTION_ID 排队、带 stateless-reset-token uniqueness checks 的本端 NEW_CONNECTION_ID 签发与对端 RETIRE 处理、server 侧 HANDSHAKE_DONE 和 NEW_TOKEN 签发、客户端侧 NEW_TOKEN 存储、HANDSHAKE_DONE 接收校验、显式 handshake progress 可观测状态、handshake confirmation、RFC 9001 client 发送 Handshake / server 接收 Handshake 后的 Initial discard，以及有效客户端侧 HANDSHAKE_DONE、server 侧 sendHandshakeDone 或 backend-confirmed no-output Handshake drive 后的 Handshake-space discard、基础 connection/stream/stream-count 流量控制、outbound BLOCKED 上报、接收侧 MAX_DATA/MAX_STREAM_DATA/MAX_STREAMS_BIDI/UNI credit 刷新与可选目标 receive data 和 stream-count window、对端 BLOCKED 可观测状态、STREAM_DATA_BLOCKED 接收侧状态创建/校验、旧 limit MAX 重发、基于已配置 receive window 的增长和 stream-count-window 增长、严格 stream 方向校验、max_idle_timeout 处理与关闭状态处理
+- [x] 简化丢包恢复与拥塞控制状态，含自动 ACK 生成、ACK range 处理、未发送 packet 的 ACK 拒绝、ACK 驱动的 sent-packet tracking、ACK delay exponent / handshake confirmed 后 max_ack_delay 截断、packet/time-threshold loss detection、确定性的 loss-timeout hook、NewReno-style recovery period、persistent congestion 响应，以及会优先使用已排队 ack-eliciting 数据、否则排队 PING probe 的 packet-number-space PTO hook
+- [x] 实验性的 Initial/Handshake/Application packet number space 模型，用于 frame-payload ACK/recovery 隔离、RFC 9000 Initial/Handshake/0-RTT frame-type filtering，并包含建模的 RFC 9001 Initial discard 与 Initial/Handshake discard cleanup
+- [x] 针对已建模 ECT(0)/ECT(1) 发送 packet 的 frame-payload ACK_ECN counter 校验，以及按 UDP path identity 隔离的内存态 endpoint ECN 状态
+- [x] 带 constant-time token matching 的 stateless reset packet helper，以及针对对端签发 CID 的连接层 reset-token 检测和唯一性校验
+- [x] 内存态 endpoint DCID/IPv4 UDP 四元组 router，覆盖 long-header DCID peeking、unsupported-version RFC 8999 Version Negotiation response generation、short-header registered-CID matching、zero-length CID tuple routing、Retry Source CID route switching、调用方验证后的 preferred-address migration commit、sequence/retire-prior-to route retirement、endpoint replacement-CID registration、stateless-reset-token 唯一性校验、调用方验证后的 path update、active-migration-disabled rejection、inactive-CID stateless reset token lookup、reset datagram construction 和 route/version-negotiation/reset/drop receive classification
 - [ ] 完整连接状态机与 protected-packet packet number space 路由
 - [ ] 完整 RFC 9002 丢包检测与拥塞控制（含 protected-packet loss/PTO timer 调度、PTO recovery 行为与剩余 NewReno 细节）
 - [ ] TLS 1.3 集成（RFC 9001）
@@ -34,7 +35,7 @@
 1. **最小 QUIC v1 子集**
    - 单路径、仅 IPv4
    - 固定 QUIC v1 版本（0x00000001）
-   - 支持 Initial / Handshake / 1-RTT 包
+   - 支持 Initial / Handshake / 0-RTT / 1-RTT 包
    - 支持基础 STREAM / ACK / PADDING / CONNECTION_CLOSE 帧
 2. **TLS 1.3 + 完整握手**
    - 基于 CRYPTO 帧的 TLS 握手集成
@@ -42,7 +43,7 @@
 3. **丢包检测与拥塞控制**
    - 基于 RFC 9002 的算法（初期会采用类似 NewReno 的实现）
 4. **QUIC v2 与高级特性**
-   - QUIC v2 版本（0x6b3343cf）支持
+   - QUIC v2 版本（0x6b3343cf），已支持 Initial key 派生、long-header type bits、Retry integrity、token version 隔离和 RFC 9368 version information，剩余 v2 行为仍待实现
    - 路径迁移、更完整的路径验证策略、stateless reset 等
 
 更详细的设计与每个功能的业务逻辑说明，请参考：
@@ -84,6 +85,7 @@ zig build
   - `zig-out/bin/quicz-connection-ids`
   - `zig-out/bin/quicz-stateless-reset`
   - `zig-out/bin/quicz-initial-keys`
+  - `zig-out/bin/quicz-endpoint-routing`
 
 ## 作为库使用（Using quicz as a library）
 
@@ -124,47 +126,66 @@ pub fn main() !void {
     // - 调用 conn.pollTx(...) 获取未加密的 frame payload 字节；
     //   它可能发送 ACK-only、PING、CRYPTO、PATH_CHALLENGE、PATH_RESPONSE、
     //   MAX_DATA、MAX_STREAM_DATA、DATA_BLOCKED、STREAM_DATA_BLOCKED、
-    //   STREAMS_BLOCKED、RESET_STREAM、STOP_SENDING 或 STREAM payload，
-    //   并在空间允许时合并待发送 ACK
+    //   STREAMS_BLOCKED、HANDSHAKE_DONE、NEW_TOKEN、RESET_STREAM、
+    //   STOP_SENDING 或 STREAM payload，并在空间允许时合并待发送 ACK
     // - 将对端 payload 字节喂给 conn.processDatagram(...)，或用
     //   conn.processDatagramInSpace(...) 显式指定 Initial/Handshake/
     //   Application packet number space 的 ACK/recovery 记账；需要在
     //   Application packet space 内区分 0-RTT/1-RTT frame-type 校验时，
     //   使用 conn.processDatagramForPacketType(...)
-    // - 外部 TLS bridge 确认握手后调用 conn.confirmHandshake()；
-    //   client 侧收到 HANDSHAKE_DONE 也会标记 handshake confirmed
-    // - 通过 conn.sendCryptoInSpace(...)、conn.pollTxInSpace(...) 与
-    //   conn.recvCryptoInSpace(...) 驱动建模的 Initial/Handshake CRYPTO
-    //   byte stream，为后续 TLS bridge 做准备
-    // - 通过 conn.recvCrypto(...) 读取默认 Application-space CRYPTO 字节
+    // - 通过 conn.driveCryptoBackendInSpace(...) 驱动可插拔 TLS/crypto
+    //   backend；backend 可接收本端 transport-parameter extension bytes，
+    //   返回对端 transport-parameter bytes 供校验/应用，收到连续的
+    //   per-space CRYPTO 字节，返回 Handshake/0-RTT/1-RTT traffic secrets
+    //   供 installed-key packet helper 使用，把产出的 CRYPTO 通过 connection 排队，并可
+    //   报告 handshake completion。如果 Handshake-space backend drive 确认
+    //   handshake 且没有排队 outbound CRYPTO，会丢弃 Handshake packet-number-space
+    //   状态和已安装 Handshake key。显式测试仍可直接调用
+    //   conn.confirmHandshake()；server 的 sendHandshakeDone() 会标记
+    //   handshake confirmed、丢弃同一 Handshake 状态，并排队 HANDSHAKE_DONE；
+    //   client 侧在有效 payload 收到 HANDSHAKE_DONE 后也会标记 confirmed 并丢弃同一 Handshake 状态；
+    //   conn.handshakeState() 会暴露 Initial/Handshake/Confirmed 进度
+    // - 测试需要更底层 Initial/Handshake CRYPTO byte-stream 控制时，可直接用
+    //   conn.sendCryptoInSpace(...)、conn.pollTxInSpace(...) 与
+    //   conn.recvCryptoInSpace(...)
+    // - 通过 conn.recvCrypto(...) 读取默认 Application-space CRYPTO 字节；
+    //   入站 CRYPTO 可以乱序到达，相同重传在字节已缓存后会被忽略
     // - 通过 conn.recvOnStream(...) 读取应用层数据；通过
     //   recvStreamFinalSize(...) 和 recvStreamFinished(...) 观察 FIN final size
-    //   以及数据被消费后的完成状态；stream 读取也会刷新接收侧
+    //   以及数据被消费后的完成状态；打开更高编号接收 stream 的入站 frame
+    //   也会创建同类型低编号 stream；stream 读取也会刷新接收侧
     //   MAX_DATA 与 MAX_STREAM_DATA credit，对端发起 stream 的 FIN 完成还会刷新
-    //   MAX_STREAMS_BIDI/UNI credit
+    //   MAX_STREAMS_BIDI/UNI credit；final size 已知后，STREAM_DATA_BLOCKED
+    //   不再为该 stream 刷新 MAX_STREAM_DATA
     // - 调用 conn.resetStream(...) 可中止已打开的本地发送侧，或已观察到的
-    //   对端发起 bidirectional stream 的回复发送侧
+    //   对端发起 bidirectional stream 的回复发送侧；入站 RESET_STREAM 之后，
+    //   已知 final size 范围内的后续 STREAM 数据会被忽略
     // - 调用 conn.stopSending(...) 可要求对端停止发送到已打开的本地
-    //   bidirectional stream 或已观察到的对端发起接收 stream
+    //   bidirectional stream 或已观察到的对端发起接收 stream；final data
+    //   已到达后，stopSending(...) 会报告 StreamClosed
     // sendCrypto(...) 与 sendOnStream(...) 会按 max_datagram_size 分片较大的写入。
     // processDatagram(...) 会校验入站 bidirectional / unidirectional stream
     // count，接收对端发起的 unidirectional stream，拒绝未打开的本地
     // bidirectional ID 与入站本地 unidirectional ID，缓存乱序 STREAM range
-    // 直到数据连续，并在 payload 无效时回滚本次部分状态变更。
+    // 直到数据连续，相同重复 STREAM 重传不会重复增长流控，并在 payload
+    // 无效时回滚本次部分状态变更。
     // CRYPTO 帧会进入按 packet number space 隔离的连续内存态握手缓冲。
     // sendPing() 会排队一个
     // ack-eliciting PING 帧。ACK、MAX_DATA、MAX_STREAM_DATA 与
     // MAX_STREAMS_BIDI/UNI 帧会更新内存态 recovery 与流控
     // 状态；packet-number-space helper 会在 frame-payload API 内隔离
     // Initial、Handshake 与 Application 的 ACK/recovery 状态，并拒绝 RFC 9000
-    // 不允许出现在 Initial、Handshake 与 0-RTT 中的 frame type；discardPacketNumberSpace()
-    // 会在 key discard 后清理建模的 Initial/Handshake sent-packet、CRYPTO、ACK、
-    // loss 与 PTO 状态；ACK 可通过
+    // 不允许出现在 Initial、Handshake 与 0-RTT 中的 frame type；client 成功发送
+    // Handshake packet 和 server 成功接收 Handshake packet 后会丢弃 Initial 状态；
+    // discardPacketNumberSpace() 会在 key discard 后清理建模的 Initial/Handshake
+    // sent-packet、CRYPTO、ACK、loss、PTO 状态和已安装 Handshake key；discardZeroRttProtectionKeys()
+    // 会清理已安装 early-data key，建模的 1-RTT 边界会在 client 安装 1-RTT key
+    // 时清理 client 0-RTT key，并在 server 接受 1-RTT short packet 后清理 server 0-RTT key；ACK 可通过
     // packet/time-threshold loss detection 将较旧的未确认 packet 标记为 lost；
     // recovery period 会抑制恢复期内重复降窗，也不会让恢复前发送 packet 的
     // ACK 增长 cwnd；persistent congestion 可把 congestion window 降到 RFC 9002 minimum；
     // checkLossDetectionTimeouts() 会处理已经到期的 time-threshold loss deadline；
-    // checkPtoTimeouts() 会在可控时钟下排队 packet-number-space PTO PING probe；
+    // checkPtoTimeouts() 会在可控时钟下优先把已排队 ack-eliciting 数据作为 PTO probe，否则排队 packet-number-space PTO PING probe；
     // ACK_ECN 会用 ACK ranges 更新 recovery，并按 packet number space 把已建模的
     // ECT(0)/ECT(1) 发送 packet 与累计 ECN counter 做校验。RTT 更新会应用
     // 对端 ACK delay exponent，并在 handshake confirmed 后把 ACK delay 截到
@@ -178,36 +199,84 @@ pub fn main() !void {
     // 会排队本端 NEW_CONNECTION_ID，收到对端 RETIRE_CONNECTION_ID 时标记
     // 本端 CID 已 retired；detectStatelessReset(...) 会把 datagram 尾部与
     // active peer stateless reset token 匹配，供后续 UDP packet 层使用；
-    // NEW_TOKEN 只允许 client
-    // 连接接收并保存为后续地址验证 token，HANDSHAKE_DONE 也只允许 client
+    // issueNewToken() 会排队 server 签发的 NEW_TOKEN；client
+    // 连接接收后会保存为后续地址验证 token；issueAddressValidationToken()
+    // 可创建 HMAC-SHA256 地址绑定、originating-version-bound 且带过期时间的
+    // Retry 或 NEW_TOKEN 值；
+    // endpoint.Udp4Tuple.peerAddressValidationBinding() 可提供稳定的远端
+    // IPv4/UDP token peer-address binding；
+    // endpoint.AddressValidationPolicy 持有内存态 active/previous token
+    // secrets 和 replay filter，用于带版本的签发、校验与 replay 拒绝，并可导出/恢复
+    // secret set 与 replay-filter snapshot，供外部持久化或 worker 分发；
+    // HANDSHAKE_DONE 也只允许 client
     // 接收；server 连接默认把 peer address 视为未验证；可用
     // recordPeerAddressBytesReceived(...) 显式记录已接收 datagram 字节，
     // 并在外部握手、token 或 path 检查证明地址归属后调用 validatePeerAddress()。
     // pollTx() 与 pollTxInSpace() 会在验证前执行 RFC 9000 3x
-    // anti-amplification 发送预算限制。server 也可用 issueRetryToken(...)
-    // 与 validateRetryToken(...) 建模一次性 Retry token；匹配 token 会被消费并验证 peer address；
+    // anti-amplification 发送预算限制。server 也可用 issueRetryDatagram(...)
+    // 建模 Retry datagram，用 issueRetryToken(...) 与 validateRetryToken(...)
+    // 建模一次性 Retry token，或用 validateAddressValidationToken(...)
+    // / validateAddressValidationTokenWithSecrets(...)
+    // 校验认证过的地址 token；匹配 Retry token 会被消费一次，并验证 originating
+    // version 与 peer address；
+    // client 可通过 processRetryDatagram(...) 处理 Retry datagram；accepted
+    // latestRetryToken() 会在 protected Initial packetization 没有显式传入
+    // Initial token 时自动复用。applyPeerTransportParameters(...) 会用
+    // originalDestinationConnectionId() 和 retrySourceConnectionId() 校验 server 的
+    // original_destination_connection_id 与 retry_source_connection_id，并用
+    // peerInitialSourceConnectionId() 校验 initial_source_connection_id。
+    // localTransportParameters() 会在本端发出首个 protected Initial 后导出
+    // initial_source_connection_id；server 连接成功打开首个 client Initial 后会导出
+    // original_destination_connection_id。
     // stopSending() 会为可接收 stream 排队 STOP_SENDING；resetStream()
-    // 和入站 STOP_SENDING 会关闭对应发送侧并排队 RESET_STREAM；RESET_STREAM
-    // 会关闭接收侧，除非该 stream 已经以相同 final size 完成。本地发送因对端 credit 阻塞时会排队 DATA_BLOCKED、
+    // 和入站 STOP_SENDING 会关闭对应发送侧并排队 RESET_STREAM；对于对端发起的
+    // bidirectional stream，入站 STOP_SENDING 可以在任何 STREAM 数据前打开接收状态，
+    // 且仅关闭本端发送侧。RESET_STREAM 会关闭接收侧，除非该 stream 已经以相同 final size 完成。本地发送因对端 credit 阻塞时会排队 DATA_BLOCKED、
     // STREAM_DATA_BLOCKED 与 STREAMS_BLOCKED_*；recvOnStream() 会在应用读取释放
     // receive credit 后排队 MAX_DATA 与 MAX_STREAM_DATA，并在对端发起 FIN stream
-    // 完全消费后排队 MAX_STREAMS_BIDI/UNI；localTransportParameters()
-    // 会导出本端配置的接收限制、disable_active_migration 和 server stateless_reset_token，
+    // 完全消费后排队 MAX_STREAMS_BIDI/UNI；入站 BLOCKED 会记录对端最高 blocked
+    // limit，校验 STREAM_DATA_BLOCKED 的接收侧 stream ID，合法时可在 STREAM
+    // 数据前创建接收状态，并按需重发或增长 MAX_*；MAX_STREAM_DATA 也可在任何
+    // STREAM 数据前打开对端发起 bidirectional stream 的接收/发送状态，让回复使用
+    // 对端通告的 credit；匹配发送侧已经发送 FIN 后会忽略后续 MAX_STREAM_DATA。
+    // MAX_DATA/MAX_STREAM_DATA 刷新可使用配置的目标 receive window。localTransportParameters()
+    // 会导出本端配置的接收限制、ACK delay exponent/max_ack_delay、
+    // disable_active_migration、server stateless_reset_token 和配置的 server preferred_address，
     // applyPeerTransportParameters() 会把对端握手参数应用到发送侧流控、
     // stream-count、ACK delay、outbound datagram 大小和
-    // peerActiveMigrationDisabled() / peerStatelessResetToken() 可观测状态。
+    // peerActiveMigrationDisabled() / peerStatelessResetToken() /
+    // peerPreferredAddress() 可观测状态。encodeLocalTransportParameters()
+    // 与 applyPeerTransportParameterBytes() 会把同一组数据暴露为 TLS QUIC
+    // extension bytes，供后续 TLS backend 集成。
     // 入站 BLOCKED 帧会更新已观察
     // 到的对端最高 blocked limit；如果对端报告的是旧 receive limit，也会重新排队
-    // 当前 MAX_* 帧。closeConnection() 与 closeApplication()
+    // 当前 MAX_* 帧；如果对端报告当前 receive limit，则可按已配置 receive window
+    // 增长 MAX_DATA/MAX_STREAM_DATA，也可通过 receive_stream_count_window 增长
+    // MAX_STREAMS_BIDI/UNI。closeConnection() 与 closeApplication()
     // 会排队 CONNECTION_CLOSE 变体；pollTx() 会在 closing 期间发出并重发
-    // close frame；max_idle_timeout 会通过 transport parameter 导出/应用，成功
+    // close frame；peerClose() 会在 draining 期间暴露已接受的对端 close 诊断；
+    // max_idle_timeout 会通过 transport parameter 导出/应用，成功
     // 收发会刷新 idleTimeoutDeadlineMillis()，checkIdleTimeouts() 会在建模的
     // idle deadline 到期时关闭 active 连接。connectionState() 会暴露 active/closing/draining/closed
     // 生命周期状态。DCID routing 仍不在这个骨架内。
-    // 连接层现在可通过 pollInitialProtectedDatagram() 发送 Initial CRYPTO，
-    // 并通过 processInitialProtectedDatagram() 接收单个 protected Initial
-    // long packet；coalescing、完整 UDP packetization、TLS 和后续 encryption
-    // level 仍未实现。
+    // 连接层现在可通过 pollProtectedLongCryptoDatagramInSpace() 与
+    // processProtectedLongDatagramInSpace() 收发 Initial/Handshake CRYPTO 的
+    // protected long packet；pollProtectedLongDatagram() 与
+    // processProtectedLongDatagram() 可 coalesce 并路由 protected
+    // Initial/Handshake CRYPTO、ACK-only、PING packet，以及使用调用方 key 或连接已安装 key 的
+    // 0-RTT STREAM/RESET_STREAM/STOP_SENDING packet；独立 0-RTT helper 也有
+    // installed-key 变体，pollProtectedHandshakeDatagramWithInstalledKeys()
+    // / processProtectedHandshakeDatagramWithInstalledKeys() 可使用 CryptoBackend
+    // 安装的 Handshake key 收发 Handshake CRYPTO/ACK/PING；pollProtectedShortDatagram()
+    // / processProtectedShortDatagram() 和 pollProtectedShortDatagramWithInstalledKeys()
+    // / processProtectedShortDatagramWithInstalledKeys() 可收发调用方提供 key 或连接已安装 key 的
+    // protected 1-RTT short PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_RESPONSE/
+    // RETIRE_CONNECTION_ID/MAX_*/BLOCKED/STREAM/RESET_STREAM/STOP_SENDING/
+    // CONNECTION_CLOSE packet。Config.enable_spin_bit 可启用当前单路径
+    // spin-bit 模型；nextOutgoingSpinBit() 暴露下一次 short-header 值，
+    // resetSpinBitForPath() 可在 path 或 CID 切换后重置。完整 UDP packetization、socket-owned endpoint routing、
+    // 真实 TLS backend secret production、真实 TLS-backed early-data secret ownership，
+    // 以及 TLS 0-RTT acceptance/replay policy 仍未实现。
 }
 ```
 
@@ -232,13 +301,15 @@ pub fn main() !void {
 - [`examples/connection_ids.zig`](examples/connection_ids.zig)
 - [`examples/stateless_reset.zig`](examples/stateless_reset.zig)
 - [`examples/initial_keys.zig`](examples/initial_keys.zig)
+- [`examples/endpoint_routing.zig`](examples/endpoint_routing.zig)
 
-这些示例当前用于演示内存态 frame-payload API、codec API、transport-parameter
+这些示例当前用于演示内存态 frame-payload API、包含 QUIC v2 long-header
+type-bit 映射的 codec API、包含 RFC 9368 version information 的 transport-parameter
 API、flow-control API、unidirectional stream API、stream-reset API、STOP_SENDING API、
-close-state API、idle-timeout API、packet-number-space discard 与 0-RTT frame filtering API、
+close-state API、idle-timeout API、handshake-state API、packet-number-space discard 与 0-RTT frame filtering API、
 ECN-validation API、包含 ACK-delay、recovery-period 与 persistent congestion 处理的
 loss-recovery API、PTO-recovery API、
-path-validation API、address-validation API、Retry-token 与 integrity-tag API、connection-ID API、stateless-reset API 与 Initial key/protected-packet/header-protection API，并不是
+path-validation API、包含 token version binding 的 address-validation API、Retry-token 处理与 v1/v2 integrity-tag API、connection-ID API、stateless-reset API、v1/v2 Initial key、key-update/protected-packet/header-protection API 与 endpoint-routing/Retry-DCID/preferred-address/stateless-reset-token lookup API，并不是
 可互通的 QUIC-over-UDP 程序。
 
 ## 文档结构（Documentation Layout）

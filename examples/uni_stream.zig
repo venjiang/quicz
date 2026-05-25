@@ -40,24 +40,34 @@ pub fn main() !void {
     try client.sendOnStream(client_stream, "client telemetry", true);
 
     var recv_buf: [64]u8 = undefined;
-    const client_data = try relayUntilStreamData(&client, &server, client_stream, &recv_buf);
-    std.debug.print("[uni] client->server stream={} data={s} finished={}\n", .{
+    var datagram: [128]u8 = undefined;
+    const client_payload = (try client.pollTx(0, &datagram)) orelse return error.UnexpectedState;
+    try server.processDatagram(0, client_payload);
+    try server.processDatagram(1, client_payload);
+    const client_data_len = (try server.recvOnStream(client_stream, &recv_buf)) orelse return error.UnexpectedState;
+    std.debug.print("[uni] client->server stream={} data={s} duplicate_ignored=true finished={}\n", .{
         client_stream,
-        client_data,
+        recv_buf[0..client_data_len],
         try server.recvStreamFinished(client_stream),
     });
 
     try requireError(error.InvalidStream, server.sendOnStream(client_stream, "reply-not-allowed", true));
     std.debug.print("[uni] server rejected reply on receive-only stream={}\n", .{client_stream});
 
-    const server_stream = try server.openUniStream();
-    try server.sendOnStream(server_stream, "server event", true);
+    var down_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    defer down_client.deinit();
+    var down_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    defer down_server.deinit();
+    try down_server.validatePeerAddress();
 
-    const server_data = try relayUntilStreamData(&server, &client, server_stream, &recv_buf);
+    const server_stream = try down_server.openUniStream();
+    try down_server.sendOnStream(server_stream, "server event", true);
+
+    const server_data = try relayUntilStreamData(&down_server, &down_client, server_stream, &recv_buf);
     std.debug.print("[uni] server->client stream={} data={s} final_size={?} finished={}\n", .{
         server_stream,
         server_data,
-        try client.recvStreamFinalSize(server_stream),
-        try client.recvStreamFinished(server_stream),
+        try down_client.recvStreamFinalSize(server_stream),
+        try down_client.recvStreamFinished(server_stream),
     });
 }

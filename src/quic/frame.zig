@@ -222,6 +222,24 @@ fn readerHasRemainingLen(comptime Reader: type) bool {
     };
 }
 
+fn minimalVarIntLen(value: u64) FrameError!usize {
+    if (value <= 63) return 1;
+    if (value <= 16383) return 2;
+    if (value <= 1073741823) return 4;
+    if (value <= max_quic_varint) return 8;
+    return error.InvalidFrameValue;
+}
+
+fn decodeFrameType(reader: anytype) !u64 {
+    const decoded = try packet.decodeVarInt(reader);
+    if (decoded.len != try minimalVarIntLen(decoded.value)) return error.InvalidFrameValue;
+    return decoded.value;
+}
+
+fn frameTypeId(comptime frame_type: FrameType) u64 {
+    return @intFromEnum(frame_type);
+}
+
 fn validateAckRangeCountFitsReader(reader: anytype, range_count: usize) FrameError!void {
     if (comptime readerHasRemainingLen(@TypeOf(reader))) {
         const min_range_bytes = std.math.mul(usize, range_count, 2) catch return error.InvalidFrameLength;
@@ -507,21 +525,21 @@ pub fn decodeFrameSlice(data: []const u8, allocator: std.mem.Allocator) !Decoded
 /// field require a reader that exposes `remainingLen()` so the decoder can
 /// consume the rest of the packet payload.
 pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
-    const frame_type = try reader.readByte();
+    const frame_type = try decodeFrameType(reader);
 
-    if (frame_type == @intFromEnum(FrameType.padding)) {
+    if (frame_type == frameTypeId(.padding)) {
         return .{ .padding = .{ .len = 1 } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.ping)) {
+    if (frame_type == frameTypeId(.ping)) {
         return .{ .ping = {} };
     }
 
-    if (frame_type == @intFromEnum(FrameType.ack) or frame_type == @intFromEnum(FrameType.ack_ecn)) {
+    if (frame_type == frameTypeId(.ack) or frame_type == frameTypeId(.ack_ecn)) {
         const ack = try decodeAckFrameFields(reader, allocator);
         errdefer deinitAckFrame(ack, allocator);
 
-        if (frame_type == @intFromEnum(FrameType.ack_ecn)) {
+        if (frame_type == frameTypeId(.ack_ecn)) {
             return .{ .ack_ecn = .{
                 .ack = ack,
                 .ecn_counts = .{
@@ -534,7 +552,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         return .{ .ack = ack };
     }
 
-    if (frame_type == @intFromEnum(FrameType.reset_stream)) {
+    if (frame_type == frameTypeId(.reset_stream)) {
         const stream_id = (try packet.decodeVarInt(reader)).value;
         const application_error_code = (try packet.decodeVarInt(reader)).value;
         const final_size = (try packet.decodeVarInt(reader)).value;
@@ -546,7 +564,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.stop_sending)) {
+    if (frame_type == frameTypeId(.stop_sending)) {
         const stream_id = (try packet.decodeVarInt(reader)).value;
         const application_error_code = (try packet.decodeVarInt(reader)).value;
 
@@ -556,7 +574,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.new_token)) {
+    if (frame_type == frameTypeId(.new_token)) {
         const token_len = (try packet.decodeVarInt(reader)).value;
         const len_usize = try varIntToUsize(token_len);
         if (len_usize == 0) return error.InvalidFrameValue;
@@ -565,7 +583,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         return .{ .new_token = .{ .token = token } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.crypto)) {
+    if (frame_type == frameTypeId(.crypto)) {
         const offset = (try packet.decodeVarInt(reader)).value;
         const data_len = (try packet.decodeVarInt(reader)).value;
         try validateFrameEndOffset(offset, data_len);
@@ -579,12 +597,12 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.max_data)) {
+    if (frame_type == frameTypeId(.max_data)) {
         const maximum_data = (try packet.decodeVarInt(reader)).value;
         return .{ .max_data = .{ .maximum_data = maximum_data } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.max_stream_data)) {
+    if (frame_type == frameTypeId(.max_stream_data)) {
         const stream_id = (try packet.decodeVarInt(reader)).value;
         const maximum_stream_data = (try packet.decodeVarInt(reader)).value;
 
@@ -594,24 +612,24 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.max_streams_bidi)) {
+    if (frame_type == frameTypeId(.max_streams_bidi)) {
         const maximum_streams = (try packet.decodeVarInt(reader)).value;
         try validateStreamCount(maximum_streams);
         return .{ .max_streams_bidi = .{ .maximum_streams = maximum_streams } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.max_streams_uni)) {
+    if (frame_type == frameTypeId(.max_streams_uni)) {
         const maximum_streams = (try packet.decodeVarInt(reader)).value;
         try validateStreamCount(maximum_streams);
         return .{ .max_streams_uni = .{ .maximum_streams = maximum_streams } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.data_blocked)) {
+    if (frame_type == frameTypeId(.data_blocked)) {
         const maximum_data = (try packet.decodeVarInt(reader)).value;
         return .{ .data_blocked = .{ .maximum_data = maximum_data } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.stream_data_blocked)) {
+    if (frame_type == frameTypeId(.stream_data_blocked)) {
         const stream_id = (try packet.decodeVarInt(reader)).value;
         const maximum_stream_data = (try packet.decodeVarInt(reader)).value;
         return .{ .stream_data_blocked = .{
@@ -620,19 +638,19 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.streams_blocked_bidi)) {
+    if (frame_type == frameTypeId(.streams_blocked_bidi)) {
         const maximum_streams = (try packet.decodeVarInt(reader)).value;
         try validateStreamCount(maximum_streams);
         return .{ .streams_blocked_bidi = .{ .maximum_streams = maximum_streams } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.streams_blocked_uni)) {
+    if (frame_type == frameTypeId(.streams_blocked_uni)) {
         const maximum_streams = (try packet.decodeVarInt(reader)).value;
         try validateStreamCount(maximum_streams);
         return .{ .streams_blocked_uni = .{ .maximum_streams = maximum_streams } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.new_connection_id)) {
+    if (frame_type == frameTypeId(.new_connection_id)) {
         const sequence_number = (try packet.decodeVarInt(reader)).value;
         const retire_prior_to = (try packet.decodeVarInt(reader)).value;
         const connection_id_len = try reader.readByte();
@@ -655,24 +673,24 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         return .{ .new_connection_id = new_connection_id };
     }
 
-    if (frame_type == @intFromEnum(FrameType.retire_connection_id)) {
+    if (frame_type == frameTypeId(.retire_connection_id)) {
         const sequence_number = (try packet.decodeVarInt(reader)).value;
         return .{ .retire_connection_id = .{ .sequence_number = sequence_number } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.path_challenge)) {
+    if (frame_type == frameTypeId(.path_challenge)) {
         var data: [8]u8 = undefined;
         try reader.readNoEof(&data);
         return .{ .path_challenge = .{ .data = data } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.path_response)) {
+    if (frame_type == frameTypeId(.path_response)) {
         var data: [8]u8 = undefined;
         try reader.readNoEof(&data);
         return .{ .path_response = .{ .data = data } };
     }
 
-    if ((frame_type & 0b1111_1000) == @intFromEnum(FrameType.stream)) {
+    if ((frame_type & 0b1111_1000) == frameTypeId(.stream)) {
         const has_off = (frame_type & 0x04) != 0;
         const has_len = (frame_type & 0x02) != 0;
         const fin = (frame_type & 0x01) != 0;
@@ -707,7 +725,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.connection_close)) {
+    if (frame_type == frameTypeId(.connection_close)) {
         const error_code = (try packet.decodeVarInt(reader)).value;
         const triggering_frame_type = (try packet.decodeVarInt(reader)).value;
         const reason_len = (try packet.decodeVarInt(reader)).value;
@@ -722,7 +740,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.application_close)) {
+    if (frame_type == frameTypeId(.application_close)) {
         const error_code = (try packet.decodeVarInt(reader)).value;
         const reason_len = (try packet.decodeVarInt(reader)).value;
         const len_usize = try varIntToUsize(reason_len);
@@ -735,7 +753,7 @@ pub fn decodeFrame(reader: anytype, allocator: std.mem.Allocator) !Frame {
         } };
     }
 
-    if (frame_type == @intFromEnum(FrameType.handshake_done)) {
+    if (frame_type == frameTypeId(.handshake_done)) {
         return .{ .handshake_done = {} };
     }
 
@@ -792,6 +810,27 @@ test "decodeFrameSlice aggregates consecutive padding" {
         .ping => try std.testing.expectEqual(@as(usize, 1), ping.len),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "decodeFrame rejects non-shortest frame type encodings" {
+    const long_ping = [_]u8{
+        0x40, 0x01, // PING encoded as a two-byte varint instead of one byte
+    };
+
+    var in = buffer.fixedReader(&long_ping);
+    try std.testing.expectError(error.InvalidFrameValue, decodeFrame(in.reader(), std.testing.allocator));
+}
+
+test "decodeFrame rejects unknown frame types" {
+    const unknown_one_byte = [_]u8{0x1f};
+    var one_byte_in = buffer.fixedReader(&unknown_one_byte);
+    try std.testing.expectError(error.UnsupportedFrameType, decodeFrame(one_byte_in.reader(), std.testing.allocator));
+
+    const unknown_two_byte = [_]u8{
+        0x40, 0x40, // shortest varint encoding for frame type 64
+    };
+    var two_byte_in = buffer.fixedReader(&unknown_two_byte);
+    try std.testing.expectError(error.UnsupportedFrameType, decodeFrame(two_byte_in.reader(), std.testing.allocator));
 }
 
 test "encode/decode crypto frame roundtrip" {

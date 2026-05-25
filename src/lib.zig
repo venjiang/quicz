@@ -4,12 +4,16 @@ pub const packet = @import("quic/packet.zig");
 pub const frame = @import("quic/frame.zig");
 pub const recovery = @import("quic/recovery.zig");
 pub const protection = @import("quic/protection.zig");
+pub const address_validation_token = @import("quic/address_validation_token.zig");
+pub const endpoint = @import("quic/endpoint.zig");
 pub const transport_error = @import("quic/transport_error.zig");
 pub const transport_parameters = @import("quic/transport_parameters.zig");
 const buffer = @import("quic/buffer.zig");
 
 test {
     _ = protection;
+    _ = address_validation_token;
+    _ = endpoint;
     _ = transport_error;
     _ = transport_parameters;
 }
@@ -17,12 +21,15 @@ test {
 const max_quic_varint = 4611686018427387903;
 const max_stream_count = @as(u64, 1) << 60;
 const max_connection_id_len = 20;
+const min_initial_destination_connection_id_len = 8;
+const min_initial_udp_datagram_len = 1200;
 const min_active_connection_id_limit = 2;
 const default_max_stored_new_tokens: usize = 4;
 const close_state_pto_multiplier: u64 = 3;
 const max_path_challenge_transmissions: u8 = 3;
 const packet_threshold_loss_gap: u64 = 3;
 const anti_amplification_multiplier: usize = 3;
+const default_available_versions = [_]packet.Version{.v1};
 
 /// Public error set returned by the experimental connection API.
 pub const Error = error{
@@ -37,6 +44,80 @@ pub const Error = error{
     InvalidStream,
 };
 
+/// Fixed-storage server preferred-address transport parameter value.
+///
+/// QUIC servers can advertise this parameter so clients know a preferred
+/// address, replacement connection ID, and stateless reset token for future
+/// migration. This value owns fixed connection ID storage so connection state
+/// never borrows slices from parsed transport parameters.
+pub const PreferredAddress = struct {
+    /// Preferred IPv4 address.
+    ipv4_address: [4]u8,
+    /// Preferred IPv4 UDP port.
+    ipv4_port: u16,
+    /// Preferred IPv6 address.
+    ipv6_address: [16]u8,
+    /// Preferred IPv6 UDP port.
+    ipv6_port: u16,
+    /// Fixed storage for the preferred-address connection ID.
+    connection_id: [max_connection_id_len]u8 = undefined,
+    /// Number of valid bytes in `connection_id`; must be 1..20.
+    connection_id_len: u8,
+    /// Stateless reset token associated with `connection_id`.
+    stateless_reset_token: [packet.stateless_reset_token_len]u8,
+
+    /// Construct a preferred-address value with owned fixed CID storage.
+    pub fn init(
+        ipv4_address: [4]u8,
+        ipv4_port: u16,
+        ipv6_address: [16]u8,
+        ipv6_port: u16,
+        connection_id: []const u8,
+        stateless_reset_token: [packet.stateless_reset_token_len]u8,
+    ) Error!PreferredAddress {
+        if (connection_id.len == 0 or connection_id.len > max_connection_id_len) return error.InvalidPacket;
+        var result = PreferredAddress{
+            .ipv4_address = ipv4_address,
+            .ipv4_port = ipv4_port,
+            .ipv6_address = ipv6_address,
+            .ipv6_port = ipv6_port,
+            .connection_id_len = @intCast(connection_id.len),
+            .stateless_reset_token = stateless_reset_token,
+        };
+        @memcpy(result.connection_id[0..connection_id.len], connection_id);
+        return result;
+    }
+
+    /// Copy a parsed transport-parameter preferred address into fixed storage.
+    pub fn fromTransportParameter(preferred: transport_parameters.PreferredAddress) Error!PreferredAddress {
+        return PreferredAddress.init(
+            preferred.ipv4_address,
+            preferred.ipv4_port,
+            preferred.ipv6_address,
+            preferred.ipv6_port,
+            preferred.connection_id,
+            preferred.stateless_reset_token,
+        );
+    }
+
+    /// Borrow the valid preferred-address connection ID bytes.
+    pub fn connectionId(self: *const PreferredAddress) []const u8 {
+        return self.connection_id[0..@as(usize, self.connection_id_len)];
+    }
+
+    /// Convert to the typed transport-parameter view for encoding/export.
+    pub fn asTransportParameter(self: *const PreferredAddress) transport_parameters.PreferredAddress {
+        return .{
+            .ipv4_address = self.ipv4_address,
+            .ipv4_port = self.ipv4_port,
+            .ipv6_address = self.ipv6_address,
+            .ipv6_port = self.ipv6_port,
+            .connection_id = self.connectionId(),
+            .stateless_reset_token = self.stateless_reset_token,
+        };
+    }
+};
+
 /// Runtime configuration for a `QuicConnection`.
 pub const Config = struct {
     /// Maximum frame payload bytes accepted or emitted by the in-memory API.
@@ -45,6 +126,10 @@ pub const Config = struct {
     initial_rtt_ms: u32 = 333,
     /// Local max_idle_timeout transport parameter in milliseconds. Zero disables the local side.
     max_idle_timeout_ms: u64 = 0,
+    /// Local ACK delay exponent transport parameter used for ACK Delay encoding.
+    ack_delay_exponent: u8 = 3,
+    /// Local max_ack_delay transport parameter in milliseconds.
+    max_ack_delay_ms: u32 = 25,
     /// Advertise that this endpoint does not support active connection migration.
     disable_active_migration: bool = false,
     /// Optional server stateless_reset_token transport parameter for the handshake CID.
@@ -52,22 +137,128 @@ pub const Config = struct {
     /// QUIC clients must not send this parameter, so client connections ignore
     /// this value when exporting local transport parameters.
     stateless_reset_token: ?[packet.stateless_reset_token_len]u8 = null,
+    /// Optional server preferred_address transport parameter.
+    ///
+    /// Only server connections can advertise this value. Clients store a peer
+    /// preferred address through `applyPeerTransportParameters()` instead.
+    preferred_address: ?PreferredAddress = null,
     /// Initial connection-level stream data limit in both send and receive directions.
     initial_max_data: u64 = 65_536,
     /// Initial per-stream data limit in both send and receive directions.
     initial_max_stream_data: u64 = 65_536,
+    /// Optional target receive connection window after application reads free data.
+    ///
+    /// When set, receive-side MAX_DATA refresh advertises at least this many
+    /// bytes beyond the highest connection-level byte received so far. Null
+    /// preserves the fixed-window behavior of replenishing exactly consumed
+    /// bytes.
+    receive_connection_window: ?u64 = null,
+    /// Optional target receive stream window after application reads free data.
+    ///
+    /// When set, receive-side MAX_STREAM_DATA refresh advertises at least this
+    /// many bytes beyond the highest byte received on that stream. Null
+    /// preserves the fixed-window behavior of replenishing exactly consumed
+    /// bytes.
+    receive_stream_window: ?u64 = null,
+    /// Optional target stream-count growth when a peer reports current-limit blocking.
+    ///
+    /// When set, STREAMS_BLOCKED_BIDI/UNI at or above the current receive
+    /// stream-count limit grows the matching MAX_STREAMS by this many streams.
+    /// Null preserves the existing behavior of only retransmitting stale limits
+    /// or refreshing credit after completed peer-initiated streams.
+    receive_stream_count_window: ?u64 = null,
     /// Initial bidirectional stream-count limit in both send and receive directions. Maximum is 2^60.
     initial_max_streams_bidi: u64 = 64,
     /// Initial unidirectional stream-count limit in both send and receive directions. Maximum is 2^60.
     initial_max_streams_uni: u64 = 64,
     /// Maximum active peer-issued connection IDs tracked by the connection skeleton.
     active_connection_id_limit: u64 = min_active_connection_id_limit,
+    /// QUIC version advertised as this endpoint's chosen version.
+    ///
+    /// The connection skeleton still emits QUIC v1 packet headers in most
+    /// packetized helpers; this value is currently used for authenticated
+    /// RFC 9368 version_information transport-parameter exchange.
+    chosen_version: packet.Version = .v1,
+    /// Versions advertised in the RFC 9368 Available Versions list.
+    available_versions: []const packet.Version = &default_available_versions,
+    /// Version selected after reacting to an RFC 8999 Version Negotiation packet.
+    ///
+    /// Client follow-up connections set this to enforce RFC 9368 downgrade
+    /// validation against the server's authenticated Version Information.
+    version_negotiation_selected_version: ?packet.Version = null,
     /// Maximum NEW_TOKEN values retained by client connections. A value of 0 discards tokens.
     max_stored_new_tokens: usize = default_max_stored_new_tokens,
+    /// Enable RFC 9000 latency spin-bit signaling in the current single-path model.
+    ///
+    /// Disabled connections emit a deterministic false spin bit and ignore peer
+    /// spin values. Future endpoint path state can reset this value when a new
+    /// path or destination CID is selected.
+    enable_spin_bit: bool = false,
 };
 
 /// Endpoint role. It determines the locally initiated stream IDs.
 pub const ConnectionSide = enum { client, server };
+
+fn isZeroVersion(version: packet.Version) bool {
+    return @intFromEnum(version) == 0;
+}
+
+fn versionListContains(versions: []const packet.Version, version: packet.Version) bool {
+    for (versions) |candidate| {
+        if (@intFromEnum(candidate) == @intFromEnum(version)) return true;
+    }
+    return false;
+}
+
+fn statelessResetTokensEqual(
+    a: [packet.stateless_reset_token_len]u8,
+    b: [packet.stateless_reset_token_len]u8,
+) bool {
+    return std.crypto.timing_safe.eql([packet.stateless_reset_token_len]u8, a, b);
+}
+
+fn selectMutualVersion(preferred_versions: []const packet.Version, offered_versions: []const packet.Version) ?packet.Version {
+    for (preferred_versions) |preferred| {
+        if (versionListContains(offered_versions, preferred)) return preferred;
+    }
+    return null;
+}
+
+fn selectMutualVersionWithExtra(
+    preferred_versions: []const packet.Version,
+    offered_versions: []const packet.Version,
+    extra_version: packet.Version,
+) ?packet.Version {
+    for (preferred_versions) |preferred| {
+        if (@intFromEnum(preferred) == @intFromEnum(extra_version) or versionListContains(offered_versions, preferred)) {
+            return preferred;
+        }
+    }
+    return null;
+}
+
+fn validateLocalVersionInformation(side: ConnectionSide, config: Config) Error!void {
+    if (isZeroVersion(config.chosen_version)) return error.InvalidPacket;
+    for (config.available_versions) |available| {
+        if (isZeroVersion(available)) return error.InvalidPacket;
+    }
+    if (side == .client) {
+        if (config.available_versions.len == 0) return error.InvalidPacket;
+        if (!versionListContains(config.available_versions, config.chosen_version)) return error.InvalidPacket;
+    }
+    if (config.version_negotiation_selected_version) |selected| {
+        if (side != .client) return error.InvalidPacket;
+        if (isZeroVersion(selected)) return error.InvalidPacket;
+        if (@intFromEnum(selected) != @intFromEnum(config.chosen_version)) return error.InvalidPacket;
+        if (!versionListContains(config.available_versions, selected)) return error.InvalidPacket;
+    }
+}
+
+fn validateInitialDestinationConnectionIdLength(dcid: []const u8) Error!void {
+    if (dcid.len < min_initial_destination_connection_id_len or dcid.len > max_connection_id_len) {
+        return error.InvalidPacket;
+    }
+}
 
 /// Modeled connection lifecycle for the experimental frame-payload API.
 pub const ConnectionState = enum {
@@ -81,6 +272,40 @@ pub const ConnectionState = enum {
     closed,
 };
 
+/// Transport-layer close information received from the peer.
+///
+/// The reason phrase slice is owned by the connection and remains valid until
+/// `deinit()`. A null `peerClose()` result means no peer close frame has been
+/// accepted yet.
+pub const PeerClose = union(enum) {
+    /// Peer sent a transport CONNECTION_CLOSE frame.
+    connection: struct {
+        /// QUIC transport error code carried by the peer.
+        error_code: u64,
+        /// Frame type that triggered the close, or 0 when not frame-specific.
+        frame_type: u64,
+        /// Peer-provided diagnostic reason phrase.
+        reason_phrase: []const u8,
+    },
+    /// Peer sent an application CONNECTION_CLOSE frame.
+    application: struct {
+        /// Application error code carried by the peer.
+        error_code: u64,
+        /// Peer-provided diagnostic reason phrase.
+        reason_phrase: []const u8,
+    },
+};
+
+/// Modeled QUIC handshake progress for the experimental frame-payload API.
+pub const HandshakeState = enum {
+    /// Only Initial-level state has been observed or queued.
+    initial,
+    /// Handshake packet number space is active but the handshake is not confirmed.
+    handshake,
+    /// The handshake has been confirmed by HANDSHAKE_DONE or an external TLS hook.
+    confirmed,
+};
+
 /// QUIC packet number spaces from RFC 9000 Section 12.3.
 pub const PacketNumberSpace = enum {
     /// Initial packets and ACKs for Initial packets.
@@ -89,6 +314,148 @@ pub const PacketNumberSpace = enum {
     handshake,
     /// 0-RTT and 1-RTT application data packets.
     application,
+};
+
+/// TLS-produced Handshake traffic secrets for one QUIC connection.
+///
+/// `local` is this endpoint's write secret; `peer` is the remote endpoint's
+/// write secret used for opening peer Handshake packets. QUIC key update does
+/// not apply to Handshake keys.
+pub const HandshakeTrafficSecrets = struct {
+    /// This endpoint's Handshake write traffic secret.
+    local: [protection.traffic_secret_len]u8,
+    /// Peer endpoint's Handshake write traffic secret.
+    peer: [protection.traffic_secret_len]u8,
+};
+
+/// TLS-produced 0-RTT traffic secrets for one QUIC connection.
+///
+/// 0-RTT packets are only sent by clients. `local` is the optional client write
+/// secret for emitting early data, and `peer` is the optional client write
+/// secret used by a server to open peer early-data packets.
+pub const ZeroRttTrafficSecrets = struct {
+    /// Optional local 0-RTT write traffic secret.
+    local: ?[protection.traffic_secret_len]u8 = null,
+    /// Optional peer 0-RTT write traffic secret.
+    peer: ?[protection.traffic_secret_len]u8 = null,
+};
+
+/// TLS-produced 1-RTT traffic secrets for one QUIC connection.
+///
+/// `local` is this endpoint's write secret; `peer` is the remote endpoint's
+/// write secret used for opening peer packets. The connection derives packet
+/// protection keys and owns the resulting key-phase state.
+pub const OneRttTrafficSecrets = struct {
+    /// This endpoint's 1-RTT write traffic secret.
+    local: [protection.traffic_secret_len]u8,
+    /// Peer endpoint's 1-RTT write traffic secret.
+    peer: [protection.traffic_secret_len]u8,
+};
+
+/// Pluggable TLS/crypto backend hook driven by QUIC CRYPTO byte streams.
+///
+/// The connection owns QUIC packet-number-space buffering and packetization;
+/// the backend owns TLS transcript parsing, handshake data production, and
+/// handshake-complete decisions. Callback errors abort the current drive step.
+pub const CryptoBackend = struct {
+    /// Opaque backend state passed to all callbacks.
+    context: *anyopaque,
+    /// Consume contiguous CRYPTO bytes received in `space`.
+    receive: *const fn (context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void,
+    /// Copy backend-produced CRYPTO bytes for `space` into `out_buf`.
+    ///
+    /// Return null when no bytes are currently available. Non-empty returned
+    /// slices are copied into connection-owned CRYPTO send queues before this
+    /// callback is invoked again.
+    pull: *const fn (context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8,
+    /// Optional hook receiving this endpoint's encoded transport parameters.
+    ///
+    /// The slice is valid only during the callback; backends that need to hold
+    /// it for TLS transcript construction must copy it. The connection may call
+    /// this more than once, so backends should treat it as idempotent setup.
+    set_local_transport_parameters: ?*const fn (context: *anyopaque, data: []const u8) Error!void = null,
+    /// Optional hook returning peer transport-parameter extension bytes.
+    ///
+    /// Return null until no new peer extension is available. Backends should
+    /// return each parsed peer extension at most once because applying
+    /// transport parameters resets initial peer limits.
+    pull_peer_transport_parameters: ?*const fn (context: *anyopaque, out_buf: []u8) Error!?[]const u8 = null,
+    /// Optional hook returning TLS-produced Handshake traffic secrets.
+    ///
+    /// Return null until secrets are available. The connection derives packet
+    /// protection keys for installed-key Handshake long-packet helpers.
+    pull_handshake_traffic_secrets: ?*const fn (context: *anyopaque) Error!?HandshakeTrafficSecrets = null,
+    /// Optional hook returning TLS-produced 0-RTT traffic secrets.
+    ///
+    /// Return null until secrets are available. Clients usually return `local`
+    /// and servers usually return `peer`.
+    pull_zero_rtt_traffic_secrets: ?*const fn (context: *anyopaque) Error!?ZeroRttTrafficSecrets = null,
+    /// Optional hook returning TLS-produced 1-RTT traffic secrets.
+    ///
+    /// Return null until secrets are available. The connection derives packet
+    /// protection keys and installs endpoint-owned key-phase state from the
+    /// returned secrets.
+    pull_1rtt_traffic_secrets: ?*const fn (context: *anyopaque) Error!?OneRttTrafficSecrets = null,
+    /// Optional handshake-complete probe. When true, the connection marks the
+    /// modeled handshake confirmed after CRYPTO input/output has been driven.
+    handshake_confirmed: ?*const fn (context: *anyopaque) bool = null,
+
+    fn isHandshakeConfirmed(self: CryptoBackend) bool {
+        if (self.handshake_confirmed) |confirmed| return confirmed(self.context);
+        return false;
+    }
+
+    fn setLocalTransportParameters(self: CryptoBackend, data: []const u8) Error!bool {
+        const set_local = self.set_local_transport_parameters orelse return false;
+        try set_local(self.context, data);
+        return true;
+    }
+
+    fn pullPeerTransportParameters(self: CryptoBackend, out_buf: []u8) Error!?[]const u8 {
+        const pull_peer = self.pull_peer_transport_parameters orelse return null;
+        return try pull_peer(self.context, out_buf);
+    }
+
+    fn pullHandshakeTrafficSecrets(self: CryptoBackend) Error!?HandshakeTrafficSecrets {
+        const pull_secrets = self.pull_handshake_traffic_secrets orelse return null;
+        return try pull_secrets(self.context);
+    }
+
+    fn pullZeroRttTrafficSecrets(self: CryptoBackend) Error!?ZeroRttTrafficSecrets {
+        const pull_secrets = self.pull_zero_rtt_traffic_secrets orelse return null;
+        return try pull_secrets(self.context);
+    }
+
+    fn pullOneRttTrafficSecrets(self: CryptoBackend) Error!?OneRttTrafficSecrets {
+        const pull_secrets = self.pull_1rtt_traffic_secrets orelse return null;
+        return try pull_secrets(self.context);
+    }
+};
+
+/// Progress reported by one `driveCryptoBackendInSpace()` call.
+pub const CryptoBackendProgress = struct {
+    /// Local transport-parameter extension bytes supplied to the backend.
+    local_transport_parameters_bytes: usize = 0,
+    /// Peer transport-parameter extension bytes pulled from the backend.
+    peer_transport_parameters_bytes: usize = 0,
+    /// Whether peer transport parameters were applied during this drive step.
+    peer_transport_parameters_applied: bool = false,
+    /// Whether Handshake traffic secrets were installed during this drive step.
+    handshake_keys_installed: bool = false,
+    /// Whether any 0-RTT traffic secret was installed during this drive step.
+    zero_rtt_keys_installed: bool = false,
+    /// Whether 1-RTT traffic secrets were installed during this drive step.
+    one_rtt_keys_installed: bool = false,
+    /// Number of inbound CRYPTO chunks delivered to the backend.
+    inbound_chunks: usize = 0,
+    /// Number of inbound CRYPTO bytes delivered to the backend.
+    inbound_bytes: usize = 0,
+    /// Number of outbound backend chunks queued as CRYPTO data.
+    outbound_chunks: usize = 0,
+    /// Number of outbound backend bytes queued as CRYPTO data.
+    outbound_bytes: usize = 0,
+    /// Whether the connection is handshake-confirmed after the drive step.
+    handshake_confirmed: bool = false,
 };
 
 /// QUIC packet type context used for frame-payload validation.
@@ -104,6 +471,22 @@ pub const FramePacketType = enum {
     handshake,
     /// 1-RTT short-header packet payload.
     one_rtt,
+};
+
+/// Caller-supplied keys for protected long-packet receive routing.
+///
+/// `initial` is required when a coalesced datagram contains Initial packets.
+/// `zero_rtt` is required when it contains 0-RTT packets. `handshake` is
+/// required when it contains Handshake packets unless the installed-key
+/// Handshake helpers are used. Real TLS transcript ownership and automatic key
+/// discard remain future endpoint/TLS work.
+pub const ProtectedLongDatagramKeys = struct {
+    /// Keys used to open protected Initial long packets.
+    initial: ?protection.Aes128PacketProtectionKeys = null,
+    /// Keys used to open protected 0-RTT long packets.
+    zero_rtt: ?protection.Aes128PacketProtectionKeys = null,
+    /// Keys used to open protected Handshake long packets.
+    handshake: ?protection.Aes128PacketProtectionKeys = null,
 };
 
 /// Modeled ECN codepoint used for packets recorded by the frame-payload API.
@@ -138,6 +521,58 @@ const PendingCryptoFrame = struct {
     data: []u8,
 };
 
+const BuiltProtectedLongPacket = struct {
+    space: PacketNumberSpace,
+    packet_number: u64,
+    datagram: []u8,
+    ack_eliciting: bool,
+    local_original_destination_connection_id: [max_connection_id_len]u8 = undefined,
+    local_original_destination_connection_id_len: ?u8 = null,
+    local_initial_source_connection_id: [max_connection_id_len]u8 = undefined,
+    local_initial_source_connection_id_len: ?u8 = null,
+    clear_ack: bool = false,
+    consume_ping: bool = false,
+    consume_crypto: bool = false,
+    consume_reset_stream: bool = false,
+    consume_stop_sending: bool = false,
+    consume_stream: bool = false,
+
+    fn recordLocalOriginalDestinationConnectionId(self: *BuiltProtectedLongPacket, dcid: ?[]const u8) void {
+        const value = dcid orelse return;
+        std.debug.assert(value.len <= max_connection_id_len);
+        @memcpy(self.local_original_destination_connection_id[0..value.len], value);
+        self.local_original_destination_connection_id_len = @intCast(value.len);
+    }
+
+    fn recordLocalInitialSourceConnectionId(self: *BuiltProtectedLongPacket, scid: ?[]const u8) void {
+        const value = scid orelse return;
+        std.debug.assert(value.len <= max_connection_id_len);
+        @memcpy(self.local_initial_source_connection_id[0..value.len], value);
+        self.local_initial_source_connection_id_len = @intCast(value.len);
+    }
+};
+
+const BuiltProtectedShortPacket = struct {
+    packet_number: u64,
+    datagram: []u8,
+    ack_eliciting: bool,
+    clear_ack: bool = false,
+    consume_ping: bool = false,
+    consume_crypto: bool = false,
+    consume_path_response: bool = false,
+    consume_path_challenge: bool = false,
+    consume_retire_connection_id: bool = false,
+    new_connection_id_index: ?usize = null,
+    consume_new_token: bool = false,
+    consume_handshake_done: bool = false,
+    consume_max_frame: bool = false,
+    consume_blocked_frame: bool = false,
+    consume_reset_stream: bool = false,
+    consume_stop_sending: bool = false,
+    consume_stream: bool = false,
+    close_packet: bool = false,
+};
+
 const PendingRecvStreamFrame = struct {
     offset: u64,
     data: []u8,
@@ -161,6 +596,8 @@ const PendingCloseFrame = union(enum) {
     connection: frame.ConnectionCloseFrame,
     application: frame.ApplicationCloseFrame,
 };
+
+const PeerCloseSnapshot = enum { absent, present };
 
 const PendingPathChallenge = struct {
     data: [8]u8,
@@ -237,6 +674,7 @@ const PacketNumberSpaceState = struct {
     crypto_recv_buffer: std.ArrayList(u8) = .empty,
     crypto_read_offset: usize = 0,
     crypto_send_queue: std.ArrayList(PendingCryptoFrame) = .empty,
+    crypto_recv_pending: std.ArrayList(PendingCryptoFrame) = .empty,
     ecn_sent_ect0: u64 = 0,
     ecn_sent_ect1: u64 = 0,
     ecn_largest_acknowledged: ?u64 = null,
@@ -248,6 +686,7 @@ const PacketNumberSpaceState = struct {
             .recovery_state = recovery.Recovery.init(.{
                 .max_datagram_size = config.max_datagram_size,
                 .initial_rtt_ms = config.initial_rtt_ms,
+                .max_ack_delay_ms = config.max_ack_delay_ms,
             }),
         };
     }
@@ -256,8 +695,12 @@ const PacketNumberSpaceState = struct {
         for (self.crypto_send_queue.items) |pending| {
             allocator.free(pending.data);
         }
+        for (self.crypto_recv_pending.items) |pending| {
+            allocator.free(pending.data);
+        }
         self.crypto_recv_buffer.deinit(allocator);
         self.crypto_send_queue.deinit(allocator);
+        self.crypto_recv_pending.deinit(allocator);
         self.sent_packets.deinit(allocator);
     }
 };
@@ -277,6 +720,7 @@ const PacketNumberSpaceView = struct {
     crypto_recv_buffer: *std.ArrayList(u8),
     crypto_read_offset: *usize,
     crypto_send_queue: *std.ArrayList(PendingCryptoFrame),
+    crypto_recv_pending: *std.ArrayList(PendingCryptoFrame),
     ecn_sent_ect0: *u64,
     ecn_sent_ect1: *u64,
     ecn_largest_acknowledged: *?u64,
@@ -314,6 +758,42 @@ fn quicVarIntWireLen(value: u64) Error!usize {
     if (value <= 1073741823) return 4;
     if (value <= max_quic_varint) return 8;
     return error.Internal;
+}
+
+fn protectedLongDatagramWireLen(
+    header: packet.LongHeader,
+    packet_number_len: u8,
+    plaintext_len: usize,
+) Error!usize {
+    if (packet_number_len == 0 or packet_number_len > 4) return error.InvalidPacket;
+    const protected_payload_len = std.math.add(usize, plaintext_len, protection.aead_tag_len) catch return error.BufferTooSmall;
+    const protected_payload_len_u64 = std.math.cast(u64, protected_payload_len) orelse return error.BufferTooSmall;
+    const wire_length = std.math.add(u64, protected_payload_len_u64, packet_number_len) catch return error.BufferTooSmall;
+
+    var header_len: usize = 1 + 4 + 1 + header.dcid.len + 1 + header.scid.len;
+    if (header.packet_type == .initial) {
+        const token_len_u64 = std.math.cast(u64, header.token.len) orelse return error.BufferTooSmall;
+        header_len = try addWireLen(header_len, try quicVarIntWireLen(token_len_u64));
+        header_len = try addWireLen(header_len, header.token.len);
+    }
+    header_len = try addWireLen(header_len, try quicVarIntWireLen(wire_length));
+    header_len = try addWireLen(header_len, packet_number_len);
+    return try addWireLen(header_len, protected_payload_len);
+}
+
+fn protectedLongPlaintextLenForMinDatagram(
+    header: packet.LongHeader,
+    packet_number_len: u8,
+    plaintext_len: usize,
+    min_datagram_len: usize,
+) Error!usize {
+    if (min_datagram_len == 0) return plaintext_len;
+    var expanded_len = plaintext_len;
+    while (try protectedLongDatagramWireLen(header, packet_number_len, expanded_len) < min_datagram_len) {
+        const current_len = try protectedLongDatagramWireLen(header, packet_number_len, expanded_len);
+        expanded_len = try addWireLen(expanded_len, min_datagram_len - current_len);
+    }
+    return expanded_len;
 }
 
 fn addWireLen(current: usize, extra: usize) Error!usize {
@@ -481,6 +961,20 @@ fn newConnectionIdFrameWireLen(local_id: LocalConnectionId) Error!usize {
     return addWireLen(len, local_id.stateless_reset_token.len);
 }
 
+fn newTokenFrameWireLen(token: []const u8) Error!usize {
+    if (token.len == 0) return error.InvalidPacket;
+    const token_len = std.math.cast(u64, token.len) orelse return error.BufferTooSmall;
+    if (token_len > max_quic_varint) return error.BufferTooSmall;
+
+    var len: usize = 1; // frame type
+    len = try addWireLen(len, try quicVarIntWireLen(token_len));
+    return addWireLen(len, token.len);
+}
+
+fn handshakeDoneFrameWireLen() usize {
+    return 1; // frame type only
+}
+
 fn closeReasonLenWireLen(reason_len: usize) Error!usize {
     const value = std.math.cast(u64, reason_len) orelse return error.BufferTooSmall;
     if (value > max_quic_varint) return error.BufferTooSmall;
@@ -558,6 +1052,13 @@ fn deinitPendingCloseFrame(close: *PendingCloseFrame, allocator: std.mem.Allocat
     }
 }
 
+fn deinitPeerClose(close: *PeerClose, allocator: std.mem.Allocator) void {
+    switch (close.*) {
+        .connection => |connection| allocator.free(connection.reason_phrase),
+        .application => |application| allocator.free(application.reason_phrase),
+    }
+}
+
 fn streamEndOffset(offset: u64, data_len: usize) ?u64 {
     const len = std.math.cast(u64, data_len) orelse return null;
     const end = std.math.add(u64, offset, len) catch return null;
@@ -623,12 +1124,61 @@ fn packetNumberSpaceForFramePacketType(packet_type: FramePacketType) PacketNumbe
     };
 }
 
+const ProtectedLongPacketSpace = struct {
+    packet_type: packet.PacketType,
+    frame_packet_type: FramePacketType,
+};
+
+fn protectedLongPacketSpaceFor(space: PacketNumberSpace) ?ProtectedLongPacketSpace {
+    return switch (space) {
+        .initial => .{ .packet_type = .initial, .frame_packet_type = .initial },
+        .handshake => .{ .packet_type = .handshake, .frame_packet_type = .handshake },
+        .application => null,
+    };
+}
+
+const ProtectedLongPacketRoute = struct {
+    space: PacketNumberSpace,
+    packet_type: packet.PacketType,
+    frame_packet_type: FramePacketType,
+    keys: protection.Aes128PacketProtectionKeys,
+};
+
+fn protectedLongPacketRouteFor(
+    keys: ProtectedLongDatagramKeys,
+    packet_type: packet.PacketType,
+) ?ProtectedLongPacketRoute {
+    return switch (packet_type) {
+        .initial => if (keys.initial) |initial_keys| .{
+            .space = .initial,
+            .packet_type = .initial,
+            .frame_packet_type = .initial,
+            .keys = initial_keys,
+        } else null,
+        .zero_rtt => if (keys.zero_rtt) |zero_rtt_keys| .{
+            .space = .application,
+            .packet_type = .zero_rtt,
+            .frame_packet_type = .zero_rtt,
+            .keys = zero_rtt_keys,
+        } else null,
+        .handshake => if (keys.handshake) |handshake_keys| .{
+            .space = .handshake,
+            .packet_type = .handshake,
+            .frame_packet_type = .handshake,
+            .keys = handshake_keys,
+        } else null,
+        .retry => null,
+    };
+}
+
 fn frameAllowedInFramePacketType(decoded: frame.Frame, packet_type: FramePacketType) bool {
     return switch (packet_type) {
         .initial, .handshake => switch (decoded) {
             .padding, .ping, .ack, .ack_ecn, .crypto, .connection_close => true,
             else => false,
         },
+        // RFC 9000 Table 3 marks RETIRE_CONNECTION_ID as a 0/1-RTT frame, but
+        // Section 12.5 permits treating it as a 0-RTT protocol violation.
         .zero_rtt => switch (decoded) {
             .padding,
             .ping,
@@ -734,6 +1284,7 @@ pub const QuicConnection = struct {
     peer_max_idle_timeout_ms: u64,
     peer_disable_active_migration: bool,
     peer_stateless_reset_token: ?[packet.stateless_reset_token_len]u8,
+    peer_preferred_address: ?PreferredAddress,
     last_packet_activity_millis: ?i64,
     next_stream_id: u64,
     next_uni_stream_id: u64,
@@ -753,6 +1304,15 @@ pub const QuicConnection = struct {
     peer_active_connection_id_limit: u64,
     pending_retire_connection_ids: std.ArrayList(u64),
     stored_new_tokens: std.ArrayList([]u8),
+    pending_new_tokens: std.ArrayList([]u8),
+    retry_token: ?[]u8,
+    version_negotiation_selected_version: ?packet.Version,
+    local_initial_source_connection_id: [max_connection_id_len]u8,
+    local_initial_source_connection_id_len: ?u8,
+    peer_initial_source_connection_id: ?[]u8,
+    original_destination_connection_id: [max_connection_id_len]u8,
+    original_destination_connection_id_len: ?u8,
+    retry_source_connection_id: ?[]u8,
     retry_tokens: std.ArrayList([]u8),
     pending_blocked_frames: std.ArrayList(PendingBlockedFrame),
     pending_max_frames: std.ArrayList(PendingMaxFrame),
@@ -791,12 +1351,26 @@ pub const QuicConnection = struct {
     crypto_recv_buffer: std.ArrayList(u8),
     crypto_read_offset: usize,
     crypto_send_queue: std.ArrayList(PendingCryptoFrame),
+    crypto_recv_pending: std.ArrayList(PendingCryptoFrame),
     send_queue: std.ArrayList(PendingStreamFrame),
     pending_reset_streams: std.ArrayList(frame.ResetStreamFrame),
     pending_stop_sending: std.ArrayList(frame.StopSendingFrame),
     send_streams: std.ArrayList(SendStreamState),
     recv_streams: std.ArrayList(RecvStreamState),
+    spin_bit_value: bool,
+    local_handshake_keys: ?protection.Aes128PacketProtectionKeys,
+    peer_handshake_keys: ?protection.Aes128PacketProtectionKeys,
+    local_zero_rtt_keys: ?protection.Aes128PacketProtectionKeys,
+    peer_zero_rtt_keys: ?protection.Aes128PacketProtectionKeys,
+    peer_zero_rtt_accepted: bool,
+    local_one_rtt_key_phase_state: ?protection.Aes128KeyPhaseState,
+    peer_one_rtt_key_phase_state: ?protection.Aes128KeyPhaseState,
+    local_one_rtt_key_update_ack_threshold: ?u64,
+    handshake_state: HandshakeState,
     handshake_confirmed: bool,
+    pending_handshake_done: bool,
+    handshake_done_sent: bool,
+    peer_close: ?PeerClose,
     pending_close: ?PendingCloseFrame,
     state: ConnectionState,
     close_deadline_millis: ?i64,
@@ -814,6 +1388,25 @@ pub const QuicConnection = struct {
         if (config.active_connection_id_limit < min_active_connection_id_limit) {
             return error.InvalidPacket;
         }
+        if (config.ack_delay_exponent > 20) {
+            return error.InvalidPacket;
+        }
+        if (config.max_ack_delay_ms >= (@as(u32, 1) << 14)) {
+            return error.InvalidPacket;
+        }
+        if (config.receive_connection_window) |window| {
+            if (window > max_quic_varint) return error.InvalidPacket;
+        }
+        if (config.receive_stream_window) |window| {
+            if (window > max_quic_varint) return error.InvalidPacket;
+        }
+        if (config.receive_stream_count_window) |window| {
+            if (window > max_stream_count) return error.InvalidStream;
+        }
+        if (side == .client and config.preferred_address != null) {
+            return error.InvalidPacket;
+        }
+        try validateLocalVersionInformation(side, config);
 
         return QuicConnection{
             .allocator = allocator,
@@ -825,6 +1418,7 @@ pub const QuicConnection = struct {
             .peer_max_idle_timeout_ms = 0,
             .peer_disable_active_migration = false,
             .peer_stateless_reset_token = null,
+            .peer_preferred_address = null,
             .last_packet_activity_millis = null,
             .next_stream_id = switch (side) {
                 .client => 0,
@@ -850,6 +1444,15 @@ pub const QuicConnection = struct {
             .peer_active_connection_id_limit = min_active_connection_id_limit,
             .pending_retire_connection_ids = .empty,
             .stored_new_tokens = .empty,
+            .pending_new_tokens = .empty,
+            .retry_token = null,
+            .version_negotiation_selected_version = config.version_negotiation_selected_version,
+            .local_initial_source_connection_id = undefined,
+            .local_initial_source_connection_id_len = null,
+            .peer_initial_source_connection_id = null,
+            .original_destination_connection_id = undefined,
+            .original_destination_connection_id_len = null,
+            .retry_source_connection_id = null,
             .retry_tokens = .empty,
             .pending_blocked_frames = .empty,
             .pending_max_frames = .empty,
@@ -877,6 +1480,7 @@ pub const QuicConnection = struct {
             .recovery_state = recovery.Recovery.init(.{
                 .max_datagram_size = config.max_datagram_size,
                 .initial_rtt_ms = config.initial_rtt_ms,
+                .max_ack_delay_ms = config.max_ack_delay_ms,
             }),
             .sent_packets = .empty,
             .largest_acknowledged = null,
@@ -891,12 +1495,26 @@ pub const QuicConnection = struct {
             .crypto_recv_buffer = .empty,
             .crypto_read_offset = 0,
             .crypto_send_queue = .empty,
+            .crypto_recv_pending = .empty,
             .send_queue = .empty,
             .pending_reset_streams = .empty,
             .pending_stop_sending = .empty,
             .send_streams = .empty,
             .recv_streams = .empty,
+            .spin_bit_value = false,
+            .local_handshake_keys = null,
+            .peer_handshake_keys = null,
+            .local_zero_rtt_keys = null,
+            .peer_zero_rtt_keys = null,
+            .peer_zero_rtt_accepted = false,
+            .local_one_rtt_key_phase_state = null,
+            .peer_one_rtt_key_phase_state = null,
+            .local_one_rtt_key_update_ack_threshold = null,
+            .handshake_state = .initial,
             .handshake_confirmed = false,
+            .pending_handshake_done = false,
+            .handshake_done_sent = false,
+            .peer_close = null,
             .pending_close = null,
             .state = .active,
             .close_deadline_millis = null,
@@ -909,6 +1527,9 @@ pub const QuicConnection = struct {
         self.initial_packet_space.deinit(self.allocator);
         self.handshake_packet_space.deinit(self.allocator);
         for (self.crypto_send_queue.items) |pending| {
+            self.allocator.free(pending.data);
+        }
+        for (self.crypto_recv_pending.items) |pending| {
             self.allocator.free(pending.data);
         }
         for (self.send_queue.items) |pending| {
@@ -931,6 +1552,13 @@ pub const QuicConnection = struct {
             self.allocator.free(token);
         }
         self.stored_new_tokens.deinit(self.allocator);
+        for (self.pending_new_tokens.items) |token| {
+            self.allocator.free(token);
+        }
+        self.pending_new_tokens.deinit(self.allocator);
+        if (self.retry_token) |token| self.allocator.free(token);
+        if (self.peer_initial_source_connection_id) |cid| self.allocator.free(cid);
+        if (self.retry_source_connection_id) |cid| self.allocator.free(cid);
         for (self.retry_tokens.items) |token| {
             self.allocator.free(token);
         }
@@ -940,6 +1568,7 @@ pub const QuicConnection = struct {
         self.peer_stream_data_blocked_limits.deinit(self.allocator);
         self.crypto_recv_buffer.deinit(self.allocator);
         self.crypto_send_queue.deinit(self.allocator);
+        self.crypto_recv_pending.deinit(self.allocator);
         self.send_queue.deinit(self.allocator);
         self.pending_reset_streams.deinit(self.allocator);
         self.pending_stop_sending.deinit(self.allocator);
@@ -947,6 +1576,7 @@ pub const QuicConnection = struct {
         for (self.recv_streams.items) |*stream| {
             stream.deinit(self.allocator);
         }
+        self.clearPeerClose();
         self.clearPendingCloseFrame();
         self.recv_streams.deinit(self.allocator);
     }
@@ -959,6 +1589,11 @@ pub const QuicConnection = struct {
     /// Return the close/drain deadline in milliseconds, or null when no timer is active.
     pub fn closeDeadlineMillis(self: QuicConnection) ?i64 {
         return self.close_deadline_millis;
+    }
+
+    /// Return the peer close frame that moved this connection into draining, if any.
+    pub fn peerClose(self: QuicConnection) ?PeerClose {
+        return self.peer_close;
     }
 
     /// Return the effective max idle timeout in milliseconds, or null when disabled.
@@ -998,6 +1633,15 @@ pub const QuicConnection = struct {
     /// handshake CID token without changing that API's return meaning.
     pub fn peerStatelessResetToken(self: QuicConnection) ?[packet.stateless_reset_token_len]u8 {
         return self.peer_stateless_reset_token;
+    }
+
+    /// Return the server preferred address learned from peer transport parameters.
+    ///
+    /// The value is copied into connection-owned fixed storage when peer
+    /// parameters are applied. The current skeleton only exposes it for future
+    /// endpoint migration policy; it does not automatically migrate sockets.
+    pub fn peerPreferredAddress(self: QuicConnection) ?PreferredAddress {
+        return self.peer_preferred_address;
     }
 
     /// Return whether the peer address is considered validated for send limits.
@@ -1168,6 +1812,198 @@ pub const QuicConnection = struct {
         return self.handshake_confirmed;
     }
 
+    /// Return the modeled QUIC handshake progress state.
+    pub fn handshakeState(self: QuicConnection) HandshakeState {
+        return self.handshake_state;
+    }
+
+    /// Return the spin bit that the next protected 1-RTT short packet will use.
+    ///
+    /// When `Config.enable_spin_bit` is false this remains false so the default
+    /// packetization behavior stays unchanged.
+    pub fn nextOutgoingSpinBit(self: QuicConnection) bool {
+        return self.shortHeaderSpinBit();
+    }
+
+    /// Reset the modeled spin bit for a newly selected path or destination CID.
+    ///
+    /// The current connection skeleton is single-path; endpoint routing can call
+    /// this hook when a future socket-backed migration commits to a new path.
+    pub fn resetSpinBitForPath(self: *QuicConnection) void {
+        self.spin_bit_value = false;
+    }
+
+    /// Install TLS-produced Handshake traffic secrets into connection-owned state.
+    ///
+    /// The local secret protects future Handshake long-header packets sent by
+    /// this endpoint. The peer secret opens future Handshake long-header packets
+    /// received from the remote endpoint. `discardPacketNumberSpace(.handshake)`
+    /// discards these installed keys together with Handshake recovery state.
+    pub fn installHandshakeTrafficSecrets(
+        self: *QuicConnection,
+        secrets: HandshakeTrafficSecrets,
+    ) Error!void {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.handshake_packet_space.discarded) return error.InvalidPacket;
+        self.local_handshake_keys = protection.deriveAes128PacketProtectionKeys(secrets.local);
+        self.peer_handshake_keys = protection.deriveAes128PacketProtectionKeys(secrets.peer);
+    }
+
+    /// Return whether both local send and peer receive Handshake keys exist.
+    pub fn hasHandshakeProtectionKeys(self: QuicConnection) bool {
+        return self.local_handshake_keys != null and self.peer_handshake_keys != null;
+    }
+
+    /// Install TLS-produced 0-RTT traffic secrets into connection-owned state.
+    ///
+    /// Clients normally install only `local` so they can emit early data.
+    /// Servers normally install only `peer` so they can open client early data.
+    /// The server-side peer receive key is not accepted by default; call
+    /// `acceptZeroRtt()` after TLS policy accepts early data, or
+    /// `rejectZeroRtt()` to discard it.
+    pub fn installZeroRttTrafficSecrets(
+        self: *QuicConnection,
+        secrets: ZeroRttTrafficSecrets,
+    ) Error!void {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (secrets.local == null and secrets.peer == null) return error.InvalidPacket;
+        if (secrets.local) |local| {
+            self.local_zero_rtt_keys = protection.deriveAes128PacketProtectionKeys(local);
+        }
+        if (secrets.peer) |peer| {
+            self.peer_zero_rtt_keys = protection.deriveAes128PacketProtectionKeys(peer);
+            self.peer_zero_rtt_accepted = false;
+        }
+    }
+
+    /// Return whether local 0-RTT send keys are installed.
+    pub fn hasLocalZeroRttProtectionKey(self: QuicConnection) bool {
+        return self.local_zero_rtt_keys != null;
+    }
+
+    /// Return whether peer 0-RTT receive keys are installed.
+    pub fn hasPeerZeroRttProtectionKey(self: QuicConnection) bool {
+        return self.peer_zero_rtt_keys != null;
+    }
+
+    /// Return whether installed peer 0-RTT receive keys are accepted for use.
+    pub fn zeroRttAccepted(self: QuicConnection) bool {
+        return self.peer_zero_rtt_accepted;
+    }
+
+    /// Accept installed peer 0-RTT receive keys after TLS early-data policy.
+    ///
+    /// This only gates the connection-installed receive helper. Callers that
+    /// use `processProtectedZeroRttDatagram()` with explicit keys still own
+    /// acceptance and replay policy outside the connection.
+    pub fn acceptZeroRtt(self: *QuicConnection) Error!void {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.peer_zero_rtt_keys == null) return error.InvalidPacket;
+        self.peer_zero_rtt_accepted = true;
+    }
+
+    /// Reject installed peer 0-RTT receive keys and discard early-data state.
+    ///
+    /// This models TLS rejecting early data before any installed-key 0-RTT
+    /// payload is processed. It does not affect caller-owned explicit-key
+    /// packet opening.
+    pub fn rejectZeroRtt(self: *QuicConnection) Error!void {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        self.peer_zero_rtt_keys = null;
+        self.peer_zero_rtt_accepted = false;
+    }
+
+    /// Discard all installed 0-RTT packet-protection keys.
+    ///
+    /// This explicit hook models the key-lifecycle cleanup required after
+    /// early data is no longer accepted. Clients also discard these keys when
+    /// 1-RTT keys are installed; servers discard them after the first accepted
+    /// 1-RTT short packet. TLS acceptance/replay policy remains outside this
+    /// helper.
+    pub fn discardZeroRttProtectionKeys(self: *QuicConnection) Error!void {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        self.discardZeroRttProtectionKeyState();
+    }
+
+    fn discardZeroRttProtectionKeyState(self: *QuicConnection) void {
+        self.local_zero_rtt_keys = null;
+        self.peer_zero_rtt_keys = null;
+        self.peer_zero_rtt_accepted = false;
+    }
+
+    /// Install TLS-produced 1-RTT traffic secrets into connection-owned state.
+    ///
+    /// The local secret protects future short-header packets sent by this
+    /// endpoint. The peer secret opens future short-header packets received
+    /// from the remote endpoint. Key phase starts at false as required for
+    /// initial 1-RTT keys; later updates use `initiateOneRttKeyUpdate()` and
+    /// peer key-phase bits. Client connections discard installed 0-RTT keys as
+    /// soon as 1-RTT keys are installed.
+    pub fn installOneRttTrafficSecrets(
+        self: *QuicConnection,
+        secrets: OneRttTrafficSecrets,
+    ) Error!void {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.side == .client) {
+            self.discardZeroRttProtectionKeyState();
+        }
+        self.local_one_rtt_key_phase_state = protection.Aes128KeyPhaseState.init(
+            protection.deriveAes128PacketProtectionKeys(secrets.local),
+            false,
+        );
+        self.peer_one_rtt_key_phase_state = protection.Aes128KeyPhaseState.init(
+            protection.deriveAes128PacketProtectionKeys(secrets.peer),
+            false,
+        );
+        self.local_one_rtt_key_update_ack_threshold = null;
+    }
+
+    /// Return whether both local send and peer receive 1-RTT key states exist.
+    pub fn hasOneRttProtectionKeys(self: QuicConnection) bool {
+        return self.local_one_rtt_key_phase_state != null and self.peer_one_rtt_key_phase_state != null;
+    }
+
+    /// Return the key phase bit used by the next installed-key 1-RTT send.
+    pub fn localOneRttKeyPhase(self: QuicConnection) ?bool {
+        if (self.local_one_rtt_key_phase_state) |state| return state.currentKeyPhase();
+        return null;
+    }
+
+    /// Return the active peer key phase for installed-key 1-RTT receive.
+    pub fn peerOneRttKeyPhase(self: QuicConnection) ?bool {
+        if (self.peer_one_rtt_key_phase_state) |state| return state.currentKeyPhase();
+        return null;
+    }
+
+    /// Advance the installed local 1-RTT send keys before the next packet.
+    ///
+    /// This models endpoint-owned key update initiation after handshake
+    /// confirmation. A second local update is rejected until an Application ACK
+    /// covers a packet number sent with the new key phase.
+    pub fn initiateOneRttKeyUpdate(self: *QuicConnection) Error!void {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (!self.handshake_confirmed) return error.InvalidPacket;
+        if (self.local_one_rtt_key_update_ack_threshold != null) return error.InvalidPacket;
+        if (self.local_one_rtt_key_phase_state) |*state| {
+            state.initiateKeyUpdate();
+            self.local_one_rtt_key_update_ack_threshold = self.next_packet_number;
+            return;
+        }
+        return error.InvalidPacket;
+    }
+
+    fn shortHeaderSpinBit(self: QuicConnection) bool {
+        return self.config.enable_spin_bit and self.spin_bit_value;
+    }
+
+    fn updateSpinBitAfterReceivedShortPacket(self: *QuicConnection, peer_spin_bit: bool) void {
+        if (!self.config.enable_spin_bit) return;
+        self.spin_bit_value = switch (self.side) {
+            .client => !peer_spin_bit,
+            .server => peer_spin_bit,
+        };
+    }
+
     /// Return the peer-issued CID sequence whose stateless reset token matches.
     ///
     /// This is a read-only detector for future UDP packet handling. The
@@ -1186,6 +2022,334 @@ pub const QuicConnection = struct {
     /// Return Retry tokens issued by this server and still accepted once.
     pub fn pendingRetryTokenCount(self: QuicConnection) usize {
         return self.retry_tokens.items.len;
+    }
+
+    /// Return the Retry token most recently accepted by a client connection.
+    ///
+    /// The returned token is owned by the connection and is used automatically
+    /// as the Initial token when protected Initial packetization receives no
+    /// explicit token argument. Null means no valid Retry packet has been
+    /// processed by this client connection.
+    pub fn latestRetryToken(self: QuicConnection) ?[]const u8 {
+        return self.retry_token;
+    }
+
+    /// Return the Source Connection ID used by this endpoint's first sent Initial.
+    ///
+    /// This value is captured only after a protected Initial packet is actually
+    /// committed to the send path. `localTransportParameters()` exports it as
+    /// `initial_source_connection_id` once available.
+    pub fn localInitialSourceConnectionId(self: *const QuicConnection) ?[]const u8 {
+        const len = self.local_initial_source_connection_id_len orelse return null;
+        return self.local_initial_source_connection_id[0..len];
+    }
+
+    /// Return the peer's Initial Source Connection ID observed on its first Initial.
+    ///
+    /// The value is captured from a successfully opened protected Initial packet
+    /// and later authenticated by the peer's `initial_source_connection_id`
+    /// transport parameter.
+    pub fn peerInitialSourceConnectionId(self: QuicConnection) ?[]const u8 {
+        return self.peer_initial_source_connection_id;
+    }
+
+    /// Return the Original Destination Connection ID remembered for transport parameters.
+    ///
+    /// Client connections record the DCID used by their first sent Initial and
+    /// validate it against the server's `original_destination_connection_id`.
+    /// Server connections record the DCID from the first successfully opened
+    /// client Initial and export it through `localTransportParameters()`.
+    pub fn originalDestinationConnectionId(self: *const QuicConnection) ?[]const u8 {
+        const len = self.original_destination_connection_id_len orelse return null;
+        return self.original_destination_connection_id[0..len];
+    }
+
+    /// Return the Retry Source Connection ID from a validated Retry packet.
+    ///
+    /// Client connections expose the Retry Source Connection ID from a
+    /// validated Retry packet for later server transport-parameter validation.
+    /// Server connections expose the Retry Source Connection ID from a Retry
+    /// datagram issued through `issueRetryDatagram()`.
+    pub fn retrySourceConnectionId(self: QuicConnection) ?[]const u8 {
+        return self.retry_source_connection_id;
+    }
+
+    /// Return the version selected from a validated Version Negotiation packet.
+    ///
+    /// The current connection object only records the result. The caller still
+    /// owns starting the next incompatible-version connection attempt with the
+    /// selected version and carrying authenticated RFC 9368 Version Information.
+    pub fn versionNegotiationSelectedVersion(self: QuicConnection) ?packet.Version {
+        return self.version_negotiation_selected_version;
+    }
+
+    /// Build and record one server-side QUIC v1 Retry datagram.
+    ///
+    /// The returned datagram is allocated with the connection allocator and
+    /// must be freed by the caller. A successful call registers `token` for
+    /// one-time server validation, records the Original Destination Connection
+    /// ID and Retry Source Connection ID, and makes both available through
+    /// `localTransportParameters()`. Address-bound token generation can be
+    /// supplied by `issueAddressValidationToken()`. Endpoint DCID switching
+    /// remains endpoint policy.
+    pub fn issueRetryDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        original_destination_connection_id: []const u8,
+        client_source_connection_id: []const u8,
+        retry_source_connection_id: []const u8,
+        token: []const u8,
+    ) Error![]u8 {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.side != .server or token.len == 0) return error.InvalidPacket;
+        if (self.initial_packet_space.discarded or self.initial_packet_space.next_peer_packet_number != 0) return error.InvalidPacket;
+        if (self.original_destination_connection_id_len != null or self.retry_source_connection_id != null) return error.InvalidPacket;
+        try self.validateOriginalDestinationConnectionIdForRecord(original_destination_connection_id);
+        try validateInitialDestinationConnectionIdLength(original_destination_connection_id);
+        if (client_source_connection_id.len > max_connection_id_len or retry_source_connection_id.len > max_connection_id_len) {
+            return error.InvalidPacket;
+        }
+
+        const retry = packet.RetryPacket{
+            .version = .v1,
+            .dcid = client_source_connection_id,
+            .scid = retry_source_connection_id,
+            .token = token,
+            .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+        };
+        const datagram = protection.encodeRetryPacketWithIntegrity(
+            self.allocator,
+            original_destination_connection_id,
+            retry,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        const owned_retry_scid = self.allocator.alloc(u8, retry_source_connection_id.len) catch return error.OutOfMemory;
+        errdefer self.allocator.free(owned_retry_scid);
+        @memcpy(owned_retry_scid, retry_source_connection_id);
+
+        try self.issueRetryToken(token);
+        self.recordOriginalDestinationConnectionId(original_destination_connection_id);
+        self.retry_source_connection_id = owned_retry_scid;
+        self.recordPeerAddressBytesSent(datagram.len);
+        self.recordPacketActivity(now_millis);
+        return datagram;
+    }
+
+    /// Validate and process one client-side QUIC v1 Retry datagram.
+    ///
+    /// The Retry Integrity Tag is verified using the Original Destination
+    /// Connection ID from the first client Initial. A valid Retry stores the
+    /// opaque token for the next Initial packet and records the Retry Source
+    /// Connection ID for later transport-parameter checks. This models the
+    /// packet-routing step only; token encryption, expiration, address binding,
+    /// and endpoint DCID switching remain endpoint policy.
+    pub fn processRetryDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        original_destination_connection_id: []const u8,
+        datagram: []const u8,
+    ) Error!void {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.side != .client or self.retry_token != null) return error.InvalidPacket;
+        if (self.initial_packet_space.discarded) return error.InvalidPacket;
+        if (self.initial_packet_space.next_peer_packet_number != 0) return error.InvalidPacket;
+
+        var retry = protection.parseRetryPacketWithIntegrity(
+            self.allocator,
+            original_destination_connection_id,
+            datagram,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidPacket,
+        };
+        defer packet.deinitRetryPacket(&retry, self.allocator);
+
+        if (retry.version != .v1) return error.InvalidPacket;
+        try self.validateOriginalDestinationConnectionIdForRecord(original_destination_connection_id);
+        if (self.original_destination_connection_id_len == null) {
+            try validateInitialDestinationConnectionIdLength(original_destination_connection_id);
+        }
+
+        const owned_token = self.allocator.alloc(u8, retry.token.len) catch return error.OutOfMemory;
+        errdefer self.allocator.free(owned_token);
+        @memcpy(owned_token, retry.token);
+
+        const owned_retry_scid = self.allocator.alloc(u8, retry.scid.len) catch return error.OutOfMemory;
+        errdefer self.allocator.free(owned_retry_scid);
+        @memcpy(owned_retry_scid, retry.scid);
+
+        self.recordOriginalDestinationConnectionId(original_destination_connection_id);
+        self.retry_token = owned_token;
+        self.retry_source_connection_id = owned_retry_scid;
+        self.recordPacketActivity(now_millis);
+    }
+
+    /// Validate and act on one client-side Version Negotiation packet.
+    ///
+    /// Incorrect connection-ID echoes and packets that include the client's
+    /// Original Version are ignored by returning null. A valid packet selects
+    /// the first server-offered version that appears in this client's
+    /// configured `available_versions`, records that this connection attempt
+    /// already reacted to Version Negotiation, and returns the selected version.
+    pub fn processVersionNegotiationDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        original_destination_connection_id: []const u8,
+        local_initial_source_connection_id: []const u8,
+        datagram: []const u8,
+    ) Error!?packet.Version {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.side != .client) return error.InvalidPacket;
+        if (self.initial_packet_space.discarded) return error.InvalidPacket;
+        if (self.initial_packet_space.next_peer_packet_number != 0) return error.InvalidPacket;
+        if (original_destination_connection_id.len > max_connection_id_len) return error.InvalidPacket;
+        if (local_initial_source_connection_id.len > max_connection_id_len) return error.InvalidPacket;
+        if (self.version_negotiation_selected_version != null) return null;
+
+        var negotiation = packet.parseVersionNegotiationPacket(datagram, self.allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidPacket,
+        };
+        defer packet.deinitVersionNegotiationPacket(&negotiation, self.allocator);
+
+        if (!std.mem.eql(u8, negotiation.dcid, local_initial_source_connection_id)) return null;
+        if (!std.mem.eql(u8, negotiation.scid, original_destination_connection_id)) return null;
+        if (versionListContains(negotiation.versions, self.config.chosen_version)) return null;
+
+        const selected = selectMutualVersion(self.config.available_versions, negotiation.versions) orelse return error.InvalidPacket;
+        self.version_negotiation_selected_version = selected;
+        self.recordPacketActivity(now_millis);
+        return selected;
+    }
+
+    /// Create a server-authenticated address-validation token.
+    ///
+    /// The token is bound to `peer_address`, expires after `lifetime_millis`,
+    /// and is authenticated with `secret`. The peer address is included in the
+    /// MAC input but not serialized into the token. Callers pass `.retry`
+    /// tokens to `issueRetryDatagram()` and `.new_token` values to
+    /// `issueNewToken()`.
+    pub fn issueAddressValidationToken(
+        self: *QuicConnection,
+        secret: address_validation_token.Secret,
+        kind: address_validation_token.Kind,
+        now_millis: i64,
+        lifetime_millis: u64,
+        peer_address: []const u8,
+        nonce: address_validation_token.Nonce,
+    ) Error![]u8 {
+        return self.issueAddressValidationTokenForVersion(secret, kind, .v1, now_millis, lifetime_millis, peer_address, nonce);
+    }
+
+    /// Create a server-authenticated token for a specific QUIC version.
+    pub fn issueAddressValidationTokenForVersion(
+        self: *QuicConnection,
+        secret: address_validation_token.Secret,
+        kind: address_validation_token.Kind,
+        originating_version: packet.Version,
+        now_millis: i64,
+        lifetime_millis: u64,
+        peer_address: []const u8,
+        nonce: address_validation_token.Nonce,
+    ) Error![]u8 {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.side != .server) return error.InvalidPacket;
+
+        return address_validation_token.encode(self.allocator, secret, .{
+            .kind = kind,
+            .originating_version = originating_version,
+            .issued_millis = now_millis,
+            .lifetime_millis = lifetime_millis,
+            .peer_address = peer_address,
+            .nonce = nonce,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidPacket,
+        };
+    }
+
+    /// Validate a server-authenticated address-validation token.
+    ///
+    /// Retry tokens must also be present in the one-time pending Retry-token
+    /// set, so successful validation consumes them. NEW_TOKEN validation is
+    /// stateless in the current connection skeleton. Either successful kind
+    /// validates the peer address and lifts the modeled anti-amplification
+    /// limit.
+    pub fn validateAddressValidationToken(
+        self: *QuicConnection,
+        secret: address_validation_token.Secret,
+        expected_kind: address_validation_token.Kind,
+        now_millis: i64,
+        peer_address: []const u8,
+        token: []const u8,
+    ) Error!void {
+        try self.validateAddressValidationTokenForVersion(secret, expected_kind, .v1, now_millis, peer_address, token);
+    }
+
+    /// Validate a server-authenticated token for an expected QUIC version.
+    pub fn validateAddressValidationTokenForVersion(
+        self: *QuicConnection,
+        secret: address_validation_token.Secret,
+        expected_kind: address_validation_token.Kind,
+        expected_originating_version: packet.Version,
+        now_millis: i64,
+        peer_address: []const u8,
+        token: []const u8,
+    ) Error!void {
+        const secrets = [_]address_validation_token.Secret{secret};
+        try self.validateAddressValidationTokenWithSecretsForVersion(&secrets, expected_kind, expected_originating_version, now_millis, peer_address, token);
+    }
+
+    /// Validate a server-authenticated token against rotated endpoint secrets.
+    ///
+    /// This has the same connection-side effects as
+    /// `validateAddressValidationToken()`: Retry tokens are consumed from the
+    /// pending one-time set, NEW_TOKEN values do not require pending state, and
+    /// successful validation marks the peer address as validated.
+    pub fn validateAddressValidationTokenWithSecrets(
+        self: *QuicConnection,
+        secrets: []const address_validation_token.Secret,
+        expected_kind: address_validation_token.Kind,
+        now_millis: i64,
+        peer_address: []const u8,
+        token: []const u8,
+    ) Error!void {
+        try self.validateAddressValidationTokenWithSecretsForVersion(secrets, expected_kind, .v1, now_millis, peer_address, token);
+    }
+
+    /// Validate a version-bound server-authenticated token against rotated secrets.
+    pub fn validateAddressValidationTokenWithSecretsForVersion(
+        self: *QuicConnection,
+        secrets: []const address_validation_token.Secret,
+        expected_kind: address_validation_token.Kind,
+        expected_originating_version: packet.Version,
+        now_millis: i64,
+        peer_address: []const u8,
+        token: []const u8,
+    ) Error!void {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.side != .server or token.len == 0) return error.InvalidPacket;
+
+        _ = address_validation_token.validateAnySecretForVersion(secrets, expected_kind, expected_originating_version, now_millis, peer_address, token) catch return error.InvalidPacket;
+        if (expected_kind == .retry and !self.consumePendingRetryToken(token)) {
+            return error.InvalidPacket;
+        }
+        self.peer_address_validated = true;
+        self.recordPacketActivity(now_millis);
     }
 
     /// Register an opaque Retry token that a server will accept once.
@@ -1215,10 +2379,7 @@ pub const QuicConnection = struct {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (self.side != .server or token.len == 0) return error.InvalidPacket;
 
-        for (self.retry_tokens.items, 0..) |existing, i| {
-            if (!std.mem.eql(u8, existing, token)) continue;
-            const removed = self.retry_tokens.orderedRemove(i);
-            self.allocator.free(removed);
+        if (self.consumePendingRetryToken(token)) {
             self.peer_address_validated = true;
             return;
         }
@@ -1261,6 +2422,7 @@ pub const QuicConnection = struct {
         if (retire_prior_to > self.next_local_connection_id_sequence) return error.InvalidPacket;
         if (self.localConnectionIdCount() >= self.peer_active_connection_id_limit) return error.InvalidPacket;
         if (self.localConnectionIdValueExists(connection_id)) return error.InvalidPacket;
+        if (self.localStatelessResetTokenValueExists(stateless_reset_token)) return error.InvalidPacket;
 
         const sequence_number = self.next_local_connection_id_sequence;
         const owned_connection_id = self.allocator.alloc(u8, connection_id.len) catch return error.OutOfMemory;
@@ -1301,12 +2463,13 @@ pub const QuicConnection = struct {
         self.expireLossDetectionTimeouts(now_millis);
     }
 
-    /// Queue PTO PING probes when simplified PTO deadlines expire.
+    /// Queue PTO probes when simplified PTO deadlines expire.
     ///
     /// This is a deterministic hook for the current frame-payload model. It
+    /// lets already queued ack-eliciting data serve as the probe; otherwise it
     /// queues one PING in every non-discarded packet number space whose PTO is
-    /// due. It does not yet retransmit data frames; if no packet is in flight,
-    /// it is a no-op.
+    /// due. It does not yet clone already-sent data frames for retransmission;
+    /// if no packet is in flight, it is a no-op.
     pub fn checkPtoTimeouts(self: *QuicConnection, now_millis: i64) Error!void {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
@@ -1330,6 +2493,7 @@ pub const QuicConnection = struct {
     /// RFC 9002 peer `max_ack_delay` cap.
     pub fn confirmHandshake(self: *QuicConnection) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        self.handshake_state = .confirmed;
         self.handshake_confirmed = true;
     }
 
@@ -1341,11 +2505,19 @@ pub const QuicConnection = struct {
     pub fn discardPacketNumberSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (space == .application) return error.InvalidPacket;
+        self.discardPacketNumberSpaceState(space);
+    }
 
-        var packet_space = self.packetNumberSpace(space);
+    fn discardPacketNumberSpaceState(self: *QuicConnection, space: PacketNumberSpace) void {
+        std.debug.assert(space != .application);
+        const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return;
 
         packet_space.discarded.* = true;
+        if (space == .handshake) {
+            self.local_handshake_keys = null;
+            self.peer_handshake_keys = null;
+        }
         packet_space.pending_ack_largest.* = null;
         packet_space.largest_acknowledged.* = null;
         packet_space.first_rtt_sample_sent_time_millis.* = null;
@@ -1356,6 +2528,7 @@ pub const QuicConnection = struct {
         packet_space.crypto_send_offset.* = 0;
         packet_space.crypto_recv_buffer.items.len = 0;
         packet_space.crypto_read_offset.* = 0;
+        self.rollbackCryptoFrameQueue(packet_space.crypto_recv_pending, 0);
         packet_space.recovery_state.bytes_in_flight = 0;
         packet_space.recovery_state.pto_count = 0;
     }
@@ -1400,7 +2573,7 @@ pub const QuicConnection = struct {
         codepoint: EcnCodepoint,
     ) Error!u64 {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
-        var packet_space = self.packetNumberSpace(space);
+        const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
         if (packet_space.next_packet_number.* > max_quic_varint) return error.Internal;
         if (!packet_space.recovery_state.canSend(bytes)) return error.FlowControlBlocked;
@@ -1424,6 +2597,7 @@ pub const QuicConnection = struct {
         packet_space.recovery_state.onPacketSent(bytes);
         self.recordPeerAddressBytesSent(bytes);
         self.recordPacketActivity(now_millis);
+        self.maybeDiscardInitialAfterHandshakePacketSent(space);
         return packet_number;
     }
 
@@ -1459,16 +2633,18 @@ pub const QuicConnection = struct {
     pub fn sendPingInSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         try self.queuePingInSpace(space);
+        self.markHandshakeSpaceUsed(space);
     }
 
     /// Build the local RFC 9000 transport parameters advertised during handshake.
     ///
     /// The current skeleton maps idle timeout, receive limits, ACK timing,
-    /// local datagram sizing, active migration policy, and optional server
-    /// stateless reset token into typed parameters. Connection ID values and
-    /// server-only Retry/original-destination fields are left for the future
-    /// packet layer.
-    pub fn localTransportParameters(self: QuicConnection) transport_parameters.TransportParameters {
+    /// local datagram sizing, active migration policy, the first sent Initial
+    /// Source Connection ID when known, server Original Destination Connection
+    /// ID / Retry Source Connection ID when known, RFC 9368 version
+    /// information, and optional server stateless reset token into typed
+    /// parameters.
+    pub fn localTransportParameters(self: *const QuicConnection) transport_parameters.TransportParameters {
         var params = transport_parameters.TransportParameters{
             .max_idle_timeout = self.config.max_idle_timeout_ms,
             .initial_max_data = self.recv_max_data,
@@ -1477,17 +2653,42 @@ pub const QuicConnection = struct {
             .initial_max_stream_data_uni = self.recv_max_stream_data,
             .initial_max_streams_bidi = self.recv_max_streams_bidi,
             .initial_max_streams_uni = self.recv_max_streams_uni,
-            .max_ack_delay = self.recovery_state.max_ack_delay_ms,
+            .ack_delay_exponent = self.config.ack_delay_exponent,
+            .max_ack_delay = self.config.max_ack_delay_ms,
             .disable_active_migration = self.config.disable_active_migration,
             .active_connection_id_limit = self.config.active_connection_id_limit,
+            .original_destination_connection_id = if (self.side == .server) self.originalDestinationConnectionId() else null,
+            .initial_source_connection_id = self.localInitialSourceConnectionId(),
+            .retry_source_connection_id = if (self.side == .server) self.retrySourceConnectionId() else null,
+            .version_information = .{
+                .chosen_version = self.config.chosen_version,
+                .available_versions = self.config.available_versions,
+            },
         };
         if (self.side == .server) {
             params.stateless_reset_token = self.config.stateless_reset_token;
+            if (self.config.preferred_address) |*preferred| {
+                params.preferred_address = preferred.asTransportParameter();
+            }
         }
         if (self.config.max_datagram_size >= 1200) {
             params.max_udp_payload_size = self.config.max_datagram_size;
         }
         return params;
+    }
+
+    /// Encode local transport parameters as TLS QUIC extension bytes.
+    ///
+    /// TLS backends carry these bytes in the QUIC transport_parameters
+    /// extension. The returned slice aliases `out_buf` and remains valid until
+    /// the caller reuses that buffer.
+    pub fn encodeLocalTransportParameters(self: *const QuicConnection, out_buf: []u8) Error![]const u8 {
+        var out = buffer.fixedWriter(out_buf);
+        transport_parameters.encode(out.writer(), self.localTransportParameters()) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        return out.getWritten();
     }
 
     /// Apply peer RFC 9000 transport parameters after handshake parsing.
@@ -1503,6 +2704,11 @@ pub const QuicConnection = struct {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         try self.validatePeerTransportParameters(params);
 
+        const peer_preferred_address = if (params.preferred_address) |preferred|
+            try PreferredAddress.fromTransportParameter(preferred)
+        else
+            null;
+
         self.peer_max_udp_payload_size = std.math.cast(usize, params.max_udp_payload_size) orelse std.math.maxInt(usize);
         self.peer_max_data = params.initial_max_data;
         self.peer_initial_max_stream_data_bidi_local = params.initial_max_stream_data_bidi_local;
@@ -1514,6 +2720,7 @@ pub const QuicConnection = struct {
         self.peer_max_idle_timeout_ms = params.max_idle_timeout;
         self.peer_disable_active_migration = params.disable_active_migration;
         self.peer_stateless_reset_token = params.stateless_reset_token;
+        self.peer_preferred_address = peer_preferred_address;
         self.peer_active_connection_id_limit = params.active_connection_id_limit;
         self.recovery_state.max_ack_delay_ms = params.max_ack_delay;
 
@@ -1522,9 +2729,68 @@ pub const QuicConnection = struct {
         }
     }
 
+    /// Parse TLS QUIC extension bytes and apply peer transport parameters.
+    ///
+    /// Parse errors and semantic validation failures are reported as
+    /// `InvalidPacket`. The connection mutates only after the extension parses
+    /// and passes the same validation used by `applyPeerTransportParameters()`.
+    pub fn applyPeerTransportParameterBytes(
+        self: *QuicConnection,
+        data: []const u8,
+    ) Error!void {
+        var params = transport_parameters.parse(data, self.allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidPacket,
+        };
+        defer params.deinit(self.allocator);
+        try self.applyPeerTransportParameters(params);
+    }
+
     fn validateConnectionIdParameter(cid: ?[]const u8) Error!void {
         if (cid) |value| {
             if (value.len > max_connection_id_len) return error.InvalidPacket;
+        }
+    }
+
+    fn validatePeerVersionInformation(
+        self: QuicConnection,
+        version_information: transport_parameters.VersionInformation,
+    ) Error!void {
+        if (isZeroVersion(version_information.chosen_version)) return error.InvalidPacket;
+        for (version_information.available_versions) |available| {
+            if (isZeroVersion(available)) return error.InvalidPacket;
+        }
+
+        switch (self.side) {
+            .server => {
+                if (!version_information.containsAvailableVersion(version_information.chosen_version)) {
+                    return error.InvalidPacket;
+                }
+                if (@intFromEnum(version_information.chosen_version) != @intFromEnum(self.config.chosen_version)) {
+                    return error.InvalidPacket;
+                }
+            },
+            .client => {
+                if (!versionListContains(self.config.available_versions, version_information.chosen_version)) {
+                    return error.InvalidPacket;
+                }
+                if (self.version_negotiation_selected_version) |selected| {
+                    if (@intFromEnum(version_information.chosen_version) != @intFromEnum(selected)) {
+                        return error.InvalidPacket;
+                    }
+                    if (version_information.available_versions.len == 0) {
+                        return error.InvalidPacket;
+                    }
+                    const preferred = selectMutualVersionWithExtra(
+                        self.config.available_versions,
+                        version_information.available_versions,
+                        version_information.chosen_version,
+                    ) orelse return error.InvalidPacket;
+                    if (@intFromEnum(preferred) != @intFromEnum(selected)) {
+                        return error.InvalidPacket;
+                    }
+                }
+            },
         }
     }
 
@@ -1552,10 +2818,45 @@ pub const QuicConnection = struct {
         try validateConnectionIdParameter(params.original_destination_connection_id);
         try validateConnectionIdParameter(params.initial_source_connection_id);
         try validateConnectionIdParameter(params.retry_source_connection_id);
+        try self.validateInitialSourceConnectionIdParameter(params.initial_source_connection_id);
+        try self.validateOriginalDestinationConnectionIdParameter(params.original_destination_connection_id);
+        try self.validateRetrySourceConnectionIdParameter(params.retry_source_connection_id);
         if (params.preferred_address) |preferred| {
-            if (preferred.connection_id.len == 0 or preferred.connection_id.len > max_connection_id_len) {
-                return error.InvalidPacket;
+            _ = try PreferredAddress.fromTransportParameter(preferred);
+        }
+        if (params.version_information) |version_information| {
+            try self.validatePeerVersionInformation(version_information);
+        } else if (self.side == .client) {
+            if (self.version_negotiation_selected_version) |selected| {
+                if (@intFromEnum(selected) != @intFromEnum(packet.Version.v1)) return error.InvalidPacket;
             }
+        }
+    }
+
+    fn validateOriginalDestinationConnectionIdParameter(self: QuicConnection, original_destination_connection_id: ?[]const u8) Error!void {
+        if (self.side != .client) return;
+        if (self.originalDestinationConnectionId()) |expected| {
+            const actual = original_destination_connection_id orelse return error.InvalidPacket;
+            if (!std.mem.eql(u8, expected, actual)) return error.InvalidPacket;
+        } else if (original_destination_connection_id != null) {
+            return error.InvalidPacket;
+        }
+    }
+
+    fn validateInitialSourceConnectionIdParameter(self: QuicConnection, initial_source_connection_id: ?[]const u8) Error!void {
+        if (self.peer_initial_source_connection_id) |expected| {
+            const actual = initial_source_connection_id orelse return error.InvalidPacket;
+            if (!std.mem.eql(u8, expected, actual)) return error.InvalidPacket;
+        }
+    }
+
+    fn validateRetrySourceConnectionIdParameter(self: QuicConnection, retry_source_connection_id: ?[]const u8) Error!void {
+        if (self.side != .client) return;
+        if (self.retry_source_connection_id) |expected| {
+            const actual = retry_source_connection_id orelse return error.InvalidPacket;
+            if (!std.mem.eql(u8, expected, actual)) return error.InvalidPacket;
+        } else if (retry_source_connection_id != null) {
+            return error.InvalidPacket;
         }
     }
 
@@ -1574,6 +2875,13 @@ pub const QuicConnection = struct {
         }
     }
 
+    fn clearPeerClose(self: *QuicConnection) void {
+        if (self.peer_close) |*peer_close| {
+            deinitPeerClose(peer_close, self.allocator);
+            self.peer_close = null;
+        }
+    }
+
     fn enterClosingState(self: *QuicConnection, now_millis: i64) void {
         self.state = .closing;
         self.close_deadline_millis = self.closeStateDeadlineMillis(now_millis);
@@ -1584,6 +2892,33 @@ pub const QuicConnection = struct {
         self.state = .draining;
         self.close_deadline_millis = self.closeStateDeadlineMillis(now_millis);
         self.closed = true;
+    }
+
+    fn receiveConnectionCloseFrame(self: *QuicConnection, now_millis: i64, close: frame.ConnectionCloseFrame) Error!void {
+        if (self.peer_close == null) {
+            const owned_reason = self.allocator.alloc(u8, close.reason_phrase.len) catch return error.OutOfMemory;
+            errdefer self.allocator.free(owned_reason);
+            @memcpy(owned_reason, close.reason_phrase);
+            self.peer_close = .{ .connection = .{
+                .error_code = close.error_code,
+                .frame_type = close.frame_type,
+                .reason_phrase = owned_reason,
+            } };
+        }
+        self.enterDrainingState(now_millis);
+    }
+
+    fn receiveApplicationCloseFrame(self: *QuicConnection, now_millis: i64, close: frame.ApplicationCloseFrame) Error!void {
+        if (self.peer_close == null) {
+            const owned_reason = self.allocator.alloc(u8, close.reason_phrase.len) catch return error.OutOfMemory;
+            errdefer self.allocator.free(owned_reason);
+            @memcpy(owned_reason, close.reason_phrase);
+            self.peer_close = .{ .application = .{
+                .error_code = close.error_code,
+                .reason_phrase = owned_reason,
+            } };
+        }
+        self.enterDrainingState(now_millis);
     }
 
     fn expireCloseState(self: *QuicConnection, now_millis: i64) void {
@@ -1631,9 +2966,24 @@ pub const QuicConnection = struct {
         return bytes <= remaining;
     }
 
+    fn initialTokenForPacket(self: QuicConnection, space: PacketNumberSpace, token: []const u8) []const u8 {
+        if (space != .initial or token.len != 0) return token;
+        return self.retry_token orelse &[_]u8{};
+    }
+
     fn recordPeerAddressBytesSent(self: *QuicConnection, bytes: usize) void {
         if (!self.isAntiAmplificationLimited()) return;
         self.peer_address_bytes_sent = std.math.add(usize, self.peer_address_bytes_sent, bytes) catch std.math.maxInt(usize);
+    }
+
+    fn consumePendingRetryToken(self: *QuicConnection, token: []const u8) bool {
+        for (self.retry_tokens.items, 0..) |existing, i| {
+            if (!std.mem.eql(u8, existing, token)) continue;
+            const removed = self.retry_tokens.orderedRemove(i);
+            self.allocator.free(removed);
+            return true;
+        }
+        return false;
     }
 
     fn initialPeerStreamDataLimit(self: QuicConnection, stream_id: u64) u64 {
@@ -1654,6 +3004,22 @@ pub const QuicConnection = struct {
         return @min(scaled_ack_delay, self.recovery_state.max_ack_delay_ms);
     }
 
+    fn markHandshakeSpaceUsed(self: *QuicConnection, space: PacketNumberSpace) void {
+        if (space == .handshake and self.handshake_state == .initial) {
+            self.handshake_state = .handshake;
+        }
+    }
+
+    fn maybeDiscardInitialAfterHandshakePacketSent(self: *QuicConnection, space: PacketNumberSpace) void {
+        if (self.side != .client or space != .handshake or self.isClosingOrClosed()) return;
+        self.discardPacketNumberSpaceState(.initial);
+    }
+
+    fn maybeDiscardInitialAfterHandshakePacketReceived(self: *QuicConnection, space: PacketNumberSpace) void {
+        if (self.side != .server or space != .handshake or self.isClosingOrClosed()) return;
+        self.discardPacketNumberSpaceState(.initial);
+    }
+
     fn packetNumberSpace(self: *QuicConnection, space: PacketNumberSpace) PacketNumberSpaceView {
         return switch (space) {
             .initial => .{
@@ -1671,6 +3037,7 @@ pub const QuicConnection = struct {
                 .crypto_recv_buffer = &self.initial_packet_space.crypto_recv_buffer,
                 .crypto_read_offset = &self.initial_packet_space.crypto_read_offset,
                 .crypto_send_queue = &self.initial_packet_space.crypto_send_queue,
+                .crypto_recv_pending = &self.initial_packet_space.crypto_recv_pending,
                 .ecn_sent_ect0 = &self.initial_packet_space.ecn_sent_ect0,
                 .ecn_sent_ect1 = &self.initial_packet_space.ecn_sent_ect1,
                 .ecn_largest_acknowledged = &self.initial_packet_space.ecn_largest_acknowledged,
@@ -1692,6 +3059,7 @@ pub const QuicConnection = struct {
                 .crypto_recv_buffer = &self.handshake_packet_space.crypto_recv_buffer,
                 .crypto_read_offset = &self.handshake_packet_space.crypto_read_offset,
                 .crypto_send_queue = &self.handshake_packet_space.crypto_send_queue,
+                .crypto_recv_pending = &self.handshake_packet_space.crypto_recv_pending,
                 .ecn_sent_ect0 = &self.handshake_packet_space.ecn_sent_ect0,
                 .ecn_sent_ect1 = &self.handshake_packet_space.ecn_sent_ect1,
                 .ecn_largest_acknowledged = &self.handshake_packet_space.ecn_largest_acknowledged,
@@ -1713,6 +3081,7 @@ pub const QuicConnection = struct {
                 .crypto_recv_buffer = &self.crypto_recv_buffer,
                 .crypto_read_offset = &self.crypto_read_offset,
                 .crypto_send_queue = &self.crypto_send_queue,
+                .crypto_recv_pending = &self.crypto_recv_pending,
                 .ecn_sent_ect0 = &self.ecn_sent_ect0,
                 .ecn_sent_ect1 = &self.ecn_sent_ect1,
                 .ecn_largest_acknowledged = &self.ecn_largest_acknowledged,
@@ -1750,24 +3119,121 @@ pub const QuicConnection = struct {
         );
     }
 
-    /// Remove Initial packet protection and process the decrypted frame payload.
+    /// Process a UDP datagram containing coalesced protected long-header packets.
     ///
-    /// This is the first protected-packet bridge for the connection skeleton. It
-    /// accepts exactly one QUIC v1 Initial long packet, decrypts it with caller
-    /// supplied Initial keys, requires the packet number to match the next
-    /// expected Initial packet number, then routes the plaintext through the
-    /// existing Initial packet number space frame handler. Coalesced packets,
-    /// Retry, Handshake, 0-RTT, and 1-RTT protection remain endpoint work.
-    pub fn processInitialProtectedDatagram(
+    /// The method currently routes Initial, 0-RTT, and Handshake protected
+    /// packets. It first validates that every coalesced packet has
+    /// caller-supplied keys and a supported packet type, so missing-key or
+    /// unsupported-type failures do not partially mutate connection state. Each
+    /// successfully opened packet is then routed through the matching packet
+    /// number space. 0-RTT uses Application packet numbers while still applying
+    /// 0-RTT frame restrictions. Retry packets are handled separately by
+    /// `processRetryDatagram()`. Real TLS transcript ownership and key discard
+    /// remain future endpoint/TLS work.
+    pub fn processProtectedLongDatagram(
         self: *QuicConnection,
+        now_millis: i64,
+        keys: ProtectedLongDatagramKeys,
+        datagram: []const u8,
+    ) Error!usize {
+        if (datagram.len == 0) return error.InvalidPacket;
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+
+        var offset: usize = 0;
+        var packet_count: usize = 0;
+        while (offset < datagram.len) {
+            const info = protection.peekProtectedLongPacketInfo(datagram[offset..]) catch return error.InvalidPacket;
+            if (info.version != .v1 or info.len == 0) return error.InvalidPacket;
+            const route = protectedLongPacketRouteFor(keys, info.packet_type) orelse return error.InvalidPacket;
+            const packet_space = self.packetNumberSpace(route.space);
+            if (packet_space.discarded.*) return error.InvalidPacket;
+            offset = std.math.add(usize, offset, info.len) catch return error.InvalidPacket;
+            packet_count += 1;
+        }
+
+        offset = 0;
+        var processed_count: usize = 0;
+        while (offset < datagram.len) {
+            const info = protection.peekProtectedLongPacketInfo(datagram[offset..]) catch return error.InvalidPacket;
+            const route = protectedLongPacketRouteFor(keys, info.packet_type) orelse return error.InvalidPacket;
+            try self.processProtectedLongDatagramWithRoute(
+                route,
+                now_millis,
+                datagram.len,
+                datagram[offset..][0..info.len],
+            );
+            offset += info.len;
+            processed_count += 1;
+        }
+
+        std.debug.assert(processed_count == packet_count);
+        return processed_count;
+    }
+
+    /// Remove long-header packet protection for Initial or Handshake space.
+    ///
+    /// This accepts exactly one QUIC v1 protected long packet for the selected
+    /// Initial or Handshake packet number space, decrypts it with caller-supplied
+    /// keys, requires the packet number to match the next expected value for
+    /// that space, then routes the plaintext through the matching frame rules.
+    /// Coalesced packets, 1-RTT protected transmit, real TLS transcript
+    /// ownership, key discard, and key update remain endpoint/TLS integration
+    /// work.
+    pub fn processProtectedLongDatagramInSpace(
+        self: *QuicConnection,
+        space: PacketNumberSpace,
         now_millis: i64,
         keys: protection.Aes128PacketProtectionKeys,
         datagram: []const u8,
     ) Error!void {
-        const expected_packet_number = self.nextPeerPacketNumber(.initial);
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+
+        const long_space = protectedLongPacketSpaceFor(space) orelse return error.InvalidPacket;
+        const packet_space = self.packetNumberSpace(space);
+        if (packet_space.discarded.*) return error.InvalidPacket;
+
+        try self.processProtectedLongDatagramWithRoute(.{
+            .space = space,
+            .packet_type = long_space.packet_type,
+            .frame_packet_type = long_space.frame_packet_type,
+            .keys = keys,
+        }, now_millis, datagram.len, datagram);
+    }
+
+    /// Remove Handshake long-header protection using installed peer keys.
+    ///
+    /// Call `installHandshakeTrafficSecrets()` or drive a `CryptoBackend` that
+    /// returns Handshake traffic secrets before using this helper. Failed
+    /// packets keep the Handshake packet-number space unchanged through the
+    /// same rollback boundary as the caller-keyed helper.
+    pub fn processProtectedHandshakeDatagramWithInstalledKeys(
+        self: *QuicConnection,
+        now_millis: i64,
+        datagram: []const u8,
+    ) Error!void {
+        const keys = self.peer_handshake_keys orelse return error.InvalidPacket;
+        try self.processProtectedLongDatagramInSpace(.handshake, now_millis, keys, datagram);
+    }
+
+    fn processProtectedLongDatagramWithRoute(
+        self: *QuicConnection,
+        route: ProtectedLongPacketRoute,
+        now_millis: i64,
+        udp_datagram_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        const packet_space = self.packetNumberSpace(route.space);
+        if (packet_space.discarded.*) return error.InvalidPacket;
+        try self.validateIncomingInitialDatagramLen(route.space, udp_datagram_len);
+
+        const expected_packet_number = packet_space.next_peer_packet_number.*;
         var decoded = protection.unprotectLongPacketAes128(
             self.allocator,
-            keys,
+            route.keys,
             datagram,
             expected_packet_number,
         ) catch |err| switch (err) {
@@ -1777,29 +3243,706 @@ pub const QuicConnection = struct {
         defer protection.deinitProtectedLongPacket(&decoded, self.allocator);
 
         if (decoded.len != datagram.len) return error.InvalidPacket;
-        if (decoded.packet.header.version != .v1 or decoded.packet.header.packet_type != .initial) {
+        if (decoded.packet.header.version != .v1 or decoded.packet.header.packet_type != route.packet_type) {
             return error.InvalidPacket;
         }
         if (decoded.packet.header.packet_number != expected_packet_number) return error.InvalidPacket;
 
+        const pending_original_destination_dcid = if (route.space == .initial and self.side == .server and self.original_destination_connection_id_len == null)
+            decoded.packet.header.dcid
+        else
+            null;
+        if (pending_original_destination_dcid) |dcid| {
+            try validateInitialDestinationConnectionIdLength(dcid);
+        }
+        if (route.space == .initial and self.side == .client and decoded.packet.header.token.len != 0) {
+            return error.InvalidPacket;
+        }
+        const pending_peer_initial_scid = if (route.space == .initial and self.peer_initial_source_connection_id == null)
+            self.allocator.dupe(u8, decoded.packet.header.scid) catch return error.OutOfMemory
+        else
+            null;
+        errdefer if (pending_peer_initial_scid) |cid| self.allocator.free(cid);
+
         try self.processDatagramInSpaceWithPacketType(
-            .initial,
-            .initial,
+            route.space,
+            route.frame_packet_type,
             now_millis,
             decoded.packet.plaintext,
         );
+        const packet_space_after = self.packetNumberSpace(route.space);
+        if (packet_space_after.next_peer_packet_number.* == expected_packet_number) {
+            packet_space_after.next_peer_packet_number.* = std.math.add(u64, expected_packet_number, 1) catch return error.Internal;
+        }
+        if (pending_original_destination_dcid) |cid| {
+            self.recordOriginalDestinationConnectionId(cid);
+        }
+        if (pending_peer_initial_scid) |cid| {
+            self.peer_initial_source_connection_id = cid;
+        }
     }
 
-    /// Return the next protected Initial CRYPTO datagram, or null if idle.
+    /// Remove 0-RTT long-header packet protection and process the decrypted payload.
+    ///
+    /// 0-RTT packets share the Application packet number space with 1-RTT, but
+    /// this method routes the plaintext through 0-RTT frame restrictions. The
+    /// caller supplies the 0-RTT traffic keys; TLS secret production, rejection
+    /// policy, and replay defenses remain endpoint/TLS integration work.
+    pub fn processProtectedZeroRttDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) Error!void {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+
+        try self.processProtectedLongDatagramWithRoute(.{
+            .space = .application,
+            .packet_type = .zero_rtt,
+            .frame_packet_type = .zero_rtt,
+            .keys = keys,
+        }, now_millis, datagram.len, datagram);
+    }
+
+    /// Remove 0-RTT long-header protection using installed peer early-data keys.
+    ///
+    /// Call `installZeroRttTrafficSecrets()` or drive a `CryptoBackend` that
+    /// returns a peer 0-RTT secret, then `acceptZeroRtt()` after TLS policy
+    /// accepts early data. Replay defense remains caller-owned endpoint/TLS
+    /// work.
+    pub fn processProtectedZeroRttDatagramWithInstalledKeys(
+        self: *QuicConnection,
+        now_millis: i64,
+        datagram: []const u8,
+    ) Error!void {
+        const keys = self.peer_zero_rtt_keys orelse return error.InvalidPacket;
+        if (!self.peer_zero_rtt_accepted) return error.InvalidPacket;
+        try self.processProtectedZeroRttDatagram(now_millis, keys, datagram);
+    }
+
+    /// Remove Initial packet protection and process the decrypted frame payload.
+    ///
+    /// This compatibility wrapper routes one protected Initial long packet
+    /// through `processProtectedLongDatagramInSpace(.initial, ...)`.
+    pub fn processInitialProtectedDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) Error!void {
+        try self.processProtectedLongDatagramInSpace(.initial, now_millis, keys, datagram);
+    }
+
+    /// Remove 1-RTT short-header packet protection and process the frame payload.
+    ///
+    /// This accepts exactly one protected short-header datagram, decrypts it
+    /// with caller-supplied keys, requires the packet number to match the next
+    /// expected Application packet number, then routes the plaintext through
+    /// 1-RTT frame rules. Use `processProtectedShortDatagramWithKeyUpdate()`
+    /// when the datagram might carry the next key phase. Installed 1-RTT keys
+    /// are available through `processProtectedShortDatagramWithInstalledKeys()`;
+    /// connection-installed server 0-RTT receive keys are discarded after the
+    /// packet authenticates and the Application-frame payload is accepted. Real
+    /// TLS transcript ownership, remaining key discard, and endpoint DCID lookup
+    /// remain future endpoint/TLS integration work.
+    pub fn processProtectedShortDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+
+        const packet_space = self.packetNumberSpace(.application);
+        if (packet_space.discarded.*) return error.InvalidPacket;
+
+        const expected_packet_number = packet_space.next_peer_packet_number.*;
+        var decoded = protection.unprotectShortPacketAes128(
+            self.allocator,
+            keys,
+            datagram,
+            dcid_len,
+            expected_packet_number,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidPacket,
+        };
+        defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
+
+        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number);
+    }
+
+    /// Remove 1-RTT short-header packet protection with current/next key phases.
+    ///
+    /// The receiver uses the short-header key phase bit to choose either
+    /// `keys.current` or `keys.next`, then applies the same Application-space
+    /// packet-number and frame validation as `processProtectedShortDatagram()`.
+    /// This is still caller-keyed; use
+    /// `processProtectedShortDatagramWithInstalledKeys()` when the connection
+    /// owns key-phase state. Successful server-side receive also discards
+    /// installed 0-RTT receive keys. Real TLS traffic-secret production remains
+    /// future integration work.
+    pub fn processProtectedShortDatagramWithKeyUpdate(
+        self: *QuicConnection,
+        now_millis: i64,
+        keys: protection.ShortPacketKeyUpdateKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+
+        const packet_space = self.packetNumberSpace(.application);
+        if (packet_space.discarded.*) return error.InvalidPacket;
+
+        const expected_packet_number = packet_space.next_peer_packet_number.*;
+        var decoded = protection.unprotectShortPacketAes128WithKeyUpdate(
+            self.allocator,
+            keys,
+            datagram,
+            dcid_len,
+            expected_packet_number,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidPacket,
+        };
+        defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
+
+        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number);
+    }
+
+    /// Remove 1-RTT short-header packet protection with caller-owned key state.
+    ///
+    /// The key-phase state supplies current and next receive keys. It advances
+    /// only after the packet authenticates and the decrypted frame payload is
+    /// accepted, so failed datagrams do not mutate peer key-phase state. Real
+    /// TLS traffic-secret production, key-update confirmation, and old-key
+    /// discard remain future endpoint/TLS integration work. Successful
+    /// server-side receive also discards installed 0-RTT receive keys.
+    pub fn processProtectedShortDatagramWithKeyPhaseState(
+        self: *QuicConnection,
+        now_millis: i64,
+        key_phase_state: *protection.Aes128KeyPhaseState,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+
+        const packet_space = self.packetNumberSpace(.application);
+        if (packet_space.discarded.*) return error.InvalidPacket;
+
+        const expected_packet_number = packet_space.next_peer_packet_number.*;
+        var decoded = protection.unprotectShortPacketAes128WithKeyUpdate(
+            self.allocator,
+            key_phase_state.keyUpdateKeys(),
+            datagram,
+            dcid_len,
+            expected_packet_number,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidPacket,
+        };
+        defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
+
+        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number);
+        _ = key_phase_state.updateAfterReceiving(decoded.packet.header.key_phase);
+    }
+
+    /// Remove 1-RTT short-header protection using installed peer traffic keys.
+    ///
+    /// The peer key-phase state is owned by the connection and advances only
+    /// after authentication and Application-frame processing succeed. Use
+    /// `installOneRttTrafficSecrets()` or a `CryptoBackend` traffic-secret
+    /// handoff before calling this helper. Server-side successful receive
+    /// discards installed 0-RTT receive keys.
+    pub fn processProtectedShortDatagramWithInstalledKeys(
+        self: *QuicConnection,
+        now_millis: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        var state = self.peer_one_rtt_key_phase_state orelse return error.InvalidPacket;
+        try self.processProtectedShortDatagramWithKeyPhaseState(now_millis, &state, dcid_len, datagram);
+        self.peer_one_rtt_key_phase_state = state;
+    }
+
+    fn processDecodedProtectedShortDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        decoded: *const protection.DecodedProtectedShortPacket,
+        datagram_len: usize,
+        expected_packet_number: u64,
+    ) Error!void {
+        if (decoded.len != datagram_len) return error.InvalidPacket;
+        if (decoded.packet.header.packet_number != expected_packet_number) return error.InvalidPacket;
+        try self.processDatagramInSpaceWithPacketType(
+            .application,
+            .one_rtt,
+            now_millis,
+            decoded.packet.plaintext,
+        );
+        const packet_space_after = self.packetNumberSpace(.application);
+        if (packet_space_after.next_peer_packet_number.* == expected_packet_number) {
+            packet_space_after.next_peer_packet_number.* = std.math.add(u64, expected_packet_number, 1) catch return error.Internal;
+        }
+        if (self.side == .server) {
+            self.discardZeroRttProtectionKeyState();
+        }
+        self.updateSpinBitAfterReceivedShortPacket(decoded.packet.header.spin_bit);
+    }
+
+    /// Return one protected 1-RTT short-header datagram for Application frames.
     ///
     /// The returned datagram is allocated with the connection allocator and must
-    /// be freed by the caller. This bridges the Initial CRYPTO send queue to the
-    /// RFC 9001 long-packet protection helper while preserving packet-number,
-    /// sent-packet, recovery, anti-amplification, and idle-timeout accounting.
-    /// ACK-only, PING-only, coalesced packets, Retry, Handshake, 0-RTT, and
-    /// 1-RTT protected transmit remain endpoint work.
-    pub fn pollInitialProtectedDatagram(
+    /// be freed by the caller. This currently protects Application-space PING,
+    /// CRYPTO, HANDSHAKE_DONE, NEW_TOKEN, NEW_CONNECTION_ID, PATH_CHALLENGE,
+    /// PATH_RESPONSE, RETIRE_CONNECTION_ID, MAX_DATA, MAX_STREAM_DATA,
+    /// MAX_STREAMS_BIDI/UNI, DATA_BLOCKED, STREAM_DATA_BLOCKED,
+    /// STREAMS_BLOCKED_BIDI/UNI, RESET_STREAM, STOP_SENDING,
+    /// CONNECTION_CLOSE/APPLICATION_CLOSE, or one queued STREAM with an optional
+    /// ACK, or ACK-only state, while preserving packet number, ACK, recovery,
+    /// congestion, close-state, and anti-amplification accounting. TLS secret
+    /// production, automatic key-phase transitions, and remaining key discard
+    /// remain endpoint/TLS integration work.
+    pub fn pollProtectedShortDatagram(
         self: *QuicConnection,
+        now_millis: i64,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+    ) Error!?[]u8 {
+        return self.pollProtectedShortDatagramWithKeyPhase(now_millis, dcid, keys, false);
+    }
+
+    /// Return one protected 1-RTT short-header datagram with an explicit key phase.
+    ///
+    /// Callers pass keys matching `key_phase`. This keeps the current
+    /// caller-keyed bridge usable for deterministic key-update tests while a
+    /// future endpoint/TLS state machine owns key-phase transitions.
+    pub fn pollProtectedShortDatagramWithKeyPhase(
+        self: *QuicConnection,
+        now_millis: i64,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+    ) Error!?[]u8 {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.pending_close != null) {
+            return try self.pollProtectedShortCloseDatagram(now_millis, dcid, keys, key_phase);
+        }
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+
+        const built = (try self.buildNextProtectedShortPacket(dcid, keys, key_phase)) orelse return null;
+        errdefer self.allocator.free(built.datagram);
+
+        if (built.datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        if (!self.canSendToPeerAddress(built.datagram.len)) {
+            self.allocator.free(built.datagram);
+            return null;
+        }
+        if (built.ack_eliciting and !self.recovery_state.canSend(built.datagram.len)) {
+            self.allocator.free(built.datagram);
+            return null;
+        }
+        if (built.ack_eliciting) {
+            self.sent_packets.ensureUnusedCapacity(self.allocator, 1) catch return error.OutOfMemory;
+        }
+        if (built.consume_path_challenge) {
+            self.outstanding_path_challenges.ensureUnusedCapacity(self.allocator, 1) catch return error.OutOfMemory;
+        }
+
+        self.commitBuiltProtectedShortPacket(built, now_millis);
+        return built.datagram;
+    }
+
+    /// Return one protected 1-RTT short-header datagram using key-phase state.
+    ///
+    /// This uses the state's current send keys and current key-phase bit. The
+    /// caller explicitly initiates updates on the state before polling.
+    pub fn pollProtectedShortDatagramWithKeyPhaseState(
+        self: *QuicConnection,
+        now_millis: i64,
+        dcid: []const u8,
+        key_phase_state: *const protection.Aes128KeyPhaseState,
+    ) Error!?[]u8 {
+        return self.pollProtectedShortDatagramWithKeyPhase(
+            now_millis,
+            dcid,
+            key_phase_state.currentKeys(),
+            key_phase_state.currentKeyPhase(),
+        );
+    }
+
+    /// Return one protected 1-RTT short-header datagram using installed keys.
+    ///
+    /// The local key-phase state is owned by the connection. Call
+    /// `installOneRttTrafficSecrets()` or drive a `CryptoBackend` that returns
+    /// 1-RTT traffic secrets before using this helper.
+    pub fn pollProtectedShortDatagramWithInstalledKeys(
+        self: *QuicConnection,
+        now_millis: i64,
+        dcid: []const u8,
+    ) Error!?[]u8 {
+        const state = self.local_one_rtt_key_phase_state orelse return error.InvalidPacket;
+        return self.pollProtectedShortDatagramWithKeyPhaseState(now_millis, dcid, &state);
+    }
+
+    fn pollProtectedShortCloseDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+    ) Error!?[]u8 {
+        const built = try self.buildProtectedShortClosePacket(dcid, keys, key_phase);
+        errdefer self.allocator.free(built.datagram);
+
+        if (built.datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        if (!self.canSendToPeerAddress(built.datagram.len)) {
+            self.allocator.free(built.datagram);
+            return null;
+        }
+
+        self.commitBuiltProtectedShortPacket(built, now_millis);
+        return built.datagram;
+    }
+
+    /// Return one protected 0-RTT long-header datagram for early Application frames.
+    ///
+    /// The returned datagram is allocated with the connection allocator and must
+    /// be freed by the caller. This client-side API emits one 0-RTT protected
+    /// RESET_STREAM, STOP_SENDING, or STREAM frame from the Application packet
+    /// number space without coalescing ACK or CRYPTO frames, because those are
+    /// not valid in 0-RTT packets. Callers supply the 0-RTT keys; TLS secret
+    /// production, replay defense, and server acceptance policy remain
+    /// endpoint/TLS integration work.
+    pub fn pollProtectedZeroRttDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+    ) Error!?[]u8 {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+
+        const built = (try self.buildNextProtectedZeroRttPacket(dcid, scid, keys)) orelse return null;
+        errdefer self.allocator.free(built.datagram);
+
+        if (built.datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        if (!self.canSendToPeerAddress(built.datagram.len)) {
+            self.allocator.free(built.datagram);
+            return null;
+        }
+        if (built.ack_eliciting and !self.recovery_state.canSend(built.datagram.len)) {
+            self.allocator.free(built.datagram);
+            return null;
+        }
+
+        try self.ensureProtectedLongCommitCapacity(built);
+        self.commitBuiltProtectedLongPacket(built, now_millis);
+        return built.datagram;
+    }
+
+    /// Return one protected 0-RTT long-header datagram using installed keys.
+    ///
+    /// This client-side helper emits early STREAM, RESET_STREAM, or STOP_SENDING
+    /// data with the connection's installed local 0-RTT keys. TLS 0-RTT
+    /// acceptance and replay policy remain endpoint/TLS work.
+    pub fn pollProtectedZeroRttDatagramWithInstalledKeys(
+        self: *QuicConnection,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+    ) Error!?[]u8 {
+        const keys = self.local_zero_rtt_keys orelse return error.InvalidPacket;
+        return self.pollProtectedZeroRttDatagram(now_millis, dcid, scid, keys);
+    }
+
+    /// Return one protected long datagram with queued Initial/0-RTT/Handshake frames.
+    ///
+    /// The returned datagram is allocated with the connection allocator and must
+    /// be freed by the caller. For each Initial/Handshake space, the method can
+    /// emit one protected CRYPTO packet, PING packet with an optional ACK, or
+    /// ACK-only packet. When `keys.zero_rtt` is supplied by a client, it can
+    /// also emit one 0-RTT Application STREAM, RESET_STREAM, or STOP_SENDING
+    /// packet. The method coalesces eligible long packets into one UDP datagram
+    /// when the result fits `max_udp_payload_size`. It prebuilds packets and
+    /// checks congestion plus anti-amplification budget before committing
+    /// packet-number, sent-packet, recovery, ACK/PING, CRYPTO, and 0-RTT queue
+    /// state. Endpoint DCID switching, real TLS transcript ownership, key
+    /// discard, and key update remain endpoint/TLS integration work.
+    pub fn pollProtectedLongDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        keys: ProtectedLongDatagramKeys,
+    ) Error!?[]u8 {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+
+        var initial_packet: ?BuiltProtectedLongPacket = null;
+        var zero_rtt_packet: ?BuiltProtectedLongPacket = null;
+        var handshake_packet: ?BuiltProtectedLongPacket = null;
+        errdefer {
+            if (initial_packet) |built| self.allocator.free(built.datagram);
+            if (zero_rtt_packet) |built| self.allocator.free(built.datagram);
+            if (handshake_packet) |built| self.allocator.free(built.datagram);
+        }
+
+        if (self.initial_packet_space.crypto_send_queue.items.len != 0 or
+            self.initial_packet_space.pending_ping_count != 0 or
+            self.initial_packet_space.pending_ack_largest != null)
+        {
+            initial_packet = try self.buildNextProtectedLongPacketInSpace(
+                .initial,
+                dcid,
+                scid,
+                initial_token,
+                keys.initial orelse return error.InvalidPacket,
+                0,
+            );
+        }
+        if (keys.zero_rtt) |zero_rtt_keys| {
+            if (self.hasPendingProtectedZeroRttFrames()) {
+                zero_rtt_packet = try self.buildNextProtectedZeroRttPacket(
+                    dcid,
+                    scid,
+                    zero_rtt_keys,
+                );
+            }
+        }
+        if (self.handshake_packet_space.crypto_send_queue.items.len != 0 or
+            self.handshake_packet_space.pending_ping_count != 0 or
+            self.handshake_packet_space.pending_ack_largest != null)
+        {
+            handshake_packet = try self.buildNextProtectedLongPacketInSpace(
+                .handshake,
+                dcid,
+                scid,
+                &[_]u8{},
+                keys.handshake orelse return error.InvalidPacket,
+                0,
+            );
+        }
+
+        if (initial_packet == null and zero_rtt_packet == null and handshake_packet == null) return null;
+
+        var total_len: usize = 0;
+        if (initial_packet) |built| {
+            total_len = built.datagram.len;
+        }
+        if (zero_rtt_packet) |built| {
+            const next_total = std.math.add(usize, total_len, built.datagram.len) catch return error.BufferTooSmall;
+            if (total_len != 0 and next_total > self.maxTxDatagramSize()) {
+                self.allocator.free(built.datagram);
+                zero_rtt_packet = null;
+            } else {
+                total_len = next_total;
+            }
+        }
+        if (handshake_packet) |built| {
+            const next_total = std.math.add(usize, total_len, built.datagram.len) catch return error.BufferTooSmall;
+            if (total_len != 0 and next_total > self.maxTxDatagramSize()) {
+                self.allocator.free(built.datagram);
+                handshake_packet = null;
+            } else {
+                total_len = next_total;
+            }
+        }
+        if (initial_packet) |built| {
+            const required_initial_datagram_len = self.minimumOutgoingInitialDatagramLen(.initial, built.ack_eliciting);
+            if (required_initial_datagram_len != 0 and total_len < required_initial_datagram_len) {
+                const target_initial_len = try addWireLen(built.datagram.len, required_initial_datagram_len - total_len);
+                self.allocator.free(built.datagram);
+                initial_packet = null;
+                initial_packet = try self.buildNextProtectedLongPacketInSpace(
+                    .initial,
+                    dcid,
+                    scid,
+                    initial_token,
+                    keys.initial orelse return error.InvalidPacket,
+                    target_initial_len,
+                );
+
+                total_len = 0;
+                if (initial_packet) |expanded_initial| total_len = expanded_initial.datagram.len;
+                if (zero_rtt_packet) |zero_rtt| total_len = std.math.add(usize, total_len, zero_rtt.datagram.len) catch return error.BufferTooSmall;
+                if (handshake_packet) |handshake| total_len = std.math.add(usize, total_len, handshake.datagram.len) catch return error.BufferTooSmall;
+
+                if (total_len > self.maxTxDatagramSize()) {
+                    if (zero_rtt_packet) |zero_rtt| {
+                        self.allocator.free(zero_rtt.datagram);
+                        zero_rtt_packet = null;
+                    }
+                    if (handshake_packet) |handshake| {
+                        self.allocator.free(handshake.datagram);
+                        handshake_packet = null;
+                    }
+                    if (initial_packet) |expanded_initial| self.allocator.free(expanded_initial.datagram);
+                    initial_packet = null;
+                    initial_packet = try self.buildNextProtectedLongPacketInSpace(
+                        .initial,
+                        dcid,
+                        scid,
+                        initial_token,
+                        keys.initial orelse return error.InvalidPacket,
+                        required_initial_datagram_len,
+                    );
+                    total_len = if (initial_packet) |single_initial| single_initial.datagram.len else 0;
+                }
+            }
+        }
+        if (total_len == 0) return null;
+        if (total_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        if (!self.canSendToPeerAddress(total_len)) {
+            if (initial_packet) |built| self.allocator.free(built.datagram);
+            if (zero_rtt_packet) |built| self.allocator.free(built.datagram);
+            if (handshake_packet) |built| self.allocator.free(built.datagram);
+            initial_packet = null;
+            zero_rtt_packet = null;
+            handshake_packet = null;
+            return null;
+        }
+        if (initial_packet) |built| {
+            const packet_space = self.packetNumberSpace(built.space);
+            if (built.ack_eliciting and !packet_space.recovery_state.canSend(built.datagram.len)) {
+                if (initial_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
+                if (zero_rtt_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
+                if (handshake_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
+                initial_packet = null;
+                zero_rtt_packet = null;
+                handshake_packet = null;
+                return null;
+            }
+        }
+        if (zero_rtt_packet) |built| {
+            const packet_space = self.packetNumberSpace(built.space);
+            if (built.ack_eliciting and !packet_space.recovery_state.canSend(built.datagram.len)) {
+                if (initial_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
+                if (zero_rtt_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
+                if (handshake_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
+                initial_packet = null;
+                zero_rtt_packet = null;
+                handshake_packet = null;
+                return null;
+            }
+        }
+        if (handshake_packet) |built| {
+            const packet_space = self.packetNumberSpace(built.space);
+            if (built.ack_eliciting and !packet_space.recovery_state.canSend(built.datagram.len)) {
+                if (initial_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
+                if (zero_rtt_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
+                if (handshake_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
+                initial_packet = null;
+                zero_rtt_packet = null;
+                handshake_packet = null;
+                return null;
+            }
+        }
+
+        if (initial_packet) |built| try self.ensureProtectedLongCommitCapacity(built);
+        if (zero_rtt_packet) |built| try self.ensureProtectedLongCommitCapacity(built);
+        if (handshake_packet) |built| try self.ensureProtectedLongCommitCapacity(built);
+
+        const datagram = self.allocator.alloc(u8, total_len) catch return error.OutOfMemory;
+        errdefer self.allocator.free(datagram);
+
+        var offset: usize = 0;
+        if (initial_packet) |built| {
+            @memcpy(datagram[offset..][0..built.datagram.len], built.datagram);
+            offset += built.datagram.len;
+            self.commitBuiltProtectedLongPacket(built, now_millis);
+            self.allocator.free(built.datagram);
+            initial_packet = null;
+        }
+        if (zero_rtt_packet) |built| {
+            @memcpy(datagram[offset..][0..built.datagram.len], built.datagram);
+            offset += built.datagram.len;
+            self.commitBuiltProtectedLongPacket(built, now_millis);
+            self.allocator.free(built.datagram);
+            zero_rtt_packet = null;
+        }
+        if (handshake_packet) |built| {
+            @memcpy(datagram[offset..][0..built.datagram.len], built.datagram);
+            offset += built.datagram.len;
+            self.commitBuiltProtectedLongPacket(built, now_millis);
+            self.allocator.free(built.datagram);
+            handshake_packet = null;
+        }
+        std.debug.assert(offset == datagram.len);
+        return datagram;
+    }
+
+    /// Return one protected Handshake long-header datagram using installed keys.
+    ///
+    /// This emits at most one Handshake CRYPTO, PING+ACK, or ACK-only packet
+    /// from the Handshake packet number space without requiring the caller to
+    /// pass packet-protection keys on every call. Use the caller-keyed
+    /// `pollProtectedLongDatagram()` when coalescing Initial and Handshake
+    /// packets is required.
+    pub fn pollProtectedHandshakeDatagramWithInstalledKeys(
+        self: *QuicConnection,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+    ) Error!?[]u8 {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+
+        const keys = self.local_handshake_keys orelse return error.InvalidPacket;
+        const built = (try self.buildNextProtectedLongPacketInSpace(
+            .handshake,
+            dcid,
+            scid,
+            &[_]u8{},
+            keys,
+            0,
+        )) orelse return null;
+        errdefer self.allocator.free(built.datagram);
+
+        if (built.datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        if (!self.canSendToPeerAddress(built.datagram.len)) {
+            self.allocator.free(built.datagram);
+            return null;
+        }
+        const packet_space = self.packetNumberSpace(.handshake);
+        if (built.ack_eliciting and !packet_space.recovery_state.canSend(built.datagram.len)) {
+            self.allocator.free(built.datagram);
+            return null;
+        }
+
+        try self.ensureProtectedLongCommitCapacity(built);
+        self.commitBuiltProtectedLongPacket(built, now_millis);
+        return built.datagram;
+    }
+
+    /// Return the next protected Initial or Handshake CRYPTO datagram, or null if idle.
+    ///
+    /// The returned datagram is allocated with the connection allocator and must
+    /// be freed by the caller. This compatibility-level API bridges only the
+    /// selected Initial or Handshake CRYPTO send queue to the RFC 9001
+    /// long-packet protection helper. Use `pollProtectedLongDatagram()` when ACK
+    /// or PING protected packets should also be emitted. For Initial packets,
+    /// a client-side Retry token accepted through `processRetryDatagram()` is
+    /// used when `token` is empty. Real TLS transcript ownership, key discard,
+    /// and key update remain endpoint/TLS integration work.
+    pub fn pollProtectedLongCryptoDatagramInSpace(
+        self: *QuicConnection,
+        space: PacketNumberSpace,
         now_millis: i64,
         dcid: []const u8,
         scid: []const u8,
@@ -1810,7 +3953,51 @@ pub const QuicConnection = struct {
         self.expireCloseState(now_millis);
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
 
-        var packet_space = self.packetNumberSpace(.initial);
+        const min_datagram_len = self.minimumOutgoingInitialDatagramLen(space, true);
+        const built = (try self.buildProtectedLongCryptoPacketInSpace(space, dcid, scid, token, keys, min_datagram_len)) orelse return null;
+        errdefer self.allocator.free(built.datagram);
+
+        const packet_space = self.packetNumberSpace(space);
+        if (!packet_space.recovery_state.canSend(built.datagram.len) or !self.canSendToPeerAddress(built.datagram.len)) {
+            self.allocator.free(built.datagram);
+            return null;
+        }
+
+        try self.ensureProtectedLongCommitCapacity(built);
+        self.commitBuiltProtectedLongPacket(built, now_millis);
+        return built.datagram;
+    }
+
+    /// Return the next protected Initial CRYPTO datagram, or null if idle.
+    ///
+    /// This compatibility wrapper routes Initial CRYPTO through
+    /// `pollProtectedLongCryptoDatagramInSpace(.initial, ...)`.
+    pub fn pollInitialProtectedDatagram(
+        self: *QuicConnection,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+        token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+    ) Error!?[]u8 {
+        return self.pollProtectedLongCryptoDatagramInSpace(.initial, now_millis, dcid, scid, token, keys);
+    }
+
+    fn buildProtectedLongCryptoPacketInSpace(
+        self: *QuicConnection,
+        space: PacketNumberSpace,
+        dcid: []const u8,
+        scid: []const u8,
+        token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        min_datagram_len: usize,
+    ) Error!?BuiltProtectedLongPacket {
+        const long_space = protectedLongPacketSpaceFor(space) orelse return error.InvalidPacket;
+        if (space != .initial and token.len != 0) return error.InvalidPacket;
+        const header_token = self.initialTokenForPacket(space, token);
+        try self.validateOutgoingInitialPacketFields(space, dcid, header_token);
+
+        const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
         if (packet_space.crypto_send_queue.items.len == 0) return null;
         if (packet_space.next_packet_number.* > max_quic_varint) return error.Internal;
@@ -1823,8 +4010,22 @@ pub const QuicConnection = struct {
             packet_space.largest_acknowledged.*,
         ) catch return error.Internal;
 
+        const header = packet.LongHeader{
+            .version = .v1,
+            .dcid = dcid,
+            .scid = scid,
+            .packet_type = long_space.packet_type,
+            .token = header_token,
+            .packet_number = packet_number,
+            .payload_length = 0,
+        };
         const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
-        const plaintext_len = @max(crypto_encoded_len, min_payload_len);
+        const plaintext_len = try protectedLongPlaintextLenForMinDatagram(
+            header,
+            packet_number_encoding.len,
+            @max(crypto_encoded_len, min_payload_len),
+            min_datagram_len,
+        );
         if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
 
         const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
@@ -1840,12 +4041,156 @@ pub const QuicConnection = struct {
             else => return error.Internal,
         };
 
+        const datagram = protection.protectLongPacketAes128(self.allocator, header, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        var built = BuiltProtectedLongPacket{
+            .space = space,
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .consume_crypto = true,
+        };
+        built.recordLocalOriginalDestinationConnectionId(self.localOriginalDestinationConnectionIdForPacket(space, dcid));
+        built.recordLocalInitialSourceConnectionId(self.localInitialSourceConnectionIdForPacket(space, scid));
+        return built;
+    }
+
+    fn buildNextProtectedLongPacketInSpace(
+        self: *QuicConnection,
+        space: PacketNumberSpace,
+        dcid: []const u8,
+        scid: []const u8,
+        token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        min_datagram_len: usize,
+    ) Error!?BuiltProtectedLongPacket {
+        const packet_space = self.packetNumberSpace(space);
+        if (packet_space.discarded.*) return error.InvalidPacket;
+        if (packet_space.crypto_send_queue.items.len != 0) {
+            return self.buildProtectedLongCryptoPacketInSpace(space, dcid, scid, token, keys, min_datagram_len);
+        }
+        const ack_to_send = self.pendingAckFrame(space);
+        if (packet_space.pending_ping_count.* != 0) {
+            return try self.buildProtectedLongPingPacketInSpace(space, dcid, scid, token, keys, ack_to_send, min_datagram_len);
+        }
+        if (ack_to_send) |ack| {
+            return try self.buildProtectedLongAckOnlyPacketInSpace(space, dcid, scid, token, keys, ack, min_datagram_len);
+        }
+        return null;
+    }
+
+    fn hasPendingProtectedZeroRttFrames(self: *QuicConnection) bool {
+        self.dropObsoleteStopSendingFrames();
+        return self.pending_reset_streams.items.len != 0 or
+            self.pending_stop_sending.items.len != 0 or
+            self.send_queue.items.len != 0;
+    }
+
+    fn buildNextProtectedZeroRttPacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        scid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+    ) Error!?BuiltProtectedLongPacket {
+        if (self.side != .client) return error.InvalidPacket;
+        if (self.application_packet_space_discarded) return error.InvalidPacket;
+
+        self.dropResetClosedStreamFrames();
+        if (self.pending_reset_streams.items.len != 0) {
+            const reset = self.pending_reset_streams.items[0];
+            return try self.buildProtectedZeroRttFramePacket(
+                dcid,
+                scid,
+                keys,
+                .{ .reset_stream = reset },
+                try resetStreamFrameWireLen(reset),
+                .{ .reset_stream = true },
+            );
+        }
+        self.dropObsoleteStopSendingFrames();
+        if (self.pending_stop_sending.items.len != 0) {
+            const stop_sending = self.pending_stop_sending.items[0];
+            return try self.buildProtectedZeroRttFramePacket(
+                dcid,
+                scid,
+                keys,
+                .{ .stop_sending = stop_sending },
+                try stopSendingFrameWireLen(stop_sending),
+                .{ .stop_sending = true },
+            );
+        }
+        if (self.send_queue.items.len != 0) {
+            const pending = self.send_queue.items[0];
+            return try self.buildProtectedZeroRttFramePacket(
+                dcid,
+                scid,
+                keys,
+                .{ .stream = .{
+                    .stream_id = pending.stream_id,
+                    .offset = pending.offset,
+                    .fin = pending.fin,
+                    .data = pending.data,
+                } },
+                try streamFrameWireLen(pending.stream_id, pending.offset, pending.data.len),
+                .{ .stream = true },
+            );
+        }
+        return null;
+    }
+
+    const ZeroRttConsumeFlags = struct {
+        reset_stream: bool = false,
+        stop_sending: bool = false,
+        stream: bool = false,
+    };
+
+    fn buildProtectedZeroRttFramePacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        scid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        frame_to_send: frame.Frame,
+        encoded_frame_len: usize,
+        consume: ZeroRttConsumeFlags,
+    ) Error!BuiltProtectedLongPacket {
+        if (!frameAllowedInFramePacketType(frame_to_send, .zero_rtt)) return error.InvalidPacket;
+
+        const packet_space = self.packetNumberSpace(.application);
+        if (packet_space.discarded.*) return error.InvalidPacket;
+        if (packet_space.next_packet_number.* > max_quic_varint) return error.Internal;
+
+        const packet_number = packet_space.next_packet_number.*;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            packet_space.largest_acknowledged.*,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        frame.encodeFrame(plaintext_out.writer(), frame_to_send) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
         const datagram = protection.protectLongPacketAes128(self.allocator, .{
             .version = .v1,
             .dcid = dcid,
             .scid = scid,
-            .packet_type = .initial,
-            .token = token,
+            .packet_type = .zero_rtt,
+            .token = &[_]u8{},
             .packet_number = packet_number,
             .payload_length = 0,
         }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
@@ -1855,29 +4200,1316 @@ pub const QuicConnection = struct {
         };
         errdefer self.allocator.free(datagram);
 
-        if (datagram.len > self.maxTxDatagramSize()) {
-            self.allocator.free(datagram);
-            return error.BufferTooSmall;
-        }
-        if (!packet_space.recovery_state.canSend(datagram.len) or !self.canSendToPeerAddress(datagram.len)) {
-            self.allocator.free(datagram);
-            return null;
-        }
-
-        packet_space.sent_packets.append(self.allocator, .{
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .space = .application,
             .packet_number = packet_number,
-            .sent_time_millis = now_millis,
-            .bytes = datagram.len,
-        }) catch return error.OutOfMemory;
-        errdefer _ = packet_space.sent_packets.orderedRemove(packet_space.sent_packets.items.len - 1);
+            .datagram = datagram,
+            .ack_eliciting = frameIsAckEliciting(frame_to_send),
+            .consume_reset_stream = consume.reset_stream,
+            .consume_stop_sending = consume.stop_sending,
+            .consume_stream = consume.stream,
+        };
+    }
 
-        const removed = packet_space.crypto_send_queue.orderedRemove(0);
-        self.allocator.free(removed.data);
-        packet_space.next_packet_number.* = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        packet_space.recovery_state.onPacketSent(datagram.len);
-        self.recordPeerAddressBytesSent(datagram.len);
+    fn buildProtectedLongPingPacketInSpace(
+        self: *QuicConnection,
+        space: PacketNumberSpace,
+        dcid: []const u8,
+        scid: []const u8,
+        token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        ack_to_send: ?frame.AckFrame,
+        min_datagram_len: usize,
+    ) Error!BuiltProtectedLongPacket {
+        const ack_len = if (ack_to_send) |ack| try ackFrameWireLen(ack) else 0;
+        const encoded_len = try addWireLen(ack_len, pingFrameWireLen());
+        return try self.buildProtectedLongControlPacketInSpace(
+            space,
+            dcid,
+            scid,
+            token,
+            keys,
+            encoded_len,
+            ack_to_send,
+            true,
+            min_datagram_len,
+        );
+    }
+
+    fn buildProtectedLongAckOnlyPacketInSpace(
+        self: *QuicConnection,
+        space: PacketNumberSpace,
+        dcid: []const u8,
+        scid: []const u8,
+        token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        ack: frame.AckFrame,
+        min_datagram_len: usize,
+    ) Error!BuiltProtectedLongPacket {
+        return try self.buildProtectedLongControlPacketInSpace(
+            space,
+            dcid,
+            scid,
+            token,
+            keys,
+            try ackFrameWireLen(ack),
+            ack,
+            false,
+            min_datagram_len,
+        );
+    }
+
+    fn buildProtectedLongControlPacketInSpace(
+        self: *QuicConnection,
+        space: PacketNumberSpace,
+        dcid: []const u8,
+        scid: []const u8,
+        token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        encoded_frame_len: usize,
+        ack_to_send: ?frame.AckFrame,
+        include_ping: bool,
+        min_datagram_len: usize,
+    ) Error!BuiltProtectedLongPacket {
+        const long_space = protectedLongPacketSpaceFor(space) orelse return error.InvalidPacket;
+        if (space != .initial and token.len != 0) return error.InvalidPacket;
+        const header_token = self.initialTokenForPacket(space, token);
+        try self.validateOutgoingInitialPacketFields(space, dcid, header_token);
+
+        const packet_space = self.packetNumberSpace(space);
+        if (packet_space.discarded.*) return error.InvalidPacket;
+        if (packet_space.next_packet_number.* > max_quic_varint) return error.Internal;
+
+        const packet_number = packet_space.next_packet_number.*;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            packet_space.largest_acknowledged.*,
+        ) catch return error.Internal;
+
+        const header = packet.LongHeader{
+            .version = .v1,
+            .dcid = dcid,
+            .scid = scid,
+            .packet_type = long_space.packet_type,
+            .token = header_token,
+            .packet_number = packet_number,
+            .payload_length = 0,
+        };
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = try protectedLongPlaintextLenForMinDatagram(
+            header,
+            packet_number_encoding.len,
+            @max(encoded_frame_len, min_payload_len),
+            min_datagram_len,
+        );
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        if (include_ping) {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ping = {} }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+
+        const datagram = protection.protectLongPacketAes128(self.allocator, header, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        var built = BuiltProtectedLongPacket{
+            .space = space,
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = include_ping,
+            .clear_ack = ack_to_send != null,
+            .consume_ping = include_ping,
+        };
+        built.recordLocalOriginalDestinationConnectionId(self.localOriginalDestinationConnectionIdForPacket(space, dcid));
+        built.recordLocalInitialSourceConnectionId(self.localInitialSourceConnectionIdForPacket(space, scid));
+        return built;
+    }
+
+    fn localOriginalDestinationConnectionIdForPacket(
+        self: QuicConnection,
+        space: PacketNumberSpace,
+        dcid: []const u8,
+    ) ?[]const u8 {
+        if (self.side != .client or space != .initial or self.original_destination_connection_id_len != null) return null;
+        return dcid;
+    }
+
+    fn localInitialSourceConnectionIdForPacket(
+        self: QuicConnection,
+        space: PacketNumberSpace,
+        scid: []const u8,
+    ) ?[]const u8 {
+        if (space != .initial or self.local_initial_source_connection_id_len != null) return null;
+        return scid;
+    }
+
+    fn validateOutgoingInitialPacketFields(
+        self: QuicConnection,
+        space: PacketNumberSpace,
+        dcid: []const u8,
+        token: []const u8,
+    ) Error!void {
+        if (space != .initial) return;
+        if (self.side == .server) {
+            if (token.len != 0) return error.InvalidPacket;
+            return;
+        }
+        if (self.originalDestinationConnectionId()) |original_dcid| {
+            const expected_dcid = self.peerInitialSourceConnectionId() orelse
+                self.retrySourceConnectionId() orelse
+                original_dcid;
+            if (!std.mem.eql(u8, expected_dcid, dcid)) return error.InvalidPacket;
+            return;
+        }
+        try validateInitialDestinationConnectionIdLength(dcid);
+    }
+
+    fn minimumOutgoingInitialDatagramLen(self: QuicConnection, space: PacketNumberSpace, ack_eliciting: bool) usize {
+        if (space != .initial) return 0;
+        if (self.side == .client or ack_eliciting) return min_initial_udp_datagram_len;
+        return 0;
+    }
+
+    fn validateIncomingInitialDatagramLen(self: QuicConnection, space: PacketNumberSpace, udp_datagram_len: usize) Error!void {
+        if (space == .initial and self.side == .server and udp_datagram_len < min_initial_udp_datagram_len) {
+            return error.InvalidPacket;
+        }
+    }
+
+    fn validateOriginalDestinationConnectionIdForRecord(self: QuicConnection, dcid: []const u8) Error!void {
+        if (dcid.len > max_connection_id_len) return error.InvalidPacket;
+        if (self.originalDestinationConnectionId()) |existing| {
+            if (!std.mem.eql(u8, existing, dcid)) return error.InvalidPacket;
+        }
+    }
+
+    fn recordOriginalDestinationConnectionId(self: *QuicConnection, dcid: []const u8) void {
+        if (self.original_destination_connection_id_len != null) return;
+        std.debug.assert(dcid.len <= max_connection_id_len);
+        @memcpy(self.original_destination_connection_id[0..dcid.len], dcid);
+        self.original_destination_connection_id_len = @intCast(dcid.len);
+    }
+
+    fn recordLocalInitialSourceConnectionId(self: *QuicConnection, scid: []const u8) void {
+        if (self.local_initial_source_connection_id_len != null) return;
+        std.debug.assert(scid.len <= max_connection_id_len);
+        @memcpy(self.local_initial_source_connection_id[0..scid.len], scid);
+        self.local_initial_source_connection_id_len = @intCast(scid.len);
+    }
+
+    fn ensureProtectedLongCommitCapacity(
+        self: *QuicConnection,
+        built: BuiltProtectedLongPacket,
+    ) Error!void {
+        if (!built.ack_eliciting) return;
+        var packet_space = self.packetNumberSpace(built.space);
+        packet_space.sent_packets.ensureUnusedCapacity(self.allocator, 1) catch return error.OutOfMemory;
+    }
+
+    fn commitBuiltProtectedLongPacket(
+        self: *QuicConnection,
+        built: BuiltProtectedLongPacket,
+        now_millis: i64,
+    ) void {
+        var packet_space = self.packetNumberSpace(built.space);
+        if (built.ack_eliciting) {
+            packet_space.sent_packets.appendAssumeCapacity(.{
+                .packet_number = built.packet_number,
+                .sent_time_millis = now_millis,
+                .bytes = built.datagram.len,
+            });
+        }
+
+        if (built.consume_crypto) {
+            const removed = packet_space.crypto_send_queue.orderedRemove(0);
+            self.allocator.free(removed.data);
+        }
+        if (built.consume_ping) packet_space.pending_ping_count.* -= 1;
+        if (built.consume_reset_stream) _ = self.pending_reset_streams.orderedRemove(0);
+        if (built.consume_stop_sending) _ = self.pending_stop_sending.orderedRemove(0);
+        if (built.consume_stream) {
+            const removed = self.send_queue.orderedRemove(0);
+            self.allocator.free(removed.data);
+        }
+        if (built.clear_ack) packet_space.pending_ack_largest.* = null;
+        packet_space.next_packet_number.* = built.packet_number + 1;
+        if (built.ack_eliciting) packet_space.recovery_state.onPacketSent(built.datagram.len);
+        self.recordPeerAddressBytesSent(built.datagram.len);
         self.recordPacketActivity(now_millis);
-        return datagram;
+        if (built.local_original_destination_connection_id_len) |len| {
+            self.recordOriginalDestinationConnectionId(built.local_original_destination_connection_id[0..len]);
+        }
+        if (built.local_initial_source_connection_id_len) |len| {
+            self.recordLocalInitialSourceConnectionId(built.local_initial_source_connection_id[0..len]);
+        }
+        self.maybeDiscardInitialAfterHandshakePacketSent(built.space);
+    }
+
+    fn buildNextProtectedShortPacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+    ) Error!?BuiltProtectedShortPacket {
+        if (self.application_packet_space_discarded) return error.InvalidPacket;
+        const ack_to_send = self.pendingAckFrame(.application);
+        if (self.pending_path_responses.items.len != 0) {
+            return try self.buildProtectedShortPathResponsePacket(dcid, keys, key_phase, ack_to_send);
+        }
+        if (self.pending_reset_streams.items.len != 0) {
+            return try self.buildProtectedShortResetStreamPacket(dcid, keys, key_phase, ack_to_send);
+        }
+        self.dropObsoleteStopSendingFrames();
+        if (self.pending_stop_sending.items.len != 0) {
+            return try self.buildProtectedShortStopSendingPacket(dcid, keys, key_phase, ack_to_send);
+        }
+        if (self.pending_retire_connection_ids.items.len != 0) {
+            return try self.buildProtectedShortRetireConnectionIdPacket(dcid, keys, key_phase, ack_to_send);
+        }
+        if (self.pending_handshake_done) {
+            return try self.buildProtectedShortHandshakeDonePacket(dcid, keys, key_phase, ack_to_send);
+        }
+        if (self.nextUnsentLocalConnectionIdIndex() != null) {
+            return try self.buildProtectedShortNewConnectionIdPacket(dcid, keys, key_phase, ack_to_send);
+        }
+        if (self.pending_new_tokens.items.len != 0) {
+            return try self.buildProtectedShortNewTokenPacket(dcid, keys, key_phase, ack_to_send);
+        }
+        if (self.pending_path_challenges.items.len != 0) {
+            return try self.buildProtectedShortPathChallengePacket(dcid, keys, key_phase, ack_to_send);
+        }
+        self.dropObsoleteMaxFrames();
+        if (self.pending_max_frames.items.len != 0) {
+            return try self.buildProtectedShortMaxFramePacket(dcid, keys, key_phase, ack_to_send);
+        }
+        self.dropObsoleteBlockedFrames();
+        if (self.pending_blocked_frames.items.len != 0) {
+            return try self.buildProtectedShortBlockedFramePacket(dcid, keys, key_phase, ack_to_send);
+        }
+        if (self.crypto_send_queue.items.len != 0) {
+            return try self.buildProtectedShortCryptoPacket(dcid, keys, key_phase, ack_to_send);
+        }
+        if (self.pending_ping_count != 0) {
+            const ack_len = if (ack_to_send) |ack| try ackFrameWireLen(ack) else 0;
+            const encoded_len = try addWireLen(ack_len, pingFrameWireLen());
+            return try self.buildProtectedShortControlPacket(dcid, keys, key_phase, encoded_len, ack_to_send, true);
+        }
+        self.dropResetClosedStreamFrames();
+        if (self.send_queue.items.len != 0) {
+            return try self.buildProtectedShortStreamPacket(dcid, keys, key_phase, ack_to_send);
+        }
+        if (ack_to_send) |ack| {
+            return try self.buildProtectedShortControlPacket(
+                dcid,
+                keys,
+                key_phase,
+                try ackFrameWireLen(ack),
+                ack,
+                false,
+            );
+        }
+        return null;
+    }
+
+    fn buildProtectedShortClosePacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const close = self.pending_close orelse return error.Internal;
+        const encoded_frame_len = try closeFrameWireLen(close);
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        switch (close) {
+            .connection => |connection| frame.encodeFrame(plaintext_out.writer(), .{ .connection_close = connection }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            },
+            .application => |application| frame.encodeFrame(plaintext_out.writer(), .{ .application_close = application }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            },
+        }
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = false,
+            .close_packet = true,
+        };
+    }
+
+    fn buildProtectedShortPathResponsePacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        ack_to_send: ?frame.AckFrame,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const response_data = self.pending_path_responses.items[0];
+        const response_encoded_len = pathResponseFrameWireLen();
+        var encoded_frame_len = response_encoded_len;
+        if (ack_to_send) |ack| {
+            encoded_frame_len = try addWireLen(try ackFrameWireLen(ack), response_encoded_len);
+        }
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(plaintext_out.writer(), .{ .path_response = .{ .data = response_data } }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .clear_ack = ack_to_send != null,
+            .consume_path_response = true,
+        };
+    }
+
+    fn buildProtectedShortResetStreamPacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        ack_to_send: ?frame.AckFrame,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const reset = self.pending_reset_streams.items[0];
+        const reset_encoded_len = try resetStreamFrameWireLen(reset);
+        var encoded_frame_len = reset_encoded_len;
+        if (ack_to_send) |ack| {
+            encoded_frame_len = try addWireLen(try ackFrameWireLen(ack), reset_encoded_len);
+        }
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(plaintext_out.writer(), .{ .reset_stream = reset }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .clear_ack = ack_to_send != null,
+            .consume_reset_stream = true,
+        };
+    }
+
+    fn buildProtectedShortStopSendingPacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        ack_to_send: ?frame.AckFrame,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const stop_sending = self.pending_stop_sending.items[0];
+        const stop_encoded_len = try stopSendingFrameWireLen(stop_sending);
+        var encoded_frame_len = stop_encoded_len;
+        if (ack_to_send) |ack| {
+            encoded_frame_len = try addWireLen(try ackFrameWireLen(ack), stop_encoded_len);
+        }
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(plaintext_out.writer(), .{ .stop_sending = stop_sending }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .clear_ack = ack_to_send != null,
+            .consume_stop_sending = true,
+        };
+    }
+
+    fn buildProtectedShortRetireConnectionIdPacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        ack_to_send: ?frame.AckFrame,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const sequence_number = self.pending_retire_connection_ids.items[0];
+        const retire_encoded_len = try retireConnectionIdFrameWireLen(sequence_number);
+        var encoded_frame_len = retire_encoded_len;
+        if (ack_to_send) |ack| {
+            encoded_frame_len = try addWireLen(try ackFrameWireLen(ack), retire_encoded_len);
+        }
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(plaintext_out.writer(), .{ .retire_connection_id = .{ .sequence_number = sequence_number } }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .clear_ack = ack_to_send != null,
+            .consume_retire_connection_id = true,
+        };
+    }
+
+    fn buildProtectedShortNewConnectionIdPacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        ack_to_send: ?frame.AckFrame,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const local_index = self.nextUnsentLocalConnectionIdIndex() orelse return error.Internal;
+        const local_id = self.local_connection_ids.items[local_index];
+        const new_connection_id_encoded_len = try newConnectionIdFrameWireLen(local_id);
+        var encoded_frame_len = new_connection_id_encoded_len;
+        if (ack_to_send) |ack| {
+            encoded_frame_len = try addWireLen(try ackFrameWireLen(ack), new_connection_id_encoded_len);
+        }
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(plaintext_out.writer(), .{ .new_connection_id = .{
+            .sequence_number = local_id.sequence_number,
+            .retire_prior_to = local_id.retire_prior_to,
+            .connection_id = local_id.connection_id,
+            .stateless_reset_token = local_id.stateless_reset_token,
+        } }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .clear_ack = ack_to_send != null,
+            .new_connection_id_index = local_index,
+        };
+    }
+
+    fn buildProtectedShortHandshakeDonePacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        ack_to_send: ?frame.AckFrame,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const handshake_done_encoded_len = handshakeDoneFrameWireLen();
+        var encoded_frame_len = handshake_done_encoded_len;
+        if (ack_to_send) |ack| {
+            encoded_frame_len = try addWireLen(try ackFrameWireLen(ack), handshake_done_encoded_len);
+        }
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(plaintext_out.writer(), .{ .handshake_done = {} }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .clear_ack = ack_to_send != null,
+            .consume_handshake_done = true,
+        };
+    }
+
+    fn buildProtectedShortNewTokenPacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        ack_to_send: ?frame.AckFrame,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const token = self.pending_new_tokens.items[0];
+        const new_token_encoded_len = try newTokenFrameWireLen(token);
+        var encoded_frame_len = new_token_encoded_len;
+        if (ack_to_send) |ack| {
+            encoded_frame_len = try addWireLen(try ackFrameWireLen(ack), new_token_encoded_len);
+        }
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(plaintext_out.writer(), .{ .new_token = .{ .token = token } }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .clear_ack = ack_to_send != null,
+            .consume_new_token = true,
+        };
+    }
+
+    fn buildProtectedShortPathChallengePacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        ack_to_send: ?frame.AckFrame,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const pending_challenge = self.pending_path_challenges.items[0];
+        const challenge_encoded_len = pathChallengeFrameWireLen();
+        var encoded_frame_len = challenge_encoded_len;
+        if (ack_to_send) |ack| {
+            encoded_frame_len = try addWireLen(try ackFrameWireLen(ack), challenge_encoded_len);
+        }
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(plaintext_out.writer(), .{ .path_challenge = .{ .data = pending_challenge.data } }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .clear_ack = ack_to_send != null,
+            .consume_path_challenge = true,
+        };
+    }
+
+    fn buildProtectedShortMaxFramePacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        ack_to_send: ?frame.AckFrame,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const max_frame = self.pending_max_frames.items[0];
+        const max_encoded_len = try maxFrameWireLen(max_frame);
+        var encoded_frame_len = max_encoded_len;
+        if (ack_to_send) |ack| {
+            encoded_frame_len = try addWireLen(try ackFrameWireLen(ack), max_encoded_len);
+        }
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        switch (max_frame) {
+            .data => |data| frame.encodeFrame(plaintext_out.writer(), .{ .max_data = data }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            },
+            .stream_data => |stream_data| frame.encodeFrame(plaintext_out.writer(), .{ .max_stream_data = stream_data }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            },
+            .streams_bidi => |streams| frame.encodeFrame(plaintext_out.writer(), .{ .max_streams_bidi = streams }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            },
+            .streams_uni => |streams| frame.encodeFrame(plaintext_out.writer(), .{ .max_streams_uni = streams }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            },
+        }
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .clear_ack = ack_to_send != null,
+            .consume_max_frame = true,
+        };
+    }
+
+    fn buildProtectedShortBlockedFramePacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        ack_to_send: ?frame.AckFrame,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const blocked = self.pending_blocked_frames.items[0];
+        const blocked_encoded_len = try blockedFrameWireLen(blocked);
+        var encoded_frame_len = blocked_encoded_len;
+        if (ack_to_send) |ack| {
+            encoded_frame_len = try addWireLen(try ackFrameWireLen(ack), blocked_encoded_len);
+        }
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        switch (blocked) {
+            .data => |data| frame.encodeFrame(plaintext_out.writer(), .{ .data_blocked = data }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            },
+            .stream_data => |stream_data| frame.encodeFrame(plaintext_out.writer(), .{ .stream_data_blocked = stream_data }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            },
+            .streams_bidi => |streams| frame.encodeFrame(plaintext_out.writer(), .{ .streams_blocked_bidi = streams }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            },
+            .streams_uni => |streams| frame.encodeFrame(plaintext_out.writer(), .{ .streams_blocked_uni = streams }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            },
+        }
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .clear_ack = ack_to_send != null,
+            .consume_blocked_frame = true,
+        };
+    }
+
+    fn buildProtectedShortCryptoPacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        ack_to_send: ?frame.AckFrame,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const pending = self.crypto_send_queue.items[0];
+        const crypto_encoded_len = try cryptoFrameWireLen(pending.offset, pending.data.len);
+        var encoded_frame_len = crypto_encoded_len;
+        if (ack_to_send) |ack| {
+            encoded_frame_len = try addWireLen(try ackFrameWireLen(ack), crypto_encoded_len);
+        }
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(plaintext_out.writer(), .{ .crypto = .{
+            .offset = pending.offset,
+            .data = pending.data,
+        } }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .clear_ack = ack_to_send != null,
+            .consume_crypto = true,
+        };
+    }
+
+    fn buildProtectedShortStreamPacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        ack_to_send: ?frame.AckFrame,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const pending = self.send_queue.items[0];
+        const stream_encoded_len = try streamFrameWireLen(pending.stream_id, pending.offset, pending.data.len);
+        var encoded_frame_len = stream_encoded_len;
+        if (ack_to_send) |ack| {
+            encoded_frame_len = try addWireLen(try ackFrameWireLen(ack), stream_encoded_len);
+        }
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(plaintext_out.writer(), .{ .stream = .{
+            .stream_id = pending.stream_id,
+            .offset = pending.offset,
+            .fin = pending.fin,
+            .data = pending.data,
+        } }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = true,
+            .clear_ack = ack_to_send != null,
+            .consume_stream = true,
+        };
+    }
+
+    fn buildProtectedShortControlPacket(
+        self: *QuicConnection,
+        dcid: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        key_phase: bool,
+        encoded_frame_len: usize,
+        ack_to_send: ?frame.AckFrame,
+        include_ping: bool,
+    ) Error!BuiltProtectedShortPacket {
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        const packet_number = self.next_packet_number;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            self.largest_acknowledged,
+        ) catch return error.Internal;
+
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        if (ack_to_send) |ack| {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ack = ack }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        if (include_ping) {
+            frame.encodeFrame(plaintext_out.writer(), .{ .ping = {} }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+
+        const datagram = protection.protectShortPacketAes128(self.allocator, .{
+            .dcid = dcid,
+            .spin_bit = self.shortHeaderSpinBit(),
+            .key_phase = key_phase,
+            .packet_number = packet_number,
+        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        return .{
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = include_ping,
+            .clear_ack = ack_to_send != null,
+            .consume_ping = include_ping,
+        };
+    }
+
+    fn commitBuiltProtectedShortPacket(
+        self: *QuicConnection,
+        built: BuiltProtectedShortPacket,
+        now_millis: i64,
+    ) void {
+        if (built.ack_eliciting) {
+            self.sent_packets.appendAssumeCapacity(.{
+                .packet_number = built.packet_number,
+                .sent_time_millis = now_millis,
+                .bytes = built.datagram.len,
+            });
+        }
+
+        if (built.consume_ping) self.pending_ping_count -= 1;
+        if (built.consume_crypto) {
+            const removed = self.crypto_send_queue.orderedRemove(0);
+            self.allocator.free(removed.data);
+        }
+        if (built.consume_path_response) _ = self.pending_path_responses.orderedRemove(0);
+        if (built.consume_path_challenge) {
+            const removed = self.pending_path_challenges.orderedRemove(0);
+            const transmissions = std.math.add(u8, removed.transmissions, 1) catch max_path_challenge_transmissions;
+            self.outstanding_path_challenges.appendAssumeCapacity(.{
+                .data = removed.data,
+                .sent_time_millis = now_millis,
+                .transmissions = transmissions,
+            });
+        }
+        if (built.consume_retire_connection_id) _ = self.pending_retire_connection_ids.orderedRemove(0);
+        if (built.new_connection_id_index) |local_index| self.local_connection_ids.items[local_index].sent = true;
+        if (built.consume_handshake_done) {
+            self.pending_handshake_done = false;
+            self.handshake_done_sent = true;
+        }
+        if (built.consume_new_token) {
+            const removed = self.pending_new_tokens.orderedRemove(0);
+            self.allocator.free(removed);
+        }
+        if (built.consume_max_frame) _ = self.pending_max_frames.orderedRemove(0);
+        if (built.consume_blocked_frame) _ = self.pending_blocked_frames.orderedRemove(0);
+        if (built.consume_reset_stream) _ = self.pending_reset_streams.orderedRemove(0);
+        if (built.consume_stop_sending) _ = self.pending_stop_sending.orderedRemove(0);
+        if (built.consume_stream) {
+            const removed = self.send_queue.orderedRemove(0);
+            self.allocator.free(removed.data);
+        }
+        if (built.clear_ack) self.pending_ack_largest = null;
+        self.next_packet_number = built.packet_number + 1;
+        if (built.ack_eliciting) self.recovery_state.onPacketSent(built.datagram.len);
+        if (built.close_packet and !self.closed) self.enterClosingState(now_millis);
+        self.recordPeerAddressBytesSent(built.datagram.len);
+        self.recordPacketActivity(now_millis);
     }
 
     /// Process one frame-payload datagram using RFC 9000 packet-type frame rules.
@@ -1949,6 +5581,9 @@ pub const QuicConnection = struct {
         const stored_new_token_count = self.stored_new_tokens.items.len;
         const pending_reset_stream_count = self.pending_reset_streams.items.len;
         const pending_max_frame_count = self.pending_max_frames.items.len;
+        const recv_max_data_snapshot = self.recv_max_data;
+        const recv_max_streams_bidi_snapshot = self.recv_max_streams_bidi;
+        const recv_max_streams_uni_snapshot = self.recv_max_streams_uni;
         const peer_max_data_snapshot = self.peer_max_data;
         const peer_max_udp_payload_size_snapshot = self.peer_max_udp_payload_size;
         const peer_initial_max_stream_data_bidi_local_snapshot = self.peer_initial_max_stream_data_bidi_local;
@@ -1964,11 +5599,15 @@ pub const QuicConnection = struct {
         const peer_stream_data_blocked_snapshots = self.allocator.alloc(PeerStreamDataBlockedState, peer_stream_data_blocked_count) catch return error.OutOfMemory;
         defer self.allocator.free(peer_stream_data_blocked_snapshots);
         @memcpy(peer_stream_data_blocked_snapshots, self.peer_stream_data_blocked_limits.items);
+        const handshake_state_snapshot = self.handshake_state;
         const handshake_confirmed_snapshot = self.handshake_confirmed;
+        const local_one_rtt_key_update_ack_threshold_snapshot = self.local_one_rtt_key_update_ack_threshold;
+        const peer_close_snapshot: PeerCloseSnapshot = if (self.peer_close == null) .absent else .present;
         const closed_snapshot = self.closed;
         const state_snapshot = self.state;
         const close_deadline_millis_snapshot = self.close_deadline_millis;
         const crypto_recv_buffer_len_snapshot = packet_space.crypto_recv_buffer.items.len;
+        const crypto_recv_pending_count_snapshot = packet_space.crypto_recv_pending.items.len;
         const crypto_read_offset_snapshot = packet_space.crypto_read_offset.*;
         const send_stream_count = self.send_streams.items.len;
         const send_stream_snapshots = self.allocator.alloc(SendStreamState, send_stream_count) catch return error.OutOfMemory;
@@ -2007,7 +5646,9 @@ pub const QuicConnection = struct {
             self.peer_streams_blocked_bidi_limit = peer_streams_blocked_bidi_limit_snapshot;
             self.peer_streams_blocked_uni_limit = peer_streams_blocked_uni_limit_snapshot;
             self.rollbackPeerStreamDataBlockedLimits(peer_stream_data_blocked_count, peer_stream_data_blocked_snapshots);
+            self.handshake_state = handshake_state_snapshot;
             self.handshake_confirmed = handshake_confirmed_snapshot;
+            self.local_one_rtt_key_update_ack_threshold = local_one_rtt_key_update_ack_threshold_snapshot;
             packet_space = self.packetNumberSpace(space);
             packet_space.next_peer_packet_number.* = next_peer_packet_number_snapshot;
             packet_space.pending_ack_largest.* = pending_ack_largest_snapshot;
@@ -2020,10 +5661,15 @@ pub const QuicConnection = struct {
             self.rollbackStoredNewTokens(stored_new_token_count);
             self.pending_reset_streams.items.len = pending_reset_stream_count;
             self.pending_max_frames.items.len = pending_max_frame_count;
+            self.recv_max_data = recv_max_data_snapshot;
+            self.recv_max_streams_bidi = recv_max_streams_bidi_snapshot;
+            self.recv_max_streams_uni = recv_max_streams_uni_snapshot;
             self.closed = closed_snapshot;
             self.state = state_snapshot;
             self.close_deadline_millis = close_deadline_millis_snapshot;
+            if (peer_close_snapshot == .absent) self.clearPeerClose();
             packet_space.crypto_recv_buffer.items.len = crypto_recv_buffer_len_snapshot;
+            self.rollbackCryptoFrameQueue(packet_space.crypto_recv_pending, crypto_recv_pending_count_snapshot);
             packet_space.crypto_read_offset.* = crypto_read_offset_snapshot;
             self.rollbackSentPackets(packet_space.sent_packets, sent_packet_count, sent_packet_snapshots);
             packet_space.largest_acknowledged.* = largest_acknowledged_snapshot;
@@ -2038,6 +5684,7 @@ pub const QuicConnection = struct {
         }
 
         var ack_eliciting = false;
+        var received_handshake_done = false;
         var offset: usize = 0;
         while (offset < datagram.len) {
             var decoded = frame.decodeFrameSlice(datagram[offset..], self.allocator) catch |err| switch (err) {
@@ -2073,8 +5720,12 @@ pub const QuicConnection = struct {
                 .new_connection_id => |new_connection_id| try self.receiveNewConnectionIdFrame(new_connection_id),
                 .retire_connection_id => |retire_connection_id| try self.receiveRetireConnectionIdFrame(retire_connection_id),
                 .new_token => |new_token| try self.receiveNewTokenFrame(new_token),
-                .handshake_done => try self.receiveHandshakeDoneFrame(),
-                .connection_close, .application_close => self.enterDrainingState(now_millis),
+                .handshake_done => {
+                    try self.receiveHandshakeDoneFrame();
+                    received_handshake_done = true;
+                },
+                .connection_close => |connection_close| try self.receiveConnectionCloseFrame(now_millis, connection_close),
+                .application_close => |application_close| try self.receiveApplicationCloseFrame(now_millis, application_close),
                 else => {},
             }
 
@@ -2084,8 +5735,13 @@ pub const QuicConnection = struct {
         if (ack_eliciting and !self.closed) {
             try self.queueAckForReceivedPacket(space);
         }
+        self.markHandshakeSpaceUsed(space);
         try self.drainPendingRecvStreams();
         self.recordPacketActivity(now_millis);
+        self.maybeDiscardInitialAfterHandshakePacketReceived(space);
+        if (received_handshake_done and !self.isClosingOrClosed()) {
+            try self.discardPacketNumberSpace(.handshake);
+        }
     }
 
     /// Return the next frame-payload datagram for a selected packet number space.
@@ -2140,14 +5796,21 @@ pub const QuicConnection = struct {
         if (self.pending_reset_streams.items.len != 0) {
             return try self.pollResetStream(ack_to_send, now_millis, out_buf);
         }
+        self.dropObsoleteStopSendingFrames();
         if (self.pending_stop_sending.items.len != 0) {
             return try self.pollStopSending(ack_to_send, now_millis, out_buf);
         }
         if (self.pending_retire_connection_ids.items.len != 0) {
             return try self.pollRetireConnectionId(ack_to_send, now_millis, out_buf);
         }
+        if (self.pending_handshake_done) {
+            return try self.pollHandshakeDone(ack_to_send, now_millis, out_buf);
+        }
         if (self.pendingNewConnectionIdCount() != 0) {
             return try self.pollNewConnectionId(ack_to_send, now_millis, out_buf);
+        }
+        if (self.pending_new_tokens.items.len != 0) {
+            return try self.pollNewToken(ack_to_send, now_millis, out_buf);
         }
         if (self.pending_path_challenges.items.len != 0) {
             return try self.pollPathChallenge(ack_to_send, now_millis, out_buf);
@@ -2402,6 +6065,7 @@ pub const QuicConnection = struct {
         }
 
         packet_space.crypto_send_offset.* = next_offset;
+        self.markHandshakeSpaceUsed(space);
     }
 
     /// Queue data for a stream. The data is copied and emitted by `pollTx`.
@@ -2563,13 +6227,10 @@ pub const QuicConnection = struct {
             removed.deinit(self.allocator);
         };
 
-        self.recv_streams.append(self.allocator, .{
-            .stream_id = stream_id,
-            .max_data = self.recv_max_stream_data,
-        }) catch return error.OutOfMemory;
+        const stream_state = try self.appendRecvStreamState(stream_id);
         appended_recv_state = true;
 
-        try self.queueStopSending(&self.recv_streams.items[self.recv_streams.items.len - 1], application_error_code);
+        try self.queueStopSending(stream_state, application_error_code);
     }
 
     /// Queue one ack-eliciting PING frame for transmission by `pollTx`.
@@ -2584,6 +6245,41 @@ pub const QuicConnection = struct {
     pub fn sendPathChallenge(self: *QuicConnection, data: [8]u8) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         self.pending_path_challenges.append(self.allocator, .{ .data = data }) catch return error.OutOfMemory;
+    }
+
+    /// Queue the server-only HANDSHAKE_DONE frame for Application/1-RTT transmission.
+    ///
+    /// This marks the modeled server handshake confirmed, discards Handshake
+    /// packet-number-space state and installed Handshake keys, and queues at
+    /// most one HANDSHAKE_DONE frame. The frame is consumed only after a
+    /// successful `pollTx()` or `pollProtectedShortDatagram()` send commit.
+    pub fn sendHandshakeDone(self: *QuicConnection) Error!void {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.side != .server) return error.InvalidPacket;
+
+        self.handshake_state = .confirmed;
+        self.handshake_confirmed = true;
+        self.discardPacketNumberSpaceState(.handshake);
+        if (self.pending_handshake_done or self.handshake_done_sent) return;
+        self.pending_handshake_done = true;
+    }
+
+    /// Queue a server-issued NEW_TOKEN frame for Application/1-RTT transmission.
+    ///
+    /// The opaque token is copied into connection-owned memory. It is consumed
+    /// only after a successful `pollTx()` or `pollProtectedShortDatagram()` send
+    /// commit; anti-amplification or congestion blocking leaves it queued.
+    pub fn issueNewToken(self: *QuicConnection, token: []const u8) Error!void {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.side != .server) return error.InvalidPacket;
+
+        const encoded_len = try newTokenFrameWireLen(token);
+        if (encoded_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const owned_token = self.allocator.alloc(u8, token.len) catch return error.OutOfMemory;
+        errdefer self.allocator.free(owned_token);
+        @memcpy(owned_token, token);
+        self.pending_new_tokens.append(self.allocator, owned_token) catch return error.OutOfMemory;
     }
 
     /// Return the newest stored NEW_TOKEN value, or null when no token is available.
@@ -2639,6 +6335,7 @@ pub const QuicConnection = struct {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
+        try self.drainPendingCryptoFrames(space);
         if (packet_space.crypto_read_offset.* >= packet_space.crypto_recv_buffer.items.len) return null;
 
         const available = packet_space.crypto_recv_buffer.items[packet_space.crypto_read_offset.*..];
@@ -2646,6 +6343,80 @@ pub const QuicConnection = struct {
         @memcpy(buf[0..n], available[0..n]);
         packet_space.crypto_read_offset.* += n;
         return n;
+    }
+
+    /// Drive a pluggable TLS/crypto backend for one packet number space.
+    ///
+    /// This helper gives `backend` the local transport-parameter extension
+    /// bytes when requested, delivers contiguous received CRYPTO bytes to
+    /// `backend`, applies peer transport-parameter bytes returned by
+    /// `backend`, queues backend-produced bytes through `sendCryptoInSpace()`,
+    /// and marks the modeled handshake confirmed when the backend reports
+    /// completion. If a Handshake-space drive confirms the handshake without
+    /// queuing outbound CRYPTO, the Handshake packet number space and installed
+    /// Handshake keys are discarded in the same call. `scratch` must be
+    /// non-empty and is only used during this call.
+    pub fn driveCryptoBackendInSpace(
+        self: *QuicConnection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!CryptoBackendProgress {
+        if (scratch.len == 0) return error.BufferTooSmall;
+
+        var progress = CryptoBackendProgress{};
+
+        if (backend.set_local_transport_parameters != null) {
+            const local_transport_parameters = try self.encodeLocalTransportParameters(scratch);
+            if (try backend.setLocalTransportParameters(local_transport_parameters)) {
+                progress.local_transport_parameters_bytes = local_transport_parameters.len;
+            }
+        }
+
+        while (try self.recvCryptoInSpace(space, scratch)) |n| {
+            if (n == 0) return error.BufferTooSmall;
+            try backend.receive(backend.context, space, scratch[0..n]);
+            progress.inbound_chunks += 1;
+            progress.inbound_bytes += n;
+        }
+
+        if (try backend.pullPeerTransportParameters(scratch)) |peer_transport_parameters| {
+            try self.applyPeerTransportParameterBytes(peer_transport_parameters);
+            progress.peer_transport_parameters_bytes = peer_transport_parameters.len;
+            progress.peer_transport_parameters_applied = true;
+        }
+
+        if (try backend.pullHandshakeTrafficSecrets()) |secrets| {
+            try self.installHandshakeTrafficSecrets(secrets);
+            progress.handshake_keys_installed = true;
+        }
+
+        if (try backend.pullZeroRttTrafficSecrets()) |secrets| {
+            try self.installZeroRttTrafficSecrets(secrets);
+            progress.zero_rtt_keys_installed = true;
+        }
+
+        if (try backend.pullOneRttTrafficSecrets()) |secrets| {
+            try self.installOneRttTrafficSecrets(secrets);
+            progress.one_rtt_keys_installed = true;
+        }
+
+        while (try backend.pull(backend.context, space, scratch)) |outbound| {
+            if (outbound.len == 0) break;
+            try self.sendCryptoInSpace(space, outbound);
+            progress.outbound_chunks += 1;
+            progress.outbound_bytes += outbound.len;
+        }
+
+        const backend_confirmed = backend.isHandshakeConfirmed();
+        if (backend_confirmed and !self.handshake_confirmed) {
+            try self.confirmHandshake();
+        }
+        if (backend_confirmed and space == .handshake and progress.outbound_chunks == 0) {
+            self.discardPacketNumberSpaceState(.handshake);
+        }
+        progress.handshake_confirmed = self.handshake_confirmed;
+        return progress;
     }
 
     /// Read queued data for a stream. Returns null when no data is available,
@@ -2662,7 +6433,10 @@ pub const QuicConnection = struct {
         }
 
         const stream_state = self.findRecvStream(stream_id) orelse return null;
-        if (stream_state.reset_error_code != null) return error.StreamClosed;
+        if (stream_state.reset_error_code != null) {
+            try self.queueClosedReceiveStreamCountCredit(stream_state);
+            return error.StreamClosed;
+        }
         if (stream_state.read_offset >= stream_state.data.items.len) {
             try self.queueReceiveFlowControlCredit(stream_state, 0);
             return null;
@@ -2725,6 +6499,29 @@ pub const QuicConnection = struct {
             if (stream.stream_id == stream_id) return stream;
         }
         return null;
+    }
+
+    fn appendRecvStreamState(self: *QuicConnection, stream_id: u64) Error!*RecvStreamState {
+        self.recv_streams.append(self.allocator, .{
+            .stream_id = stream_id,
+            .max_data = self.recv_max_stream_data,
+        }) catch return error.OutOfMemory;
+        return &self.recv_streams.items[self.recv_streams.items.len - 1];
+    }
+
+    fn ensureRecvStreamState(self: *QuicConnection, stream_id: u64) Error!*RecvStreamState {
+        if (self.findRecvStream(stream_id)) |stream_state| return stream_state;
+
+        var next_stream_id = stream_id & 0x03;
+        while (true) {
+            if (self.findRecvStream(next_stream_id) == null) {
+                _ = try self.appendRecvStreamState(next_stream_id);
+            }
+            if (next_stream_id == stream_id) break;
+            next_stream_id = std.math.add(u64, next_stream_id, 4) catch return error.InvalidStream;
+        }
+
+        return self.findRecvStream(stream_id) orelse error.Internal;
     }
 
     fn queueStreamFrame(
@@ -2866,6 +6663,14 @@ pub const QuicConnection = struct {
         if (stream_state.data.items.len < final_size_usize) return;
         const new_read_offset = std.math.add(usize, stream_state.read_offset, consumed_len) catch return error.Internal;
         if (new_read_offset < final_size_usize) return;
+        try self.queueClosedReceiveStreamCountCredit(stream_state);
+    }
+
+    fn queueClosedReceiveStreamCountCredit(
+        self: *QuicConnection,
+        stream_state: *RecvStreamState,
+    ) Error!void {
+        if (stream_state.stream_count_credit_released) return;
         if (isLocalStreamInitiator(self.side, stream_state.stream_id)) return;
 
         if (isBidirectionalStream(stream_state.stream_id)) {
@@ -2882,6 +6687,55 @@ pub const QuicConnection = struct {
             self.recv_max_streams_uni = next_limit;
         }
         stream_state.stream_count_credit_released = true;
+    }
+
+    fn nextReceiveConnectionDataLimit(self: QuicConnection, consumed: u64) Error!u64 {
+        var next_limit = std.math.add(u64, self.recv_max_data, consumed) catch return error.Internal;
+        if (self.config.receive_connection_window) |window| {
+            const target_limit = std.math.add(u64, self.recv_data_bytes, window) catch return error.Internal;
+            next_limit = @max(next_limit, target_limit);
+        }
+        if (next_limit > max_quic_varint) return error.Internal;
+        return next_limit;
+    }
+
+    fn nextReceiveStreamDataLimit(self: QuicConnection, stream_state: RecvStreamState, consumed: u64) Error!u64 {
+        var next_limit = std.math.add(u64, stream_state.max_data, consumed) catch return error.Internal;
+        if (self.config.receive_stream_window) |window| {
+            const highest_received = try highestReceivedStreamEndOffset(stream_state);
+            const target_limit = std.math.add(u64, highest_received, window) catch return error.Internal;
+            next_limit = @max(next_limit, target_limit);
+        }
+        if (next_limit > max_quic_varint) return error.Internal;
+        return next_limit;
+    }
+
+    fn nextReceiveLimitAfterPeerBlocked(
+        current_limit: u64,
+        reported_limit: u64,
+        maybe_window: ?u64,
+    ) ?u64 {
+        const window = maybe_window orelse return null;
+        const capped_reported = @min(reported_limit, max_quic_varint);
+        if (window == 0 or capped_reported < current_limit) return null;
+        const capped_window = @min(window, max_quic_varint - capped_reported);
+        const target_limit = capped_reported + capped_window;
+        if (target_limit <= current_limit) return null;
+        return target_limit;
+    }
+
+    fn nextReceiveStreamCountLimitAfterPeerBlocked(
+        current_limit: u64,
+        reported_limit: u64,
+        maybe_window: ?u64,
+    ) ?u64 {
+        const window = maybe_window orelse return null;
+        const capped_reported = @min(reported_limit, max_stream_count);
+        if (window == 0 or capped_reported < current_limit) return null;
+        const capped_window = @min(window, max_stream_count - capped_reported);
+        const target_limit = capped_reported + capped_window;
+        if (target_limit <= current_limit) return null;
+        return target_limit;
     }
 
     fn queueReceiveFlowControlCredit(
@@ -2910,9 +6764,8 @@ pub const QuicConnection = struct {
         }
 
         const consumed = std.math.cast(u64, consumed_len) orelse return error.Internal;
-        const next_connection_limit = std.math.add(u64, self.recv_max_data, consumed) catch return error.Internal;
-        const next_stream_limit = std.math.add(u64, stream_state.max_data, consumed) catch return error.Internal;
-        if (next_connection_limit > max_quic_varint or next_stream_limit > max_quic_varint) return error.Internal;
+        const next_connection_limit = try self.nextReceiveConnectionDataLimit(consumed);
+        const next_stream_limit = try self.nextReceiveStreamDataLimit(stream_state.*, consumed);
 
         const max_data_frame = PendingMaxFrame{ .data = .{ .maximum_data = next_connection_limit } };
         const max_stream_data_frame = PendingMaxFrame{ .stream_data = .{
@@ -2931,6 +6784,14 @@ pub const QuicConnection = struct {
     }
 
     fn rollbackCryptoSendQueue(
+        self: *QuicConnection,
+        queue: *std.ArrayList(PendingCryptoFrame),
+        original_len: usize,
+    ) void {
+        self.rollbackCryptoFrameQueue(queue, original_len);
+    }
+
+    fn rollbackCryptoFrameQueue(
         self: *QuicConnection,
         queue: *std.ArrayList(PendingCryptoFrame),
         original_len: usize,
@@ -3025,15 +6886,18 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn streamDataLimitForBlockedFrame(self: *QuicConnection, stream_id: u64) u64 {
-        if (self.findSendStream(stream_id)) |stream_state| return stream_state.max_data;
-        return self.initialPeerStreamDataLimit(stream_id);
+    fn streamDataBlockedFrameIsObsolete(self: *QuicConnection, stream_data: frame.StreamDataBlockedFrame) bool {
+        if (self.findSendStream(stream_data.stream_id)) |stream_state| {
+            if (stream_state.reset_sent or stream_state.fin_sent) return true;
+            return stream_state.max_data > stream_data.maximum_stream_data;
+        }
+        return self.initialPeerStreamDataLimit(stream_data.stream_id) > stream_data.maximum_stream_data;
     }
 
     fn blockedFrameIsObsolete(self: *QuicConnection, blocked_frame: PendingBlockedFrame) bool {
         return switch (blocked_frame) {
             .data => |data| self.peer_max_data > data.maximum_data,
-            .stream_data => |stream_data| self.streamDataLimitForBlockedFrame(stream_data.stream_id) > stream_data.maximum_stream_data,
+            .stream_data => |stream_data| self.streamDataBlockedFrameIsObsolete(stream_data),
             .streams_bidi => |streams| self.peer_max_streams_bidi > streams.maximum_streams,
             .streams_uni => |streams| self.peer_max_streams_uni > streams.maximum_streams,
         };
@@ -3050,15 +6914,18 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn receiveStreamDataLimitForMaxFrame(self: *QuicConnection, stream_id: u64) u64 {
-        if (self.findRecvStream(stream_id)) |stream_state| return stream_state.max_data;
-        return self.recv_max_stream_data;
+    fn maxStreamDataFrameIsObsolete(self: *QuicConnection, stream_data: frame.MaxStreamDataFrame) bool {
+        const stream_state = self.findRecvStream(stream_data.stream_id) orelse {
+            return self.recv_max_stream_data > stream_data.maximum_stream_data;
+        };
+        if (stream_state.final_size != null or stream_state.reset_error_code != null) return true;
+        return stream_state.max_data > stream_data.maximum_stream_data;
     }
 
     fn maxFrameIsObsolete(self: *QuicConnection, max_frame: PendingMaxFrame) bool {
         return switch (max_frame) {
             .data => |data| self.recv_max_data > data.maximum_data,
-            .stream_data => |stream_data| self.receiveStreamDataLimitForMaxFrame(stream_data.stream_id) > stream_data.maximum_stream_data,
+            .stream_data => |stream_data| self.maxStreamDataFrameIsObsolete(stream_data),
             .streams_bidi => |streams| self.recv_max_streams_bidi > streams.maximum_streams,
             .streams_uni => |streams| self.recv_max_streams_uni > streams.maximum_streams,
         };
@@ -3069,6 +6936,25 @@ pub const QuicConnection = struct {
         while (i < self.pending_max_frames.items.len) {
             if (self.maxFrameIsObsolete(self.pending_max_frames.items[i])) {
                 _ = self.pending_max_frames.orderedRemove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    fn stopSendingFrameIsObsolete(self: *QuicConnection, stop_sending: frame.StopSendingFrame) bool {
+        const stream_state = self.findRecvStream(stop_sending.stream_id) orelse return true;
+        if (stream_state.reset_error_code != null) return true;
+        const final_size = stream_state.final_size orelse return false;
+        const final_size_usize = std.math.cast(usize, final_size) orelse return false;
+        return stream_state.data.items.len >= final_size_usize;
+    }
+
+    fn dropObsoleteStopSendingFrames(self: *QuicConnection) void {
+        var i: usize = 0;
+        while (i < self.pending_stop_sending.items.len) {
+            if (self.stopSendingFrameIsObsolete(self.pending_stop_sending.items[i])) {
+                _ = self.pending_stop_sending.orderedRemove(i);
                 continue;
             }
             i += 1;
@@ -3090,6 +6976,7 @@ pub const QuicConnection = struct {
         var largest_acked_packet: ?SentPacket = null;
         var newly_acked_ect0: u64 = 0;
         var newly_acked_ect1: u64 = 0;
+        var local_key_update_acked = false;
 
         var i: usize = 0;
         while (i < packet_space.sent_packets.items.len) {
@@ -3100,6 +6987,13 @@ pub const QuicConnection = struct {
 
             const removed = packet_space.sent_packets.orderedRemove(i);
             acked_bytes = std.math.add(usize, acked_bytes, removed.bytes) catch std.math.maxInt(usize);
+            if (space == .application) {
+                if (self.local_one_rtt_key_update_ack_threshold) |threshold| {
+                    if (removed.packet_number >= threshold) {
+                        local_key_update_acked = true;
+                    }
+                }
+            }
             if (largest_acked_packet == null or removed.packet_number > largest_acked_packet.?.packet_number) {
                 largest_acked_packet = removed;
             }
@@ -3153,6 +7047,9 @@ pub const QuicConnection = struct {
                 packet_space.recovery_state.onPersistentCongestion();
             }
             return;
+        }
+        if (local_key_update_acked) {
+            self.local_one_rtt_key_update_ack_threshold = null;
         }
 
         packet_space.recovery_state.onPacketAcked(
@@ -3288,12 +7185,40 @@ pub const QuicConnection = struct {
         }
     }
 
+    fn hasPendingPtoProbeDataInSpace(self: *QuicConnection, space: PacketNumberSpace) bool {
+        const packet_space = self.packetNumberSpace(space);
+        if (packet_space.crypto_send_queue.items.len != 0 or packet_space.pending_ping_count.* != 0) return true;
+        if (space != .application) return false;
+
+        if (self.pending_path_responses.items.len != 0 or
+            self.pending_reset_streams.items.len != 0 or
+            self.pending_retire_connection_ids.items.len != 0 or
+            self.pending_handshake_done or
+            self.pendingNewConnectionIdCount() != 0 or
+            self.pending_new_tokens.items.len != 0 or
+            self.pending_path_challenges.items.len != 0)
+        {
+            return true;
+        }
+
+        self.dropObsoleteStopSendingFrames();
+        if (self.pending_stop_sending.items.len != 0) return true;
+        self.dropObsoleteMaxFrames();
+        if (self.pending_max_frames.items.len != 0) return true;
+        self.dropObsoleteBlockedFrames();
+        if (self.pending_blocked_frames.items.len != 0) return true;
+        self.dropResetClosedStreamFrames();
+        return self.send_queue.items.len != 0;
+    }
+
     fn checkPtoTimeoutInSpace(self: *QuicConnection, space: PacketNumberSpace, now_millis: i64) Error!void {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return;
         const deadline = self.ptoDeadlineMillis(space) orelse return;
         if (deadline > now_millis) return;
-        try self.queuePingInSpace(space);
+        if (!self.hasPendingPtoProbeDataInSpace(space)) {
+            try self.queuePingInSpace(space);
+        }
         packet_space.recovery_state.onPtoExpired();
     }
 
@@ -3411,6 +7336,7 @@ pub const QuicConnection = struct {
         const written = out.getWritten();
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
+        self.maybeDiscardInitialAfterHandshakePacketSent(space);
         return written;
     }
 
@@ -3765,6 +7691,145 @@ pub const QuicConnection = struct {
         return written;
     }
 
+    fn pollHandshakeDone(
+        self: *QuicConnection,
+        ack_to_send: ?frame.AckFrame,
+        now_millis: i64,
+        out_buf: []u8,
+    ) Error!?[]u8 {
+        const handshake_done_encoded_len = handshakeDoneFrameWireLen();
+        const max_tx_datagram_size = self.maxTxDatagramSize();
+        if (handshake_done_encoded_len > max_tx_datagram_size) return error.BufferTooSmall;
+
+        var encoded_len = handshake_done_encoded_len;
+        var include_ack = false;
+        if (ack_to_send) |ack| {
+            const ack_encoded_len = try ackFrameWireLen(ack);
+            const coalesced_len = try addWireLen(ack_encoded_len, handshake_done_encoded_len);
+            if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
+                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+            {
+                encoded_len = coalesced_len;
+                include_ack = true;
+            } else if (ack_encoded_len <= max_tx_datagram_size and out_buf.len >= ack_encoded_len) {
+                return try self.pollAckOnly(ack, now_millis, out_buf);
+            } else {
+                return error.BufferTooSmall;
+            }
+        }
+
+        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (out_buf.len < encoded_len) return error.BufferTooSmall;
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        var appended_sent_packet = false;
+        errdefer if (appended_sent_packet) {
+            self.sent_packets.items.len -= 1;
+        };
+
+        const packet_number = self.next_packet_number;
+        self.sent_packets.append(self.allocator, .{
+            .packet_number = packet_number,
+            .sent_time_millis = now_millis,
+            .bytes = encoded_len,
+        }) catch return error.OutOfMemory;
+        appended_sent_packet = true;
+
+        var out = buffer.fixedWriter(out_buf[0..encoded_len]);
+        if (include_ack) {
+            frame.encodeFrame(out.writer(), .{ .ack = ack_to_send.? }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(out.writer(), .{ .handshake_done = {} }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const written = out.getWritten();
+        std.debug.assert(written.len == encoded_len);
+
+        self.pending_handshake_done = false;
+        self.handshake_done_sent = true;
+        if (include_ack) self.pending_ack_largest = null;
+        self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
+        self.recovery_state.onPacketSent(written.len);
+        self.recordPeerAddressBytesSent(written.len);
+        self.recordPacketActivity(now_millis);
+        return written;
+    }
+
+    fn pollNewToken(
+        self: *QuicConnection,
+        ack_to_send: ?frame.AckFrame,
+        now_millis: i64,
+        out_buf: []u8,
+    ) Error!?[]u8 {
+        const token = self.pending_new_tokens.items[0];
+        const new_token_encoded_len = try newTokenFrameWireLen(token);
+        const max_tx_datagram_size = self.maxTxDatagramSize();
+        if (new_token_encoded_len > max_tx_datagram_size) return error.BufferTooSmall;
+
+        var encoded_len = new_token_encoded_len;
+        var include_ack = false;
+        if (ack_to_send) |ack| {
+            const ack_encoded_len = try ackFrameWireLen(ack);
+            const coalesced_len = try addWireLen(ack_encoded_len, new_token_encoded_len);
+            if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
+                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+            {
+                encoded_len = coalesced_len;
+                include_ack = true;
+            } else if (ack_encoded_len <= max_tx_datagram_size and out_buf.len >= ack_encoded_len) {
+                return try self.pollAckOnly(ack, now_millis, out_buf);
+            } else {
+                return error.BufferTooSmall;
+            }
+        }
+
+        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (out_buf.len < encoded_len) return error.BufferTooSmall;
+        if (self.next_packet_number > max_quic_varint) return error.Internal;
+
+        var appended_sent_packet = false;
+        errdefer if (appended_sent_packet) {
+            self.sent_packets.items.len -= 1;
+        };
+
+        const packet_number = self.next_packet_number;
+        self.sent_packets.append(self.allocator, .{
+            .packet_number = packet_number,
+            .sent_time_millis = now_millis,
+            .bytes = encoded_len,
+        }) catch return error.OutOfMemory;
+        appended_sent_packet = true;
+
+        var out = buffer.fixedWriter(out_buf[0..encoded_len]);
+        if (include_ack) {
+            frame.encodeFrame(out.writer(), .{ .ack = ack_to_send.? }) catch |err| switch (err) {
+                error.NoSpaceLeft => return error.BufferTooSmall,
+                else => return error.Internal,
+            };
+        }
+        frame.encodeFrame(out.writer(), .{ .new_token = .{ .token = token } }) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const written = out.getWritten();
+        std.debug.assert(written.len == encoded_len);
+
+        const removed = self.pending_new_tokens.orderedRemove(0);
+        self.allocator.free(removed);
+        if (include_ack) self.pending_ack_largest = null;
+        self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
+        self.recovery_state.onPacketSent(written.len);
+        self.recordPeerAddressBytesSent(written.len);
+        self.recordPacketActivity(now_millis);
+        return written;
+    }
+
     fn pollPingFrame(
         self: *QuicConnection,
         ack_to_send: ?frame.AckFrame,
@@ -3843,6 +7908,7 @@ pub const QuicConnection = struct {
         packet_space.recovery_state.onPacketSent(written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
+        self.maybeDiscardInitialAfterHandshakePacketSent(space);
         return written;
     }
 
@@ -4170,6 +8236,7 @@ pub const QuicConnection = struct {
         packet_space.recovery_state.onPacketSent(written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
+        self.maybeDiscardInitialAfterHandshakePacketSent(space);
         return written;
     }
 
@@ -4223,6 +8290,16 @@ pub const QuicConnection = struct {
         return false;
     }
 
+    fn localStatelessResetTokenValueExists(
+        self: QuicConnection,
+        stateless_reset_token: [packet.stateless_reset_token_len]u8,
+    ) bool {
+        for (self.local_connection_ids.items) |local_id| {
+            if (statelessResetTokensEqual(local_id.stateless_reset_token, stateless_reset_token)) return true;
+        }
+        return false;
+    }
+
     fn findLocalConnectionId(self: *QuicConnection, sequence_number: u64) ?*LocalConnectionId {
         for (self.local_connection_ids.items) |*local_id| {
             if (local_id.sequence_number == sequence_number) return local_id;
@@ -4248,6 +8325,16 @@ pub const QuicConnection = struct {
         return null;
     }
 
+    fn activeStatelessResetTokenValueExists(
+        self: QuicConnection,
+        stateless_reset_token: [packet.stateless_reset_token_len]u8,
+    ) bool {
+        for (self.active_connection_ids.items) |active_id| {
+            if (statelessResetTokensEqual(active_id.stateless_reset_token, stateless_reset_token)) return true;
+        }
+        return false;
+    }
+
     fn queueRetireConnectionId(self: *QuicConnection, sequence_number: u64) Error!void {
         for (self.pending_retire_connection_ids.items) |queued_sequence_number| {
             if (queued_sequence_number == sequence_number) return;
@@ -4268,10 +8355,11 @@ pub const QuicConnection = struct {
 
         if (self.findActiveConnectionId(new_connection_id.sequence_number)) |existing| {
             if (!std.mem.eql(u8, existing.connection_id, new_connection_id.connection_id)) return error.InvalidPacket;
-            if (!std.mem.eql(u8, &existing.stateless_reset_token, &new_connection_id.stateless_reset_token)) return error.InvalidPacket;
+            if (!statelessResetTokensEqual(existing.stateless_reset_token, new_connection_id.stateless_reset_token)) return error.InvalidPacket;
             return;
         }
 
+        if (self.activeStatelessResetTokenValueExists(new_connection_id.stateless_reset_token)) return error.InvalidPacket;
         if (self.activeConnectionIdCount() >= self.config.active_connection_id_limit) return error.InvalidPacket;
 
         const owned_connection_id = self.allocator.alloc(u8, new_connection_id.connection_id.len) catch return error.OutOfMemory;
@@ -4304,6 +8392,7 @@ pub const QuicConnection = struct {
 
     fn receiveHandshakeDoneFrame(self: *QuicConnection) Error!void {
         if (self.side == .server) return error.InvalidPacket;
+        self.handshake_state = .confirmed;
         self.handshake_confirmed = true;
     }
 
@@ -4314,19 +8403,35 @@ pub const QuicConnection = struct {
             data_blocked.maximum_data;
         if (data_blocked.maximum_data < self.recv_max_data) {
             try self.queueMaxDataFrame(self.recv_max_data);
+        } else if (nextReceiveLimitAfterPeerBlocked(
+            self.recv_max_data,
+            data_blocked.maximum_data,
+            self.config.receive_connection_window,
+        )) |next_limit| {
+            try self.queueMaxDataFrame(next_limit);
+            self.recv_max_data = next_limit;
         }
     }
 
     fn receiveStreamDataBlockedFrame(self: *QuicConnection, stream_data_blocked: frame.StreamDataBlockedFrame) Error!void {
         if (stream_data_blocked.stream_id > max_quic_varint) return error.InvalidStream;
+        try self.validateIncomingStreamCount(stream_data_blocked.stream_id);
+
+        const stream_state = try self.ensureRecvStreamState(stream_data_blocked.stream_id);
+        if (stream_state.final_size != null) return;
 
         for (self.peer_stream_data_blocked_limits.items) |*blocked| {
             if (blocked.stream_id != stream_data_blocked.stream_id) continue;
             blocked.maximum_stream_data = @max(blocked.maximum_stream_data, stream_data_blocked.maximum_stream_data);
-            if (self.findRecvStream(stream_data_blocked.stream_id)) |stream_state| {
-                if (stream_data_blocked.maximum_stream_data < stream_state.max_data) {
-                    try self.queueMaxStreamDataFrame(stream_data_blocked.stream_id, stream_state.max_data);
-                }
+            if (stream_data_blocked.maximum_stream_data < stream_state.max_data) {
+                try self.queueMaxStreamDataFrame(stream_data_blocked.stream_id, stream_state.max_data);
+            } else if (nextReceiveLimitAfterPeerBlocked(
+                stream_state.max_data,
+                stream_data_blocked.maximum_stream_data,
+                self.config.receive_stream_window,
+            )) |next_limit| {
+                try self.queueMaxStreamDataFrame(stream_data_blocked.stream_id, next_limit);
+                stream_state.max_data = next_limit;
             }
             return;
         }
@@ -4335,10 +8440,15 @@ pub const QuicConnection = struct {
             .stream_id = stream_data_blocked.stream_id,
             .maximum_stream_data = stream_data_blocked.maximum_stream_data,
         }) catch return error.OutOfMemory;
-        if (self.findRecvStream(stream_data_blocked.stream_id)) |stream_state| {
-            if (stream_data_blocked.maximum_stream_data < stream_state.max_data) {
-                try self.queueMaxStreamDataFrame(stream_data_blocked.stream_id, stream_state.max_data);
-            }
+        if (stream_data_blocked.maximum_stream_data < stream_state.max_data) {
+            try self.queueMaxStreamDataFrame(stream_data_blocked.stream_id, stream_state.max_data);
+        } else if (nextReceiveLimitAfterPeerBlocked(
+            stream_state.max_data,
+            stream_data_blocked.maximum_stream_data,
+            self.config.receive_stream_window,
+        )) |next_limit| {
+            try self.queueMaxStreamDataFrame(stream_data_blocked.stream_id, next_limit);
+            stream_state.max_data = next_limit;
         }
     }
 
@@ -4349,6 +8459,13 @@ pub const QuicConnection = struct {
             streams_blocked.maximum_streams;
         if (streams_blocked.maximum_streams < self.recv_max_streams_bidi) {
             try self.queueMaxStreamsBidiFrame(self.recv_max_streams_bidi);
+        } else if (nextReceiveStreamCountLimitAfterPeerBlocked(
+            self.recv_max_streams_bidi,
+            streams_blocked.maximum_streams,
+            self.config.receive_stream_count_window,
+        )) |next_limit| {
+            try self.queueMaxStreamsBidiFrame(next_limit);
+            self.recv_max_streams_bidi = next_limit;
         }
     }
 
@@ -4359,11 +8476,23 @@ pub const QuicConnection = struct {
             streams_blocked.maximum_streams;
         if (streams_blocked.maximum_streams < self.recv_max_streams_uni) {
             try self.queueMaxStreamsUniFrame(self.recv_max_streams_uni);
+        } else if (nextReceiveStreamCountLimitAfterPeerBlocked(
+            self.recv_max_streams_uni,
+            streams_blocked.maximum_streams,
+            self.config.receive_stream_count_window,
+        )) |next_limit| {
+            try self.queueMaxStreamsUniFrame(next_limit);
+            self.recv_max_streams_uni = next_limit;
         }
     }
 
     fn receiveMaxDataFrame(self: *QuicConnection, max_data: frame.MaxDataFrame) void {
         self.peer_max_data = @max(self.peer_max_data, max_data.maximum_data);
+    }
+
+    fn applyMaxStreamDataToSendStream(stream_state: *SendStreamState, maximum_stream_data: u64) void {
+        if (stream_state.fin_sent) return;
+        stream_state.max_data = @max(stream_state.max_data, maximum_stream_data);
     }
 
     fn receiveMaxStreamDataFrame(self: *QuicConnection, max_stream_data: frame.MaxStreamDataFrame) Error!void {
@@ -4372,28 +8501,34 @@ pub const QuicConnection = struct {
         if (!isBidirectionalStream(max_stream_data.stream_id)) {
             if (!isLocalStreamInitiator(self.side, max_stream_data.stream_id)) return error.InvalidPacket;
             const stream_state = self.findSendStream(max_stream_data.stream_id) orelse return error.InvalidPacket;
-            stream_state.max_data = @max(stream_state.max_data, max_stream_data.maximum_stream_data);
+            applyMaxStreamDataToSendStream(stream_state, max_stream_data.maximum_stream_data);
             return;
         }
 
         if (isLocalStreamInitiator(self.side, max_stream_data.stream_id)) {
             const stream_state = self.findSendStream(max_stream_data.stream_id) orelse return error.InvalidPacket;
-            stream_state.max_data = @max(stream_state.max_data, max_stream_data.maximum_stream_data);
+            applyMaxStreamDataToSendStream(stream_state, max_stream_data.maximum_stream_data);
             return;
         }
 
         if (streamCountForId(max_stream_data.stream_id) > self.recv_max_streams_bidi) return error.InvalidPacket;
-        if (self.findRecvStream(max_stream_data.stream_id) == null) return error.InvalidPacket;
+        _ = try self.ensureRecvStreamState(max_stream_data.stream_id);
 
         const existing_state = self.findSendStream(max_stream_data.stream_id);
+        var appended_send_state = false;
+        errdefer if (appended_send_state) {
+            _ = self.send_streams.orderedRemove(self.send_streams.items.len - 1);
+        };
+
         const stream_state = existing_state orelse blk: {
             self.send_streams.append(self.allocator, .{
                 .stream_id = max_stream_data.stream_id,
                 .max_data = self.initialPeerStreamDataLimit(max_stream_data.stream_id),
             }) catch return error.OutOfMemory;
+            appended_send_state = true;
             break :blk &self.send_streams.items[self.send_streams.items.len - 1];
         };
-        stream_state.max_data = @max(stream_state.max_data, max_stream_data.maximum_stream_data);
+        applyMaxStreamDataToSendStream(stream_state, max_stream_data.maximum_stream_data);
     }
 
     fn receiveMaxStreamsBidiFrame(self: *QuicConnection, max_streams: frame.MaxStreamsBidiFrame) void {
@@ -4437,6 +8572,8 @@ pub const QuicConnection = struct {
 
         if (streamCountForId(stop_sending.stream_id) > self.recv_max_streams_bidi) return error.InvalidPacket;
 
+        _ = try self.ensureRecvStreamState(stop_sending.stream_id);
+
         const existing_state = self.findSendStream(stop_sending.stream_id);
         var appended_send_state = false;
         errdefer if (appended_send_state) {
@@ -4479,6 +8616,10 @@ pub const QuicConnection = struct {
         if (stream_state.reset_error_code != null) return error.StreamClosed;
         if (stream_state.stop_sending_sent) return;
         if (application_error_code > max_quic_varint) return error.InvalidPacket;
+        if (stream_state.final_size) |final_size| {
+            const final_size_usize = std.math.cast(usize, final_size) orelse return error.Internal;
+            if (stream_state.data.items.len >= final_size_usize) return error.StreamClosed;
+        }
 
         self.pending_stop_sending.append(self.allocator, .{
             .stream_id = stream_state.stream_id,
@@ -4517,16 +8658,46 @@ pub const QuicConnection = struct {
         return highest;
     }
 
-    fn receiveStreamFrameOverlaps(stream_state: RecvStreamState, offset: u64, data_len: usize) Error!bool {
-        if (data_len == 0) return false;
+    const ReceiveStreamFrameData = struct {
+        offset: u64,
+        data: []const u8,
+    };
+
+    fn trimAlreadyReceivedStreamData(
+        stream_state: RecvStreamState,
+        offset: u64,
+        data: []const u8,
+    ) Error!ReceiveStreamFrameData {
+        if (data.len == 0) return .{ .offset = offset, .data = data };
 
         const contiguous_len = std.math.cast(u64, stream_state.data.items.len) orelse return error.Internal;
-        if (offset < contiguous_len) return true;
+        var new_offset = offset;
+        var new_data = data;
+
+        if (new_offset < contiguous_len) {
+            const duplicate_len_u64 = @min(
+                contiguous_len - new_offset,
+                std.math.cast(u64, new_data.len) orelse return error.InvalidPacket,
+            );
+            const duplicate_len = std.math.cast(usize, duplicate_len_u64) orelse return error.InvalidPacket;
+            const duplicate_start = std.math.cast(usize, new_offset) orelse return error.InvalidPacket;
+            const duplicate_end = std.math.add(usize, duplicate_start, duplicate_len) catch return error.InvalidPacket;
+            if (!std.mem.eql(u8, stream_state.data.items[duplicate_start..duplicate_end], new_data[0..duplicate_len])) {
+                return error.InvalidPacket;
+            }
+            new_offset = streamEndOffset(new_offset, duplicate_len) orelse return error.InvalidPacket;
+            new_data = new_data[duplicate_len..];
+            if (new_data.len == 0) return .{ .offset = new_offset, .data = new_data };
+        }
 
         for (stream_state.pending.items) |pending| {
-            if (streamRangesOverlap(offset, data_len, pending.offset, pending.data.len)) return true;
+            if (!streamRangesOverlap(new_offset, new_data.len, pending.offset, pending.data.len)) continue;
+            if (new_offset == pending.offset and new_data.len == pending.data.len and std.mem.eql(u8, new_data, pending.data)) {
+                return .{ .offset = new_offset, .data = new_data[0..0] };
+            }
+            return error.InvalidPacket;
         }
-        return false;
+        return .{ .offset = new_offset, .data = new_data };
     }
 
     fn appendPendingRecvStreamFrame(
@@ -4582,21 +8753,7 @@ pub const QuicConnection = struct {
         if (reset.stream_id > max_quic_varint) return error.InvalidStream;
         try self.validateIncomingStreamCount(reset.stream_id);
 
-        const existing_state = self.findRecvStream(reset.stream_id);
-        var appended_recv_state = false;
-        errdefer if (appended_recv_state) {
-            var removed = self.recv_streams.orderedRemove(self.recv_streams.items.len - 1);
-            removed.deinit(self.allocator);
-        };
-
-        const stream_state = existing_state orelse blk: {
-            self.recv_streams.append(self.allocator, .{
-                .stream_id = reset.stream_id,
-                .max_data = self.recv_max_stream_data,
-            }) catch return error.OutOfMemory;
-            appended_recv_state = true;
-            break :blk &self.recv_streams.items[self.recv_streams.items.len - 1];
-        };
+        const stream_state = try self.ensureRecvStreamState(reset.stream_id);
 
         if (reset.final_size > stream_state.max_data) return error.InvalidPacket;
 
@@ -4604,6 +8761,19 @@ pub const QuicConnection = struct {
         if (reset.final_size < highest_received) return error.InvalidPacket;
         if (stream_state.final_size) |final_size| {
             if (final_size != reset.final_size) return error.InvalidPacket;
+            if (stream_state.reset_error_code != null) return;
+
+            const final_size_usize = std.math.cast(usize, final_size) orelse return error.Internal;
+            if (stream_state.data.items.len >= final_size_usize) return;
+
+            const received_size = try receivedStreamByteCount(stream_state.*);
+            if (reset.final_size < received_size) return error.InvalidPacket;
+            const delta = reset.final_size - received_size;
+            const next_recv_total = std.math.add(u64, self.recv_data_bytes, delta) catch return error.InvalidPacket;
+            if (next_recv_total > self.recv_max_data) return error.InvalidPacket;
+
+            self.recv_data_bytes = next_recv_total;
+            stream_state.reset_error_code = reset.application_error_code;
             return;
         }
 
@@ -4618,6 +8788,80 @@ pub const QuicConnection = struct {
         stream_state.reset_error_code = reset.application_error_code;
     }
 
+    const ReceiveCryptoFrameData = struct {
+        offset: u64,
+        data: []const u8,
+    };
+
+    fn trimAlreadyReceivedCryptoData(
+        packet_space: PacketNumberSpaceView,
+        offset: u64,
+        data: []const u8,
+    ) Error!ReceiveCryptoFrameData {
+        if (data.len == 0) return .{ .offset = offset, .data = data };
+
+        const contiguous_len = std.math.cast(u64, packet_space.crypto_recv_buffer.items.len) orelse return error.Internal;
+        var new_offset = offset;
+        var new_data = data;
+
+        if (new_offset < contiguous_len) {
+            const duplicate_len_u64 = @min(
+                contiguous_len - new_offset,
+                std.math.cast(u64, new_data.len) orelse return error.InvalidPacket,
+            );
+            const duplicate_len = std.math.cast(usize, duplicate_len_u64) orelse return error.InvalidPacket;
+            const duplicate_start = std.math.cast(usize, new_offset) orelse return error.InvalidPacket;
+            const duplicate_end = std.math.add(usize, duplicate_start, duplicate_len) catch return error.InvalidPacket;
+            if (!std.mem.eql(u8, packet_space.crypto_recv_buffer.items[duplicate_start..duplicate_end], new_data[0..duplicate_len])) {
+                return error.InvalidPacket;
+            }
+            new_offset = streamEndOffset(new_offset, duplicate_len) orelse return error.InvalidPacket;
+            new_data = new_data[duplicate_len..];
+            if (new_data.len == 0) return .{ .offset = new_offset, .data = new_data };
+        }
+
+        for (packet_space.crypto_recv_pending.items) |pending| {
+            if (!streamRangesOverlap(new_offset, new_data.len, pending.offset, pending.data.len)) continue;
+            if (new_offset == pending.offset and new_data.len == pending.data.len and std.mem.eql(u8, new_data, pending.data)) {
+                return .{ .offset = new_offset, .data = new_data[0..0] };
+            }
+            return error.InvalidPacket;
+        }
+        return .{ .offset = new_offset, .data = new_data };
+    }
+
+    fn pendingCryptoFrameIndexAt(packet_space: PacketNumberSpaceView, offset: u64) ?usize {
+        for (packet_space.crypto_recv_pending.items, 0..) |pending, i| {
+            if (pending.offset == offset) return i;
+        }
+        return null;
+    }
+
+    fn drainPendingCryptoFrames(self: *QuicConnection, space: PacketNumberSpace) Error!void {
+        var packet_space = self.packetNumberSpace(space);
+        const start_len = packet_space.crypto_recv_buffer.items.len;
+        var expected = std.math.cast(u64, start_len) orelse return error.Internal;
+        var total_append_len: usize = 0;
+        while (pendingCryptoFrameIndexAt(packet_space, expected)) |pending_index| {
+            const pending = packet_space.crypto_recv_pending.items[pending_index];
+            total_append_len = std.math.add(usize, total_append_len, pending.data.len) catch return error.InvalidPacket;
+            expected = streamEndOffset(expected, pending.data.len) orelse return error.InvalidPacket;
+        }
+
+        if (total_append_len == 0) return;
+        packet_space.crypto_recv_buffer.ensureUnusedCapacity(self.allocator, total_append_len) catch return error.OutOfMemory;
+
+        expected = std.math.cast(u64, start_len) orelse return error.Internal;
+        while (pendingCryptoFrameIndexAt(packet_space, expected)) |pending_index| {
+            const pending = packet_space.crypto_recv_pending.items[pending_index];
+            packet_space.crypto_recv_buffer.appendSliceAssumeCapacity(pending.data);
+            expected = streamEndOffset(expected, pending.data.len) orelse return error.InvalidPacket;
+
+            const removed = packet_space.crypto_recv_pending.orderedRemove(pending_index);
+            self.allocator.free(removed.data);
+        }
+    }
+
     fn receiveCryptoFrame(
         self: *QuicConnection,
         space: PacketNumberSpace,
@@ -4626,11 +8870,16 @@ pub const QuicConnection = struct {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
 
-        const expected_offset = std.math.cast(u64, packet_space.crypto_recv_buffer.items.len) orelse return error.Internal;
-        if (crypto.offset != expected_offset) return error.InvalidPacket;
         _ = streamEndOffset(crypto.offset, crypto.data.len) orelse return error.InvalidPacket;
+        const new_frame_data = try trimAlreadyReceivedCryptoData(packet_space, crypto.offset, crypto.data);
+        if (new_frame_data.data.len == 0) return;
 
-        packet_space.crypto_recv_buffer.appendSlice(self.allocator, crypto.data) catch return error.OutOfMemory;
+        const contiguous_len = std.math.cast(u64, packet_space.crypto_recv_buffer.items.len) orelse return error.Internal;
+        if (new_frame_data.offset == contiguous_len) {
+            packet_space.crypto_recv_buffer.appendSlice(self.allocator, new_frame_data.data) catch return error.OutOfMemory;
+        } else {
+            try self.queueCryptoFrame(packet_space.crypto_recv_pending, new_frame_data.offset, new_frame_data.data);
+        }
     }
 
     fn receiveStreamFrame(self: *QuicConnection, stream_frame: frame.StreamFrame) Error!void {
@@ -4638,49 +8887,37 @@ pub const QuicConnection = struct {
         try self.validateIncomingStreamCount(stream_frame.stream_id);
 
         const end_offset = streamEndOffset(stream_frame.offset, stream_frame.data.len) orelse return error.InvalidPacket;
-        const next_recv_total = streamEndOffset(self.recv_data_bytes, stream_frame.data.len) orelse return error.InvalidPacket;
-        if (next_recv_total > self.recv_max_data) return error.InvalidPacket;
-
         const existing_state = self.findRecvStream(stream_frame.stream_id);
         const stream_receive_limit = if (existing_state) |stream_state| stream_state.max_data else self.recv_max_stream_data;
         if (end_offset > stream_receive_limit) return error.InvalidPacket;
 
         if (existing_state) |stream_state| {
-            if (stream_state.reset_error_code != null) return error.InvalidPacket;
             if (stream_state.final_size) |final_size| {
                 if (end_offset > final_size) return error.InvalidPacket;
                 if (stream_frame.fin and end_offset != final_size) return error.InvalidPacket;
+                const final_size_usize = std.math.cast(usize, final_size) orelse return error.Internal;
+                if (stream_state.data.items.len >= final_size_usize) return;
+                if (stream_state.reset_error_code != null) return;
+            } else if (stream_state.reset_error_code != null) {
+                return error.Internal;
             } else if (stream_frame.fin) {
                 const highest_received = try highestReceivedStreamEndOffset(stream_state.*);
                 if (end_offset < highest_received) return error.InvalidPacket;
             }
-
-            if (try receiveStreamFrameOverlaps(stream_state.*, stream_frame.offset, stream_frame.data.len)) {
-                return error.InvalidPacket;
-            }
         }
 
-        var appended_recv_state = false;
-        errdefer if (appended_recv_state) {
-            var removed = self.recv_streams.orderedRemove(self.recv_streams.items.len - 1);
-            removed.deinit(self.allocator);
-        };
+        const stream_state = if (existing_state) |state| state else try self.ensureRecvStreamState(stream_frame.stream_id);
 
-        const stream_state = existing_state orelse blk: {
-            self.recv_streams.append(self.allocator, .{
-                .stream_id = stream_frame.stream_id,
-                .max_data = self.recv_max_stream_data,
-            }) catch return error.OutOfMemory;
-            appended_recv_state = true;
-            break :blk &self.recv_streams.items[self.recv_streams.items.len - 1];
-        };
+        const new_frame_data = try trimAlreadyReceivedStreamData(stream_state.*, stream_frame.offset, stream_frame.data);
+        const next_recv_total = streamEndOffset(self.recv_data_bytes, new_frame_data.data.len) orelse return error.InvalidPacket;
+        if (next_recv_total > self.recv_max_data) return error.InvalidPacket;
 
         const contiguous_len = std.math.cast(u64, stream_state.data.items.len) orelse return error.Internal;
-        if (stream_frame.data.len != 0) {
-            if (stream_frame.offset == contiguous_len) {
-                stream_state.data.appendSlice(self.allocator, stream_frame.data) catch return error.OutOfMemory;
+        if (new_frame_data.data.len != 0) {
+            if (new_frame_data.offset == contiguous_len) {
+                stream_state.data.appendSlice(self.allocator, new_frame_data.data) catch return error.OutOfMemory;
             } else {
-                try self.appendPendingRecvStreamFrame(stream_state, stream_frame.offset, stream_frame.data);
+                try self.appendPendingRecvStreamFrame(stream_state, new_frame_data.offset, new_frame_data.data);
             }
             self.recv_data_bytes = next_recv_total;
         }
@@ -4841,9 +9078,42 @@ test "init validates initial stream count limits" {
     try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
         .active_connection_id_limit = 1,
     }));
+    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+        .ack_delay_exponent = 21,
+    }));
+    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+        .max_ack_delay_ms = 1 << 14,
+    }));
+    try std.testing.expectError(error.InvalidStream, QuicConnection.init(std.testing.allocator, .client, .{
+        .receive_stream_count_window = max_stream_count + 1,
+    }));
+}
+
+test "PreferredAddress owns fixed connection ID storage" {
+    const reset_token = [_]u8{0xa5} ** packet.stateless_reset_token_len;
+    const cid = [_]u8{ 0xc1, 0xc2, 0xc3 };
+    const preferred = try PreferredAddress.init(
+        .{ 192, 0, 2, 10 },
+        4433,
+        .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+        4434,
+        &cid,
+        reset_token,
+    );
+
+    try std.testing.expectEqualSlices(u8, &cid, preferred.connectionId());
+    try std.testing.expectError(error.InvalidPacket, PreferredAddress.init(
+        .{ 192, 0, 2, 10 },
+        4433,
+        .{0} ** 16,
+        4434,
+        &[_]u8{},
+        reset_token,
+    ));
 }
 
 test "localTransportParameters exposes configured receive limits" {
+    const available_versions = [_]packet.Version{ .v2, .v1 };
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1400,
         .max_idle_timeout_ms = 30_000,
@@ -4853,11 +9123,14 @@ test "localTransportParameters exposes configured receive limits" {
         .initial_max_streams_bidi = 12,
         .initial_max_streams_uni = 6,
         .active_connection_id_limit = 4,
+        .available_versions = &available_versions,
     });
     defer conn.deinit();
 
     const params = conn.localTransportParameters();
     try std.testing.expect(params.stateless_reset_token == null);
+    try std.testing.expect(params.original_destination_connection_id == null);
+    try std.testing.expect(params.initial_source_connection_id == null);
     try std.testing.expectEqual(@as(u64, 30_000), params.max_idle_timeout);
     try std.testing.expect(params.disable_active_migration);
     try std.testing.expectEqual(@as(u64, 1400), params.max_udp_payload_size);
@@ -4868,6 +9141,174 @@ test "localTransportParameters exposes configured receive limits" {
     try std.testing.expectEqual(@as(u64, 12), params.initial_max_streams_bidi);
     try std.testing.expectEqual(@as(u64, 6), params.initial_max_streams_uni);
     try std.testing.expectEqual(@as(u64, 4), params.active_connection_id_limit);
+    const version_information = params.version_information orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &available_versions, version_information.available_versions);
+}
+
+test "version_information transport parameter validation follows endpoint role" {
+    const v2_first = [_]packet.Version{ .v2, .v1 };
+    const v1_only = [_]packet.Version{.v1};
+
+    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+        .chosen_version = @enumFromInt(0),
+        .available_versions = &v1_only,
+    }));
+    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &[_]packet.Version{.v2},
+    }));
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v1,
+        .available_versions = &v2_first,
+    });
+    defer server.deinit();
+    try server.applyPeerTransportParameters(.{
+        .initial_max_data = 7,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &v2_first,
+        },
+    });
+    try std.testing.expectEqual(@as(u64, 7), server.peer_max_data);
+
+    try std.testing.expectError(error.InvalidPacket, server.applyPeerTransportParameters(.{
+        .initial_max_data = 8,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &[_]packet.Version{.v2},
+        },
+    }));
+    try std.testing.expectEqual(@as(u64, 7), server.peer_max_data);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .available_versions = &v1_only,
+    });
+    defer client.deinit();
+    try std.testing.expectError(error.InvalidPacket, client.applyPeerTransportParameters(.{
+        .version_information = .{
+            .chosen_version = .v2,
+            .available_versions = &v2_first,
+        },
+    }));
+}
+
+test "version_information validates downgrade state after Version Negotiation" {
+    const v2_first = [_]packet.Version{ .v2, .v1 };
+    const v1_first = [_]packet.Version{ .v1, .v2 };
+
+    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .server, .{
+        .version_negotiation_selected_version = .v1,
+    }));
+    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &v2_first,
+        .version_negotiation_selected_version = .v2,
+    }));
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &v2_first,
+        .version_negotiation_selected_version = .v2,
+    });
+    defer client.deinit();
+
+    try client.applyPeerTransportParameters(.{
+        .initial_max_data = 11,
+        .version_information = .{
+            .chosen_version = .v2,
+            .available_versions = &v2_first,
+        },
+    });
+    try std.testing.expectEqual(@as(u64, 11), client.peer_max_data);
+
+    try std.testing.expectError(error.InvalidPacket, client.applyPeerTransportParameters(.{
+        .initial_max_data = 12,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &v1_first,
+        },
+    }));
+    try std.testing.expectError(error.InvalidPacket, client.applyPeerTransportParameters(.{
+        .initial_max_data = 13,
+        .version_information = .{
+            .chosen_version = .v2,
+            .available_versions = &[_]packet.Version{},
+        },
+    }));
+    try std.testing.expectEqual(@as(u64, 11), client.peer_max_data);
+}
+
+test "version_information rejects downgrade after forged Version Negotiation" {
+    const v2_first = [_]packet.Version{ .v2, .v1 };
+    const v1_first = [_]packet.Version{ .v1, .v2 };
+
+    var downgraded = try QuicConnection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &v2_first,
+        .version_negotiation_selected_version = .v1,
+    });
+    defer downgraded.deinit();
+
+    try std.testing.expectError(error.InvalidPacket, downgraded.applyPeerTransportParameters(.{
+        .initial_max_data = 10,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &v1_first,
+        },
+    }));
+    try std.testing.expectEqual(@as(u64, 65_536), downgraded.peer_max_data);
+}
+
+test "missing version_information after Version Negotiation follows v1 exception" {
+    const v2_first = [_]packet.Version{ .v2, .v1 };
+    const v1_only = [_]packet.Version{.v1};
+
+    var selected_v2 = try QuicConnection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &v2_first,
+        .version_negotiation_selected_version = .v2,
+    });
+    defer selected_v2.deinit();
+    try std.testing.expectError(error.InvalidPacket, selected_v2.applyPeerTransportParameters(.{
+        .initial_max_data = 10,
+    }));
+    try std.testing.expectEqual(@as(u64, 65_536), selected_v2.peer_max_data);
+
+    var selected_v1 = try QuicConnection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &v1_only,
+        .version_negotiation_selected_version = .v1,
+    });
+    defer selected_v1.deinit();
+    try selected_v1.applyPeerTransportParameters(.{
+        .initial_max_data = 10,
+    });
+    try std.testing.expectEqual(@as(u64, 10), selected_v1.peer_max_data);
+}
+
+test "localTransportParameters keeps local ACK policy separate from peer recovery policy" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .ack_delay_exponent = 7,
+        .max_ack_delay_ms = 15,
+    });
+    defer conn.deinit();
+
+    const before = conn.localTransportParameters();
+    try std.testing.expectEqual(@as(u64, 7), before.ack_delay_exponent);
+    try std.testing.expectEqual(@as(u64, 15), before.max_ack_delay);
+
+    try conn.applyPeerTransportParameters(.{
+        .ack_delay_exponent = 4,
+        .max_ack_delay = 50,
+    });
+    try std.testing.expectEqual(@as(u64, 4), conn.peer_ack_delay_exponent);
+    try std.testing.expectEqual(@as(u64, 50), conn.recovery_state.max_ack_delay_ms);
+
+    const after = conn.localTransportParameters();
+    try std.testing.expectEqual(@as(u64, 7), after.ack_delay_exponent);
+    try std.testing.expectEqual(@as(u64, 15), after.max_ack_delay);
 }
 
 test "localTransportParameters advertises server stateless reset token only" {
@@ -4889,6 +9330,110 @@ test "localTransportParameters advertises server stateless reset token only" {
     try std.testing.expectEqualSlices(u8, &reset_token, &advertised);
 }
 
+test "localTransportParameters advertises server preferred address only" {
+    const reset_token = [_]u8{0x44} ** packet.stateless_reset_token_len;
+    const cid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const preferred = try PreferredAddress.init(
+        .{ 203, 0, 113, 7 },
+        8443,
+        .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7 },
+        8444,
+        &cid,
+        reset_token,
+    );
+
+    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+        .preferred_address = preferred,
+    }));
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .preferred_address = preferred,
+    });
+    defer server.deinit();
+
+    const exported = server.localTransportParameters().preferred_address orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &preferred.ipv4_address, &exported.ipv4_address);
+    try std.testing.expectEqual(preferred.ipv4_port, exported.ipv4_port);
+    try std.testing.expectEqualSlices(u8, preferred.connectionId(), exported.connection_id);
+    try std.testing.expectEqualSlices(u8, &reset_token, &exported.stateless_reset_token);
+}
+
+test "transport parameter TLS extension bytes roundtrip through connection API" {
+    const reset_token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const preferred_cid = [_]u8{ 0xf5, 0xf6, 0xf7, 0xf8 };
+    const preferred = try PreferredAddress.init(
+        .{ 198, 51, 100, 7 },
+        4433,
+        .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7 },
+        4434,
+        &preferred_cid,
+        reset_token,
+    );
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .max_datagram_size = 1300,
+        .max_idle_timeout_ms = 250,
+        .stateless_reset_token = reset_token,
+        .preferred_address = preferred,
+        .initial_max_data = 4096,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 3,
+        .initial_max_streams_uni = 2,
+    });
+    defer server.deinit();
+
+    var extension_bytes_buf: [256]u8 = undefined;
+    const extension_bytes = try server.encodeLocalTransportParameters(&extension_bytes_buf);
+    try std.testing.expect(extension_bytes.len > 0);
+
+    var parsed = try transport_parameters.parse(extension_bytes, std.testing.allocator);
+    defer parsed.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 4096), parsed.initial_max_data);
+    try std.testing.expectEqual(@as(u64, 1300), parsed.max_udp_payload_size);
+    try std.testing.expect(parsed.stateless_reset_token != null);
+    try std.testing.expect(parsed.preferred_address != null);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.applyPeerTransportParameterBytes(extension_bytes);
+    try std.testing.expectEqual(@as(u64, 4096), client.peer_max_data);
+    try std.testing.expectEqual(@as(usize, 1300), client.maxTxDatagramSize());
+    try std.testing.expectEqual(@as(?u64, 250), client.effectiveIdleTimeoutMillis());
+    const peer_reset = client.peerStatelessResetToken() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &reset_token, &peer_reset);
+    const peer_preferred = client.peerPreferredAddress() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &preferred_cid, peer_preferred.connectionId());
+
+    var too_small: [1]u8 = undefined;
+    try std.testing.expectError(error.BufferTooSmall, server.encodeLocalTransportParameters(&too_small));
+}
+
+test "applyPeerTransportParameterBytes rejects malformed or invalid extensions without mutation" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    const malformed = [_]u8{0x04};
+    try std.testing.expectError(error.InvalidPacket, conn.applyPeerTransportParameterBytes(&malformed));
+    try std.testing.expectEqual(@as(u64, 65_536), conn.peer_max_data);
+    try std.testing.expect(conn.peerStatelessResetToken() == null);
+
+    const reset_token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    var server_only_raw: [64]u8 = undefined;
+    var server_only_out = buffer.fixedWriter(&server_only_raw);
+    try transport_parameters.encode(server_only_out.writer(), .{
+        .stateless_reset_token = reset_token,
+        .initial_max_data = 7,
+    });
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        conn.applyPeerTransportParameterBytes(server_only_out.getWritten()),
+    );
+    try std.testing.expectEqual(@as(u64, 65_536), conn.peer_max_data);
+    try std.testing.expect(conn.peerStatelessResetToken() == null);
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+}
+
 test "applyPeerTransportParameters updates send limits and ACK policy" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{
         .initial_max_stream_data = 99,
@@ -4900,9 +9445,19 @@ test "applyPeerTransportParameters updates send limits and ACK policy" {
     const bidi_stream = try conn.openStream();
     try std.testing.expectEqual(@as(u64, 99), conn.send_streams.items[0].max_data);
     const reset_token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const preferred_cid = [_]u8{ 0xf1, 0xf2, 0xf3, 0xf4 };
+    const preferred = try PreferredAddress.init(
+        .{ 198, 51, 100, 42 },
+        4433,
+        .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x42 },
+        4434,
+        &preferred_cid,
+        reset_token,
+    );
 
     try conn.applyPeerTransportParameters(.{
         .stateless_reset_token = reset_token,
+        .preferred_address = preferred.asTransportParameter(),
         .max_udp_payload_size = 1200,
         .initial_max_data = 10,
         .initial_max_stream_data_bidi_local = 7,
@@ -4924,6 +9479,11 @@ test "applyPeerTransportParameters updates send limits and ACK policy" {
     try std.testing.expect(conn.peerActiveMigrationDisabled());
     const stored_reset_token = conn.peerStatelessResetToken() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u8, &reset_token, &stored_reset_token);
+    const stored_preferred = conn.peerPreferredAddress() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &preferred.ipv4_address, &stored_preferred.ipv4_address);
+    try std.testing.expectEqual(preferred.ipv4_port, stored_preferred.ipv4_port);
+    try std.testing.expectEqualSlices(u8, preferred.connectionId(), stored_preferred.connectionId());
+    try std.testing.expectEqualSlices(u8, &reset_token, &stored_preferred.stateless_reset_token);
     try std.testing.expectEqual(@as(u64, 50), conn.recovery_state.max_ack_delay_ms);
     try std.testing.expectEqual(@as(u64, 5), conn.findSendStream(bidi_stream).?.max_data);
     try std.testing.expectError(error.FlowControlBlocked, conn.openStream());
@@ -5010,14 +9570,438 @@ test "applyPeerTransportParameters rejects invalid peer values without mutation"
     defer conn.deinit();
 
     const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const preferred = try PreferredAddress.init(.{ 203, 0, 113, 9 }, 4433, .{0} ** 16, 4434, &[_]u8{0xc1}, token);
     try std.testing.expectError(error.InvalidPacket, conn.applyPeerTransportParameters(.{
         .stateless_reset_token = token,
         .initial_max_data = 1,
     }));
+    try std.testing.expectError(error.InvalidPacket, conn.applyPeerTransportParameters(.{
+        .preferred_address = preferred.asTransportParameter(),
+        .initial_max_data = 2,
+    }));
     try std.testing.expectEqual(@as(u64, 65_536), conn.peer_max_data);
     try std.testing.expectEqual(@as(u64, 3), conn.peer_ack_delay_exponent);
     try std.testing.expect(conn.peerStatelessResetToken() == null);
+    try std.testing.expect(conn.peerPreferredAddress() == null);
     try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+}
+
+test "applyPeerTransportParameters validates retry_source_connection_id" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const retry_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const other_scid = [_]u8{ 0x99, 0x88, 0x77, 0x66 };
+    const retry = packet.RetryPacket{
+        .version = .v1,
+        .dcid = &client_scid,
+        .scid = &retry_scid,
+        .token = "retry-token-for-client-address",
+        .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+    };
+    const retry_datagram = try protection.encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
+    defer std.testing.allocator.free(retry_datagram);
+
+    var no_retry = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer no_retry.deinit();
+    try std.testing.expectError(error.InvalidPacket, no_retry.applyPeerTransportParameters(.{
+        .retry_source_connection_id = &retry_scid,
+        .initial_max_data = 7,
+    }));
+    try std.testing.expectEqual(@as(u64, 65_536), no_retry.peer_max_data);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.processRetryDatagram(10, &original_dcid, retry_datagram);
+
+    try std.testing.expectError(error.InvalidPacket, client.applyPeerTransportParameters(.{
+        .original_destination_connection_id = &original_dcid,
+        .initial_max_data = 8,
+    }));
+    try std.testing.expectError(error.InvalidPacket, client.applyPeerTransportParameters(.{
+        .original_destination_connection_id = &original_dcid,
+        .retry_source_connection_id = &other_scid,
+        .initial_max_data = 9,
+    }));
+    try std.testing.expectError(error.InvalidPacket, client.applyPeerTransportParameters(.{
+        .original_destination_connection_id = &other_scid,
+        .retry_source_connection_id = &retry_scid,
+        .initial_max_data = 9,
+    }));
+    try std.testing.expectEqual(@as(u64, 65_536), client.peer_max_data);
+    try std.testing.expectEqualStrings(&original_dcid, client.originalDestinationConnectionId().?);
+
+    try client.applyPeerTransportParameters(.{
+        .original_destination_connection_id = &original_dcid,
+        .retry_source_connection_id = &retry_scid,
+        .initial_max_data = 10,
+    });
+    try std.testing.expectEqual(@as(u64, 10), client.peer_max_data);
+}
+
+test "issueRetryDatagram records Retry transport parameters and token" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const retry_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const retry_token = "retry-token-for-client-address";
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    const retry_datagram = try server.issueRetryDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        &retry_scid,
+        retry_token,
+    );
+    defer std.testing.allocator.free(retry_datagram);
+
+    try std.testing.expect(try protection.verifyRetryIntegrityTag(std.testing.allocator, &original_dcid, retry_datagram));
+    try std.testing.expectEqualStrings(&original_dcid, server.originalDestinationConnectionId().?);
+    try std.testing.expectEqualStrings(&retry_scid, server.retrySourceConnectionId().?);
+    try std.testing.expectEqual(@as(usize, 1), server.pendingRetryTokenCount());
+    const server_params = server.localTransportParameters();
+    try std.testing.expectEqualStrings(&original_dcid, server_params.original_destination_connection_id.?);
+    try std.testing.expectEqualStrings(&retry_scid, server_params.retry_source_connection_id.?);
+
+    try client.processRetryDatagram(11, &original_dcid, retry_datagram);
+    try client.applyPeerTransportParameters(server_params);
+    try std.testing.expectEqual(@as(u64, 65_536), client.peer_max_data);
+    try server.validateRetryToken(client.latestRetryToken().?);
+    try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 0), server.pendingRetryTokenCount());
+}
+
+test "issueRetryDatagram rejects invalid Retry issuance without mutation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const retry_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try std.testing.expectError(error.InvalidPacket, client.issueRetryDatagram(
+        0,
+        &original_dcid,
+        &client_scid,
+        &retry_scid,
+        "token",
+    ));
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try std.testing.expectError(error.InvalidPacket, server.issueRetryDatagram(
+        1,
+        &original_dcid,
+        &client_scid,
+        &retry_scid,
+        "",
+    ));
+    try std.testing.expect(server.originalDestinationConnectionId() == null);
+    try std.testing.expect(server.retrySourceConnectionId() == null);
+    try std.testing.expectEqual(@as(usize, 0), server.pendingRetryTokenCount());
+
+    const retry_datagram = try server.issueRetryDatagram(
+        2,
+        &original_dcid,
+        &client_scid,
+        &retry_scid,
+        "token",
+    );
+    defer std.testing.allocator.free(retry_datagram);
+    try std.testing.expectError(error.InvalidPacket, server.issueRetryDatagram(
+        3,
+        &original_dcid,
+        &client_scid,
+        &retry_scid,
+        "other-token",
+    ));
+    try std.testing.expectEqualStrings(&original_dcid, server.originalDestinationConnectionId().?);
+    try std.testing.expectEqualStrings(&retry_scid, server.retrySourceConnectionId().?);
+    try std.testing.expectEqual(@as(usize, 1), server.pendingRetryTokenCount());
+}
+
+test "address-bound Retry token validation consumes token and validates address" {
+    const secret: address_validation_token.Secret = [_]u8{0x42} ** address_validation_token.secret_len;
+    const nonce: address_validation_token.Nonce = [_]u8{0x19} ** address_validation_token.nonce_len;
+    const peer_address = "203.0.113.7:4433";
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const retry_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    const retry_token = try server.issueAddressValidationToken(
+        secret,
+        .retry,
+        100,
+        1_000,
+        peer_address,
+        nonce,
+    );
+    defer std.testing.allocator.free(retry_token);
+
+    const retry_datagram = try server.issueRetryDatagram(
+        101,
+        &original_dcid,
+        &client_scid,
+        &retry_scid,
+        retry_token,
+    );
+    defer std.testing.allocator.free(retry_datagram);
+    try client.processRetryDatagram(102, &original_dcid, retry_datagram);
+
+    try std.testing.expectEqual(@as(usize, 1), server.pendingRetryTokenCount());
+    try std.testing.expect(!server.peerAddressValidated());
+    try server.validateAddressValidationToken(secret, .retry, 103, peer_address, client.latestRetryToken().?);
+    try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 0), server.pendingRetryTokenCount());
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.validateAddressValidationToken(secret, .retry, 104, peer_address, client.latestRetryToken().?),
+    );
+}
+
+test "address-bound Retry token rejects wrong address or expiration without consuming" {
+    const secret: address_validation_token.Secret = [_]u8{0x21} ** address_validation_token.secret_len;
+    const nonce: address_validation_token.Nonce = [_]u8{0x84} ** address_validation_token.nonce_len;
+    const peer_address = "198.51.100.3:4433";
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    const retry_token = try server.issueAddressValidationToken(
+        secret,
+        .retry,
+        10,
+        10,
+        peer_address,
+        nonce,
+    );
+    defer std.testing.allocator.free(retry_token);
+    try server.issueRetryToken(retry_token);
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.validateAddressValidationToken(secret, .retry, 11, "198.51.100.4:4433", retry_token),
+    );
+    try std.testing.expect(!server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 1), server.pendingRetryTokenCount());
+
+    try server.validateAddressValidationToken(secret, .retry, 20, peer_address, retry_token);
+    try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 0), server.pendingRetryTokenCount());
+
+    var expired_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer expired_server.deinit();
+    const expired_token = try expired_server.issueAddressValidationToken(
+        secret,
+        .retry,
+        10,
+        10,
+        peer_address,
+        nonce,
+    );
+    defer std.testing.allocator.free(expired_token);
+    try expired_server.issueRetryToken(expired_token);
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        expired_server.validateAddressValidationToken(secret, .retry, 21, peer_address, expired_token),
+    );
+    try std.testing.expect(!expired_server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 1), expired_server.pendingRetryTokenCount());
+}
+
+test "address-bound NEW_TOKEN validates peer address without one-time Retry state" {
+    const secret: address_validation_token.Secret = [_]u8{0xa5} ** address_validation_token.secret_len;
+    const nonce: address_validation_token.Nonce = [_]u8{0x5a} ** address_validation_token.nonce_len;
+    const peer_address = "192.0.2.9:4433";
+
+    var issuer = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer issuer.deinit();
+    const new_token = try issuer.issueAddressValidationToken(
+        secret,
+        .new_token,
+        1_000,
+        60_000,
+        peer_address,
+        nonce,
+    );
+    defer std.testing.allocator.free(new_token);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.sendPing();
+    var out_buf: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]u8, null), try server.pollTx(1_010, &out_buf));
+
+    try server.validateAddressValidationToken(secret, .new_token, 1_020, peer_address, new_token);
+    try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(@as(?usize, null), server.antiAmplificationLimitRemaining());
+    const payload = (try server.pollTx(1_021, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), payload.len);
+
+    var other_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer other_server.deinit();
+    try std.testing.expectError(
+        error.InvalidPacket,
+        other_server.validateAddressValidationToken(secret, .new_token, 1_030, "192.0.2.10:4433", new_token),
+    );
+    try std.testing.expect(!other_server.peerAddressValidated());
+}
+
+test "address-bound NEW_TOKEN validates only for its originating QUIC version" {
+    const secret: address_validation_token.Secret = [_]u8{0xb5} ** address_validation_token.secret_len;
+    const nonce: address_validation_token.Nonce = [_]u8{0x7a} ** address_validation_token.nonce_len;
+    const peer_address = "192.0.2.29:4433";
+
+    var issuer = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer issuer.deinit();
+    const new_token = try issuer.issueAddressValidationTokenForVersion(
+        secret,
+        .new_token,
+        .v2,
+        1_000,
+        60_000,
+        peer_address,
+        nonce,
+    );
+    defer std.testing.allocator.free(new_token);
+
+    var v1_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer v1_server.deinit();
+    try std.testing.expectError(
+        error.InvalidPacket,
+        v1_server.validateAddressValidationTokenForVersion(secret, .new_token, .v1, 1_020, peer_address, new_token),
+    );
+    try std.testing.expect(!v1_server.peerAddressValidated());
+
+    var v2_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer v2_server.deinit();
+    try v2_server.validateAddressValidationTokenForVersion(secret, .new_token, .v2, 1_020, peer_address, new_token);
+    try std.testing.expect(v2_server.peerAddressValidated());
+}
+
+test "address-bound NEW_TOKEN validates with rotated secrets" {
+    const previous_secret: address_validation_token.Secret = [_]u8{0xa5} ** address_validation_token.secret_len;
+    const current_secret: address_validation_token.Secret = [_]u8{0x5c} ** address_validation_token.secret_len;
+    const secrets = [_]address_validation_token.Secret{ current_secret, previous_secret };
+    const current_only = [_]address_validation_token.Secret{current_secret};
+    const nonce: address_validation_token.Nonce = [_]u8{0x5a} ** address_validation_token.nonce_len;
+    const peer_address = "192.0.2.19:4433";
+
+    var issuer = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer issuer.deinit();
+    const new_token = try issuer.issueAddressValidationToken(
+        previous_secret,
+        .new_token,
+        1_000,
+        60_000,
+        peer_address,
+        nonce,
+    );
+    defer std.testing.allocator.free(new_token);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validateAddressValidationTokenWithSecrets(&secrets, .new_token, 1_020, peer_address, new_token);
+    try std.testing.expect(server.peerAddressValidated());
+
+    var current_only_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer current_only_server.deinit();
+    try std.testing.expectError(
+        error.InvalidPacket,
+        current_only_server.validateAddressValidationTokenWithSecrets(&current_only, .new_token, 1_020, peer_address, new_token),
+    );
+    try std.testing.expect(!current_only_server.peerAddressValidated());
+}
+
+test "applyPeerTransportParameters validates original_destination_connection_id without Retry" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const other_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try client.sendCryptoInSpace(.initial, "client initial");
+    const protected = (try client.pollInitialProtectedDatagram(
+        0,
+        &dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+    try std.testing.expectEqualStrings(&dcid, client.originalDestinationConnectionId().?);
+
+    try server.processInitialProtectedDatagram(1, secrets.client, protected);
+    const server_params = server.localTransportParameters();
+    try std.testing.expectEqualStrings(&dcid, server.originalDestinationConnectionId().?);
+    try std.testing.expectEqualStrings(&dcid, server_params.original_destination_connection_id.?);
+
+    try std.testing.expectError(error.InvalidPacket, client.applyPeerTransportParameters(.{
+        .initial_max_data = 7,
+    }));
+    try std.testing.expectError(error.InvalidPacket, client.applyPeerTransportParameters(.{
+        .original_destination_connection_id = &other_dcid,
+        .initial_max_data = 8,
+    }));
+    try std.testing.expectEqual(@as(u64, 65_536), client.peer_max_data);
+
+    try client.applyPeerTransportParameters(.{
+        .original_destination_connection_id = server_params.original_destination_connection_id,
+        .initial_max_data = 9,
+    });
+    try std.testing.expectEqual(@as(u64, 9), client.peer_max_data);
+}
+
+test "applyPeerTransportParameters validates initial_source_connection_id" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const other_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try client.sendCryptoInSpace(.initial, "client initial");
+    const protected = (try client.pollInitialProtectedDatagram(
+        0,
+        &dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+    try std.testing.expect(protected.len >= min_initial_udp_datagram_len);
+
+    try server.processInitialProtectedDatagram(1, secrets.client, protected);
+    try std.testing.expectEqualStrings(&client_scid, server.peerInitialSourceConnectionId().?);
+
+    try std.testing.expectError(error.InvalidPacket, server.applyPeerTransportParameters(.{
+        .initial_max_data = 7,
+    }));
+    try std.testing.expectError(error.InvalidPacket, server.applyPeerTransportParameters(.{
+        .initial_source_connection_id = &other_scid,
+        .initial_max_data = 8,
+    }));
+    try std.testing.expectEqual(@as(u64, 65_536), server.peer_max_data);
+
+    try server.applyPeerTransportParameters(.{
+        .initial_source_connection_id = &client_scid,
+        .initial_max_data = 9,
+    });
+    try std.testing.expectEqual(@as(u64, 9), server.peer_max_data);
 }
 
 test "openStream enforces peer bidirectional stream limit until MAX_STREAMS_BIDI" {
@@ -5125,6 +10109,105 @@ test "processDatagram and recvCrypto move crypto data" {
     try std.testing.expectEqual(@as(?usize, null), try conn.recvCrypto(&read_buf));
 }
 
+test "processDatagram buffers out-of-order CRYPTO and ignores duplicate pending data" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 6,
+        .data = "world",
+    } });
+    const pending = try std.testing.allocator.dupe(u8, out.getWritten());
+    defer std.testing.allocator.free(pending);
+    try conn.processDatagram(0, pending);
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_buffer.items.len);
+    try std.testing.expectEqual(@as(usize, 1), conn.crypto_recv_pending.items.len);
+
+    try conn.processDatagram(1, pending);
+    try std.testing.expectEqual(@as(usize, 1), conn.crypto_recv_pending.items.len);
+
+    var read_buf: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, null), try conn.recvCrypto(&read_buf));
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "hello ",
+    } });
+    try conn.processDatagram(2, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), conn.crypto_recv_pending.items.len);
+
+    const n = (try conn.recvCrypto(&read_buf)).?;
+    try std.testing.expectEqualStrings("hello world", read_buf[0..n]);
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_pending.items.len);
+}
+
+test "processDatagram discards duplicate CRYPTO data without appending bytes" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "hello",
+    } });
+    const original = try std.testing.allocator.dupe(u8, out.getWritten());
+    defer std.testing.allocator.free(original);
+    try conn.processDatagram(0, original);
+    try std.testing.expectEqualStrings("hello", conn.crypto_recv_buffer.items);
+
+    try conn.processDatagram(1, original);
+    try std.testing.expectEqualStrings("hello", conn.crypto_recv_buffer.items);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 3,
+        .data = "lo!",
+    } });
+    try conn.processDatagram(2, out.getWritten());
+    try std.testing.expectEqualStrings("hello!", conn.crypto_recv_buffer.items);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvCrypto(&read_buf)).?;
+    try std.testing.expectEqualStrings("hello!", read_buf[0..n]);
+}
+
+test "processDatagram rejects conflicting CRYPTO overlap and rolls back pending data" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 5,
+        .data = "tail",
+    } });
+    try out.writeByte(0x02); // truncated ACK frame
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_buffer.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "hello",
+    } });
+    try conn.processDatagram(1, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 3,
+        .data = "xx",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(2, out.getWritten()));
+    try std.testing.expectEqualStrings("hello", conn.crypto_recv_buffer.items);
+}
+
 test "CRYPTO streams are isolated by packet number space" {
     var client = try QuicConnection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
@@ -5138,27 +10221,391 @@ test "CRYPTO streams are isolated by packet number space" {
     var datagram: [64]u8 = undefined;
     const initial_payload = (try client.pollTxInSpace(.initial, 10, &datagram)) orelse return error.TestUnexpectedResult;
     try server.processDatagramInSpace(.initial, 20, initial_payload);
-
-    const handshake_payload = (try client.pollTxInSpace(.handshake, 30, &datagram)) orelse return error.TestUnexpectedResult;
-    try server.processDatagramInSpace(.handshake, 40, handshake_payload);
-
-    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.initial));
-    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.handshake));
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
-    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.handshake));
-    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
 
     var read_buf: [32]u8 = undefined;
     const initial_len = (try server.recvCryptoInSpace(.initial, &read_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("initial flight", read_buf[0..initial_len]);
+
+    const initial_ack = (try server.pollTxInSpace(.initial, 25, &datagram)) orelse return error.TestUnexpectedResult;
+    try client.processDatagramInSpace(.initial, 26, initial_ack);
+
+    const handshake_payload = (try client.pollTxInSpace(.handshake, 30, &datagram)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(client.packetNumberSpaceDiscarded(.initial));
+    try server.processDatagramInSpace(.handshake, 40, handshake_payload);
+    try std.testing.expect(server.packetNumberSpaceDiscarded(.initial));
+
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.handshake));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
     const handshake_len = (try server.recvCryptoInSpace(.handshake, &read_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("handshake flight", read_buf[0..handshake_len]);
     try std.testing.expectEqual(@as(?usize, null), try server.recvCryptoInSpace(.application, &read_buf));
+}
 
-    const initial_ack = (try server.pollTxInSpace(.initial, 50, &datagram)) orelse return error.TestUnexpectedResult;
-    try client.processDatagramInSpace(.initial, 60, initial_ack);
-    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.initial));
-    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.handshake));
+test "driveCryptoBackendInSpace delivers reassembled CRYPTO and queues backend output" {
+    const MockBackend = struct {
+        inbound: std.ArrayList(u8) = .empty,
+        outbound: []const u8,
+        outbound_offset: usize = 0,
+        last_space: ?PacketNumberSpace = null,
+        receive_count: usize = 0,
+        confirmed: bool = false,
+
+        fn deinit(self: *@This()) void {
+            self.inbound.deinit(std.testing.allocator);
+        }
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.last_space = space;
+            self.receive_count += 1;
+            self.inbound.appendSlice(std.testing.allocator, data) catch return error.OutOfMemory;
+            if (space == .handshake and std.mem.eql(u8, self.inbound.items, "client hello")) {
+                self.confirmed = true;
+            }
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_offset >= self.outbound.len) return null;
+            const n = @min(out_buf.len, self.outbound.len - self.outbound_offset);
+            @memcpy(out_buf[0..n], self.outbound[self.outbound_offset..][0..n]);
+            self.outbound_offset += n;
+            return out_buf[0..n];
+        }
+
+        fn handshakeConfirmed(context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.confirmed;
+        }
+    };
+
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 6,
+        .data = " hello",
+    } });
+    try conn.processDatagramInSpace(.handshake, 0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "client",
+    } });
+    try conn.processDatagramInSpace(.handshake, 1, out.getWritten());
+
+    var backend = MockBackend{ .outbound = "server flight" };
+    defer backend.deinit();
+    var scratch: [5]u8 = undefined;
+    const progress = try conn.driveCryptoBackendInSpace(.handshake, backend.backend(), &scratch);
+
+    try std.testing.expectEqual(@as(usize, 3), progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, 12), progress.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 3), progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, 13), progress.outbound_bytes);
+    try std.testing.expect(progress.handshake_confirmed);
+    try std.testing.expectEqual(HandshakeState.confirmed, conn.handshakeState());
+    try std.testing.expect(!conn.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expectEqual(PacketNumberSpace.handshake, backend.last_space.?);
+    try std.testing.expectEqualStrings("client hello", backend.inbound.items);
+
+    try conn.validatePeerAddress();
+    var payload_buf: [64]u8 = undefined;
+    var collected: [32]u8 = undefined;
+    var collected_len: usize = 0;
+    while (try conn.pollTxInSpace(.handshake, 2, &payload_buf)) |payload| {
+        var payload_offset: usize = 0;
+        while (payload_offset < payload.len) {
+            var decoded = try frame.decodeFrameSlice(payload[payload_offset..], std.testing.allocator);
+            defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+            switch (decoded.frame) {
+                .crypto => |crypto| {
+                    @memcpy(collected[collected_len..][0..crypto.data.len], crypto.data);
+                    collected_len += crypto.data.len;
+                },
+                .ack => {},
+                else => return error.TestUnexpectedResult,
+            }
+            payload_offset += decoded.len;
+        }
+    }
+    try std.testing.expectEqualStrings("server flight", collected[0..collected_len]);
+}
+
+test "driveCryptoBackendInSpace discards Handshake space when backend confirms without outbound crypto" {
+    const ConfirmingBackend = struct {
+        inbound: std.ArrayList(u8) = .empty,
+        secrets: HandshakeTrafficSecrets,
+        secrets_sent: bool = false,
+        confirmed: bool = false,
+
+        fn deinit(self: *@This()) void {
+            self.inbound.deinit(std.testing.allocator);
+        }
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.CryptoError;
+            self.inbound.appendSlice(std.testing.allocator, data) catch return error.OutOfMemory;
+            self.confirmed = std.mem.eql(u8, self.inbound.items, "client finished");
+        }
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullHandshakeTrafficSecrets(context: *anyopaque) Error!?HandshakeTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.secrets_sent) return null;
+            self.secrets_sent = true;
+            return self.secrets;
+        }
+
+        fn handshakeConfirmed(context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.confirmed;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "client finished",
+    } });
+    try conn.processDatagramInSpace(.handshake, 0, out.getWritten());
+    try std.testing.expectEqual(@as(?u64, 0), conn.pendingAckLargest(.handshake));
+
+    var backend = ConfirmingBackend{ .secrets = .{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    } };
+    defer backend.deinit();
+    var scratch: [32]u8 = undefined;
+    const progress = try conn.driveCryptoBackendInSpace(.handshake, backend.backend(), &scratch);
+
+    try std.testing.expect(progress.handshake_confirmed);
+    try std.testing.expect(progress.handshake_keys_installed);
+    try std.testing.expectEqual(@as(usize, 1), progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, 0), progress.outbound_chunks);
+    try std.testing.expectEqual(HandshakeState.confirmed, conn.handshakeState());
+    try std.testing.expect(conn.handshakeConfirmed());
+    try std.testing.expect(conn.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(!conn.hasHandshakeProtectionKeys());
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.handshake));
+    try std.testing.expectError(error.InvalidPacket, conn.sendCryptoInSpace(.handshake, "late"));
+    try std.testing.expectError(error.InvalidPacket, conn.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    }));
+}
+
+test "driveCryptoBackendInSpace requires scratch buffer before consuming crypto" {
+    const NoopBackend = struct {
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+    };
+
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "client",
+    } });
+    try conn.processDatagramInSpace(.handshake, 0, out.getWritten());
+
+    var context: u8 = 0;
+    const backend = CryptoBackend{
+        .context = &context,
+        .receive = NoopBackend.receive,
+        .pull = NoopBackend.pull,
+    };
+    var empty: [0]u8 = .{};
+    try std.testing.expectError(error.BufferTooSmall, conn.driveCryptoBackendInSpace(.handshake, backend, &empty));
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvCryptoInSpace(.handshake, &read_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("client", read_buf[0..n]);
+}
+
+test "driveCryptoBackendInSpace exchanges transport parameter bytes with backend" {
+    const MockBackend = struct {
+        local_transport_parameters: std.ArrayList(u8) = .empty,
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn deinit(self: *@This()) void {
+            self.local_transport_parameters.deinit(std.testing.allocator);
+        }
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .set_local_transport_parameters = setLocalTransportParameters,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn setLocalTransportParameters(context: *anyopaque, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.local_transport_parameters.appendSlice(std.testing.allocator, data) catch return error.OutOfMemory;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    var peer_params_buf: [160]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .max_idle_timeout = 88,
+        .max_udp_payload_size = 1400,
+        .initial_max_data = 1234,
+        .initial_max_stream_data_bidi_local = 55,
+        .initial_max_stream_data_bidi_remote = 66,
+        .initial_max_stream_data_uni = 77,
+        .initial_max_streams_bidi = 4,
+        .initial_max_streams_uni = 5,
+        .ack_delay_exponent = 5,
+        .max_ack_delay = 33,
+    });
+
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .max_datagram_size = 1300,
+        .ack_delay_exponent = 4,
+        .max_ack_delay_ms = 44,
+        .initial_max_data = 999,
+    });
+    defer conn.deinit();
+
+    var backend = MockBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    defer backend.deinit();
+    var scratch: [256]u8 = undefined;
+    const progress = try conn.driveCryptoBackendInSpace(.initial, backend.backend(), &scratch);
+
+    try std.testing.expect(progress.local_transport_parameters_bytes > 0);
+    try std.testing.expectEqual(progress.local_transport_parameters_bytes, backend.local_transport_parameters.items.len);
+    try std.testing.expectEqual(peer_params_out.getWritten().len, progress.peer_transport_parameters_bytes);
+    try std.testing.expect(progress.peer_transport_parameters_applied);
+
+    var parsed_local = try transport_parameters.parse(backend.local_transport_parameters.items, std.testing.allocator);
+    defer parsed_local.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 999), parsed_local.initial_max_data);
+    try std.testing.expectEqual(@as(u64, 4), parsed_local.ack_delay_exponent);
+    try std.testing.expectEqual(@as(u64, 44), parsed_local.max_ack_delay);
+    try std.testing.expectEqual(@as(u64, 1300), parsed_local.max_udp_payload_size);
+
+    try std.testing.expectEqual(@as(u64, 1234), conn.peer_max_data);
+    try std.testing.expectEqual(@as(u64, 55), conn.peer_initial_max_stream_data_bidi_local);
+    try std.testing.expectEqual(@as(u64, 66), conn.peer_initial_max_stream_data_bidi_remote);
+    try std.testing.expectEqual(@as(u64, 77), conn.peer_initial_max_stream_data_uni);
+    try std.testing.expectEqual(@as(u64, 4), conn.peer_max_streams_bidi);
+    try std.testing.expectEqual(@as(u64, 5), conn.peer_max_streams_uni);
+    try std.testing.expectEqual(@as(u64, 5), conn.peer_ack_delay_exponent);
+    try std.testing.expectEqual(@as(u64, 88), conn.peer_max_idle_timeout_ms);
+    try std.testing.expectEqual(@as(usize, 1400), conn.peer_max_udp_payload_size);
+    try std.testing.expectEqual(@as(u64, 33), conn.recovery_state.max_ack_delay_ms);
+}
+
+test "driveCryptoBackendInSpace rejects invalid peer transport parameters before output" {
+    const BadBackend = struct {
+        output_pulled: bool = false,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(error.InvalidPacket, conn.driveCryptoBackendInSpace(.handshake, backend.backend(), &scratch));
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(@as(u64, 65_536), conn.peer_max_data);
+
+    try conn.validatePeerAddress();
+    var payload_buf: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTxInSpace(.handshake, 1, &payload_buf));
 }
 
 test "pollTx coalesces pending ACK with queued CRYPTO payload" {
@@ -5385,20 +10832,33 @@ test "pollTx coalesces pending ACK with queued PING payload" {
     }
 }
 
-test "processDatagram rejects out-of-order crypto data" {
+test "processDatagram buffers out-of-order crypto data" {
     var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
-    var datagram: [16]u8 = undefined;
+    var datagram: [32]u8 = undefined;
     var out = buffer.fixedWriter(&datagram);
     try frame.encodeFrame(out.writer(), .{ .crypto = .{
-        .offset = 1,
-        .data = "x",
+        .offset = 6,
+        .data = "world",
     } });
 
-    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try conn.processDatagram(0, out.getWritten());
     try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_buffer.items.len);
-    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(usize, 1), conn.crypto_recv_pending.items.len);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pending_ack_largest);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "hello ",
+    } });
+    try conn.processDatagram(1, out.getWritten());
+
+    var read_buf: [16]u8 = undefined;
+    const n = (try conn.recvCrypto(&read_buf)).?;
+    try std.testing.expectEqualStrings("hello world", read_buf[0..n]);
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_pending.items.len);
 }
 
 test "processDatagram rolls back crypto data when payload is invalid" {
@@ -5415,6 +10875,7 @@ test "processDatagram rolls back crypto data when payload is invalid" {
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
     try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_buffer.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_pending.items.len);
     try std.testing.expectEqual(@as(usize, 0), conn.crypto_read_offset);
     try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
     try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
@@ -5994,11 +11455,47 @@ test "checkPtoTimeouts queues application PING and backs off PTO" {
     try std.testing.expectEqual(@as(?i64, null), conn.ptoDeadlineMillis(.application));
 }
 
-test "checkPtoTimeouts queues Initial and Handshake PING probes independently" {
+test "checkPtoTimeouts uses queued STREAM data as application probe before PING" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "old", false);
+
+    var out_buf: [64]u8 = undefined;
+    _ = (try conn.pollTx(10, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.application));
+
+    try conn.sendOnStream(stream_id, "new", false);
+    const deadline = conn.ptoDeadlineMillis(.application) orelse return error.TestUnexpectedResult;
+    try conn.checkPtoTimeouts(deadline);
+
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), conn.send_queue.items.len);
+
+    const payload = (try conn.pollTx(deadline + 1, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .stream => |stream_frame| {
+            try std.testing.expectEqual(stream_id, stream_frame.stream_id);
+            try std.testing.expectEqual(@as(u64, 3), stream_frame.offset);
+            try std.testing.expectEqualStrings("new", stream_frame.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 2), conn.sentPacketCount(.application));
+}
+
+test "checkPtoTimeouts queues Initial and Handshake PING probes independently" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
 
     _ = try conn.recordPacketSentInSpace(.initial, 10, 100);
     _ = try conn.recordPacketSentInSpace(.handshake, 20, 100);
@@ -6134,6 +11631,121 @@ test "discardPacketNumberSpace clears Initial recovery and prevents reuse" {
     try std.testing.expectError(error.InvalidPacket, conn.discardPacketNumberSpace(.application));
 }
 
+test "client Handshake send discards Initial space after successful packet commit" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    _ = try client.recordPacketSentInSpace(.initial, 0, 100);
+    try client.sendCryptoInSpace(.initial, "queued initial");
+    try client.sendCryptoInSpace(.handshake, "client handshake");
+
+    var tiny: [0]u8 = undefined;
+    try std.testing.expectError(error.BufferTooSmall, client.pollTxInSpace(.handshake, 1, &tiny));
+    try std.testing.expect(!client.packetNumberSpaceDiscarded(.initial));
+    try std.testing.expectEqual(@as(usize, 1), client.initial_packet_space.crypto_send_queue.items.len);
+
+    var out_buf: [64]u8 = undefined;
+    const handshake_payload = (try client.pollTxInSpace(.handshake, 2, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(handshake_payload.len > 0);
+    try std.testing.expect(client.packetNumberSpaceDiscarded(.initial));
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.initial));
+    try std.testing.expectEqual(@as(usize, 0), client.initial_packet_space.crypto_send_queue.items.len);
+    try std.testing.expectError(error.InvalidPacket, client.pollTxInSpace(.initial, 3, &out_buf));
+}
+
+test "server Handshake receive discards Initial space after valid payload" {
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    try server.processDatagramInSpace(.initial, 0, &ping);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
+
+    const invalid_handshake = [_]u8{
+        @intFromEnum(frame.FrameType.ping),
+        0xff,
+    };
+    try std.testing.expectError(error.InvalidPacket, server.processDatagramInSpace(.handshake, 1, &invalid_handshake));
+    try std.testing.expect(!server.packetNumberSpaceDiscarded(.initial));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.handshake));
+
+    try server.processDatagramInSpace(.handshake, 2, &ping);
+    try std.testing.expect(server.packetNumberSpaceDiscarded(.initial));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.handshake));
+}
+
+test "protected Handshake packet commits discard Initial at the RFC 9001 boundary" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    _ = try client.recordPacketSentInSpace(.initial, 0, 100);
+    try client.sendCryptoInSpace(.initial, "queued initial");
+    try client.sendCryptoInSpace(.handshake, "client handshake");
+    const protected = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        10,
+        &server_scid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    try std.testing.expect(client.packetNumberSpaceDiscarded(.initial));
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.handshake));
+
+    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    try server.processDatagramInSpace(.initial, 0, &ping);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
+    try server.processProtectedLongDatagramInSpace(.handshake, 11, secrets.client, protected);
+    try std.testing.expect(server.packetNumberSpaceDiscarded(.initial));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
+
+    var crypto_buf: [32]u8 = undefined;
+    const recv_len = (try server.recvCryptoInSpace(.handshake, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("client handshake", crypto_buf[0..recv_len]);
+}
+
+test "discardPacketNumberSpace clears installed Handshake protection keys" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    try conn.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try std.testing.expect(conn.hasHandshakeProtectionKeys());
+
+    try conn.sendCryptoInSpace(.handshake, "handshake");
+    try conn.discardPacketNumberSpace(.handshake);
+    try std.testing.expect(conn.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(!conn.hasHandshakeProtectionKeys());
+    try std.testing.expectError(
+        error.InvalidPacket,
+        conn.pollProtectedHandshakeDatagramWithInstalledKeys(0, &dcid, &scid),
+    );
+    try std.testing.expectError(
+        error.InvalidPacket,
+        conn.processProtectedHandshakeDatagramWithInstalledKeys(0, &[_]u8{}),
+    );
+}
+
 test "processInitialProtectedDatagram opens Initial packet into Initial space" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
@@ -6145,26 +11757,22 @@ test "processInitialProtectedDatagram opens Initial packet into Initial space" {
     defer server.deinit();
 
     try client.sendCryptoInSpace(.initial, "client initial");
-    var payload_buf: [128]u8 = undefined;
-    const payload = (try client.pollTxInSpace(.initial, 0, &payload_buf)) orelse return error.TestUnexpectedResult;
-
-    const packet_number: u64 = 0;
-    const protected = try protection.protectLongPacketAes128(std.testing.allocator, .{
-        .version = .v1,
-        .dcid = &dcid,
-        .scid = &scid,
-        .packet_type = .initial,
-        .token = &[_]u8{},
-        .packet_number = packet_number,
-        .payload_length = 0,
-    }, try packet.encodePacketNumberForHeader(packet_number, null), secrets.client, payload);
+    const protected = (try client.pollInitialProtectedDatagram(
+        0,
+        &dcid,
+        &scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(protected);
+    try std.testing.expect(protected.len >= min_initial_udp_datagram_len);
 
     try server.processInitialProtectedDatagram(1, secrets.client, protected);
 
     var crypto_buf: [32]u8 = undefined;
     const recv_len = (try server.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("client initial", crypto_buf[0..recv_len]);
+    try std.testing.expectEqualStrings(&scid, server.peerInitialSourceConnectionId().?);
     try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.initial));
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
 }
@@ -6174,19 +11782,21 @@ test "processInitialProtectedDatagram rejects tampered packet without state chan
     const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
 
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
     var server = try QuicConnection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
-    const protected = try protection.protectLongPacketAes128(std.testing.allocator, .{
-        .version = .v1,
-        .dcid = &dcid,
-        .scid = &scid,
-        .packet_type = .initial,
-        .token = &[_]u8{},
-        .packet_number = 0,
-        .payload_length = 0,
-    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, "plaintext");
+    try client.sendCryptoInSpace(.initial, "plaintext");
+    const protected = (try client.pollInitialProtectedDatagram(
+        0,
+        &dcid,
+        &scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(protected);
+    try std.testing.expect(protected.len >= min_initial_udp_datagram_len);
 
     const tampered = try std.testing.allocator.dupe(u8, protected);
     defer std.testing.allocator.free(tampered);
@@ -6195,6 +11805,7 @@ test "processInitialProtectedDatagram rejects tampered packet without state chan
     try std.testing.expectError(error.InvalidPacket, server.processInitialProtectedDatagram(1, secrets.client, tampered));
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.initial));
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?[]const u8, null), server.peerInitialSourceConnectionId());
 }
 
 test "pollInitialProtectedDatagram emits protected Initial CRYPTO packet" {
@@ -6216,17 +11827,443 @@ test "pollInitialProtectedDatagram emits protected Initial CRYPTO packet" {
         secrets.client,
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(protected);
+    try std.testing.expect(protected.len >= min_initial_udp_datagram_len);
 
     try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.initial));
     try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.initial));
     try std.testing.expectEqual(protected.len, client.bytesInFlight(.initial));
+    try std.testing.expectEqualStrings(&dcid, client.originalDestinationConnectionId().?);
+    try std.testing.expect(client.localTransportParameters().original_destination_connection_id == null);
+    try std.testing.expectEqualStrings(&scid, client.localInitialSourceConnectionId().?);
+    try std.testing.expectEqualStrings(&scid, client.localTransportParameters().initial_source_connection_id.?);
 
     try server.processInitialProtectedDatagram(1, secrets.client, protected);
+    try std.testing.expectEqualStrings(&dcid, server.originalDestinationConnectionId().?);
+    try std.testing.expectEqualStrings(&dcid, server.localTransportParameters().original_destination_connection_id.?);
     var crypto_buf: [32]u8 = undefined;
     const recv_len = (try server.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("client initial", crypto_buf[0..recv_len]);
     try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.initial));
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
+}
+
+test "Initial datagram size follows RFC 9000 minimum rules" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    const small_initial = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &dcid,
+        .scid = &client_scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, "client initial");
+    defer std.testing.allocator.free(small_initial);
+    try std.testing.expect(small_initial.len < min_initial_udp_datagram_len);
+
+    var small_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer small_server.deinit();
+    try std.testing.expectError(error.InvalidPacket, small_server.processInitialProtectedDatagram(0, secrets.client, small_initial));
+    try std.testing.expectEqual(@as(u64, 0), small_server.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?u64, null), small_server.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?[]const u8, null), small_server.originalDestinationConnectionId());
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.sendCryptoInSpace(.initial, "client initial");
+    const padded_client_initial = (try client.pollInitialProtectedDatagram(
+        1,
+        &dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(padded_client_initial);
+    try std.testing.expect(padded_client_initial.len >= min_initial_udp_datagram_len);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.processInitialProtectedDatagram(2, secrets.client, padded_client_initial);
+    try std.testing.expectEqualStrings(&dcid, server.originalDestinationConnectionId().?);
+    try server.validatePeerAddress();
+
+    try server.sendCryptoInSpace(.initial, "server initial");
+    const padded_server_initial = (try server.pollInitialProtectedDatagram(
+        3,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(padded_server_initial);
+    try std.testing.expect(padded_server_initial.len >= min_initial_udp_datagram_len);
+
+    var ack_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer ack_server.deinit();
+    try ack_server.validatePeerAddress();
+    try ack_server.processInitialProtectedDatagram(4, secrets.client, padded_client_initial);
+    const ack_only = (try ack_server.pollProtectedLongDatagram(
+        5,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack_only);
+    try std.testing.expect(ack_only.len < min_initial_udp_datagram_len);
+}
+
+test "Initial packetization enforces client DCID length and server empty token" {
+    const short_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57 };
+    const valid_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.sendCryptoInSpace(.initial, "client initial");
+    const short_secrets = try protection.deriveInitialSecrets(.v1, &short_dcid);
+    try std.testing.expectError(error.InvalidPacket, client.pollInitialProtectedDatagram(
+        0,
+        &short_dcid,
+        &client_scid,
+        &[_]u8{},
+        short_secrets.client,
+    ));
+    try std.testing.expectEqual(@as(u64, 0), client.nextPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?[]const u8, null), client.originalDestinationConnectionId());
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.sendCryptoInSpace(.initial, "server initial");
+    const valid_secrets = try protection.deriveInitialSecrets(.v1, &valid_dcid);
+    try std.testing.expectError(error.InvalidPacket, server.pollInitialProtectedDatagram(
+        0,
+        &client_scid,
+        &server_scid,
+        "server-token-is-invalid",
+        valid_secrets.server,
+    ));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?[]const u8, null), server.localInitialSourceConnectionId());
+
+    var follow_client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer follow_client.deinit();
+    try follow_client.sendCryptoInSpace(.initial, "client initial");
+    const first_initial = (try follow_client.pollInitialProtectedDatagram(
+        1,
+        &valid_dcid,
+        &client_scid,
+        &[_]u8{},
+        valid_secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first_initial);
+
+    var follow_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer follow_server.deinit();
+    try follow_server.validatePeerAddress();
+    try follow_server.sendCryptoInSpace(.initial, "server initial");
+    const server_initial = (try follow_server.pollInitialProtectedDatagram(
+        2,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        valid_secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_initial);
+    try follow_client.processInitialProtectedDatagram(2, valid_secrets.server, server_initial);
+    try std.testing.expectEqualStrings(&server_scid, follow_client.peerInitialSourceConnectionId().?);
+    try follow_client.sendPingInSpace(.initial);
+
+    try std.testing.expectError(error.InvalidPacket, follow_client.pollProtectedLongDatagram(
+        3,
+        &valid_dcid,
+        &client_scid,
+        &[_]u8{},
+        .{ .initial = valid_secrets.client },
+    ));
+    try std.testing.expectEqual(@as(u64, 1), follow_client.nextPacketNumber(.initial));
+
+    const follow_initial = (try follow_client.pollProtectedLongDatagram(
+        4,
+        &server_scid,
+        &client_scid,
+        &[_]u8{},
+        .{ .initial = valid_secrets.client },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(follow_initial);
+    var opened_follow_initial = try protection.unprotectLongPacketAes128(
+        std.testing.allocator,
+        valid_secrets.client,
+        follow_initial,
+        1,
+    );
+    defer protection.deinitProtectedLongPacket(&opened_follow_initial, std.testing.allocator);
+    try std.testing.expectEqualStrings(&server_scid, opened_follow_initial.packet.header.dcid);
+}
+
+test "Initial receive validates first client DCID length and server token direction" {
+    const short_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57 };
+    const valid_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+
+    const short_secrets = try protection.deriveInitialSecrets(.v1, &short_dcid);
+    const short_protected = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &short_dcid,
+        .scid = &client_scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), short_secrets.client, "client initial");
+    defer std.testing.allocator.free(short_protected);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try std.testing.expectError(error.InvalidPacket, server.processInitialProtectedDatagram(0, short_secrets.client, short_protected));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?[]const u8, null), server.originalDestinationConnectionId());
+    try std.testing.expectEqual(@as(?[]const u8, null), server.peerInitialSourceConnectionId());
+
+    const valid_secrets = try protection.deriveInitialSecrets(.v1, &valid_dcid);
+    const token_protected = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &client_scid,
+        .scid = &server_scid,
+        .packet_type = .initial,
+        .token = "server-token-is-invalid",
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), valid_secrets.server, "server initial");
+    defer std.testing.allocator.free(token_protected);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try std.testing.expectError(error.InvalidPacket, client.processInitialProtectedDatagram(0, valid_secrets.server, token_protected));
+    try std.testing.expectEqual(@as(u64, 0), client.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?[]const u8, null), client.peerInitialSourceConnectionId());
+}
+
+test "processRetryDatagram stores token and Initial packetization reuses it" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const retry_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const retry_token = "retry-token-for-client-address";
+    const retry = packet.RetryPacket{
+        .version = .v1,
+        .dcid = &client_scid,
+        .scid = &retry_scid,
+        .token = retry_token,
+        .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+    };
+    const retry_datagram = try protection.encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
+    defer std.testing.allocator.free(retry_datagram);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    try client.processRetryDatagram(10, &original_dcid, retry_datagram);
+    try std.testing.expectEqualStrings(retry_token, client.latestRetryToken().?);
+    try std.testing.expectEqualStrings(&original_dcid, client.originalDestinationConnectionId().?);
+    try std.testing.expectEqualStrings(&retry_scid, client.retrySourceConnectionId().?);
+
+    const retry_secrets = try protection.deriveInitialSecrets(.v1, &retry_scid);
+    try client.sendCryptoInSpace(.initial, "client after retry");
+    const protected = (try client.pollInitialProtectedDatagram(
+        11,
+        &retry_scid,
+        &client_scid,
+        &[_]u8{},
+        retry_secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    var opened = try protection.unprotectLongPacketAes128(std.testing.allocator, retry_secrets.client, protected, 0);
+    defer protection.deinitProtectedLongPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqual(packet.PacketType.initial, opened.packet.header.packet_type);
+    try std.testing.expectEqualStrings(retry_token, opened.packet.header.token);
+    try std.testing.expectEqualStrings(&retry_scid, opened.packet.header.dcid);
+    try std.testing.expectEqualStrings(&client_scid, opened.packet.header.scid);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.initial));
+}
+
+test "processRetryDatagram rejects invalid or duplicate Retry without mutation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const retry_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const retry_token = "retry-token-for-client-address";
+    const retry = packet.RetryPacket{
+        .version = .v1,
+        .dcid = &client_scid,
+        .scid = &retry_scid,
+        .token = retry_token,
+        .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+    };
+    const retry_datagram = try protection.encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
+    defer std.testing.allocator.free(retry_datagram);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try std.testing.expectError(error.InvalidPacket, server.processRetryDatagram(9, &original_dcid, retry_datagram));
+    try std.testing.expectEqual(@as(?[]const u8, null), server.latestRetryToken());
+
+    const tampered = try std.testing.allocator.dupe(u8, retry_datagram);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+
+    var tampered_client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer tampered_client.deinit();
+    try std.testing.expectError(error.InvalidPacket, tampered_client.processRetryDatagram(10, &original_dcid, tampered));
+    try std.testing.expectEqual(@as(?[]const u8, null), tampered_client.latestRetryToken());
+    try std.testing.expectEqual(@as(?[]const u8, null), tampered_client.originalDestinationConnectionId());
+    try std.testing.expectEqual(@as(?[]const u8, null), tampered_client.retrySourceConnectionId());
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.processRetryDatagram(11, &original_dcid, retry_datagram);
+    try std.testing.expectError(error.InvalidPacket, client.processRetryDatagram(12, &original_dcid, retry_datagram));
+    try std.testing.expectEqualStrings(retry_token, client.latestRetryToken().?);
+    try std.testing.expectEqualStrings(&retry_scid, client.retrySourceConnectionId().?);
+}
+
+test "processVersionNegotiationDatagram selects mutual version once" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const client_versions = [_]packet.Version{ .v2, .v1 };
+    const server_versions = [_]packet.Version{.v2};
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try packet.encodeVersionNegotiationPacket(out.writer(), .{
+        .dcid = &client_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+    });
+    defer client.deinit();
+
+    const selected = (try client.processVersionNegotiationDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        out.getWritten(),
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v2, selected);
+    try std.testing.expectEqual(packet.Version.v2, client.versionNegotiationSelectedVersion().?);
+    try std.testing.expectEqual(@as(?packet.Version, null), try client.processVersionNegotiationDatagram(
+        11,
+        &original_dcid,
+        &client_scid,
+        out.getWritten(),
+    ));
+    try std.testing.expectEqual(packet.Version.v2, client.versionNegotiationSelectedVersion().?);
+}
+
+test "processVersionNegotiationDatagram ignores unsafe or mismatched packets" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const other_cid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const client_versions = [_]packet.Version{ .v2, .v1 };
+    const v1_included = [_]packet.Version{ .v2, .v1 };
+    const v2_only = [_]packet.Version{.v2};
+
+    var contains_original_raw: [80]u8 = undefined;
+    var contains_original_out = buffer.fixedWriter(&contains_original_raw);
+    try packet.encodeVersionNegotiationPacket(contains_original_out.writer(), .{
+        .dcid = &client_scid,
+        .scid = &original_dcid,
+        .versions = &v1_included,
+    });
+
+    var wrong_dcid_raw: [80]u8 = undefined;
+    var wrong_dcid_out = buffer.fixedWriter(&wrong_dcid_raw);
+    try packet.encodeVersionNegotiationPacket(wrong_dcid_out.writer(), .{
+        .dcid = &other_cid,
+        .scid = &original_dcid,
+        .versions = &v2_only,
+    });
+
+    var wrong_scid_raw: [80]u8 = undefined;
+    var wrong_scid_out = buffer.fixedWriter(&wrong_scid_raw);
+    try packet.encodeVersionNegotiationPacket(wrong_scid_out.writer(), .{
+        .dcid = &client_scid,
+        .scid = &other_cid,
+        .versions = &v2_only,
+    });
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+    });
+    defer client.deinit();
+
+    try std.testing.expectEqual(@as(?packet.Version, null), try client.processVersionNegotiationDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        contains_original_out.getWritten(),
+    ));
+    try std.testing.expectEqual(@as(?packet.Version, null), try client.processVersionNegotiationDatagram(
+        11,
+        &original_dcid,
+        &client_scid,
+        wrong_dcid_out.getWritten(),
+    ));
+    try std.testing.expectEqual(@as(?packet.Version, null), try client.processVersionNegotiationDatagram(
+        12,
+        &original_dcid,
+        &client_scid,
+        wrong_scid_out.getWritten(),
+    ));
+    try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
+}
+
+test "processVersionNegotiationDatagram rejects no mutual version without mutation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const client_versions = [_]packet.Version{ .v2, .v1 };
+    const server_versions = [_]packet.Version{@enumFromInt(0xface_b00c)};
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try packet.encodeVersionNegotiationPacket(out.writer(), .{
+        .dcid = &client_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+    });
+    defer client.deinit();
+
+    try std.testing.expectError(error.InvalidPacket, client.processVersionNegotiationDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        out.getWritten(),
+    ));
+    try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try std.testing.expectError(error.InvalidPacket, server.processVersionNegotiationDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        out.getWritten(),
+    ));
 }
 
 test "pollInitialProtectedDatagram leaves Initial space idle when no CRYPTO is queued" {
@@ -6246,6 +12283,2198 @@ test "pollInitialProtectedDatagram leaves Initial space idle when no CRYPTO is q
     ));
     try std.testing.expectEqual(@as(u64, 0), client.nextPacketNumber(.initial));
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.initial));
+    try std.testing.expect(client.localInitialSourceConnectionId() == null);
+    try std.testing.expect(client.localTransportParameters().initial_source_connection_id == null);
+}
+
+test "protected long datagram bridge emits Handshake CRYPTO packet" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+
+    try server.sendCryptoInSpace(.handshake, "server handshake");
+    const protected = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        10,
+        &dcid,
+        &scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(usize, 1), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(protected.len, server.bytesInFlight(.handshake));
+
+    try client.processProtectedLongDatagramInSpace(.handshake, 11, secrets.server, protected);
+    var crypto_buf: [32]u8 = undefined;
+    const recv_len = (try client.recvCryptoInSpace(.handshake, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server handshake", crypto_buf[0..recv_len]);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.handshake));
+}
+
+test "processProtectedLongDatagram routes coalesced Initial and Handshake packets" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+
+    try server.sendCryptoInSpace(.initial, "server initial");
+    const initial = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        10,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(initial);
+
+    try server.sendCryptoInSpace(.handshake, "server handshake");
+    const handshake = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        11,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(handshake);
+
+    const coalesced = try std.testing.allocator.alloc(u8, initial.len + handshake.len);
+    defer std.testing.allocator.free(coalesced);
+    @memcpy(coalesced[0..initial.len], initial);
+    @memcpy(coalesced[initial.len..], handshake);
+
+    try std.testing.expectEqual(@as(usize, 2), try client.processProtectedLongDatagram(12, .{
+        .initial = secrets.server,
+        .handshake = secrets.server,
+    }, coalesced));
+
+    var crypto_buf: [32]u8 = undefined;
+    const initial_len = (try client.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server initial", crypto_buf[0..initial_len]);
+    const handshake_len = (try client.recvCryptoInSpace(.handshake, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server handshake", crypto_buf[0..handshake_len]);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.handshake));
+}
+
+test "processProtectedLongDatagram validates coalesced keys before mutation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+
+    try server.sendCryptoInSpace(.initial, "server initial");
+    const initial = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        10,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(initial);
+
+    try server.sendCryptoInSpace(.handshake, "server handshake");
+    const handshake = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        11,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(handshake);
+
+    const coalesced = try std.testing.allocator.alloc(u8, initial.len + handshake.len);
+    defer std.testing.allocator.free(coalesced);
+    @memcpy(coalesced[0..initial.len], initial);
+    @memcpy(coalesced[initial.len..], handshake);
+
+    try std.testing.expectError(error.InvalidPacket, client.processProtectedLongDatagram(12, .{
+        .initial = secrets.server,
+    }, coalesced));
+
+    var crypto_buf: [32]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, null), try client.recvCryptoInSpace(.initial, &crypto_buf));
+    try std.testing.expectEqual(@as(?usize, null), try client.recvCryptoInSpace(.handshake, &crypto_buf));
+    try std.testing.expectEqual(@as(u64, 0), client.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(u64, 0), client.nextPeerPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.handshake));
+}
+
+test "pollProtectedLongDatagram coalesces Initial and Handshake CRYPTO packets" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+
+    try server.sendCryptoInSpace(.initial, "server initial");
+    try server.sendCryptoInSpace(.handshake, "server handshake");
+
+    const coalesced = (try server.pollProtectedLongDatagram(
+        10,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server, .handshake = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(coalesced);
+
+    const first = try protection.peekProtectedLongPacketInfo(coalesced);
+    try std.testing.expectEqual(packet.PacketType.initial, first.packet_type);
+    const second = try protection.peekProtectedLongPacketInfo(coalesced[first.len..]);
+    try std.testing.expectEqual(packet.PacketType.handshake, second.packet_type);
+    try std.testing.expectEqual(coalesced.len, first.len + second.len);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.initial));
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(usize, 1), server.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 1), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(first.len, server.bytesInFlight(.initial));
+    try std.testing.expectEqual(second.len, server.bytesInFlight(.handshake));
+    try std.testing.expectEqualStrings(&server_scid, server.localInitialSourceConnectionId().?);
+    try std.testing.expectEqualStrings(&server_scid, server.localTransportParameters().initial_source_connection_id.?);
+
+    try std.testing.expectEqual(@as(usize, 2), try client.processProtectedLongDatagram(11, .{
+        .initial = secrets.server,
+        .handshake = secrets.server,
+    }, coalesced));
+
+    var crypto_buf: [32]u8 = undefined;
+    const initial_len = (try client.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server initial", crypto_buf[0..initial_len]);
+    const handshake_len = (try client.recvCryptoInSpace(.handshake, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server handshake", crypto_buf[0..handshake_len]);
+}
+
+test "pollProtectedLongDatagram validates keys before send-state mutation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.sendCryptoInSpace(.initial, "server initial");
+    try server.sendCryptoInSpace(.handshake, "server handshake");
+
+    try std.testing.expectError(error.InvalidPacket, server.pollProtectedLongDatagram(
+        10,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    ));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.initial));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+
+    const coalesced = (try server.pollProtectedLongDatagram(
+        11,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server, .handshake = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(coalesced);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.initial));
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.handshake));
+}
+
+test "pollProtectedZeroRttDatagram emits protected STREAM in Application packet space" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "early data", true);
+    const protected = (try client.pollProtectedZeroRttDatagram(
+        10,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    const info = try protection.peekProtectedLongPacketInfo(protected);
+    try std.testing.expectEqual(packet.PacketType.zero_rtt, info.packet_type);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.send_queue.items.len);
+
+    try std.testing.expectEqual(@as(usize, 1), try server.processProtectedLongDatagram(11, .{
+        .zero_rtt = secrets.client,
+    }, protected));
+
+    var recv_buf: [32]u8 = undefined;
+    const recv_len = (try server.recvOnStream(stream_id, &recv_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("early data", recv_buf[0..recv_len]);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+}
+
+test "driveCryptoBackendInSpace installs zero RTT traffic secrets for long packet exchange" {
+    const SecretBackend = struct {
+        secrets: ZeroRttTrafficSecrets,
+        sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_zero_rtt_traffic_secrets = pullZeroRttTrafficSecrets,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullZeroRttTrafficSecrets(context: *anyopaque) Error!?ZeroRttTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.sent) return null;
+            self.sent = true;
+            return self.secrets;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    var client_backend = SecretBackend{ .secrets = .{ .local = secrets.client.secret } };
+    var server_backend = SecretBackend{ .secrets = .{ .peer = secrets.client.secret } };
+    var scratch: [8]u8 = undefined;
+    const client_progress = try client.driveCryptoBackendInSpace(.initial, client_backend.backend(), &scratch);
+    const server_progress = try server.driveCryptoBackendInSpace(.initial, server_backend.backend(), &scratch);
+    try std.testing.expect(client_progress.zero_rtt_keys_installed);
+    try std.testing.expect(server_progress.zero_rtt_keys_installed);
+    try std.testing.expect(client.hasLocalZeroRttProtectionKey());
+    try std.testing.expect(!client.hasPeerZeroRttProtectionKey());
+    try std.testing.expect(!server.hasLocalZeroRttProtectionKey());
+    try std.testing.expect(server.hasPeerZeroRttProtectionKey());
+    try std.testing.expect(!server.zeroRttAccepted());
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "installed early", true);
+    const protected = (try client.pollProtectedZeroRttDatagramWithInstalledKeys(
+        10,
+        &server_scid,
+        &client_scid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedZeroRttDatagramWithInstalledKeys(10, protected),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    try server.acceptZeroRtt();
+    try std.testing.expect(server.zeroRttAccepted());
+
+    var tampered = try std.testing.allocator.dupe(u8, protected);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedZeroRttDatagramWithInstalledKeys(11, tampered),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    try server.processProtectedZeroRttDatagramWithInstalledKeys(12, protected);
+    var recv_buf: [32]u8 = undefined;
+    const recv_len = (try server.recvOnStream(stream_id, &recv_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("installed early", recv_buf[0..recv_len]);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+}
+
+test "discardZeroRttProtectionKeys clears installed early-data keys" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    try conn.installZeroRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.client.secret,
+    });
+    try std.testing.expect(conn.hasLocalZeroRttProtectionKey());
+    try std.testing.expect(conn.hasPeerZeroRttProtectionKey());
+    try conn.acceptZeroRtt();
+    try std.testing.expect(conn.zeroRttAccepted());
+
+    try conn.discardZeroRttProtectionKeys();
+    try std.testing.expect(!conn.hasLocalZeroRttProtectionKey());
+    try std.testing.expect(!conn.hasPeerZeroRttProtectionKey());
+    try std.testing.expect(!conn.zeroRttAccepted());
+    try conn.discardZeroRttProtectionKeys();
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        conn.pollProtectedZeroRttDatagramWithInstalledKeys(0, &dcid, &scid),
+    );
+    try std.testing.expectError(
+        error.InvalidPacket,
+        conn.processProtectedZeroRttDatagramWithInstalledKeys(0, &[_]u8{}),
+    );
+}
+
+test "installed zero RTT receive requires explicit accept or rejects and discards keys" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try std.testing.expectError(error.InvalidPacket, server.acceptZeroRtt());
+    try server.installZeroRttTrafficSecrets(.{ .peer = secrets.client.secret });
+    try std.testing.expect(server.hasPeerZeroRttProtectionKey());
+    try std.testing.expect(!server.zeroRttAccepted());
+
+    try server.rejectZeroRtt();
+    try std.testing.expect(!server.hasPeerZeroRttProtectionKey());
+    try std.testing.expect(!server.zeroRttAccepted());
+    try std.testing.expectError(error.InvalidPacket, server.acceptZeroRtt());
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedZeroRttDatagramWithInstalledKeys(0, &[_]u8{}),
+    );
+}
+
+test "installOneRttTrafficSecrets discards client zero RTT keys" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installZeroRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try std.testing.expect(client.hasLocalZeroRttProtectionKey());
+    try std.testing.expect(client.hasPeerZeroRttProtectionKey());
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try std.testing.expect(client.hasOneRttProtectionKeys());
+    try std.testing.expect(!client.hasLocalZeroRttProtectionKey());
+    try std.testing.expect(!client.hasPeerZeroRttProtectionKey());
+    try std.testing.expectError(
+        error.InvalidPacket,
+        client.pollProtectedZeroRttDatagramWithInstalledKeys(0, &dcid, &scid),
+    );
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.installZeroRttTrafficSecrets(.{ .peer = secrets.client.secret });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try std.testing.expect(server.hasOneRttProtectionKeys());
+    try std.testing.expect(server.hasPeerZeroRttProtectionKey());
+}
+
+test "server discards zero RTT keys after successful one RTT receive" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try server.installZeroRttTrafficSecrets(.{ .peer = secrets.client.secret });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try std.testing.expect(server.hasPeerZeroRttProtectionKey());
+
+    try client.sendPing();
+    const protected = (try client.pollProtectedShortDatagram(
+        10,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    var tampered = try std.testing.allocator.dupe(u8, protected);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedShortDatagramWithInstalledKeys(11, server_dcid.len, tampered),
+    );
+    try std.testing.expect(server.hasPeerZeroRttProtectionKey());
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    try server.processProtectedShortDatagramWithInstalledKeys(12, server_dcid.len, protected);
+    try std.testing.expect(!server.hasLocalZeroRttProtectionKey());
+    try std.testing.expect(!server.hasPeerZeroRttProtectionKey());
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+}
+
+test "pollProtectedLongDatagram coalesces Initial and 0-RTT packets with key validation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try client.sendCryptoInSpace(.initial, "client initial");
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "early", true);
+
+    const coalesced = (try client.pollProtectedLongDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        .{
+            .initial = secrets.client,
+            .zero_rtt = secrets.client,
+        },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(coalesced);
+
+    const first = try protection.peekProtectedLongPacketInfo(coalesced);
+    try std.testing.expectEqual(packet.PacketType.initial, first.packet_type);
+    const second = try protection.peekProtectedLongPacketInfo(coalesced[first.len..]);
+    try std.testing.expectEqual(packet.PacketType.zero_rtt, second.packet_type);
+    try std.testing.expectEqual(coalesced.len, first.len + second.len);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.initial));
+    try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.application));
+
+    try std.testing.expectError(error.InvalidPacket, server.processProtectedLongDatagram(11, .{
+        .initial = secrets.client,
+    }, coalesced));
+    var initial_buf: [32]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, null), try server.recvCryptoInSpace(.initial, &initial_buf));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    try std.testing.expectEqual(@as(usize, 2), try server.processProtectedLongDatagram(12, .{
+        .initial = secrets.client,
+        .zero_rtt = secrets.client,
+    }, coalesced));
+
+    const initial_len = (try server.recvCryptoInSpace(.initial, &initial_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("client initial", initial_buf[0..initial_len]);
+    var stream_buf: [16]u8 = undefined;
+    const stream_len = (try server.recvOnStream(stream_id, &stream_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("early", stream_buf[0..stream_len]);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+}
+
+test "processProtectedZeroRttDatagram rejects protected ACK frame" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var plaintext: [16]u8 = undefined;
+    @memset(&plaintext, 0);
+    var plaintext_out = buffer.fixedWriter(&plaintext);
+    try frame.encodeFrame(plaintext_out.writer(), .{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+
+    const protected = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &server_scid,
+        .scid = &client_scid,
+        .packet_type = .zero_rtt,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(protected);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedZeroRttDatagram(10, secrets.client, protected),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+}
+
+test "pollProtectedLongDatagram drops obsolete 0-RTT STOP_SENDING" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    const stream_id = try client.openStream();
+    try client.stopSending(stream_id, 1);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_stop_sending.items.len);
+
+    var reset_buf: [32]u8 = undefined;
+    var reset_out = buffer.fixedWriter(&reset_buf);
+    try frame.encodeFrame(reset_out.writer(), .{ .reset_stream = .{
+        .stream_id = stream_id,
+        .application_error_code = 7,
+        .final_size = 0,
+    } });
+    try client.processDatagramForPacketType(.one_rtt, 0, reset_out.getWritten());
+
+    try std.testing.expectEqual(@as(?[]u8, null), try client.pollProtectedLongDatagram(
+        1,
+        &server_scid,
+        &client_scid,
+        &[_]u8{},
+        .{ .zero_rtt = secrets.client },
+    ));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_stop_sending.items.len);
+    try std.testing.expectEqual(@as(u64, 0), client.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.application));
+}
+
+test "processProtectedShortDatagram routes protected 1-RTT payload" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const plaintext = [_]u8{
+        @intFromEnum(frame.FrameType.ping),
+        @intFromEnum(frame.FrameType.padding),
+        @intFromEnum(frame.FrameType.padding),
+        @intFromEnum(frame.FrameType.padding),
+    };
+
+    const protected = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(protected);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try server.processProtectedShortDatagram(10, secrets.client, server_dcid.len, protected);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+}
+
+test "protected short datagram spin bit follows enabled single-path policy" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const client_dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{ .enable_spin_bit = true });
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{ .enable_spin_bit = true });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try std.testing.expect(!client.nextOutgoingSpinBit());
+    try client.sendPing();
+    const first_client_packet = (try client.pollProtectedShortDatagram(
+        10,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first_client_packet);
+    try std.testing.expect(!try protection.peekShortPacketSpinBit(first_client_packet));
+
+    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, first_client_packet);
+    try std.testing.expect(!server.nextOutgoingSpinBit());
+    const server_ack = (try server.pollProtectedShortDatagram(
+        12,
+        &client_dcid,
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_ack);
+    try std.testing.expect(!try protection.peekShortPacketSpinBit(server_ack));
+
+    try client.processProtectedShortDatagram(13, secrets.server, client_dcid.len, server_ack);
+    try std.testing.expect(client.nextOutgoingSpinBit());
+    try client.sendPing();
+    const second_client_packet = (try client.pollProtectedShortDatagram(
+        14,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_client_packet);
+    try std.testing.expect(try protection.peekShortPacketSpinBit(second_client_packet));
+
+    try server.processProtectedShortDatagram(15, secrets.client, server_dcid.len, second_client_packet);
+    try std.testing.expect(server.nextOutgoingSpinBit());
+    server.resetSpinBitForPath();
+    try std.testing.expect(!server.nextOutgoingSpinBit());
+}
+
+test "spin bit disabled and invalid packets do not update modeled state" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const plaintext = [_]u8{
+        @intFromEnum(frame.FrameType.ping),
+        @intFromEnum(frame.FrameType.padding),
+        @intFromEnum(frame.FrameType.padding),
+        @intFromEnum(frame.FrameType.padding),
+    };
+    const protected = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = true,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(protected);
+    try std.testing.expect(try protection.peekShortPacketSpinBit(protected));
+
+    var disabled_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer disabled_server.deinit();
+    try disabled_server.processProtectedShortDatagram(10, secrets.client, server_dcid.len, protected);
+    try std.testing.expect(!disabled_server.nextOutgoingSpinBit());
+
+    var enabled_server = try QuicConnection.init(std.testing.allocator, .server, .{ .enable_spin_bit = true });
+    defer enabled_server.deinit();
+    var tampered = try std.testing.allocator.dupe(u8, protected);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        enabled_server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, tampered),
+    );
+    try std.testing.expect(!enabled_server.nextOutgoingSpinBit());
+
+    try enabled_server.processProtectedShortDatagram(12, secrets.client, server_dcid.len, protected);
+    try std.testing.expect(enabled_server.nextOutgoingSpinBit());
+}
+
+test "protected short datagram key update selects next key phase" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const next_client_keys = protection.nextAes128PacketProtectionKeys(secrets.client);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.sendPing();
+    const protected = (try client.pollProtectedShortDatagramWithKeyPhase(
+        10,
+        &server_dcid,
+        next_client_keys,
+        true,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.application));
+    try std.testing.expect(try protection.peekShortPacketKeyPhaseAes128(secrets.client.hp, protected, server_dcid.len));
+
+    var rejecting_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer rejecting_server.deinit();
+    try std.testing.expectError(
+        error.InvalidPacket,
+        rejecting_server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, protected),
+    );
+    try std.testing.expectEqual(@as(u64, 0), rejecting_server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), rejecting_server.pendingAckLargest(.application));
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.processProtectedShortDatagramWithKeyUpdate(12, .{
+        .current = secrets.client,
+        .next = next_client_keys,
+        .current_key_phase = false,
+    }, server_dcid.len, protected);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+}
+
+test "protected short datagram key phase state advances after successful receive" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_send_state = protection.Aes128KeyPhaseState.init(secrets.client, false);
+    var server_recv_state = protection.Aes128KeyPhaseState.init(secrets.client, false);
+    client_send_state.initiateKeyUpdate();
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.sendPing();
+    const protected = (try client.pollProtectedShortDatagramWithKeyPhaseState(
+        10,
+        &server_dcid,
+        &client_send_state,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+    try std.testing.expect(try protection.peekShortPacketKeyPhaseAes128(secrets.client.hp, protected, server_dcid.len));
+
+    var tampered = try std.testing.allocator.dupe(u8, protected);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedShortDatagramWithKeyPhaseState(11, &server_recv_state, server_dcid.len, tampered),
+    );
+    try std.testing.expect(!server_recv_state.currentKeyPhase());
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    try server.processProtectedShortDatagramWithKeyPhaseState(12, &server_recv_state, server_dcid.len, protected);
+    try std.testing.expect(server_recv_state.currentKeyPhase());
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+}
+
+test "driveCryptoBackendInSpace installs handshake traffic secrets for long packet exchange" {
+    const SecretBackend = struct {
+        secrets: HandshakeTrafficSecrets,
+        sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullHandshakeTrafficSecrets(context: *anyopaque) Error!?HandshakeTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.sent) return null;
+            self.sent = true;
+            return self.secrets;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var client_backend = SecretBackend{ .secrets = .{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    } };
+    var server_backend = SecretBackend{ .secrets = .{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    } };
+    var scratch: [8]u8 = undefined;
+    const client_progress = try client.driveCryptoBackendInSpace(.handshake, client_backend.backend(), &scratch);
+    const server_progress = try server.driveCryptoBackendInSpace(.handshake, server_backend.backend(), &scratch);
+    try std.testing.expect(client_progress.handshake_keys_installed);
+    try std.testing.expect(server_progress.handshake_keys_installed);
+    try std.testing.expect(!client_progress.one_rtt_keys_installed);
+    try std.testing.expect(client.hasHandshakeProtectionKeys());
+    try std.testing.expect(server.hasHandshakeProtectionKeys());
+
+    try server.sendCryptoInSpace(.handshake, "server handshake");
+    const protected = (try server.pollProtectedHandshakeDatagramWithInstalledKeys(
+        10,
+        &client_scid,
+        &server_scid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    var tampered = try std.testing.allocator.dupe(u8, protected);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        client.processProtectedHandshakeDatagramWithInstalledKeys(11, tampered),
+    );
+    try std.testing.expectEqual(@as(u64, 0), client.nextPeerPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.handshake));
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, protected);
+    var crypto_buf: [64]u8 = undefined;
+    const recv_len = (try client.recvCryptoInSpace(.handshake, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server handshake", crypto_buf[0..recv_len]);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.handshake));
+
+    const ack = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        13,
+        &server_scid,
+        &client_scid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack);
+    try server.processProtectedHandshakeDatagramWithInstalledKeys(14, ack);
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.handshake));
+}
+
+test "driveCryptoBackendInSpace installs one RTT traffic secrets for short packet exchange" {
+    const SecretBackend = struct {
+        secrets: OneRttTrafficSecrets,
+        sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_1rtt_traffic_secrets = pullOneRttTrafficSecrets,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullOneRttTrafficSecrets(context: *anyopaque) Error!?OneRttTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.sent) return null;
+            self.sent = true;
+            return self.secrets;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var client_backend = SecretBackend{ .secrets = .{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    } };
+    var server_backend = SecretBackend{ .secrets = .{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    } };
+    var scratch: [8]u8 = undefined;
+    const client_progress = try client.driveCryptoBackendInSpace(.handshake, client_backend.backend(), &scratch);
+    const server_progress = try server.driveCryptoBackendInSpace(.handshake, server_backend.backend(), &scratch);
+    try std.testing.expect(client_progress.one_rtt_keys_installed);
+    try std.testing.expect(server_progress.one_rtt_keys_installed);
+    try std.testing.expect(client.hasOneRttProtectionKeys());
+    try std.testing.expect(server.hasOneRttProtectionKeys());
+    try std.testing.expectEqual(@as(?bool, false), client.localOneRttKeyPhase());
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttKeyPhase());
+
+    try client.sendPing();
+    const client_ping = (try client.pollProtectedShortDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_ping);
+    try server.processProtectedShortDatagramWithInstalledKeys(11, server_dcid.len, client_ping);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+
+    const server_ack = (try server.pollProtectedShortDatagramWithInstalledKeys(
+        12,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_ack);
+    try client.processProtectedShortDatagramWithInstalledKeys(13, client_dcid.len, server_ack);
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
+test "installed one RTT key phase state advances only after successful receive" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    try client.initiateOneRttKeyUpdate();
+    try std.testing.expectEqual(@as(?bool, true), client.localOneRttKeyPhase());
+    try client.sendPing();
+    const protected = (try client.pollProtectedShortDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+    try std.testing.expect(try protection.peekShortPacketKeyPhaseAes128(secrets.client.hp, protected, server_dcid.len));
+
+    var tampered = try std.testing.allocator.dupe(u8, protected);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedShortDatagramWithInstalledKeys(11, server_dcid.len, tampered),
+    );
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttKeyPhase());
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    try server.processProtectedShortDatagramWithInstalledKeys(12, server_dcid.len, protected);
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttKeyPhase());
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+}
+
+test "installed one RTT key update requires handshake confirmation and ACK before next update" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try std.testing.expectError(error.InvalidPacket, client.initiateOneRttKeyUpdate());
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+    try client.initiateOneRttKeyUpdate();
+    try std.testing.expectEqual(@as(?bool, true), client.localOneRttKeyPhase());
+    try std.testing.expectError(error.InvalidPacket, client.initiateOneRttKeyUpdate());
+
+    try client.sendPing();
+    const ping = (try client.pollProtectedShortDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping);
+    try server.processProtectedShortDatagramWithInstalledKeys(11, server_dcid.len, ping);
+    const ack = (try server.pollProtectedShortDatagramWithInstalledKeys(
+        12,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack);
+    try client.processProtectedShortDatagramWithInstalledKeys(13, client_dcid.len, ack);
+
+    try client.initiateOneRttKeyUpdate();
+    try std.testing.expectEqual(@as(?bool, false), client.localOneRttKeyPhase());
+}
+
+test "installed one RTT key update ACK confirmation rolls back with invalid payload" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try client.confirmHandshake();
+    try client.initiateOneRttKeyUpdate();
+    _ = try client.recordPacketSentInSpace(.application, 10, 100);
+
+    var payload: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&payload);
+    try frame.encodeFrame(out.writer(), .{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+    try out.writeByte(0xff);
+    try std.testing.expectError(error.InvalidPacket, client.processDatagramForPacketType(.one_rtt, 20, out.getWritten()));
+    try std.testing.expectError(error.InvalidPacket, client.initiateOneRttKeyUpdate());
+    try std.testing.expectEqual(@as(usize, 1), client.sent_packets.items.len);
+
+    out = buffer.fixedWriter(&payload);
+    try frame.encodeFrame(out.writer(), .{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+    try client.processDatagramForPacketType(.one_rtt, 21, out.getWritten());
+    try client.initiateOneRttKeyUpdate();
+}
+
+test "processProtectedShortDatagram rejects invalid short packets without mutation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const plaintext = [_]u8{
+        @intFromEnum(frame.FrameType.ping),
+        @intFromEnum(frame.FrameType.padding),
+        @intFromEnum(frame.FrameType.padding),
+        @intFromEnum(frame.FrameType.padding),
+    };
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    const wrong_packet_number = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 1,
+    }, try packet.encodePacketNumberForHeader(1, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(wrong_packet_number);
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedShortDatagram(10, secrets.client, server_dcid.len, wrong_packet_number),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    const tampered = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, tampered),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+}
+
+test "pollProtectedShortDatagram emits protected PING and ACK-only response" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try client.sendPing();
+    const client_ping = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_ping);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(client_ping.len, client.bytesInFlight(.application));
+
+    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, client_ping);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+
+    const server_ack = (try server.pollProtectedShortDatagram(12, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_ack);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    try client.processProtectedShortDatagram(13, secrets.server, client_dcid.len, server_ack);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.application));
+}
+
+test "pollProtectedShortDatagram emits protected STREAM and ACK response" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello protected", true);
+
+    const client_stream = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_stream);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(client_stream.len, client.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?[]u8, null), try client.pollProtectedShortDatagram(11, &server_dcid, secrets.client));
+
+    try server.processProtectedShortDatagram(12, secrets.client, server_dcid.len, client_stream);
+    var recv_buf: [32]u8 = undefined;
+    const recv_len = (try server.recvOnStream(stream_id, &recv_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("hello protected", recv_buf[0..recv_len]);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+
+    server.pending_max_frames.items.len = 0;
+    const server_ack = (try server.pollProtectedShortDatagram(13, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_ack);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    try client.processProtectedShortDatagram(14, secrets.server, client_dcid.len, server_ack);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.application));
+}
+
+test "pollProtectedShortDatagram emits protected CRYPTO and ACK response" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try client.sendCrypto("application crypto");
+    const client_crypto = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_crypto);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(client_crypto.len, client.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?[]u8, null), try client.pollProtectedShortDatagram(11, &server_dcid, secrets.client));
+
+    try server.processProtectedShortDatagram(12, secrets.client, server_dcid.len, client_crypto);
+    var crypto_buf: [32]u8 = undefined;
+    const crypto_len = (try server.recvCrypto(&crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("application crypto", crypto_buf[0..crypto_len]);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+
+    const server_ack = (try server.pollProtectedShortDatagram(13, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_ack);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    try client.processProtectedShortDatagram(14, secrets.server, client_dcid.len, server_ack);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.application));
+}
+
+test "pollProtectedShortDatagram preserves STREAM when anti-amplification blocks" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    const stream_id = try server.openStream();
+    try server.sendOnStream(stream_id, "blocked first", true);
+
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    try server.validatePeerAddress();
+    const server_stream = (try server.pollProtectedShortDatagram(11, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_stream);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.application));
+    try std.testing.expectEqual(server_stream.len, server.bytesInFlight(.application));
+
+    try client.processProtectedShortDatagram(12, secrets.server, client_dcid.len, server_stream);
+    var recv_buf: [32]u8 = undefined;
+    const recv_len = (try client.recvOnStream(stream_id, &recv_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("blocked first", recv_buf[0..recv_len]);
+}
+
+test "pollProtectedShortDatagram preserves CRYPTO when anti-amplification blocks" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    try server.sendCrypto("blocked crypto");
+
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    try server.validatePeerAddress();
+    const server_crypto = (try server.pollProtectedShortDatagram(11, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_crypto);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.application));
+    try std.testing.expectEqual(server_crypto.len, server.bytesInFlight(.application));
+
+    try client.processProtectedShortDatagram(12, secrets.server, client_dcid.len, server_crypto);
+    var crypto_buf: [32]u8 = undefined;
+    const crypto_len = (try client.recvCrypto(&crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("blocked crypto", crypto_buf[0..crypto_len]);
+}
+
+test "pollProtectedShortDatagram emits protected PATH_CHALLENGE and PATH_RESPONSE" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const challenge_data = [_]u8{ 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80 };
+    try client.sendPathChallenge(challenge_data);
+    const challenge = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(challenge);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_path_challenges.items.len);
+    try std.testing.expectEqual(@as(usize, 1), client.outstanding_path_challenges.items.len);
+    try std.testing.expectEqualSlices(u8, &challenge_data, &client.outstanding_path_challenges.items[0].data);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(challenge.len, client.bytesInFlight(.application));
+
+    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, challenge);
+    try std.testing.expectEqual(@as(usize, 1), server.pending_path_responses.items.len);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+
+    const response = (try server.pollProtectedShortDatagram(12, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_path_responses.items.len);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 1), server.sentPacketCount(.application));
+    try std.testing.expectEqual(response.len, server.bytesInFlight(.application));
+
+    try client.processProtectedShortDatagram(13, secrets.server, client_dcid.len, response);
+    try std.testing.expectEqual(@as(usize, 0), client.outstanding_path_challenges.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.application));
+
+    const ack = (try client.pollProtectedShortDatagram(14, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack);
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.application));
+    try server.processProtectedShortDatagram(15, secrets.client, server_dcid.len, ack);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+}
+
+test "endpoint route path update follows protected PATH_RESPONSE validation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var router = endpoint.EndpointRouter.init(std.testing.allocator);
+    defer router.deinit();
+    try router.registerConnectionId(19, &server_dcid, old_path, .{});
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+
+    const challenge_data = [_]u8{ 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb };
+    try server.sendPathChallenge(challenge_data);
+    const challenge = (try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(challenge);
+    try client.processProtectedShortDatagram(11, secrets.server, client_dcid.len, challenge);
+
+    const response = (try client.pollProtectedShortDatagram(12, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response);
+    const migrated_route = try router.routeDatagram(new_path, response);
+    try std.testing.expectEqual(@as(u64, 19), migrated_route.connection_id);
+    try std.testing.expect(migrated_route.path_changed);
+
+    try server.processProtectedShortDatagram(13, secrets.client, server_dcid.len, response);
+    try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+
+    const updated = try router.updateRoutePath(&server_dcid, old_path, new_path);
+    try std.testing.expectEqual(@as(u64, 19), updated.connection_id);
+    try std.testing.expect(!updated.path_changed);
+
+    const confirmed_route = try router.routeDatagram(new_path, response);
+    try std.testing.expectEqual(@as(u64, 19), confirmed_route.connection_id);
+    try std.testing.expect(!confirmed_route.path_changed);
+    try std.testing.expectError(error.PathMismatch, router.updateRoutePath(&server_dcid, old_path, old_path));
+}
+
+test "pollProtectedShortDatagram preserves PATH_CHALLENGE when anti-amplification blocks" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    const challenge_data = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22 };
+    try server.sendPathChallenge(challenge_data);
+
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 1), server.pending_path_challenges.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.outstanding_path_challenges.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    try server.validatePeerAddress();
+    const challenge = (try server.pollProtectedShortDatagram(11, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(challenge);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_path_challenges.items.len);
+    try std.testing.expectEqual(@as(usize, 1), server.outstanding_path_challenges.items.len);
+    try std.testing.expectEqualSlices(u8, &challenge_data, &server.outstanding_path_challenges.items[0].data);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.application));
+
+    try client.processProtectedShortDatagram(12, secrets.server, client_dcid.len, challenge);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_path_responses.items.len);
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.application));
+}
+
+test "pollProtectedShortDatagram emits protected NEW_CONNECTION_ID and RETIRE_CONNECTION_ID" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const cid0 = [_]u8{ 0xc0, 0xff, 0xee, 0x00 };
+    const cid1 = [_]u8{ 0xc0, 0xff, 0xee, 0x01 };
+    const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+
+    try std.testing.expectEqual(@as(u64, 0), try server.issueConnectionId(&cid0, token0, 0));
+    const new0 = (try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(new0);
+    try std.testing.expect(server.local_connection_ids.items[0].sent);
+    try std.testing.expectEqual(@as(usize, 0), server.pendingNewConnectionIdCount());
+    try std.testing.expectEqual(new0.len, server.bytesInFlight(.application));
+
+    try client.processProtectedShortDatagram(11, secrets.server, client_dcid.len, new0);
+    try std.testing.expectEqual(@as(usize, 1), client.active_connection_ids.items.len);
+    try std.testing.expectEqual(@as(u64, 1), client.activeConnectionIdCount());
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.application));
+
+    const ack0 = (try client.pollProtectedShortDatagram(12, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack0);
+    try server.processProtectedShortDatagram(13, secrets.client, server_dcid.len, ack0);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.application));
+
+    try std.testing.expectEqual(@as(u64, 1), try server.issueConnectionId(&cid1, token1, 1));
+    const new1 = (try server.pollProtectedShortDatagram(14, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(new1);
+    try std.testing.expect(server.local_connection_ids.items[1].sent);
+    try client.processProtectedShortDatagram(15, secrets.server, client_dcid.len, new1);
+    try std.testing.expectEqual(@as(usize, 2), client.active_connection_ids.items.len);
+    try std.testing.expect(client.active_connection_ids.items[0].retired);
+    try std.testing.expect(!client.active_connection_ids.items[1].retired);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_retire_connection_ids.items.len);
+    try std.testing.expectEqual(@as(?u64, 1), client.pendingAckLargest(.application));
+
+    const retire = (try client.pollProtectedShortDatagram(16, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(retire);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_retire_connection_ids.items.len);
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.application));
+
+    try server.processProtectedShortDatagram(17, secrets.client, server_dcid.len, retire);
+    try std.testing.expect(server.local_connection_ids.items[0].retired);
+    try std.testing.expectEqual(@as(u64, 1), server.localConnectionIdCount());
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?u64, 1), server.pendingAckLargest(.application));
+
+    const ack1 = (try server.pollProtectedShortDatagram(18, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack1);
+    try client.processProtectedShortDatagram(19, secrets.server, client_dcid.len, ack1);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
+test "pollProtectedShortDatagram preserves NEW_CONNECTION_ID when anti-amplification blocks" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    const cid = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    try std.testing.expectEqual(@as(u64, 0), try server.issueConnectionId(&cid, token, 0));
+
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.application));
+    try std.testing.expect(!server.local_connection_ids.items[0].sent);
+    try std.testing.expectEqual(@as(usize, 1), server.pendingNewConnectionIdCount());
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    try server.validatePeerAddress();
+    const new_id = (try server.pollProtectedShortDatagram(11, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(new_id);
+    try std.testing.expect(server.local_connection_ids.items[0].sent);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.application));
+
+    try client.processProtectedShortDatagram(12, secrets.server, client_dcid.len, new_id);
+    try std.testing.expectEqual(@as(usize, 1), client.active_connection_ids.items.len);
+    try std.testing.expectEqualSlices(u8, &cid, client.active_connection_ids.items[0].connection_id);
+}
+
+test "pollProtectedShortDatagram emits protected MAX_DATA and MAX_STREAM_DATA" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 5,
+    });
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 5,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", false);
+    const client_stream = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_stream);
+
+    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, client_stream);
+    var read_buf: [8]u8 = undefined;
+    const read_len = (try server.recvOnStream(stream_id, &read_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("hello", read_buf[0..read_len]);
+    try std.testing.expectEqual(@as(usize, 2), server.pending_max_frames.items.len);
+
+    const max_data = (try server.pollProtectedShortDatagram(12, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(max_data);
+    try std.testing.expectEqual(@as(usize, 1), server.pending_max_frames.items.len);
+    try client.processProtectedShortDatagram(13, secrets.server, client_dcid.len, max_data);
+    try std.testing.expectEqual(@as(u64, 10), client.peer_max_data);
+
+    const max_stream_data = (try server.pollProtectedShortDatagram(14, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(max_stream_data);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_max_frames.items.len);
+    try client.processProtectedShortDatagram(15, secrets.server, client_dcid.len, max_stream_data);
+    try std.testing.expectEqual(@as(u64, 10), client.findSendStream(stream_id).?.max_data);
+
+    try client.sendOnStream(stream_id, "!", true);
+}
+
+test "pollProtectedShortDatagram emits protected BLOCKED frames" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var data_client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 16,
+    });
+    defer data_client.deinit();
+    var data_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer data_server.deinit();
+    const data_stream = try data_client.openStream();
+    try data_client.sendOnStream(data_stream, "hello", false);
+    try std.testing.expectError(error.FlowControlBlocked, data_client.sendOnStream(data_stream, "!", false));
+
+    const data_blocked = (try data_client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(data_blocked);
+    try std.testing.expectEqual(@as(usize, 0), data_client.pending_blocked_frames.items.len);
+    try data_server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, data_blocked);
+    try std.testing.expectEqual(@as(?u64, 5), data_server.peerDataBlockedLimit());
+
+    var stream_client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 16,
+        .initial_max_stream_data = 5,
+    });
+    defer stream_client.deinit();
+    var stream_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer stream_server.deinit();
+    const stream_id = try stream_client.openStream();
+    try stream_client.sendOnStream(stream_id, "hello", false);
+    try std.testing.expectError(error.FlowControlBlocked, stream_client.sendOnStream(stream_id, "!", false));
+
+    const stream_blocked = (try stream_client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(stream_blocked);
+    try std.testing.expectEqual(@as(usize, 0), stream_client.pending_blocked_frames.items.len);
+    try stream_server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, stream_blocked);
+    try std.testing.expectEqual(@as(?u64, 5), stream_server.peerStreamDataBlockedLimit(stream_id));
+
+    var bidi_client = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
+    defer bidi_client.deinit();
+    var bidi_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer bidi_server.deinit();
+    _ = try bidi_client.openStream();
+    try std.testing.expectError(error.FlowControlBlocked, bidi_client.openStream());
+
+    const bidi_blocked = (try bidi_client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(bidi_blocked);
+    try std.testing.expectEqual(@as(usize, 0), bidi_client.pending_blocked_frames.items.len);
+    try bidi_server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, bidi_blocked);
+    try std.testing.expectEqual(@as(?u64, 1), bidi_server.peerStreamsBlockedBidiLimit());
+
+    var uni_client = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_uni = 1 });
+    defer uni_client.deinit();
+    var uni_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer uni_server.deinit();
+    _ = try uni_client.openUniStream();
+    try std.testing.expectError(error.FlowControlBlocked, uni_client.openUniStream());
+
+    const uni_blocked = (try uni_client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(uni_blocked);
+    try std.testing.expectEqual(@as(usize, 0), uni_client.pending_blocked_frames.items.len);
+    try uni_server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, uni_blocked);
+    try std.testing.expectEqual(@as(?u64, 1), uni_server.peerStreamsBlockedUniLimit());
+}
+
+test "pollProtectedShortDatagram preserves MAX and BLOCKED frames when anti-amplification blocks" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var max_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer max_server.deinit();
+    try max_server.queueMaxDataFrame(max_server.recv_max_data);
+
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try max_server.pollProtectedShortDatagram(10, &client_dcid, secrets.server),
+    );
+    try std.testing.expectEqual(@as(usize, 1), max_server.pending_max_frames.items.len);
+    try std.testing.expectEqual(@as(u64, 0), max_server.nextPacketNumber(.application));
+
+    try max_server.validatePeerAddress();
+    const max_frame = (try max_server.pollProtectedShortDatagram(11, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(max_frame);
+    try std.testing.expectEqual(@as(usize, 0), max_server.pending_max_frames.items.len);
+    try std.testing.expectEqual(@as(u64, 1), max_server.nextPacketNumber(.application));
+
+    var blocked_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer blocked_server.deinit();
+    try blocked_server.queueDataBlockedFrame(blocked_server.peer_max_data);
+
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try blocked_server.pollProtectedShortDatagram(10, &client_dcid, secrets.server),
+    );
+    try std.testing.expectEqual(@as(usize, 1), blocked_server.pending_blocked_frames.items.len);
+    try std.testing.expectEqual(@as(u64, 0), blocked_server.nextPacketNumber(.application));
+
+    try blocked_server.validatePeerAddress();
+    const blocked_frame = (try blocked_server.pollProtectedShortDatagram(11, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(blocked_frame);
+    try std.testing.expectEqual(@as(usize, 0), blocked_server.pending_blocked_frames.items.len);
+    try std.testing.expectEqual(@as(u64, 1), blocked_server.nextPacketNumber(.application));
+}
+
+test "pollProtectedShortDatagram emits protected RESET_STREAM and ACK response" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", false);
+    try client.resetStream(stream_id, 7);
+
+    const client_reset = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_reset);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(client_reset.len, client.bytesInFlight(.application));
+
+    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, client_reset);
+    var recv_buf: [16]u8 = undefined;
+    try std.testing.expectError(error.StreamClosed, server.recvOnStream(stream_id, &recv_buf));
+    try std.testing.expectEqual(@as(?u64, 5), try server.recvStreamFinalSize(stream_id));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+
+    try std.testing.expectEqual(@as(?[]u8, null), try client.pollProtectedShortDatagram(12, &server_dcid, secrets.client));
+    try std.testing.expectEqual(@as(usize, 0), client.send_queue.items.len);
+
+    const server_ack = (try server.pollProtectedShortDatagram(13, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_ack);
+    try client.processProtectedShortDatagram(14, secrets.server, client_dcid.len, server_ack);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
+test "pollProtectedShortDatagram emits protected STOP_SENDING and RESET_STREAM response" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", false);
+
+    const client_stream = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_stream);
+    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, client_stream);
+
+    try server.stopSending(stream_id, 23);
+    const server_stop = (try server.pollProtectedShortDatagram(12, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_stop);
+    try client.processProtectedShortDatagram(13, secrets.server, client_dcid.len, server_stop);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), client.pending_reset_streams.items.len);
+
+    const client_reset = (try client.pollProtectedShortDatagram(14, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_reset);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.application));
+
+    try server.processProtectedShortDatagram(15, secrets.client, server_dcid.len, client_reset);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    var recv_buf: [16]u8 = undefined;
+    try std.testing.expectError(error.StreamClosed, server.recvOnStream(stream_id, &recv_buf));
+    try std.testing.expectEqual(@as(?u64, 5), try server.recvStreamFinalSize(stream_id));
+    try std.testing.expectEqual(@as(?u64, 1), server.pendingAckLargest(.application));
+
+    const server_ack = (try server.pollProtectedShortDatagram(16, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_ack);
+    try client.processProtectedShortDatagram(17, secrets.server, client_dcid.len, server_ack);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
+test "pollProtectedShortDatagram drops obsolete STOP_SENDING after RESET_STREAM" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", false);
+    const client_stream = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_stream);
+    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, client_stream);
+
+    try server.stopSending(stream_id, 23);
+    try std.testing.expectEqual(@as(usize, 1), server.pending_stop_sending.items.len);
+    try client.resetStream(stream_id, 23);
+
+    const client_reset = (try client.pollProtectedShortDatagram(12, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_reset);
+    try server.processProtectedShortDatagram(13, secrets.client, server_dcid.len, client_reset);
+    try std.testing.expectEqual(@as(usize, 1), server.pending_stop_sending.items.len);
+
+    const server_ack = (try server.pollProtectedShortDatagram(14, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_ack);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_stop_sending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    try client.processProtectedShortDatagram(15, secrets.server, client_dcid.len, server_ack);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
+test "sendHandshakeDone and issueNewToken validate server-only queues" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try server.sendCryptoInSpace(.handshake, "discarded handshake");
+    try std.testing.expect(server.hasHandshakeProtectionKeys());
+
+    try std.testing.expectError(error.InvalidPacket, client.sendHandshakeDone());
+    try std.testing.expectError(error.InvalidPacket, client.issueNewToken("future"));
+    try std.testing.expectError(error.InvalidPacket, server.issueNewToken(""));
+
+    try server.sendHandshakeDone();
+    try std.testing.expect(server.handshakeConfirmed());
+    try std.testing.expectEqual(HandshakeState.confirmed, server.handshakeState());
+    try std.testing.expect(server.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(!server.hasHandshakeProtectionKeys());
+    try std.testing.expectError(error.InvalidPacket, server.sendCryptoInSpace(.handshake, "late"));
+    try std.testing.expectError(error.InvalidPacket, server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    }));
+    try std.testing.expect(server.pending_handshake_done);
+    try server.sendHandshakeDone();
+    try std.testing.expect(server.pending_handshake_done);
+
+    try server.issueNewToken("future");
+    try std.testing.expectEqual(@as(usize, 1), server.pending_new_tokens.items.len);
+}
+
+test "pollProtectedShortDatagram emits protected HANDSHAKE_DONE" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try std.testing.expect(client.hasHandshakeProtectionKeys());
+
+    try server.sendHandshakeDone();
+    const done_packet = (try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(done_packet);
+    try std.testing.expect(!server.pending_handshake_done);
+    try std.testing.expect(server.handshake_done_sent);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 1), server.sentPacketCount(.application));
+    try std.testing.expectEqual(done_packet.len, server.bytesInFlight(.application));
+
+    try client.processProtectedShortDatagram(11, secrets.server, client_dcid.len, done_packet);
+    try std.testing.expect(client.handshakeConfirmed());
+    try std.testing.expect(client.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(!client.hasHandshakeProtectionKeys());
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.application));
+
+    const ack = (try client.pollProtectedShortDatagram(12, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack);
+    try server.processProtectedShortDatagram(13, secrets.client, server_dcid.len, ack);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.application));
+}
+
+test "pollProtectedShortDatagram emits protected NEW_TOKEN" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    try server.issueNewToken("future-protected");
+    const token_packet = (try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(token_packet);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_new_tokens.items.len);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.application));
+    try std.testing.expectEqual(token_packet.len, server.bytesInFlight(.application));
+
+    try client.processProtectedShortDatagram(11, secrets.server, client_dcid.len, token_packet);
+    try std.testing.expectEqualStrings("future-protected", client.latestNewToken().?);
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.application));
+}
+
+test "pollProtectedShortDatagram preserves HANDSHAKE_DONE and NEW_TOKEN when anti-amplification blocks" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    try server.sendHandshakeDone();
+    try server.issueNewToken("blocked-token");
+
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server),
+    );
+    try std.testing.expect(server.pending_handshake_done);
+    try std.testing.expectEqual(@as(usize, 1), server.pending_new_tokens.items.len);
+    try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    try server.validatePeerAddress();
+    const done_packet = (try server.pollProtectedShortDatagram(11, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(done_packet);
+    try std.testing.expect(!server.pending_handshake_done);
+    try std.testing.expectEqual(@as(usize, 1), server.pending_new_tokens.items.len);
+    try client.processProtectedShortDatagram(12, secrets.server, client_dcid.len, done_packet);
+    try std.testing.expect(client.handshakeConfirmed());
+
+    const token_packet = (try server.pollProtectedShortDatagram(13, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(token_packet);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_new_tokens.items.len);
+    try client.processProtectedShortDatagram(13, secrets.server, client_dcid.len, token_packet);
+    try std.testing.expectEqualStrings("blocked-token", client.latestNewToken().?);
+}
+
+test "pollProtectedShortDatagram emits protected CONNECTION_CLOSE and retransmits" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try client.closeConnection(0, @intFromEnum(frame.FrameType.stream), "done");
+    try std.testing.expect(!client.closed);
+    try std.testing.expectEqual(ConnectionState.closing, client.connectionState());
+    try std.testing.expectEqual(@as(?i64, null), client.closeDeadlineMillis());
+
+    const close_packet = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+    try std.testing.expect(client.closed);
+    try std.testing.expectEqual(ConnectionState.closing, client.connectionState());
+    try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+    try std.testing.expect(client.closeDeadlineMillis().? > 10);
+
+    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, close_packet);
+    try std.testing.expect(server.closed);
+    try std.testing.expectEqual(ConnectionState.draining, server.connectionState());
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectError(error.ConnectionClosed, server.sendPing());
+
+    const retransmit = (try client.pollProtectedShortDatagram(12, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(retransmit);
+    try std.testing.expectEqual(@as(u64, 2), client.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+
+    const deadline = client.closeDeadlineMillis().?;
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        client.pollProtectedShortDatagram(deadline, &server_dcid, secrets.client),
+    );
+    try std.testing.expectEqual(ConnectionState.closed, client.connectionState());
+    try std.testing.expect(client.pending_close == null);
+}
+
+test "pollProtectedShortDatagram emits protected APPLICATION_CLOSE" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    try server.closeApplication(42, "app done");
+    const close_packet = (try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+
+    try std.testing.expect(server.closed);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    try client.processProtectedShortDatagram(11, secrets.server, client_dcid.len, close_packet);
+    try std.testing.expect(client.closed);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.application));
+}
+
+test "pollProtectedShortDatagram preserves close frame when anti-amplification blocks" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try server.closeConnection(0, @intFromEnum(frame.FrameType.stream), "blocked close");
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server),
+    );
+    try std.testing.expect(!server.closed);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expectEqual(@as(?i64, null), server.closeDeadlineMillis());
+    try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.application));
+    try std.testing.expect(server.pending_close != null);
+}
+
+test "pollProtectedLongDatagram emits protected ACK-only without bytes in flight" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    _ = try client.recordPacketSentInSpace(.initial, 0, 100);
+    try server.queueAckForReceivedPacketInSpace(.initial);
+
+    const ack_datagram = (try server.pollProtectedLongDatagram(
+        10,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack_datagram);
+
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.initial));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.initial));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
+
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(11, .{ .initial = secrets.server }, ack_datagram));
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.initial));
+    try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.initial));
+}
+
+test "pollProtectedLongDatagram emits protected PING with ACK" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+
+    _ = try client.recordPacketSentInSpace(.handshake, 0, 100);
+    try server.queueAckForReceivedPacketInSpace(.handshake);
+    try server.sendPingInSpace(.handshake);
+
+    const ping_datagram = (try server.pollProtectedLongDatagram(
+        20,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .handshake = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping_datagram);
+
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(usize, 1), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(ping_datagram.len, server.bytesInFlight(.handshake));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.handshake));
+
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(21, .{ .handshake = secrets.server }, ping_datagram));
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.handshake));
+}
+
+test "protected long datagram bridge rejects mismatched packet type without state changes" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    const protected = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &dcid,
+        .scid = &scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, "plaintext");
+    defer std.testing.allocator.free(protected);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedLongDatagramInSpace(.handshake, 1, secrets.client, protected),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.handshake));
+    var crypto_buf: [32]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, null), try server.recvCryptoInSpace(.handshake, &crypto_buf));
+}
+
+test "protected long CRYPTO poll rejects Handshake token without mutation" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.sendCryptoInSpace(.handshake, "server handshake");
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.pollProtectedLongCryptoDatagramInSpace(.handshake, 10, &dcid, &scid, "token", secrets.server),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
 }
 
 test "packet number spaces reject frames forbidden by RFC 9000 packet type rules" {
@@ -6285,6 +14514,42 @@ test "packet number spaces reject frames forbidden by RFC 9000 packet type rules
     try std.testing.expectEqual(@as(?u64, 0), conn.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(u64, 1), conn.nextPeerPacketNumber(.application));
     try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items.len);
+}
+
+test "handshakeState tracks Handshake space use and confirmation" {
+    var sender = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer sender.deinit();
+
+    try std.testing.expectEqual(HandshakeState.initial, sender.handshakeState());
+    try sender.sendCryptoInSpace(.initial, "initial");
+    try std.testing.expectEqual(HandshakeState.initial, sender.handshakeState());
+    try sender.sendCryptoInSpace(.handshake, "handshake");
+    try std.testing.expectEqual(HandshakeState.handshake, sender.handshakeState());
+    try std.testing.expect(!sender.handshakeConfirmed());
+
+    try sender.confirmHandshake();
+    try std.testing.expectEqual(HandshakeState.confirmed, sender.handshakeState());
+    try std.testing.expect(sender.handshakeConfirmed());
+
+    var receiver = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer receiver.deinit();
+    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    try receiver.processDatagramInSpace(.handshake, 0, &ping);
+    try std.testing.expectEqual(HandshakeState.handshake, receiver.handshakeState());
+    try std.testing.expect(!receiver.handshakeConfirmed());
+    try std.testing.expectEqual(@as(?u64, 0), receiver.pendingAckLargest(.handshake));
+
+    var rollback = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer rollback.deinit();
+    const invalid_payload = [_]u8{
+        @intFromEnum(frame.FrameType.ping),
+        0xff,
+    };
+    try std.testing.expectError(error.InvalidPacket, rollback.processDatagramInSpace(.handshake, 0, &invalid_payload));
+    try std.testing.expectEqual(HandshakeState.initial, rollback.handshakeState());
+    try std.testing.expect(!rollback.handshakeConfirmed());
+    try std.testing.expectEqual(@as(?u64, null), rollback.pendingAckLargest(.handshake));
+    try std.testing.expectEqual(@as(u64, 0), rollback.nextPeerPacketNumber(.handshake));
 }
 
 test "0-RTT packet type shares Application packet number space but filters frames" {
@@ -6344,6 +14609,32 @@ test "0-RTT packet type rejects forbidden frames and rolls back earlier state" {
     try expectFramePacketTypeRejected(.zero_rtt, .{ .retire_connection_id = .{ .sequence_number = 0 } });
 }
 
+test "0-RTT rejects RETIRE_CONNECTION_ID before semantic retirement" {
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const cid = [_]u8{ 0xc0, 0xff, 0xee, 0x10 };
+    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    try std.testing.expectEqual(@as(u64, 0), try server.issueConnectionId(&cid, token, 0));
+
+    var new_cid_buf: [64]u8 = undefined;
+    _ = (try server.pollTx(0, &new_cid_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(server.local_connection_ids.items[0].sent);
+
+    var retire_buf: [16]u8 = undefined;
+    var retire_out = buffer.fixedWriter(&retire_buf);
+    try frame.encodeFrame(retire_out.writer(), .{ .retire_connection_id = .{ .sequence_number = 0 } });
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processDatagramForPacketType(.zero_rtt, 0, retire_out.getWritten()),
+    );
+    try std.testing.expect(!server.local_connection_ids.items[0].retired);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+}
+
 test "0-RTT packet type allows reset and stop-sending frames" {
     var reset_server = try QuicConnection.init(std.testing.allocator, .server, .{});
     defer reset_server.deinit();
@@ -6389,7 +14680,8 @@ test "packet number spaces isolate receive-side ACK generation" {
     try conn.processDatagramInSpace(.initial, 0, &ping);
     try conn.processDatagramInSpace(.handshake, 1, &ping);
 
-    try std.testing.expectEqual(@as(?u64, 0), conn.pendingAckLargest(.initial));
+    try std.testing.expect(conn.packetNumberSpaceDiscarded(.initial));
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.initial));
     try std.testing.expectEqual(@as(?u64, 0), conn.pendingAckLargest(.handshake));
     try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(u64, 1), conn.nextPeerPacketNumber(.initial));
@@ -6931,19 +15223,22 @@ test "issueConnectionId emits NEW_CONNECTION_ID and accepts peer retirement" {
     try std.testing.expectEqual(@as(?u64, 0), conn.pending_ack_largest);
 }
 
-test "issueConnectionId rejects duplicates and peer active id limit overflow" {
+test "issueConnectionId rejects duplicate CIDs duplicate reset tokens and peer active id limit overflow" {
     var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
-    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    const token2 = [_]u8{0xa5} ** packet.stateless_reset_token_len;
     const cid0 = [_]u8{ 0, 1, 2, 3 };
     const cid1 = [_]u8{ 4, 5, 6, 7 };
     const cid2 = [_]u8{ 8, 9, 10, 11 };
 
-    try std.testing.expectEqual(@as(u64, 0), try conn.issueConnectionId(&cid0, token, 0));
-    try std.testing.expectError(error.InvalidPacket, conn.issueConnectionId(&cid0, token, 0));
-    try std.testing.expectEqual(@as(u64, 1), try conn.issueConnectionId(&cid1, token, 0));
-    try std.testing.expectError(error.InvalidPacket, conn.issueConnectionId(&cid2, token, 0));
+    try std.testing.expectEqual(@as(u64, 0), try conn.issueConnectionId(&cid0, token0, 0));
+    try std.testing.expectError(error.InvalidPacket, conn.issueConnectionId(&cid0, token1, 0));
+    try std.testing.expectError(error.InvalidPacket, conn.issueConnectionId(&cid1, token0, 0));
+    try std.testing.expectEqual(@as(u64, 1), try conn.issueConnectionId(&cid1, token1, 0));
+    try std.testing.expectError(error.InvalidPacket, conn.issueConnectionId(&cid2, token2, 0));
     try std.testing.expectEqual(@as(u64, 2), conn.localConnectionIdCount());
 }
 
@@ -7053,7 +15348,9 @@ test "NEW_CONNECTION_ID enforces active id limit and duplicate consistency" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
-    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    const token2 = [_]u8{0xa5} ** packet.stateless_reset_token_len;
     const cid0 = [_]u8{ 0xc0, 0, 0, 0 };
     const cid1 = [_]u8{ 0xc0, 0, 0, 1 };
     const cid2 = [_]u8{ 0xc0, 0, 0, 2 };
@@ -7067,7 +15364,7 @@ test "NEW_CONNECTION_ID enforces active id limit and duplicate consistency" {
         .sequence_number = 0,
         .retire_prior_to = 0,
         .connection_id = &cid0,
-        .stateless_reset_token = token,
+        .stateless_reset_token = token0,
     } });
     try conn.processDatagram(0, out.getWritten());
     _ = (try conn.pollTx(0, &tx)).?;
@@ -7077,7 +15374,7 @@ test "NEW_CONNECTION_ID enforces active id limit and duplicate consistency" {
         .sequence_number = 0,
         .retire_prior_to = 0,
         .connection_id = &cid0,
-        .stateless_reset_token = token,
+        .stateless_reset_token = token0,
     } });
     try conn.processDatagram(1, out.getWritten());
     try std.testing.expectEqual(@as(usize, 1), conn.active_connection_ids.items.len);
@@ -7088,7 +15385,7 @@ test "NEW_CONNECTION_ID enforces active id limit and duplicate consistency" {
         .sequence_number = 0,
         .retire_prior_to = 0,
         .connection_id = &cid0_mismatch,
-        .stateless_reset_token = token,
+        .stateless_reset_token = token0,
     } });
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(2, out.getWritten()));
     try std.testing.expectEqual(@as(usize, 1), conn.active_connection_ids.items.len);
@@ -7099,9 +15396,20 @@ test "NEW_CONNECTION_ID enforces active id limit and duplicate consistency" {
         .sequence_number = 1,
         .retire_prior_to = 0,
         .connection_id = &cid1,
-        .stateless_reset_token = token,
+        .stateless_reset_token = token0,
     } });
-    try conn.processDatagram(3, out.getWritten());
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(3, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 1), conn.active_connection_ids.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &cid1,
+        .stateless_reset_token = token1,
+    } });
+    try conn.processDatagram(4, out.getWritten());
     _ = (try conn.pollTx(3, &tx)).?;
     try std.testing.expectEqual(@as(u64, 2), conn.activeConnectionIdCount());
 
@@ -7110,9 +15418,9 @@ test "NEW_CONNECTION_ID enforces active id limit and duplicate consistency" {
         .sequence_number = 2,
         .retire_prior_to = 0,
         .connection_id = &cid2,
-        .stateless_reset_token = token,
+        .stateless_reset_token = token2,
     } });
-    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(4, out.getWritten()));
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(5, out.getWritten()));
     try std.testing.expectEqual(@as(usize, 2), conn.active_connection_ids.items.len);
     try std.testing.expectEqual(@as(u64, 2), conn.activeConnectionIdCount());
     try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
@@ -7122,7 +15430,8 @@ test "NEW_CONNECTION_ID retire_prior_to rolls back when payload is invalid" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
-    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
     const cid0 = [_]u8{ 0xd0, 0, 0, 0 };
     const cid1 = [_]u8{ 0xd0, 0, 0, 1 };
 
@@ -7132,7 +15441,7 @@ test "NEW_CONNECTION_ID retire_prior_to rolls back when payload is invalid" {
         .sequence_number = 0,
         .retire_prior_to = 0,
         .connection_id = &cid0,
-        .stateless_reset_token = token,
+        .stateless_reset_token = token0,
     } });
     try conn.processDatagram(0, out.getWritten());
 
@@ -7144,7 +15453,7 @@ test "NEW_CONNECTION_ID retire_prior_to rolls back when payload is invalid" {
         .sequence_number = 1,
         .retire_prior_to = 1,
         .connection_id = &cid1,
-        .stateless_reset_token = token,
+        .stateless_reset_token = token1,
     } });
     try out.writeByte(0xff);
 
@@ -7480,20 +15789,123 @@ test "stopSending rejects receive stream after RESET_STREAM" {
     try std.testing.expectEqual(@as(usize, 0), conn.pending_stop_sending.items.len);
 }
 
+test "stopSending rejects receive stream after final data is received" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var stream_buf: [32]u8 = undefined;
+    var stream_out = buffer.fixedWriter(&stream_buf);
+    try frame.encodeFrame(stream_out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = true,
+        .data = "done",
+    } });
+    try conn.processDatagram(0, stream_out.getWritten());
+
+    try std.testing.expectError(error.StreamClosed, conn.stopSending(0, 1));
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_stop_sending.items.len);
+}
+
+test "stopSending is still valid while final-size stream data has gaps" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var stream_buf: [32]u8 = undefined;
+    var stream_out = buffer.fixedWriter(&stream_buf);
+    try frame.encodeFrame(stream_out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 4,
+        .fin = true,
+        .data = "!",
+    } });
+    try conn.processDatagram(0, stream_out.getWritten());
+
+    try conn.stopSending(0, 1);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_stop_sending.items.len);
+}
+
+test "pending STOP_SENDING is dropped after matching RESET_STREAM arrives" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.stopSending(stream_id, 1);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_stop_sending.items.len);
+
+    var reset_buf: [32]u8 = undefined;
+    var reset_out = buffer.fixedWriter(&reset_buf);
+    try frame.encodeFrame(reset_out.writer(), .{ .reset_stream = .{
+        .stream_id = stream_id,
+        .application_error_code = 7,
+        .final_size = 0,
+    } });
+    try conn.processDatagram(0, reset_out.getWritten());
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(1, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ack => |ack_frame| try std.testing.expectEqual(@as(u64, 0), ack_frame.largest_acknowledged),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(decoded.len, payload.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_stop_sending.items.len);
+}
+
+test "pending STOP_SENDING is dropped after final data arrives" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.stopSending(stream_id, 1);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_stop_sending.items.len);
+
+    var stream_buf: [32]u8 = undefined;
+    var stream_out = buffer.fixedWriter(&stream_buf);
+    try frame.encodeFrame(stream_out.writer(), .{ .stream = .{
+        .stream_id = stream_id,
+        .offset = 0,
+        .fin = true,
+        .data = "done",
+    } });
+    try conn.processDatagram(0, stream_out.getWritten());
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(1, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ack => |ack_frame| try std.testing.expectEqual(@as(u64, 0), ack_frame.largest_acknowledged),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(decoded.len, payload.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_stop_sending.items.len);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvOnStream(stream_id, &read_buf)).?;
+    try std.testing.expectEqualStrings("done", read_buf[0..n]);
+}
+
 test "STOP_SENDING on peer bidirectional stream prevents later reply" {
     var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
+    const stream_id: u64 = 8;
     var stop_buf: [16]u8 = undefined;
     var stop_out = buffer.fixedWriter(&stop_buf);
     try frame.encodeFrame(stop_out.writer(), .{ .stop_sending = .{
-        .stream_id = 0,
+        .stream_id = stream_id,
         .application_error_code = 9,
     } });
     try conn.processDatagram(0, stop_out.getWritten());
 
-    try std.testing.expectError(error.StreamClosed, conn.sendOnStream(0, "reply", false));
+    try std.testing.expect(conn.findRecvStream(0) != null);
+    try std.testing.expect(conn.findRecvStream(4) != null);
+    try std.testing.expect(conn.findRecvStream(stream_id) != null);
+    try std.testing.expectError(error.StreamClosed, conn.sendOnStream(stream_id, "reply", false));
 
     var out_buf: [64]u8 = undefined;
     const reset_payload = (try conn.pollTx(0, &out_buf)).?;
@@ -7508,12 +15920,28 @@ test "STOP_SENDING on peer bidirectional stream prevents later reply" {
     defer frame.deinitFrame(&reset.frame, std.testing.allocator);
     switch (reset.frame) {
         .reset_stream => |reset_frame| {
-            try std.testing.expectEqual(@as(u64, 0), reset_frame.stream_id);
+            try std.testing.expectEqual(stream_id, reset_frame.stream_id);
             try std.testing.expectEqual(@as(u64, 9), reset_frame.application_error_code);
             try std.testing.expectEqual(@as(u64, 0), reset_frame.final_size);
         },
         else => return error.TestUnexpectedResult,
     }
+
+    var stream_buf: [32]u8 = undefined;
+    var stream_out = buffer.fixedWriter(&stream_buf);
+    try frame.encodeFrame(stream_out.writer(), .{ .stream = .{
+        .stream_id = stream_id,
+        .offset = 0,
+        .fin = true,
+        .data = "done",
+    } });
+    try conn.processDatagram(1, stream_out.getWritten());
+
+    var read_buf: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, null), try conn.recvOnStream(0, &read_buf));
+    try std.testing.expectEqual(@as(?usize, null), try conn.recvOnStream(4, &read_buf));
+    const n = (try conn.recvOnStream(stream_id, &read_buf)).?;
+    try std.testing.expectEqualStrings("done", read_buf[0..n]);
 }
 
 test "STOP_SENDING rolls back reset state when payload is invalid" {
@@ -7536,6 +15964,26 @@ test "STOP_SENDING rolls back reset state when payload is invalid" {
     try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
 
     try conn.sendOnStream(stream_id, "ok", false);
+}
+
+test "STOP_SENDING rolls back peer bidirectional stream creation when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stop_sending = .{
+        .stream_id = 0,
+        .application_error_code = 1,
+    } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
 }
 
 test "STOP_SENDING validates stream direction and count before queuing reset" {
@@ -7842,6 +16290,51 @@ test "RESET_STREAM after FIN with same final size keeps received data readable" 
     try std.testing.expectEqual(@as(?usize, null), try conn.recvOnStream(0, &read_buf));
 }
 
+test "RESET_STREAM after FIN with gaps aborts receive side and accounts final size" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 6,
+        .initial_max_stream_data = 10,
+    });
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 5,
+        .fin = true,
+        .data = "!",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(?u64, 6), conn.recv_streams.items[0].final_size);
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items[0].pending.items.len);
+    try std.testing.expectEqual(@as(u64, 1), conn.recv_data_bytes);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 0,
+        .application_error_code = 7,
+        .final_size = 6,
+    } });
+    try conn.processDatagram(1, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 6), conn.recv_data_bytes);
+    try std.testing.expectEqual(@as(?u64, 7), conn.recv_streams.items[0].reset_error_code);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "hello",
+    } });
+    try conn.processDatagram(2, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 6), conn.recv_data_bytes);
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items[0].data.items.len);
+
+    var read_buf: [8]u8 = undefined;
+    try std.testing.expectError(error.StreamClosed, conn.recvOnStream(0, &read_buf));
+}
+
 test "RESET_STREAM flow-control violation does not create receive state" {
     var conn = try QuicConnection.init(std.testing.allocator, .server, .{
         .initial_max_data = 2,
@@ -8041,14 +16534,32 @@ test "recvOnStream rejects locally initiated unidirectional streams" {
 }
 
 test "client accepts HANDSHAKE_DONE and queues ACK" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
+    try conn.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try conn.sendCryptoInSpace(.handshake, "late handshake");
+    try std.testing.expect(conn.hasHandshakeProtectionKeys());
 
     const payload = [_]u8{@intFromEnum(frame.FrameType.handshake_done)};
     try conn.processDatagram(0, &payload);
 
     try std.testing.expect(conn.handshakeConfirmed());
+    try std.testing.expectEqual(HandshakeState.confirmed, conn.handshakeState());
     try std.testing.expectEqual(@as(?u64, 0), conn.pending_ack_largest);
+    try std.testing.expect(conn.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(!conn.hasHandshakeProtectionKeys());
+    try std.testing.expectError(
+        error.InvalidPacket,
+        conn.pollProtectedHandshakeDatagramWithInstalledKeys(0, &dcid, &scid),
+    );
 
     var out_buf: [16]u8 = undefined;
     const ack_payload = (try conn.pollTx(0, &out_buf)).?;
@@ -8062,8 +16573,15 @@ test "client accepts HANDSHAKE_DONE and queues ACK" {
 }
 
 test "HANDSHAKE_DONE state rolls back when payload is invalid" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
+    try conn.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
 
     const payload = [_]u8{
         @intFromEnum(frame.FrameType.handshake_done),
@@ -8071,6 +16589,9 @@ test "HANDSHAKE_DONE state rolls back when payload is invalid" {
     };
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, &payload));
     try std.testing.expect(!conn.handshakeConfirmed());
+    try std.testing.expectEqual(HandshakeState.initial, conn.handshakeState());
+    try std.testing.expect(!conn.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(conn.hasHandshakeProtectionKeys());
     try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
     try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
 }
@@ -8219,6 +16740,7 @@ test "invalid payload rolls back connection close state" {
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
     try std.testing.expect(!conn.closed);
+    try std.testing.expect(conn.peerClose() == null);
     try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
     try std.testing.expectEqual(@as(?i64, null), conn.closeDeadlineMillis());
     try std.testing.expectEqual(@as(u64, 1), try conn.openStream());
@@ -8229,6 +16751,7 @@ test "closeConnection queues CONNECTION_CLOSE and closes after pollTx" {
     defer conn.deinit();
 
     try conn.closeConnection(0, @intFromEnum(frame.FrameType.stream), "done");
+    try std.testing.expect(conn.peerClose() == null);
     try std.testing.expect(!conn.closed);
     try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
     try std.testing.expectEqual(@as(?i64, null), conn.closeDeadlineMillis());
@@ -8355,6 +16878,56 @@ test "remote close enters draining state until close timeout expires" {
     try std.testing.expectError(error.ConnectionClosed, conn.processDatagram(deadline, &ping));
     try std.testing.expectEqual(ConnectionState.closed, conn.connectionState());
     try std.testing.expectEqual(@as(?i64, null), conn.closeDeadlineMillis());
+}
+
+test "remote close exposes peer close diagnostics" {
+    var transport = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    defer transport.deinit();
+
+    var close_buf: [64]u8 = undefined;
+    var close_out = buffer.fixedWriter(&close_buf);
+    try frame.encodeFrame(close_out.writer(), .{ .connection_close = .{
+        .error_code = 0x10c,
+        .frame_type = @intFromEnum(frame.FrameType.stream),
+        .reason_phrase = "flow error",
+    } });
+
+    try transport.processDatagram(20, close_out.getWritten());
+    switch (transport.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(@as(u64, 0x10c), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.stream)), close.frame_type);
+            try std.testing.expectEqualStrings("flow error", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const deadline = transport.closeDeadlineMillis().?;
+    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+    try std.testing.expectError(error.ConnectionClosed, transport.processDatagram(deadline, &ping));
+    try std.testing.expectEqual(ConnectionState.closed, transport.connectionState());
+    switch (transport.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| try std.testing.expectEqualStrings("flow error", close.reason_phrase),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var application = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer application.deinit();
+
+    close_out = buffer.fixedWriter(&close_buf);
+    try frame.encodeFrame(close_out.writer(), .{ .application_close = .{
+        .error_code = 42,
+        .reason_phrase = "app stop",
+    } });
+
+    try application.processDatagram(30, close_out.getWritten());
+    switch (application.peerClose() orelse return error.TestUnexpectedResult) {
+        .application => |close| {
+            try std.testing.expectEqual(@as(u64, 42), close.error_code);
+            try std.testing.expectEqualStrings("app stop", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "local close validates size before mutating connection state" {
@@ -8658,6 +17231,68 @@ test "sendOnStream queues STREAM_DATA_BLOCKED when stream flow control blocks" {
     }
 }
 
+test "pending STREAM_DATA_BLOCKED is dropped when FIN closes send side before transmit" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 10,
+        .initial_max_stream_data = 5,
+    });
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "12345", false);
+    try std.testing.expectError(error.FlowControlBlocked, conn.sendOnStream(stream_id, "x", false));
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_blocked_frames.items.len);
+
+    try conn.sendOnStream(stream_id, "", true);
+
+    var out_buf: [128]u8 = undefined;
+    const payload = (try conn.pollTx(0, &out_buf)).?;
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_blocked_frames.items.len);
+
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .stream => |stream_frame| {
+            try std.testing.expectEqual(stream_id, stream_frame.stream_id);
+            try std.testing.expectEqual(@as(u64, 0), stream_frame.offset);
+            try std.testing.expectEqualStrings("12345", stream_frame.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "pending STREAM_DATA_BLOCKED is dropped when reset closes send side before transmit" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 10,
+        .initial_max_stream_data = 5,
+    });
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "12345", false);
+    try std.testing.expectError(error.FlowControlBlocked, conn.sendOnStream(stream_id, "x", false));
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_blocked_frames.items.len);
+
+    try conn.resetStream(stream_id, 7);
+
+    var out_buf: [128]u8 = undefined;
+    const reset_payload = (try conn.pollTx(0, &out_buf)).?;
+    var reset = try frame.decodeFrameSlice(reset_payload, std.testing.allocator);
+    defer frame.deinitFrame(&reset.frame, std.testing.allocator);
+    switch (reset.frame) {
+        .reset_stream => |reset_frame| {
+            try std.testing.expectEqual(stream_id, reset_frame.stream_id);
+            try std.testing.expectEqual(@as(u64, 7), reset_frame.application_error_code);
+            try std.testing.expectEqual(@as(u64, 5), reset_frame.final_size);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(1, &out_buf));
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_blocked_frames.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.send_queue.items.len);
+}
+
 test "recvOnStream queues MAX_DATA and MAX_STREAM_DATA after consuming bytes" {
     var client = try QuicConnection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
@@ -8715,6 +17350,118 @@ test "recvOnStream queues MAX_DATA and MAX_STREAM_DATA after consuming bytes" {
     try client.processDatagram(40, max_stream_payload);
 
     try client.sendOnStream(stream_id, "!", true);
+}
+
+test "pending MAX_STREAM_DATA is dropped when final size becomes known before transmit" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 5,
+    });
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 5,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "12345", false);
+
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(0, (try client.pollTx(0, &datagram)).?);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try server.recvOnStream(stream_id, &read_buf)).?;
+    try std.testing.expectEqualStrings("12345", read_buf[0..n]);
+    try std.testing.expectEqual(@as(u64, 10), server.findRecvStream(stream_id).?.max_data);
+
+    try client.sendOnStream(stream_id, "", true);
+    try server.processDatagram(1, (try client.pollTx(1, &datagram)).?);
+
+    const payload = (try server.pollTx(2, &datagram)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(try payloadContainsExpectedMaxFrame(payload, .{ .data = 10 }));
+    try std.testing.expect(!try payloadContainsExpectedMaxFrame(payload, .{
+        .stream_data = .{ .stream_id = stream_id, .maximum_stream_data = 10 },
+    }));
+    try std.testing.expectEqual(@as(usize, 0), server.pending_max_frames.items.len);
+}
+
+test "pending MAX_STREAM_DATA is dropped when RESET_STREAM arrives before transmit" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 5,
+    });
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 5,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "12345", false);
+
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(0, (try client.pollTx(0, &datagram)).?);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try server.recvOnStream(stream_id, &read_buf)).?;
+    try std.testing.expectEqualStrings("12345", read_buf[0..n]);
+    try std.testing.expectEqual(@as(u64, 10), server.findRecvStream(stream_id).?.max_data);
+
+    try client.resetStream(stream_id, 7);
+    try server.processDatagram(1, (try client.pollTx(1, &datagram)).?);
+
+    const payload = (try server.pollTx(2, &datagram)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(try payloadContainsExpectedMaxFrame(payload, .{ .data = 10 }));
+    try std.testing.expect(!try payloadContainsExpectedMaxFrame(payload, .{
+        .stream_data = .{ .stream_id = stream_id, .maximum_stream_data = 10 },
+    }));
+    try std.testing.expectEqual(@as(usize, 0), server.pending_max_frames.items.len);
+}
+
+test "recvOnStream uses configured target receive windows" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 5,
+    });
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 5,
+        .initial_max_stream_data = 5,
+        .receive_connection_window = 10,
+        .receive_stream_window = 12,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "12345", false);
+
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(0, (try client.pollTx(0, &datagram)).?);
+
+    var read_buf: [8]u8 = undefined;
+    const read_len = (try server.recvOnStream(stream_id, &read_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("12345", read_buf[0..read_len]);
+    try std.testing.expectEqual(@as(u64, 15), server.recv_max_data);
+    try std.testing.expectEqual(@as(u64, 17), server.findRecvStream(stream_id).?.max_data);
+
+    var saw_max_data = false;
+    var saw_max_stream_data = false;
+    var polls: usize = 0;
+    while (polls < 3 and (!saw_max_data or !saw_max_stream_data)) : (polls += 1) {
+        const payload = (try server.pollTx(10 + @as(i64, @intCast(polls)), &datagram)) orelse break;
+        saw_max_data = saw_max_data or try payloadContainsExpectedMaxFrame(payload, .{ .data = 15 });
+        saw_max_stream_data = saw_max_stream_data or try payloadContainsExpectedMaxFrame(payload, .{
+            .stream_data = .{ .stream_id = stream_id, .maximum_stream_data = 17 },
+        });
+        try client.processDatagram(20 + @as(i64, @intCast(polls)), payload);
+    }
+    try std.testing.expect(saw_max_data);
+    try std.testing.expect(saw_max_stream_data);
 }
 
 test "recvOnStream queues MAX_STREAMS_BIDI when peer bidirectional stream finishes" {
@@ -8782,6 +17529,64 @@ test "recvOnStream queues MAX_STREAMS_UNI when zero-length peer unidirectional s
     try std.testing.expectEqual(@as(u64, 2), server.recv_max_streams_uni);
 }
 
+test "recvOnStream queues MAX_STREAMS_BIDI after peer bidirectional RESET_STREAM is observed" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_streams_bidi = 1,
+    });
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_streams_bidi = 1,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try client.openStream();
+    try client.resetStream(stream_id, 7);
+
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(0, (try client.pollTx(0, &datagram)).?);
+    try std.testing.expectError(error.FlowControlBlocked, client.openStream());
+
+    var read_buf: [1]u8 = undefined;
+    try std.testing.expectError(error.StreamClosed, server.recvOnStream(stream_id, &read_buf));
+    try std.testing.expectEqual(@as(u64, 2), server.recv_max_streams_bidi);
+
+    try pollAndProcessUntilMaxStreams(&server, &client, .bidi, 2);
+    try std.testing.expectEqual(@as(u64, 4), try client.openStream());
+
+    try std.testing.expectError(error.StreamClosed, server.recvOnStream(stream_id, &read_buf));
+    try std.testing.expectEqual(@as(u64, 2), server.recv_max_streams_bidi);
+}
+
+test "recvOnStream queues MAX_STREAMS_UNI after peer unidirectional RESET_STREAM is observed" {
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_streams_uni = 1,
+    });
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_streams_uni = 1,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try client.openUniStream();
+    try client.resetStream(stream_id, 7);
+
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(0, (try client.pollTx(0, &datagram)).?);
+    try std.testing.expectError(error.FlowControlBlocked, client.openUniStream());
+
+    var read_buf: [1]u8 = undefined;
+    try std.testing.expectError(error.StreamClosed, server.recvOnStream(stream_id, &read_buf));
+    try std.testing.expectEqual(@as(u64, 2), server.recv_max_streams_uni);
+
+    try pollAndProcessUntilMaxStreams(&server, &client, .uni, 2);
+    try std.testing.expectEqual(@as(u64, 6), try client.openUniStream());
+
+    try std.testing.expectError(error.StreamClosed, server.recvOnStream(stream_id, &read_buf));
+    try std.testing.expectEqual(@as(u64, 2), server.recv_max_streams_uni);
+}
+
 test "openStream queues STREAMS_BLOCKED frames when stream count blocks" {
     var bidi = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
     defer bidi.deinit();
@@ -8836,6 +17641,77 @@ test "processDatagram records peer BLOCKED frame limits" {
     try std.testing.expectEqual(@as(?u64, 0), conn.pending_ack_largest);
 }
 
+test "STREAM_DATA_BLOCKED creates receive stream state before STREAM data" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_stream_data = 10,
+    });
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream_data_blocked = .{
+        .stream_id = 1,
+        .maximum_stream_data = 5,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    const stream_state = conn.findRecvStream(1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 10), stream_state.max_data);
+    try std.testing.expectEqual(@as(?u64, 5), conn.peerStreamDataBlockedLimit(1));
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(1, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(try payloadContainsExpectedMaxFrame(payload, .{
+        .stream_data = .{ .stream_id = 1, .maximum_stream_data = 10 },
+    }));
+}
+
+test "STREAM_DATA_BLOCKED validates receive-side stream direction and count" {
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_max_streams_uni = 1 });
+    defer server.deinit();
+
+    const local_uni = try server.openUniStream();
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream_data_blocked = .{
+        .stream_id = local_uni,
+        .maximum_stream_data = 0,
+    } });
+    try std.testing.expectError(error.InvalidPacket, server.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(?u64, null), server.peerStreamDataBlockedLimit(local_uni));
+    try std.testing.expectEqual(@as(?u64, null), server.pending_ack_largest);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream_data_blocked = .{
+        .stream_id = 6,
+        .maximum_stream_data = 0,
+    } });
+    try std.testing.expectError(error.InvalidPacket, server.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(?u64, null), server.peerStreamDataBlockedLimit(6));
+    try std.testing.expectEqual(@as(usize, 0), server.recv_streams.items.len);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream_data_blocked = .{
+        .stream_id = 0,
+        .maximum_stream_data = 0,
+    } });
+    try std.testing.expectError(error.InvalidPacket, client.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(?u64, null), client.peerStreamDataBlockedLimit(0));
+
+    const local_bidi = try client.openStream();
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream_data_blocked = .{
+        .stream_id = local_bidi,
+        .maximum_stream_data = 0,
+    } });
+    try client.processDatagram(0, out.getWritten());
+    try std.testing.expect(client.findRecvStream(local_bidi) != null);
+    try std.testing.expectEqual(@as(?u64, 0), client.peerStreamDataBlockedLimit(local_bidi));
+}
+
 test "peer BLOCKED frame limits keep highest reported value" {
     var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
@@ -8881,6 +17757,7 @@ test "peer BLOCKED frame state rolls back when payload is invalid" {
     } });
     try frame.encodeFrame(out.writer(), .{ .streams_blocked_bidi = .{ .maximum_streams = 1 } });
     try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items.len);
 
     out = buffer.fixedWriter(&datagram);
     try frame.encodeFrame(out.writer(), .{ .data_blocked = .{ .maximum_data = 9 } });
@@ -8895,6 +17772,8 @@ test "peer BLOCKED frame state rolls back when payload is invalid" {
     try std.testing.expectEqual(@as(?u64, 5), conn.peerDataBlockedLimit());
     try std.testing.expectEqual(@as(?u64, 7), conn.peerStreamDataBlockedLimit(0));
     try std.testing.expectEqual(@as(?u64, null), conn.peerStreamDataBlockedLimit(4));
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items.len);
+    try std.testing.expect(conn.findRecvStream(4) == null);
     try std.testing.expectEqual(@as(?u64, 1), conn.peerStreamsBlockedBidiLimit());
     try std.testing.expectEqual(@as(?u64, null), conn.peerStreamsBlockedUniLimit());
     try std.testing.expectEqual(@as(?u64, 0), conn.pending_ack_largest);
@@ -8951,6 +17830,116 @@ test "peer STREAM_DATA_BLOCKED below current receive stream limit retransmits MA
     }));
 }
 
+test "peer DATA_BLOCKED at current receive limit waits without configured window" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 5,
+    });
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .data_blocked = .{ .maximum_data = 5 } });
+    try conn.processDatagram(0, out.getWritten());
+
+    try std.testing.expectEqual(@as(?u64, 5), conn.peerDataBlockedLimit());
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_max_data);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_max_frames.items.len);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pending_ack_largest);
+}
+
+test "peer DATA_BLOCKED at receive limit grows configured receive window" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 5,
+        .receive_connection_window = 10,
+    });
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .data_blocked = .{ .maximum_data = 5 } });
+    try conn.processDatagram(0, out.getWritten());
+
+    try std.testing.expectEqual(@as(?u64, 5), conn.peerDataBlockedLimit());
+    try std.testing.expectEqual(@as(u64, 15), conn.recv_max_data);
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(1, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(try payloadContainsExpectedMaxFrame(payload, .{ .data = 15 }));
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .data_blocked = .{ .maximum_data = 5 } });
+    try conn.processDatagram(2, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 15), conn.recv_max_data);
+
+    const stale_payload = (try conn.pollTx(3, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(try payloadContainsExpectedMaxFrame(stale_payload, .{ .data = 15 }));
+}
+
+test "peer STREAM_DATA_BLOCKED at receive limit grows configured receive window" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_stream_data = 5,
+        .receive_stream_window = 12,
+    });
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 1,
+        .offset = 0,
+        .fin = false,
+        .data = "",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream_data_blocked = .{
+        .stream_id = 1,
+        .maximum_stream_data = 5,
+    } });
+    try conn.processDatagram(1, out.getWritten());
+
+    try std.testing.expectEqual(@as(?u64, 5), conn.peerStreamDataBlockedLimit(1));
+    const stream_state = conn.findRecvStream(1) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 17), stream_state.max_data);
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(2, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(try payloadContainsExpectedMaxFrame(payload, .{
+        .stream_data = .{ .stream_id = 1, .maximum_stream_data = 17 },
+    }));
+}
+
+test "peer STREAM_DATA_BLOCKED is discarded after stream final size is known" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_stream_data = 5,
+        .receive_stream_window = 12,
+    });
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 5,
+        .fin = true,
+        .data = "",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(?u64, 5), conn.recv_streams.items[0].final_size);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream_data_blocked = .{
+        .stream_id = 0,
+        .maximum_stream_data = 5,
+    } });
+    try conn.processDatagram(1, out.getWritten());
+
+    try std.testing.expectEqual(@as(?u64, null), conn.peerStreamDataBlockedLimit(0));
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_streams.items[0].max_data);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_max_frames.items.len);
+}
+
 test "peer STREAMS_BLOCKED below current receive limits retransmits MAX_STREAMS" {
     var bidi = try QuicConnection.init(std.testing.allocator, .client, .{
         .initial_max_streams_bidi = 4,
@@ -8983,6 +17972,67 @@ test "peer STREAMS_BLOCKED below current receive limits retransmits MAX_STREAMS"
     try std.testing.expect(try payloadContainsExpectedMaxFrame(uni_payload, .{ .streams_uni = 3 }));
 }
 
+test "peer STREAMS_BLOCKED at receive limit waits without configured window" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_streams_bidi = 2,
+    });
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .streams_blocked_bidi = .{ .maximum_streams = 2 } });
+    try conn.processDatagram(0, out.getWritten());
+
+    try std.testing.expectEqual(@as(?u64, 2), conn.peerStreamsBlockedBidiLimit());
+    try std.testing.expectEqual(@as(u64, 2), conn.recv_max_streams_bidi);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_max_frames.items.len);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pending_ack_largest);
+}
+
+test "peer STREAMS_BLOCKED at receive limit grows configured stream-count window" {
+    var bidi = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_streams_bidi = 2,
+        .receive_stream_count_window = 3,
+    });
+    defer bidi.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .streams_blocked_bidi = .{ .maximum_streams = 2 } });
+    try bidi.processDatagram(0, out.getWritten());
+
+    try std.testing.expectEqual(@as(?u64, 2), bidi.peerStreamsBlockedBidiLimit());
+    try std.testing.expectEqual(@as(u64, 5), bidi.recv_max_streams_bidi);
+
+    var out_buf: [64]u8 = undefined;
+    const bidi_payload = (try bidi.pollTx(1, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(try payloadContainsExpectedMaxFrame(bidi_payload, .{ .streams_bidi = 5 }));
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .streams_blocked_bidi = .{ .maximum_streams = 2 } });
+    try bidi.processDatagram(2, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 5), bidi.recv_max_streams_bidi);
+
+    const stale_payload = (try bidi.pollTx(3, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(try payloadContainsExpectedMaxFrame(stale_payload, .{ .streams_bidi = 5 }));
+
+    var uni = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_streams_uni = 1,
+        .receive_stream_count_window = 2,
+    });
+    defer uni.deinit();
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .streams_blocked_uni = .{ .maximum_streams = 1 } });
+    try uni.processDatagram(0, out.getWritten());
+
+    try std.testing.expectEqual(@as(?u64, 1), uni.peerStreamsBlockedUniLimit());
+    try std.testing.expectEqual(@as(u64, 3), uni.recv_max_streams_uni);
+
+    const uni_payload = (try uni.pollTx(1, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(try payloadContainsExpectedMaxFrame(uni_payload, .{ .streams_uni = 3 }));
+}
+
 test "peer BLOCKED triggered MAX retransmission rolls back when payload is invalid" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
@@ -8996,6 +18046,46 @@ test "peer BLOCKED triggered MAX retransmission rolls back when payload is inval
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
     try std.testing.expectEqual(@as(?u64, null), conn.peerDataBlockedLimit());
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_max_frames.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
+}
+
+test "peer STREAMS_BLOCKED stream-count growth rolls back when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_streams_bidi = 2,
+        .receive_stream_count_window = 3,
+    });
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .streams_blocked_bidi = .{ .maximum_streams = 2 } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(?u64, null), conn.peerStreamsBlockedBidiLimit());
+    try std.testing.expectEqual(@as(u64, 2), conn.recv_max_streams_bidi);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_max_frames.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
+}
+
+test "peer BLOCKED receive-window growth rolls back when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 5,
+        .receive_connection_window = 10,
+    });
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .data_blocked = .{ .maximum_data = 5 } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(?u64, null), conn.peerDataBlockedLimit());
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_max_data);
     try std.testing.expectEqual(@as(usize, 0), conn.pending_max_frames.items.len);
     try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
     try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
@@ -9026,6 +18116,33 @@ test "MAX_STREAM_DATA rejects unopened local and receive-only streams" {
     } });
     try std.testing.expectError(error.InvalidPacket, server.processDatagram(0, update_out.getWritten()));
     try std.testing.expectEqual(@as(usize, 0), server.send_streams.items.len);
+}
+
+test "MAX_STREAM_DATA opens peer bidirectional stream before STREAM data" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 10,
+        .initial_max_stream_data = 1,
+        .initial_max_streams_bidi = 3,
+    });
+    defer conn.deinit();
+
+    const stream_id: u64 = 9;
+    var update_buf: [32]u8 = undefined;
+    var update_out = buffer.fixedWriter(&update_buf);
+    try frame.encodeFrame(update_out.writer(), .{ .max_stream_data = .{
+        .stream_id = stream_id,
+        .maximum_stream_data = 2,
+    } });
+    try conn.processDatagram(0, update_out.getWritten());
+
+    try std.testing.expect(conn.findRecvStream(1) != null);
+    try std.testing.expect(conn.findRecvStream(5) != null);
+    try std.testing.expect(conn.findRecvStream(stream_id) != null);
+    try std.testing.expectEqual(@as(usize, 1), conn.send_streams.items.len);
+    try std.testing.expectEqual(@as(u64, 2), conn.findSendStream(stream_id).?.max_data);
+
+    try conn.sendOnStream(stream_id, "xx", false);
+    try std.testing.expectEqual(@as(usize, 1), conn.send_queue.items.len);
 }
 
 test "MAX_STREAM_DATA updates observed peer bidirectional reply credit" {
@@ -9062,19 +18179,32 @@ test "MAX_STREAM_DATA updates observed peer bidirectional reply credit" {
     try std.testing.expectEqual(@as(usize, 1), conn.send_queue.items.len);
 }
 
+test "MAX_STREAM_DATA is ignored after send side sends FIN" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 10,
+        .initial_max_stream_data = 5,
+    });
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "hello", true);
+    try std.testing.expect(conn.findSendStream(stream_id).?.fin_sent);
+
+    var update_buf: [32]u8 = undefined;
+    var update_out = buffer.fixedWriter(&update_buf);
+    try frame.encodeFrame(update_out.writer(), .{ .max_stream_data = .{
+        .stream_id = stream_id,
+        .maximum_stream_data = 10,
+    } });
+    try conn.processDatagram(0, update_out.getWritten());
+
+    try std.testing.expectEqual(@as(u64, 5), conn.findSendStream(stream_id).?.max_data);
+    try std.testing.expectError(error.StreamClosed, conn.sendOnStream(stream_id, "!", false));
+}
+
 test "MAX_STREAM_DATA send-state creation rolls back when payload is invalid" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
-
-    var peer_stream_buf: [16]u8 = undefined;
-    var peer_stream_out = buffer.fixedWriter(&peer_stream_buf);
-    try frame.encodeFrame(peer_stream_out.writer(), .{ .stream = .{
-        .stream_id = 1,
-        .offset = 0,
-        .fin = false,
-        .data = "",
-    } });
-    try conn.processDatagram(0, peer_stream_out.getWritten());
 
     var datagram: [32]u8 = undefined;
     var out = buffer.fixedWriter(&datagram);
@@ -9084,10 +18214,11 @@ test "MAX_STREAM_DATA send-state creation rolls back when payload is invalid" {
     } });
     try out.writeByte(0xff);
 
-    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1, out.getWritten()));
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items.len);
     try std.testing.expectEqual(@as(usize, 0), conn.send_streams.items.len);
-    try std.testing.expectEqual(@as(?u64, 0), conn.pending_ack_largest);
-    try std.testing.expectEqual(@as(u64, 1), conn.next_peer_packet_number);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
 }
 
 test "sendOnStream does not create state for flow-control blocked new streams" {
@@ -9180,6 +18311,160 @@ test "processDatagram accepts stream frame without length field" {
     var read_buf: [8]u8 = undefined;
     const n = (try conn.recvOnStream(0, &read_buf)).?;
     try std.testing.expectEqualStrings("ok", read_buf[0..n]);
+}
+
+test "STREAM opens lower-numbered peer streams of the same type" {
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_streams_bidi = 3,
+        .initial_max_streams_uni = 3,
+    });
+    defer server.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 8,
+        .offset = 0,
+        .fin = false,
+        .data = "bidi",
+    } });
+    try server.processDatagram(0, out.getWritten());
+
+    try std.testing.expect(server.findRecvStream(0) != null);
+    try std.testing.expect(server.findRecvStream(4) != null);
+    try std.testing.expect(server.findRecvStream(8) != null);
+
+    var read_buf: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, null), try server.recvOnStream(0, &read_buf));
+    try std.testing.expectEqual(@as(?usize, null), try server.recvOnStream(4, &read_buf));
+    const n = (try server.recvOnStream(8, &read_buf)).?;
+    try std.testing.expectEqualStrings("bidi", read_buf[0..n]);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 10,
+        .offset = 0,
+        .fin = true,
+        .data = "uni",
+    } });
+    try server.processDatagram(1, out.getWritten());
+
+    try std.testing.expect(server.findRecvStream(2) != null);
+    try std.testing.expect(server.findRecvStream(6) != null);
+    try std.testing.expect(server.findRecvStream(10) != null);
+    try std.testing.expectEqual(@as(?usize, null), try server.recvOnStream(2, &read_buf));
+    try std.testing.expectEqual(@as(?usize, null), try server.recvOnStream(6, &read_buf));
+    const uni_len = (try server.recvOnStream(10, &read_buf)).?;
+    try std.testing.expectEqualStrings("uni", read_buf[0..uni_len]);
+}
+
+test "processDatagram discards duplicate STREAM data without growing flow control" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "hello",
+    } });
+    const original = try std.testing.allocator.dupe(u8, out.getWritten());
+    defer std.testing.allocator.free(original);
+    try conn.processDatagram(0, original);
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+
+    try conn.processDatagram(1, original);
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+    try std.testing.expectEqualStrings("hello", conn.recv_streams.items[0].data.items);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 3,
+        .fin = false,
+        .data = "lo!",
+    } });
+    try conn.processDatagram(2, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 6), conn.recv_data_bytes);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvOnStream(0, &read_buf)).?;
+    try std.testing.expectEqualStrings("hello!", read_buf[0..n]);
+}
+
+test "processDatagram accepts duplicate pending STREAM frame and rejects conflicting overlap" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 5,
+        .fin = false,
+        .data = "tail",
+    } });
+    const pending = try std.testing.allocator.dupe(u8, out.getWritten());
+    defer std.testing.allocator.free(pending);
+    try conn.processDatagram(0, pending);
+    try std.testing.expectEqual(@as(u64, 4), conn.recv_data_bytes);
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items[0].pending.items.len);
+
+    try conn.processDatagram(1, pending);
+    try std.testing.expectEqual(@as(u64, 4), conn.recv_data_bytes);
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items[0].pending.items.len);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 7,
+        .fin = false,
+        .data = "xx",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(2, out.getWritten()));
+    try std.testing.expectEqual(@as(u64, 4), conn.recv_data_bytes);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "head-",
+    } });
+    try conn.processDatagram(3, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 9), conn.recv_data_bytes);
+
+    var read_buf: [16]u8 = undefined;
+    const n = (try conn.recvOnStream(0, &read_buf)).?;
+    try std.testing.expectEqualStrings("head-tail", read_buf[0..n]);
+}
+
+test "processDatagram rejects conflicting duplicate STREAM bytes" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "hello",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 3,
+        .fin = false,
+        .data = "xx",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1, out.getWritten()));
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+    try std.testing.expectEqualStrings("hello", conn.recv_streams.items[0].data.items);
 }
 
 test "processDatagram enforces receive stream flow control" {
@@ -9423,6 +18708,90 @@ test "RESET_STREAM accounts final size after out-of-order stream data" {
     try std.testing.expectError(error.StreamClosed, conn.recvOnStream(0, &read_buf));
 }
 
+test "receive stream ignores data after RESET_STREAM within final size" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 10,
+        .initial_max_stream_data = 10,
+    });
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 0,
+        .application_error_code = 7,
+        .final_size = 5,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "abc",
+    } });
+    try conn.processDatagram(1, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items[0].data.items.len);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 5,
+        .fin = true,
+        .data = "",
+    } });
+    try conn.processDatagram(2, out.getWritten());
+    try std.testing.expectEqual(@as(?u64, 5), conn.recv_streams.items[0].final_size);
+    try std.testing.expectEqual(@as(?u64, 7), conn.recv_streams.items[0].reset_error_code);
+
+    var read_buf: [8]u8 = undefined;
+    try std.testing.expectError(error.StreamClosed, conn.recvOnStream(0, &read_buf));
+}
+
+test "receive stream rejects data after RESET_STREAM that changes final size" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 10,
+        .initial_max_stream_data = 10,
+    });
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 0,
+        .application_error_code = 7,
+        .final_size = 5,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 5,
+        .fin = false,
+        .data = "!",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1, out.getWritten()));
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+    try std.testing.expectEqual(@as(?u64, 5), conn.recv_streams.items[0].final_size);
+    try std.testing.expectEqual(@as(?u64, 7), conn.recv_streams.items[0].reset_error_code);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 4,
+        .fin = true,
+        .data = "",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1, out.getWritten()));
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+    try std.testing.expectEqual(@as(?u64, 5), conn.recv_streams.items[0].final_size);
+    try std.testing.expectEqual(@as(?u64, 7), conn.recv_streams.items[0].reset_error_code);
+}
+
 test "receive stream rejects data after final size" {
     var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
@@ -9445,6 +18814,38 @@ test "receive stream rejects data after final size" {
         .data = "!",
     } });
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
+}
+
+test "receive stream discards late STREAM after all data is received" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = true,
+        .data = "hello",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "HELLO",
+    } });
+    try conn.processDatagram(1, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+    try std.testing.expectEqualStrings("hello", conn.recv_streams.items[0].data.items);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvOnStream(0, &read_buf)).?;
+    try std.testing.expectEqualStrings("hello", read_buf[0..n]);
+    try std.testing.expect(try conn.recvStreamFinished(0));
 }
 
 test "receive stream rejects end offset beyond QUIC varint range" {

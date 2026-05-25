@@ -192,6 +192,68 @@ fn longPacketRoundtrip(allocator: std.mem.Allocator) !void {
     });
 }
 
+fn quicV2LongHeaderTypeBits(allocator: std.mem.Allocator) !void {
+    const initial = quicz.packet.LongHeader{
+        .version = .v2,
+        .dcid = &[_]u8{ 0xca, 0xfe },
+        .scid = &[_]u8{ 0xba, 0xbe },
+        .packet_type = .initial,
+        .token = &[_]u8{0x01},
+        .packet_number = 0,
+        .payload_length = 1,
+    };
+    const handshake = quicz.packet.LongHeader{
+        .version = .v2,
+        .dcid = &[_]u8{ 0xca, 0xfe },
+        .scid = &[_]u8{ 0xba, 0xbe },
+        .packet_type = .handshake,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 1,
+    };
+    const retry = quicz.packet.RetryPacket{
+        .version = .v2,
+        .dcid = &[_]u8{0xca},
+        .scid = &[_]u8{0xbe},
+        .token = &[_]u8{0x01},
+        .integrity_tag = [_]u8{0} ** 16,
+    };
+
+    var initial_raw: [64]u8 = undefined;
+    var initial_writer = fixedWriter(&initial_raw);
+    try quicz.packet.encodeLongHeader(initial_writer.writer(), initial);
+    try require(initial_writer.getWritten()[0] == 0xd0);
+    var initial_reader = fixedReader(initial_writer.getWritten());
+    var parsed_initial = try quicz.packet.parseLongHeader(initial_reader.reader(), allocator);
+    defer quicz.packet.deinitLongHeader(&parsed_initial, allocator);
+    try require(parsed_initial.version == .v2);
+    try require(parsed_initial.packet_type == .initial);
+
+    var handshake_raw: [64]u8 = undefined;
+    var handshake_writer = fixedWriter(&handshake_raw);
+    try quicz.packet.encodeLongHeader(handshake_writer.writer(), handshake);
+    try require(handshake_writer.getWritten()[0] == 0xf0);
+    var handshake_reader = fixedReader(handshake_writer.getWritten());
+    var parsed_handshake = try quicz.packet.parseLongHeader(handshake_reader.reader(), allocator);
+    defer quicz.packet.deinitLongHeader(&parsed_handshake, allocator);
+    try require(parsed_handshake.version == .v2);
+    try require(parsed_handshake.packet_type == .handshake);
+
+    var retry_raw: [64]u8 = undefined;
+    var retry_writer = fixedWriter(&retry_raw);
+    try quicz.packet.encodeRetryPacket(retry_writer.writer(), retry);
+    try require(retry_writer.getWritten()[0] == 0xc0);
+    var parsed_retry = try quicz.packet.parseRetryPacket(retry_writer.getWritten(), allocator);
+    defer quicz.packet.deinitRetryPacket(&parsed_retry, allocator);
+    try require(parsed_retry.version == .v2);
+
+    std.debug.print("[codec] v2 long type bytes initial=0x{x} handshake=0x{x} retry=0x{x}\n", .{
+        initial_writer.getWritten()[0],
+        handshake_writer.getWritten()[0],
+        retry_writer.getWritten()[0],
+    });
+}
+
 fn packetNumberEncodingExample() !void {
     const encoded = try quicz.packet.encodePacketNumberForHeader(0xac5c02, 0xabe8b3);
     try require(encoded.len == 2);
@@ -226,7 +288,48 @@ fn versionNegotiationRoundtrip(allocator: std.mem.Allocator) !void {
     try require(parsed.versions[0] == .v1);
     try require(parsed.versions[1] == .v2);
 
-    std.debug.print("[codec] version negotiation versions={}\n", .{parsed.versions.len});
+    const client_versions = [_]quicz.packet.Version{ .v2, .v1 };
+    const negotiated_versions = [_]quicz.packet.Version{.v2};
+    var negotiated_raw: [64]u8 = undefined;
+    var negotiated_writer = fixedWriter(&negotiated_raw);
+    try quicz.packet.encodeVersionNegotiationPacket(negotiated_writer.writer(), .{
+        .dcid = &scid,
+        .scid = &dcid,
+        .versions = &negotiated_versions,
+    });
+
+    var client = try quicz.QuicConnection.init(allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+    });
+    defer client.deinit();
+    const selected = (try client.processVersionNegotiationDatagram(
+        0,
+        &dcid,
+        &scid,
+        negotiated_writer.getWritten(),
+    )) orelse return error.UnexpectedRoundtrip;
+    try require(selected == .v2);
+    try require(client.versionNegotiationSelectedVersion() == .v2);
+
+    var followup = try quicz.QuicConnection.init(allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &client_versions,
+        .version_negotiation_selected_version = .v2,
+    });
+    defer followup.deinit();
+    try followup.applyPeerTransportParameters(.{
+        .version_information = .{
+            .chosen_version = .v2,
+            .available_versions = &client_versions,
+        },
+    });
+
+    std.debug.print("[codec] version negotiation versions={} selected=0x{x} downgrade_checked={}\n", .{
+        parsed.versions.len,
+        @intFromEnum(selected),
+        followup.versionNegotiationSelectedVersion() == .v2,
+    });
 }
 
 fn streamFrameRoundtrip(allocator: std.mem.Allocator) !void {
@@ -265,11 +368,16 @@ fn streamFrameRoundtrip(allocator: std.mem.Allocator) !void {
 
 fn transportParametersRoundtrip(allocator: std.mem.Allocator) !void {
     const initial_source_connection_id = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const available_versions = [_]quicz.packet.Version{ .v2, .v1 };
     const input = quicz.transport_parameters.TransportParameters{
         .initial_max_data = 65_536,
         .initial_max_stream_data_bidi_local = 32_768,
         .initial_max_streams_bidi = 16,
         .initial_source_connection_id = &initial_source_connection_id,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &available_versions,
+        },
     };
 
     var raw: [128]u8 = undefined;
@@ -284,18 +392,34 @@ fn transportParametersRoundtrip(allocator: std.mem.Allocator) !void {
     try require(parsed.initial_max_streams_bidi == input.initial_max_streams_bidi);
     try require(parsed.initial_source_connection_id != null);
     try require(std.mem.eql(u8, parsed.initial_source_connection_id.?, &initial_source_connection_id));
+    const version_information = parsed.version_information orelse return error.UnexpectedRoundtrip;
+    try require(version_information.chosen_version == .v1);
+    try require(version_information.available_versions.len == 2);
+    try require(version_information.available_versions[0] == .v2);
 
-    std.debug.print("[codec] transport parameters max_data={} max_streams_bidi={}\n", .{
+    std.debug.print("[codec] transport parameters max_data={} max_streams_bidi={} version_info_versions={}\n", .{
         parsed.initial_max_data,
         parsed.initial_max_streams_bidi,
+        version_information.available_versions.len,
     });
 }
 
 fn connectionTransportParameters(allocator: std.mem.Allocator) !void {
     const reset_token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const preferred_cid = [_]u8{ 0xf0, 0xf1, 0xf2, 0xf3 };
+    const preferred = try quicz.PreferredAddress.init(
+        .{ 203, 0, 113, 10 },
+        8443,
+        .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10 },
+        8444,
+        &preferred_cid,
+        reset_token,
+    );
 
     var client = try quicz.QuicConnection.init(allocator, .client, .{
         .max_datagram_size = 1400,
+        .ack_delay_exponent = 7,
+        .max_ack_delay_ms = 15,
         .disable_active_migration = true,
         .stateless_reset_token = reset_token,
         .initial_max_data = 4096,
@@ -306,34 +430,46 @@ fn connectionTransportParameters(allocator: std.mem.Allocator) !void {
     defer client.deinit();
 
     const local = client.localTransportParameters();
+    const local_version_information = local.version_information orelse return error.UnexpectedRoundtrip;
     try require(local.max_udp_payload_size == 1400);
     try require(local.disable_active_migration);
     try require(local.stateless_reset_token == null);
     try require(local.initial_max_data == 4096);
     try require(local.initial_max_stream_data_bidi_remote == 1024);
     try require(local.initial_max_streams_bidi == 4);
+    try require(local.ack_delay_exponent == 7);
+    try require(local.max_ack_delay == 15);
+    try require(local_version_information.chosen_version == .v1);
 
     var server = try quicz.QuicConnection.init(allocator, .server, .{
+        .ack_delay_exponent = 4,
+        .max_ack_delay_ms = 50,
+        .disable_active_migration = true,
         .stateless_reset_token = reset_token,
+        .preferred_address = preferred,
+        .initial_max_data = 2048,
+        .initial_max_stream_data = 512,
+        .initial_max_streams_bidi = 1,
+        .initial_max_streams_uni = 1,
     });
     defer server.deinit();
     const server_local = server.localTransportParameters();
     const server_reset_token = server_local.stateless_reset_token orelse return error.UnexpectedRoundtrip;
+    const server_preferred = server_local.preferred_address orelse return error.UnexpectedRoundtrip;
     try require(std.mem.eql(u8, &server_reset_token, &reset_token));
+    try require(std.mem.eql(u8, server_preferred.connection_id, &preferred_cid));
 
-    try client.applyPeerTransportParameters(.{
-        .stateless_reset_token = reset_token,
-        .max_udp_payload_size = 1200,
-        .initial_max_data = 2048,
-        .initial_max_stream_data_bidi_remote = 512,
-        .initial_max_stream_data_uni = 256,
-        .initial_max_streams_bidi = 1,
-        .initial_max_streams_uni = 1,
-        .disable_active_migration = true,
-    });
+    var server_tp_raw: [256]u8 = undefined;
+    const server_tp_bytes = try server.encodeLocalTransportParameters(&server_tp_raw);
+    try client.applyPeerTransportParameterBytes(server_tp_bytes);
+    const local_after_peer = client.localTransportParameters();
+    try require(local_after_peer.ack_delay_exponent == 7);
+    try require(local_after_peer.max_ack_delay == 15);
     try require(client.peerActiveMigrationDisabled());
     const peer_reset_token = client.peerStatelessResetToken() orelse return error.UnexpectedRoundtrip;
     try require(std.mem.eql(u8, &peer_reset_token, &reset_token));
+    const peer_preferred = client.peerPreferredAddress() orelse return error.UnexpectedRoundtrip;
+    try require(std.mem.eql(u8, peer_preferred.connectionId(), &preferred_cid));
 
     const stream_id = try client.openStream();
     try client.sendOnStream(stream_id, "hello", true);
@@ -343,11 +479,14 @@ fn connectionTransportParameters(allocator: std.mem.Allocator) !void {
         if (err != error.FlowControlBlocked) return err;
     }
 
-    std.debug.print("[codec] connection transport params local_max_data={} migration_disabled={} reset_token={} server_reset_token={}\n", .{
+    std.debug.print("[codec] connection transport params local_max_data={} local_ack_delay={} tls_bytes={} reset_token={} server_reset_token={} preferred_cid={} version_info={}\n", .{
         local.initial_max_data,
-        client.peerActiveMigrationDisabled(),
+        local_after_peer.max_ack_delay,
+        server_tp_bytes.len,
         peer_reset_token.len,
         server_reset_token.len,
+        peer_preferred.connectionId().len,
+        local_version_information.available_versions.len,
     });
 }
 
@@ -357,6 +496,7 @@ fn transportErrorMapping() !void {
     const decoded_alert = quicz.transport_error.cryptoErrorAlert(code);
 
     try require(quicz.transport_error.isKnownCode(@intFromEnum(quicz.transport_error.TransportErrorCode.protocol_violation)));
+    try require(quicz.transport_error.isKnownCode(@intFromEnum(quicz.transport_error.TransportErrorCode.version_negotiation_error)));
     try require(quicz.transport_error.isCryptoErrorCode(code));
     try require(decoded_alert != null);
     try require(decoded_alert.? == tls_alert);
@@ -370,6 +510,7 @@ pub fn main() !void {
     try varintRoundtrip();
     try shortPacketRoundtrip(gpa);
     try longPacketRoundtrip(gpa);
+    try quicV2LongHeaderTypeBits(gpa);
     try packetNumberEncodingExample();
     try versionNegotiationRoundtrip(gpa);
     try streamFrameRoundtrip(gpa);

@@ -109,6 +109,36 @@ pub fn main() !void {
     try require(zero_rtt_server.pendingAckLargest(.application) == 2);
     try require(zero_rtt_server.nextPeerPacketNumber(.application) == 3);
 
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const protected_secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+
+    var protected_zero_rtt_client = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{});
+    defer protected_zero_rtt_client.deinit();
+    var protected_zero_rtt_server = try quicz.QuicConnection.init(std.heap.page_allocator, .server, .{});
+    defer protected_zero_rtt_server.deinit();
+
+    const early_stream_id = try protected_zero_rtt_client.openStream();
+    try protected_zero_rtt_client.sendOnStream(early_stream_id, "protected early", true);
+    const protected_zero_rtt = (try protected_zero_rtt_client.pollProtectedZeroRttDatagram(
+        130,
+        &server_scid,
+        &client_scid,
+        protected_secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.heap.page_allocator.free(protected_zero_rtt);
+
+    const protected_count = try protected_zero_rtt_server.processProtectedLongDatagram(131, .{
+        .zero_rtt = protected_secrets.client,
+    }, protected_zero_rtt);
+    try require(protected_count == 1);
+    var protected_recv: [32]u8 = undefined;
+    const protected_len = (try protected_zero_rtt_server.recvOnStream(early_stream_id, &protected_recv)) orelse return error.UnexpectedState;
+    try require(std.mem.eql(u8, protected_recv[0..protected_len], "protected early"));
+    try require(protected_zero_rtt_server.pendingAckLargest(.application) == 0);
+    try require(protected_zero_rtt_server.nextPeerPacketNumber(.application) == 1);
+
     std.debug.print("[spaces] initial_pn={} application_pn={}\n", .{ initial_pn, app_pn });
     std.debug.print("[spaces] after initial ACK bytes initial={} application={}\n", .{
         conn.bytesInFlight(.initial),
@@ -122,5 +152,11 @@ pub fn main() !void {
     std.debug.print("[spaces] 0-rtt shared application next_peer_pn={} pending_ack={?}\n", .{
         zero_rtt_server.nextPeerPacketNumber(.application),
         zero_rtt_server.pendingAckLargest(.application),
+    });
+    std.debug.print("[spaces] protected 0-rtt packets={} bytes={} next_peer_pn={} pending_ack={?}\n", .{
+        protected_count,
+        protected_zero_rtt.len,
+        protected_zero_rtt_server.nextPeerPacketNumber(.application),
+        protected_zero_rtt_server.pendingAckLargest(.application),
     });
 }

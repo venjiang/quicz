@@ -7,12 +7,22 @@ fn pollRequired(conn: *quicz.QuicConnection, out: []u8) ![]const u8 {
     return (try conn.pollTx(0, out)) orelse error.UnexpectedState;
 }
 
-fn requireError(expected: anyerror, result: anyerror!?usize) !void {
+fn requireError(expected: anyerror, result: anytype) !void {
     _ = result catch |err| {
         if (err == expected) return;
         return err;
     };
     return error.UnexpectedState;
+}
+
+fn expectAckOnly(allocator: std.mem.Allocator, payload: []const u8) !void {
+    var decoded = try quicz.frame.decodeFrameSlice(payload, allocator);
+    defer quicz.frame.deinitFrame(&decoded.frame, allocator);
+    switch (decoded.frame) {
+        .ack => {},
+        else => return error.UnexpectedState,
+    }
+    if (decoded.len != payload.len) return error.UnexpectedState;
 }
 
 pub fn main() !void {
@@ -43,4 +53,52 @@ pub fn main() !void {
     std.debug.print("[stop] sender answered with RESET_STREAM final_size={?}\n", .{
         try server.recvStreamFinalSize(stream_id),
     });
+
+    var racing_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    defer racing_client.deinit();
+    var racing_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    defer racing_server.deinit();
+    try racing_server.validatePeerAddress();
+
+    const racing_stream = try racing_client.openStream();
+    try racing_client.sendOnStream(racing_stream, "racing", false);
+    try racing_server.processDatagram(3, try pollRequired(&racing_client, &datagram));
+    try racing_server.stopSending(racing_stream, 25);
+    try racing_client.resetStream(racing_stream, 25);
+    try racing_server.processDatagram(4, try pollRequired(&racing_client, &datagram));
+
+    const ack_only = try pollRequired(&racing_server, &datagram);
+    try expectAckOnly(gpa, ack_only);
+    std.debug.print("[stop] queued STOP_SENDING dropped after RESET_STREAM stream={}\n", .{racing_stream});
+
+    var done_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    defer done_client.deinit();
+    var done_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    defer done_server.deinit();
+    try done_server.validatePeerAddress();
+
+    const done_stream = try done_client.openStream();
+    try done_client.sendOnStream(done_stream, "done", true);
+    try done_server.processDatagram(5, try pollRequired(&done_client, &datagram));
+    try requireError(error.StreamClosed, done_server.stopSending(done_stream, 24));
+    std.debug.print("[stop] receiver skipped STOP_SENDING after final data stream={}\n", .{done_stream});
+
+    var early_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    defer early_client.deinit();
+    var early_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    defer early_server.deinit();
+    try early_server.validatePeerAddress();
+
+    _ = try early_client.openStream();
+    _ = try early_client.openStream();
+    const early_stream = try early_client.openStream();
+    try early_client.stopSending(early_stream, 26);
+    try early_server.processDatagram(6, try pollRequired(&early_client, &datagram));
+    try early_client.processDatagram(7, try pollRequired(&early_server, &datagram));
+    try early_client.sendOnStream(early_stream, "still open", true);
+    try early_server.processDatagram(8, try pollRequired(&early_client, &datagram));
+
+    const early_len = (try early_server.recvOnStream(early_stream, &recv_buf)) orelse return error.UnexpectedState;
+    if (!std.mem.eql(u8, recv_buf[0..early_len], "still open")) return error.UnexpectedState;
+    std.debug.print("[stop] STOP_SENDING before STREAM opened stream={} and lower streams, reset reply side, and left receive side open\n", .{early_stream});
 }
