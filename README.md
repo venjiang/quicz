@@ -300,9 +300,9 @@ pub fn main() !void {
     // the current single-path spin-bit model; nextOutgoingSpinBit() exposes the
     // next short-header value and resetSpinBitForPath() resets it after a path
     // or CID change.
-    // Full UDP packetization, socket-owned endpoint routing, real TLS backend
-    // secret production, real TLS-backed early-data secret ownership, and
-    // TLS 0-RTT acceptance/replay policy are still pending.
+    // Full TLS-owned UDP packetization, socket-owned endpoint lifecycle, real
+    // TLS backend secret production, real TLS-backed early-data secret
+    // ownership, and TLS 0-RTT acceptance/replay policy are still pending.
 }
 ```
 
@@ -326,7 +326,8 @@ See [`examples/echo_server.zig`](examples/echo_server.zig),
 [`examples/stateless_reset.zig`](examples/stateless_reset.zig),
 [`examples/initial_keys.zig`](examples/initial_keys.zig),
 [`examples/endpoint_routing.zig`](examples/endpoint_routing.zig), and
-[`examples/udp_endpoint_loopback.zig`](examples/udp_endpoint_loopback.zig) for runnable
+[`examples/udp_endpoint_loopback.zig`](examples/udp_endpoint_loopback.zig), and
+[`examples/udp_protected_loopback.zig`](examples/udp_protected_loopback.zig) for runnable
 examples. They exercise the current frame-payload, codec including QUIC v2
 long-header type-bit mapping, transport-parameter including RFC 9368 version information,
 flow-control, unidirectional stream, stream-reset, STOP_SENDING, close-state,
@@ -336,7 +337,7 @@ loss-recovery including ACK-delay, recovery-period, and persistent congestion ha
 PTO-recovery, path-validation, address-validation including token version binding, Retry-token processing and v1/v2 integrity-tag,
 connection-ID, stateless-reset, v1/v2 Initial key, key-update/protected-packet/header-protection,
 endpoint-routing/client-Initial route registration/accepted-Initial route registration/Retry-DCID/preferred-address/stateless-reset-token lookup APIs,
-and a socket-backed UDP endpoint routing loopback; they are not yet interoperable
+socket-backed UDP endpoint routing, and caller-keyed protected UDP packet loopbacks; they are not yet interoperable
 QUIC-over-UDP programs.
 
 ## 中文说明（Chinese Overview）
