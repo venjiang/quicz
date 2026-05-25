@@ -121,6 +121,12 @@ pub const RouteResult = struct {
     path_changed: bool,
 };
 
+/// Options for registering a client Initial Source CID route.
+pub const ClientInitialRouteOptions = struct {
+    /// Reject packets from a different UDP tuple while active migration is disabled.
+    active_migration_disabled: bool = false,
+};
+
 /// Endpoint-level information needed to accept a new server-side Initial.
 ///
 /// Slices borrow from the triggering datagram. The destination CID is the
@@ -630,6 +636,27 @@ pub const EndpointRouter = struct {
         if (options.stateless_reset_token) |token| {
             try self.registerStatelessResetTokenForCid(cid, token);
         }
+    }
+
+    /// Register the client Initial Source CID before sending a client Initial.
+    ///
+    /// Servers send Initial, Handshake, Version Negotiation, and Retry packets
+    /// back to the Source Connection ID chosen by the client Initial. This
+    /// helper installs that local CID as an inbound endpoint route for the
+    /// caller-owned client connection. It does not own socket I/O or construct
+    /// the Initial packet; callers still choose the outgoing Destination CID and
+    /// packetization policy at the connection layer.
+    pub fn registerClientInitialSourceConnectionId(
+        self: *EndpointRouter,
+        connection_id: u64,
+        client_source_connection_id: []const u8,
+        path: Udp4Tuple,
+        options: ClientInitialRouteOptions,
+    ) RouteError!RouteResult {
+        try self.registerConnectionId(connection_id, client_source_connection_id, path, .{
+            .active_migration_disabled = options.active_migration_disabled,
+        });
+        return self.routeConnectionId(client_source_connection_id, path);
     }
 
     /// Register routes for a server connection created from an accepted Initial.
@@ -1650,6 +1677,99 @@ test "Endpoint handleDatagram can emit version negotiation before route lookup" 
     var parsed = try packet.parseVersionNegotiationPacket(response, std.testing.allocator);
     defer packet.deinitVersionNegotiationPacket(&parsed, std.testing.allocator);
     try std.testing.expectEqualSlices(packet.Version, &supported_versions, parsed.versions);
+}
+
+test "EndpointRouter registers client Initial Source CID routes" {
+    const supported_versions = [_]packet.Version{ .v1, .v2 };
+    const path = testPath(50_000);
+    const changed_path = testPath(50_001);
+    const client_scid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const server_initial = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        0x04, 0xc1, 0xc2, 0xc3, 0xc4,
+        0x04, 0xa1, 0xa2, 0xa3, 0xa4,
+        0x00, 0x02, 0x00, 0xaa,
+    };
+    const version_negotiation = [_]u8{
+        0x80, 0x00, 0x00, 0x00, 0x00,
+        0x04, 0xc1, 0xc2, 0xc3, 0xc4,
+        0x04, 0xa1, 0xa2, 0xa3, 0xa4,
+        0x00, 0x00, 0x00, 0x01, 0x6b,
+        0x33, 0x43, 0xcf,
+    };
+    var router = EndpointRouter.init(std.testing.allocator);
+    defer router.deinit();
+
+    const registered = try router.registerClientInitialSourceConnectionId(31, &client_scid, path, .{
+        .active_migration_disabled = true,
+    });
+    try std.testing.expectEqual(@as(u64, 31), registered.connection_id);
+    try std.testing.expectEqual(@as(?u64, null), registered.sequence_number);
+    try std.testing.expectEqualSlices(u8, &client_scid, registered.destination_connection_id.asSlice());
+    try std.testing.expect(!registered.path_changed);
+
+    var out: [64]u8 = undefined;
+    const initial_action = try router.handleDatagramWithVersionNegotiation(
+        &out,
+        path,
+        &server_initial,
+        &[_]u8{ 0x55, 0x56, 0x57, 0x58, 0x59 },
+        &supported_versions,
+    );
+    switch (initial_action) {
+        .routed => |route| {
+            try std.testing.expectEqual(@as(u64, 31), route.connection_id);
+            try std.testing.expectEqualSlices(u8, &client_scid, route.destination_connection_id.asSlice());
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const vn_action = try router.handleDatagramWithVersionNegotiation(
+        &out,
+        path,
+        &version_negotiation,
+        &[_]u8{ 0x55, 0x56, 0x57, 0x58, 0x59 },
+        &supported_versions,
+    );
+    switch (vn_action) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 31), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expectError(error.ActiveMigrationDisabled, router.routeDatagram(changed_path, &server_initial));
+}
+
+test "EndpointRouter client Initial route handles zero-length SCID and rejects duplicates" {
+    const path = testPath(50_000);
+    const other_path = testPath(50_001);
+    const zero_scid = [_]u8{};
+    const zero_dcid_server_initial = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        0x00, 0x04, 0xa1, 0xa2, 0xa3,
+        0xa4, 0x00, 0x02, 0x00, 0xaa,
+    };
+    var router = EndpointRouter.init(std.testing.allocator);
+    defer router.deinit();
+
+    const zero_route = try router.registerClientInitialSourceConnectionId(32, &zero_scid, path, .{});
+    try std.testing.expectEqual(@as(u64, 32), zero_route.connection_id);
+    try std.testing.expectEqual(@as(usize, 0), zero_route.destination_connection_id.asSlice().len);
+    try std.testing.expectEqual(@as(usize, 1), router.routeCount());
+    try std.testing.expectEqual(@as(u64, 32), (try router.routeDatagram(path, &zero_dcid_server_initial)).connection_id);
+    try std.testing.expectError(error.UnknownConnectionId, router.routeDatagram(other_path, &zero_dcid_server_initial));
+    try std.testing.expectError(
+        error.DuplicateConnectionId,
+        router.registerClientInitialSourceConnectionId(33, &zero_scid, path, .{}),
+    );
+    try std.testing.expectEqual(@as(usize, 1), router.routeCount());
+
+    var too_long: [max_connection_id_len + 1]u8 = undefined;
+    @memset(&too_long, 0);
+    try std.testing.expectError(
+        error.InvalidConnectionIdLength,
+        router.registerClientInitialSourceConnectionId(34, &too_long, path, .{}),
+    );
+    try std.testing.expectEqual(@as(usize, 1), router.routeCount());
 }
 
 test "Endpoint handleDatagram classifies supported unknown Initial for server accept" {

@@ -42,6 +42,21 @@ pub fn main() !void {
     try require(short_route.sequence_number.? == 0);
     try require(std.mem.eql(u8, short_route.destination_connection_id.asSlice(), &server_dcid));
 
+    const client_connect_path = path(50_009);
+    const client_initial_scid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const server_initial_response = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        0x04, 0xc1, 0xc2, 0xc3, 0xc4,
+        0x04, 0xa1, 0xa2, 0xa3, 0xa4,
+        0x00, 0x02, 0x00, 0xaa,
+    };
+    const client_initial_registration = try router.registerClientInitialSourceConnectionId(15, &client_initial_scid, client_connect_path, .{
+        .active_migration_disabled = true,
+    });
+    try require(client_initial_registration.connection_id == 15);
+    const client_initial_route = try router.routeDatagram(client_connect_path, &server_initial_response);
+    try require(client_initial_route.connection_id == 15);
+
     const retry_original_dcid = [_]u8{ 0x90, 0x91, 0x92, 0x93 };
     const retry_source_cid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
     const retry_path = path(50_006);
@@ -266,9 +281,10 @@ pub fn main() !void {
     const action_accept_initial = accepted_initial_route == 14;
     try require(action_accept_initial);
 
-    std.debug.print("[endpoint] routed_long={} routed_short={} retry_switched={} preferred_migrated={} zero_cid={} cid_seq_retired={} path_changed={} path_updated={} migration_rejected={} retired={} stateless_reset={} reset_bytes={} action_routed={} action_reset={} action_dropped={} version_negotiation_versions={} action_accept_initial={} accepted_initial_route={} routes={}\n", .{
+    std.debug.print("[endpoint] routed_long={} routed_short={} client_initial_route={} retry_switched={} preferred_migrated={} zero_cid={} cid_seq_retired={} path_changed={} path_updated={} migration_rejected={} retired={} stateless_reset={} reset_bytes={} action_routed={} action_reset={} action_dropped={} version_negotiation_versions={} action_accept_initial={} accepted_initial_route={} routes={}\n", .{
         long_route.connection_id,
         short_route.connection_id,
+        client_initial_route.connection_id,
         retry_original_retired,
         preferred_old_retired,
         zero_route.connection_id,
