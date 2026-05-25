@@ -87,6 +87,7 @@ This builds:
   - `zig-out/bin/quicz-udp-endpoint-loopback`
   - `zig-out/bin/quicz-udp-protected-loopback`
   - `zig-out/bin/quicz-udp-retry-loopback`
+  - `zig-out/bin/quicz-udp-close-lifecycle-loopback`
   - `zig-out/bin/quicz-udp-stateless-reset-loopback`
 
 ## Using quicz as a library
@@ -332,7 +333,8 @@ See [`examples/echo_server.zig`](examples/echo_server.zig),
 [`examples/endpoint_routing.zig`](examples/endpoint_routing.zig),
 [`examples/udp_endpoint_loopback.zig`](examples/udp_endpoint_loopback.zig),
 [`examples/udp_protected_loopback.zig`](examples/udp_protected_loopback.zig),
-[`examples/udp_retry_loopback.zig`](examples/udp_retry_loopback.zig), and
+[`examples/udp_retry_loopback.zig`](examples/udp_retry_loopback.zig),
+[`examples/udp_close_lifecycle_loopback.zig`](examples/udp_close_lifecycle_loopback.zig), and
 [`examples/udp_stateless_reset_loopback.zig`](examples/udp_stateless_reset_loopback.zig) for runnable
 examples. They exercise the current frame-payload, codec including QUIC v2
 long-header type-bit mapping, transport-parameter including RFC 9368 version information,
@@ -343,7 +345,7 @@ loss-recovery including ACK-delay, recovery-period, and persistent congestion ha
 PTO-recovery, path-validation, address-validation including token version binding, Retry-token processing and v1/v2 integrity-tag,
 connection-ID, stateless-reset, v1/v2 Initial key, key-update/protected-packet/header-protection,
 endpoint-routing/client-Initial route registration/accepted-Initial route registration/Retry-DCID/preferred-address/stateless-reset-token lookup APIs,
-socket-backed UDP endpoint routing with client-side Version Negotiation selection, caller-keyed protected UDP packet loopbacks, socket-backed UDP Retry/address-validation routing, and socket-backed UDP stateless-reset emission; they are not yet interoperable
+socket-backed UDP endpoint routing with client-side Version Negotiation selection, caller-keyed protected UDP packet loopbacks, socket-backed UDP Retry/address-validation routing, socket-backed close-triggered route retirement, and socket-backed UDP stateless-reset emission; they are not yet interoperable
 QUIC-over-UDP programs.
 
 ## 中文说明（Chinese Overview）

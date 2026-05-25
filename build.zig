@@ -366,6 +366,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_retry_loopback);
 
+    // UDP close lifecycle loopback executable
+    const exe_udp_close_lifecycle_loopback = b.addExecutable(.{
+        .name = "quicz-udp-close-lifecycle-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_close_lifecycle_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_close_lifecycle_loopback);
+
     // UDP stateless reset loopback executable
     const exe_udp_stateless_reset_loopback = b.addExecutable(.{
         .name = "quicz-udp-stateless-reset-loopback",
@@ -594,6 +608,15 @@ pub fn build(b: *std.Build) void {
     run_udp_retry_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_retry_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-close-lifecycle-loopback
+    const run_udp_close_lifecycle_loopback = b.step("run-udp-close-lifecycle-loopback", "Run quicz UDP close lifecycle loopback example");
+    const run_udp_close_lifecycle_loopback_cmd = b.addRunArtifact(exe_udp_close_lifecycle_loopback);
+    run_udp_close_lifecycle_loopback.dependOn(&run_udp_close_lifecycle_loopback_cmd.step);
+    run_udp_close_lifecycle_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_close_lifecycle_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-stateless-reset-loopback
