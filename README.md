@@ -325,9 +325,10 @@ See [`examples/echo_server.zig`](examples/echo_server.zig),
 [`examples/connection_ids.zig`](examples/connection_ids.zig),
 [`examples/stateless_reset.zig`](examples/stateless_reset.zig),
 [`examples/initial_keys.zig`](examples/initial_keys.zig),
-[`examples/endpoint_routing.zig`](examples/endpoint_routing.zig), and
-[`examples/udp_endpoint_loopback.zig`](examples/udp_endpoint_loopback.zig), and
-[`examples/udp_protected_loopback.zig`](examples/udp_protected_loopback.zig) for runnable
+[`examples/endpoint_routing.zig`](examples/endpoint_routing.zig),
+[`examples/udp_endpoint_loopback.zig`](examples/udp_endpoint_loopback.zig),
+[`examples/udp_protected_loopback.zig`](examples/udp_protected_loopback.zig), and
+[`examples/udp_stateless_reset_loopback.zig`](examples/udp_stateless_reset_loopback.zig) for runnable
 examples. They exercise the current frame-payload, codec including QUIC v2
 long-header type-bit mapping, transport-parameter including RFC 9368 version information,
 flow-control, unidirectional stream, stream-reset, STOP_SENDING, close-state,
@@ -337,7 +338,7 @@ loss-recovery including ACK-delay, recovery-period, and persistent congestion ha
 PTO-recovery, path-validation, address-validation including token version binding, Retry-token processing and v1/v2 integrity-tag,
 connection-ID, stateless-reset, v1/v2 Initial key, key-update/protected-packet/header-protection,
 endpoint-routing/client-Initial route registration/accepted-Initial route registration/Retry-DCID/preferred-address/stateless-reset-token lookup APIs,
-socket-backed UDP endpoint routing, and caller-keyed protected UDP packet loopbacks; they are not yet interoperable
+socket-backed UDP endpoint routing, caller-keyed protected UDP packet loopbacks, and socket-backed UDP stateless-reset emission; they are not yet interoperable
 QUIC-over-UDP programs.
 
 ## 中文说明（Chinese Overview）
