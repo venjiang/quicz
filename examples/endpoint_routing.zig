@@ -187,6 +187,10 @@ pub fn main() !void {
         else => false,
     };
     try require(action_routed);
+    const connection_routes_retired = router.retireConnectionRoutes(10);
+    try require(connection_routes_retired == 1);
+    const lifecycle_retired_token = (try router.statelessResetTokenForDatagram(lifecycle_path, &lifecycle_datagram1)) orelse return error.UnexpectedState;
+    try require(std.mem.eql(u8, &lifecycle_retired_token, &lifecycle_token1));
 
     const reset_action = try router.handleDatagram(&reset_out, client_path, &retired_datagram, &reset_prefix);
     const action_reset = switch (reset_action) {
@@ -281,7 +285,7 @@ pub fn main() !void {
     const action_accept_initial = accepted_initial_route == 14;
     try require(action_accept_initial);
 
-    std.debug.print("[endpoint] routed_long={} routed_short={} client_initial_route={} retry_switched={} preferred_migrated={} zero_cid={} cid_seq_retired={} path_changed={} path_updated={} migration_rejected={} retired={} stateless_reset={} reset_bytes={} action_routed={} action_reset={} action_dropped={} version_negotiation_versions={} action_accept_initial={} accepted_initial_route={} routes={}\n", .{
+    std.debug.print("[endpoint] routed_long={} routed_short={} client_initial_route={} retry_switched={} preferred_migrated={} zero_cid={} cid_seq_retired={} connection_routes_retired={} path_changed={} path_updated={} migration_rejected={} retired={} stateless_reset={} reset_bytes={} action_routed={} action_reset={} action_dropped={} version_negotiation_versions={} action_accept_initial={} accepted_initial_route={} routes={}\n", .{
         long_route.connection_id,
         short_route.connection_id,
         client_initial_route.connection_id,
@@ -289,6 +293,7 @@ pub fn main() !void {
         preferred_old_retired,
         zero_route.connection_id,
         retired_before_one,
+        connection_routes_retired,
         short_route.path_changed,
         !migration_confirmed.path_changed,
         migration_rejected,

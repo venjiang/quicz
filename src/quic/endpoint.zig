@@ -770,6 +770,26 @@ pub const EndpointRouter = struct {
         return retired;
     }
 
+    /// Remove every active route owned by one caller connection handle.
+    ///
+    /// This is the endpoint lifecycle hook for a closed connection. Stateless
+    /// reset tokens are intentionally retained, matching individual CID
+    /// retirement: a later datagram for an inactive route can still be answered
+    /// by endpoint policy without keeping the connection object alive.
+    pub fn retireConnectionRoutes(self: *EndpointRouter, connection_id: u64) usize {
+        var retired: usize = 0;
+        var index: usize = 0;
+        while (index < self.routes.items.len) {
+            if (self.routes.items[index].connection_id != connection_id) {
+                index += 1;
+                continue;
+            }
+            _ = self.routes.orderedRemove(index);
+            retired += 1;
+        }
+        return retired;
+    }
+
     /// Register a replacement destination CID and retire older sequence routes.
     ///
     /// This mirrors NEW_CONNECTION_ID replacement semantics at endpoint routing
@@ -2464,6 +2484,40 @@ test "EndpointRouter rejects ambiguous stateless reset token prefixes" {
     try std.testing.expectEqual(@as(usize, 2), router.statelessResetTokenCount());
     try std.testing.expectEqual(@as(?usize, null), try router.findShortRouteIndex(testPath(50_000), &[_]u8{ 0x40, 0xaa, 0xbb, 0x00 }));
     try std.testing.expectEqual(@as(usize, 0), router.routeCount());
+}
+
+test "EndpointRouter retires all active routes for a connection handle" {
+    const cid0 = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const cid1 = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const other_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const token0 = [_]u8{0x81} ** stateless_reset_token_len;
+    const token1 = [_]u8{0x91} ** stateless_reset_token_len;
+    const other_token = [_]u8{0xa1} ** stateless_reset_token_len;
+    const path = testPath(50_000);
+    const datagram0 = [_]u8{ 0x40, 0x81, 0x82, 0x83, 0x84, 0x01 };
+    const datagram1 = [_]u8{ 0x40, 0x91, 0x92, 0x93, 0x94, 0x01 };
+    const other_datagram = [_]u8{ 0x40, 0xa1, 0xa2, 0xa3, 0xa4, 0x01 };
+    var router = EndpointRouter.init(std.testing.allocator);
+    defer router.deinit();
+
+    try router.registerConnectionId(41, &cid0, path, .{ .sequence_number = 0, .stateless_reset_token = token0 });
+    try router.registerConnectionId(41, &cid1, path, .{ .sequence_number = 1, .stateless_reset_token = token1 });
+    try router.registerConnectionId(42, &other_cid, path, .{ .sequence_number = 0, .stateless_reset_token = other_token });
+    try std.testing.expectEqual(@as(usize, 3), router.routeCount());
+    try std.testing.expectEqual(@as(usize, 3), router.statelessResetTokenCount());
+
+    try std.testing.expectEqual(@as(usize, 2), router.retireConnectionRoutes(41));
+    try std.testing.expectEqual(@as(usize, 1), router.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), router.retireConnectionRoutes(41));
+    try std.testing.expectError(error.UnknownConnectionId, router.routeDatagram(path, &datagram0));
+    try std.testing.expectError(error.UnknownConnectionId, router.routeDatagram(path, &datagram1));
+    try std.testing.expectEqual(@as(u64, 42), (try router.routeDatagram(path, &other_datagram)).connection_id);
+
+    const retired_token0 = (try router.statelessResetTokenForDatagram(path, &datagram0)) orelse return error.TestUnexpectedResult;
+    const retired_token1 = (try router.statelessResetTokenForDatagram(path, &datagram1)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &token0, &retired_token0);
+    try std.testing.expectEqualSlices(u8, &token1, &retired_token1);
+    try std.testing.expectEqual(@as(?[stateless_reset_token_len]u8, null), try router.statelessResetTokenForDatagram(path, &other_datagram));
 }
 
 test "EndpointRouter rejects stateless reset token reuse across connection IDs" {
