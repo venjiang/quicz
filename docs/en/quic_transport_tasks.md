@@ -1314,6 +1314,7 @@ run from `build.zig`.
 | `endpoint_routing` | Current in-memory endpoint DCID/IPv4 UDP tuple routing, long-header DCID peeking, unsupported-version RFC 8999 Version Negotiation response generation, client Initial Source CID route registration, supported-version unknown-DCID Initial accept classification, accepted Initial Original DCID/server Initial SCID route registration, short-header registered-CID matching, zero-length CID tuple routing, Retry Source CID route switching, caller-validated preferred-address migration commit, sequence/retire-prior-to/connection-handle route retirement, stateless reset token reuse rejection, caller-validated path update, active-migration-disabled rejection, route retirement, stateless reset token lookup for inactive CIDs, reset datagram construction with caller-supplied unpredictable bytes, and route/version-negotiation/reset/drop/accept receive action classification. | Present |
 | `udp_endpoint_loopback` | Socket-backed loopback UDP exercise for endpoint routing: unsupported-version Initial to Version Negotiation response delivery, client-side VN selection, supported Initial accept classification, client Initial Source CID response routing, accepted server Initial Source CID registration, and short-header registered-CID routing. | Present |
 | `udp_protected_loopback` | Socket-backed loopback UDP protected packet exercise: caller-keyed protected client Initial, server accept route registration, caller-keyed protected server Initial response, routed 1-RTT PING, and routed 1-RTT ACK. | Present |
+| `udp_path_validation_loopback` | Socket-backed loopback UDP path-validation exercise: protected PATH_CHALLENGE delivery to a new peer port, PATH_RESPONSE routing with `path_changed`, caller-committed route path update after validation, and confirmed routing on the new path. | Present |
 | `udp_retry_loopback` | Socket-backed loopback UDP Retry/address-validation exercise: server Retry delivery, Retry Source CID route switching, address-bound token validation with replay rejection, follow-up protected Initial routing, and Retry CID transport-parameter validation. | Present |
 | `udp_close_lifecycle_loopback` | Socket-backed loopback UDP close lifecycle exercise: protected CONNECTION_CLOSE delivery, endpoint connection-handle route retirement, retained inactive-CID stateless reset token lookup, reset emission, and client token match. | Present |
 | `udp_stateless_reset_loopback` | Socket-backed loopback UDP stateless reset exercise: trigger datagram for a retired CID, endpoint reset classification, server reset datagram send, and client token match. | Present |
@@ -1371,6 +1372,9 @@ zig build run-initial-keys
 zig build run-endpoint-routing
 zig build run-udp-endpoint-loopback
 zig build run-udp-protected-loopback
+zig build run-udp-path-validation-loopback
+zig build run-udp-retry-loopback
+zig build run-udp-close-lifecycle-loopback
 zig build run-udp-stateless-reset-loopback
 ```
 
