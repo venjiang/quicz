@@ -352,6 +352,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_protected_loopback);
 
+    // UDP path validation loopback executable
+    const exe_udp_path_validation_loopback = b.addExecutable(.{
+        .name = "quicz-udp-path-validation-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_path_validation_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_path_validation_loopback);
+
     // UDP Retry loopback executable
     const exe_udp_retry_loopback = b.addExecutable(.{
         .name = "quicz-udp-retry-loopback",
@@ -599,6 +613,15 @@ pub fn build(b: *std.Build) void {
     run_udp_protected_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_protected_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-path-validation-loopback
+    const run_udp_path_validation_loopback = b.step("run-udp-path-validation-loopback", "Run quicz UDP path validation loopback example");
+    const run_udp_path_validation_loopback_cmd = b.addRunArtifact(exe_udp_path_validation_loopback);
+    run_udp_path_validation_loopback.dependOn(&run_udp_path_validation_loopback_cmd.step);
+    run_udp_path_validation_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_path_validation_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-retry-loopback
