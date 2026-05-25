@@ -324,6 +324,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_endpoint_routing);
 
+    // UDP endpoint loopback executable
+    const exe_udp_endpoint_loopback = b.addExecutable(.{
+        .name = "quicz-udp-endpoint-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_endpoint_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_endpoint_loopback);
+
     // zig build run-server
     const run_server = b.step("run-server", "Run quicz echo server");
     const run_server_cmd = b.addRunArtifact(exe_server);
@@ -511,6 +525,15 @@ pub fn build(b: *std.Build) void {
     run_endpoint_routing_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_endpoint_routing_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-endpoint-loopback
+    const run_udp_endpoint_loopback = b.step("run-udp-endpoint-loopback", "Run quicz UDP endpoint loopback example");
+    const run_udp_endpoint_loopback_cmd = b.addRunArtifact(exe_udp_endpoint_loopback);
+    run_udp_endpoint_loopback.dependOn(&run_udp_endpoint_loopback_cmd.step);
+    run_udp_endpoint_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_endpoint_loopback_cmd.addArgs(args);
     }
 
     const lib_tests = b.addTest(.{
