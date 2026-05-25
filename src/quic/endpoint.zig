@@ -139,6 +139,22 @@ pub const InitialAcceptResult = struct {
     token: []const u8,
 };
 
+/// Options for registering endpoint routes after accepting a server Initial.
+pub const AcceptedInitialRouteOptions = struct {
+    /// Reject packets from a different UDP tuple while active migration is disabled.
+    active_migration_disabled: bool = false,
+    /// Optional stateless reset token associated with the server's Initial Source CID.
+    stateless_reset_token: ?[stateless_reset_token_len]u8 = null,
+};
+
+/// Result of installing endpoint routes for an accepted server Initial.
+pub const AcceptedInitialRouteResult = struct {
+    /// Unsequenced route for retransmitted client Initial packets using the Original DCID.
+    original_destination_route: RouteResult,
+    /// Route for packets that use the server's first Initial Source CID as their DCID.
+    server_source_route: RouteResult,
+};
+
 /// Endpoint-level action for one received UDP datagram.
 pub const DatagramAction = union(enum) {
     /// Deliver the datagram to a caller-owned connection.
@@ -614,6 +630,42 @@ pub const EndpointRouter = struct {
         if (options.stateless_reset_token) |token| {
             try self.registerStatelessResetTokenForCid(cid, token);
         }
+    }
+
+    /// Register routes for a server connection created from an accepted Initial.
+    ///
+    /// The Original Destination Connection ID remains routable for client
+    /// Initial retransmissions that occur before the peer learns the server's
+    /// Source CID. The server Source CID is installed as the endpoint-issued
+    /// Initial CID with sequence number 0 when it is non-empty. This helper does
+    /// not validate packet protection or address tokens; callers should invoke
+    /// it only after accepting the Initial and creating the connection object.
+    pub fn registerAcceptedInitialConnectionIds(
+        self: *EndpointRouter,
+        connection_id: u64,
+        initial_accept: InitialAcceptResult,
+        server_source_connection_id: []const u8,
+        options: AcceptedInitialRouteOptions,
+    ) RouteError!AcceptedInitialRouteResult {
+        const original_cid = try ConnectionId.init(initial_accept.original_destination_connection_id);
+        if (original_cid.len < 8) return error.InvalidConnectionIdLength;
+        const server_cid = try ConnectionId.init(server_source_connection_id);
+
+        try self.registerConnectionId(connection_id, original_cid.asSlice(), initial_accept.path, .{
+            .active_migration_disabled = options.active_migration_disabled,
+        });
+        errdefer _ = self.retireConnectionIdOnPath(original_cid.asSlice(), initial_accept.path) catch false;
+
+        try self.registerConnectionId(connection_id, server_cid.asSlice(), initial_accept.path, .{
+            .sequence_number = if (server_cid.len == 0) null else 0,
+            .active_migration_disabled = options.active_migration_disabled,
+            .stateless_reset_token = options.stateless_reset_token,
+        });
+
+        return .{
+            .original_destination_route = try self.routeConnectionId(original_cid.asSlice(), initial_accept.path),
+            .server_source_route = try self.routeConnectionId(server_cid.asSlice(), initial_accept.path),
+        };
     }
 
     /// Register a stateless reset token for a destination CID.
@@ -1655,6 +1707,123 @@ test "Endpoint handleDatagram classifies supported unknown Initial for server ac
         .routed => |route| try std.testing.expectEqual(@as(u64, 7), route.connection_id),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "EndpointRouter registers accepted Initial connection IDs for server routing" {
+    const supported_versions = [_]packet.Version{.v1};
+    const path = testPath(50_000);
+    const original_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11 };
+    const client_scid = [_]u8{ 0x12, 0x34, 0x56, 0x78 };
+    const server_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const token = [_]u8{ 0x99, 0x88, 0x77 };
+    const reset_token = [_]u8{0x64} ** stateless_reset_token_len;
+    const initial = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0xaa, 0xbb, 0xcc, 0xdd,
+        0xee, 0xff, 0x00, 0x11, 0x04,
+        0x12, 0x34, 0x56, 0x78, 0x03,
+        0x99, 0x88, 0x77, 0x02, 0x00,
+        0xaa,
+    };
+    const server_short = [_]u8{ 0x40, 0x21, 0x22, 0x23, 0x24, 0x01 };
+    var router = EndpointRouter.init(std.testing.allocator);
+    defer router.deinit();
+
+    var out: [64]u8 = undefined;
+    const action = try router.handleDatagramWithVersionNegotiation(
+        &out,
+        path,
+        &initial,
+        &[_]u8{ 0x55, 0x56, 0x57, 0x58, 0x59 },
+        &supported_versions,
+    );
+    const accept = switch (action) {
+        .accept_initial => |accept| accept,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualSlices(u8, &client_scid, accept.source_connection_id);
+    try std.testing.expectEqualSlices(u8, &token, accept.token);
+
+    const registered = try router.registerAcceptedInitialConnectionIds(44, accept, &server_scid, .{
+        .active_migration_disabled = true,
+        .stateless_reset_token = reset_token,
+    });
+    try std.testing.expectEqual(@as(usize, 2), router.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), router.statelessResetTokenCount());
+    try std.testing.expectEqual(@as(u64, 44), registered.original_destination_route.connection_id);
+    try std.testing.expectEqual(@as(?u64, null), registered.original_destination_route.sequence_number);
+    try std.testing.expectEqualSlices(u8, &original_dcid, registered.original_destination_route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(u64, 44), registered.server_source_route.connection_id);
+    try std.testing.expectEqual(@as(?u64, 0), registered.server_source_route.sequence_number);
+    try std.testing.expectEqualSlices(u8, &server_scid, registered.server_source_route.destination_connection_id.asSlice());
+
+    const routed_initial = try router.handleDatagramWithVersionNegotiation(
+        &out,
+        path,
+        &initial,
+        &[_]u8{ 0x55, 0x56, 0x57, 0x58, 0x59 },
+        &supported_versions,
+    );
+    switch (routed_initial) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 44), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const routed_server_scid = try router.routeDatagram(path, &server_short);
+    try std.testing.expectEqual(@as(u64, 44), routed_server_scid.connection_id);
+    try std.testing.expectEqual(@as(?u64, 0), routed_server_scid.sequence_number);
+
+    try std.testing.expect(router.retireConnectionIdSequence(44, 0));
+    try std.testing.expectError(error.UnknownConnectionId, router.routeDatagram(path, &server_short));
+    const retired_token = (try router.statelessResetTokenForDatagram(path, &server_short)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &reset_token, &retired_token);
+}
+
+test "EndpointRouter rejects accepted Initial route registration without partial routes" {
+    const supported_versions = [_]packet.Version{.v1};
+    const path = testPath(50_000);
+    const original_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11 };
+    const duplicate_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const short_original_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const reset_token = [_]u8{0x72} ** stateless_reset_token_len;
+    const initial = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0xaa, 0xbb, 0xcc, 0xdd,
+        0xee, 0xff, 0x00, 0x11, 0x04,
+        0x12, 0x34, 0x56, 0x78, 0x00,
+        0x02, 0x00, 0xaa,
+    };
+    var router = EndpointRouter.init(std.testing.allocator);
+    defer router.deinit();
+
+    const accept = (try peekInitialAcceptDatagram(path, &initial, &supported_versions)) orelse return error.TestUnexpectedResult;
+    try router.registerConnectionId(1, &duplicate_scid, path, .{});
+    try std.testing.expectError(
+        error.DuplicateConnectionId,
+        router.registerAcceptedInitialConnectionIds(2, accept, &duplicate_scid, .{}),
+    );
+    try std.testing.expectEqual(@as(usize, 1), router.routeCount());
+    try std.testing.expectError(error.UnknownConnectionId, router.routeConnectionId(&original_dcid, path));
+
+    const invalid_accept = InitialAcceptResult{
+        .path = path,
+        .version = .v1,
+        .original_destination_connection_id = &short_original_dcid,
+        .source_connection_id = &[_]u8{ 0x12, 0x34, 0x56, 0x78 },
+        .token = &.{},
+    };
+    try std.testing.expectError(
+        error.InvalidConnectionIdLength,
+        router.registerAcceptedInitialConnectionIds(3, invalid_accept, &[_]u8{ 0x31, 0x32, 0x33, 0x34 }, .{}),
+    );
+    try std.testing.expectEqual(@as(usize, 1), router.routeCount());
+
+    try std.testing.expectError(
+        error.InvalidConnectionIdLength,
+        router.registerAcceptedInitialConnectionIds(3, accept, &[_]u8{}, .{ .stateless_reset_token = reset_token }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), router.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), router.statelessResetTokenCount());
 }
 
 test "Endpoint Initial accept ignores non-Initial and rejects malformed Initial headers" {

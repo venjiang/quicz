@@ -224,6 +224,9 @@ pub fn main() !void {
         0x91, 0x92, 0x93, 0x94, 0x02,
         0xa1, 0xa2, 0x02, 0x00, 0xff,
     };
+    const accepted_server_scid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const accepted_server_token = [_]u8{ 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70 };
+    const accepted_server_datagram = [_]u8{ 0x40, 0xb1, 0xb2, 0xb3, 0xb4, 0x01 };
     const accept_initial_action = try router.handleDatagramWithVersionNegotiation(
         &reset_out,
         path(50_008),
@@ -231,19 +234,39 @@ pub fn main() !void {
         &reset_prefix,
         &supported_versions,
     );
-    const action_accept_initial = switch (accept_initial_action) {
+    const accepted_initial_route = switch (accept_initial_action) {
         .accept_initial => |accept| blk: {
             try require(accept.version == .v1);
             try require(std.mem.eql(u8, accept.original_destination_connection_id, &[_]u8{ 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88 }));
             try require(std.mem.eql(u8, accept.source_connection_id, &[_]u8{ 0x91, 0x92, 0x93, 0x94 }));
             try require(std.mem.eql(u8, accept.token, &[_]u8{ 0xa1, 0xa2 }));
-            break :blk true;
+            const registered = try router.registerAcceptedInitialConnectionIds(14, accept, &accepted_server_scid, .{
+                .active_migration_disabled = true,
+                .stateless_reset_token = accepted_server_token,
+            });
+            try require(registered.original_destination_route.connection_id == 14);
+            try require(registered.server_source_route.sequence_number.? == 0);
+
+            const routed_initial = try router.handleDatagramWithVersionNegotiation(
+                &reset_out,
+                path(50_008),
+                &accept_initial_datagram,
+                &reset_prefix,
+                &supported_versions,
+            );
+            switch (routed_initial) {
+                .routed => |route| try require(route.connection_id == 14),
+                else => return error.UnexpectedState,
+            }
+            try require((try router.routeDatagram(path(50_008), &accepted_server_datagram)).connection_id == 14);
+            break :blk registered.server_source_route.connection_id;
         },
-        else => false,
+        else => 0,
     };
+    const action_accept_initial = accepted_initial_route == 14;
     try require(action_accept_initial);
 
-    std.debug.print("[endpoint] routed_long={} routed_short={} retry_switched={} preferred_migrated={} zero_cid={} cid_seq_retired={} path_changed={} path_updated={} migration_rejected={} retired={} stateless_reset={} reset_bytes={} action_routed={} action_reset={} action_dropped={} version_negotiation_versions={} action_accept_initial={} routes={}\n", .{
+    std.debug.print("[endpoint] routed_long={} routed_short={} retry_switched={} preferred_migrated={} zero_cid={} cid_seq_retired={} path_changed={} path_updated={} migration_rejected={} retired={} stateless_reset={} reset_bytes={} action_routed={} action_reset={} action_dropped={} version_negotiation_versions={} action_accept_initial={} accepted_initial_route={} routes={}\n", .{
         long_route.connection_id,
         short_route.connection_id,
         retry_original_retired,
@@ -261,6 +284,7 @@ pub fn main() !void {
         action_dropped,
         version_negotiation_versions,
         action_accept_initial,
+        accepted_initial_route,
         router.routeCount(),
     });
 }
