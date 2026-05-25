@@ -66,8 +66,13 @@ pub fn main() !void {
     _ = try spaces.recordPacketSentInSpace(.initial, 10, 100);
     _ = try spaces.recordPacketSentInSpace(.handshake, 20, 100);
 
-    try spaces.checkPtoTimeouts(335);
-    const initial_payload = (try spaces.pollTxInSpace(.initial, 336, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
+    const initial_deadline = spaces.ptoDeadlineMillis(.initial) orelse return error.PtoRecoveryExampleFailed;
+    const handshake_deadline = spaces.ptoDeadlineMillis(.handshake) orelse return error.PtoRecoveryExampleFailed;
+    if (initial_deadline != 310) return error.PtoRecoveryExampleFailed;
+    if (handshake_deadline != 320) return error.PtoRecoveryExampleFailed;
+
+    try spaces.checkPtoTimeouts(initial_deadline);
+    const initial_payload = (try spaces.pollTxInSpace(.initial, initial_deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
     var initial_decoded = try quicz.frame.decodeFrameSlice(initial_payload, allocator);
     defer quicz.frame.deinitFrame(&initial_decoded.frame, allocator);
     switch (initial_decoded.frame) {
@@ -75,8 +80,8 @@ pub fn main() !void {
         else => return error.PtoRecoveryExampleFailed,
     }
 
-    try spaces.checkPtoTimeouts(345);
-    const handshake_payload = (try spaces.pollTxInSpace(.handshake, 346, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
+    try spaces.checkPtoTimeouts(handshake_deadline);
+    const handshake_payload = (try spaces.pollTxInSpace(.handshake, handshake_deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
     var handshake_decoded = try quicz.frame.decodeFrameSlice(handshake_payload, allocator);
     defer quicz.frame.deinitFrame(&handshake_decoded.frame, allocator);
     switch (handshake_decoded.frame) {
@@ -85,7 +90,7 @@ pub fn main() !void {
     }
 
     std.debug.print(
-        "[pto] spaces initial_probe={d} handshake_probe={d}\n",
-        .{ initial_payload.len, handshake_payload.len },
+        "[pto] spaces initial_deadline={d} handshake_deadline={d} initial_probe={d} handshake_probe={d}\n",
+        .{ initial_deadline, handshake_deadline, initial_payload.len, handshake_payload.len },
     );
 }

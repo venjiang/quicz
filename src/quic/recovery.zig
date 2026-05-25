@@ -118,8 +118,22 @@ pub const Recovery = struct {
 
     /// Current Probe Timeout in milliseconds.
     pub fn ptoMs(self: Recovery) u64 {
+        return self.ptoMsIncludingMaxAckDelay(true);
+    }
+
+    /// Current Initial/Handshake Probe Timeout in milliseconds.
+    ///
+    /// RFC 9002 sets `max_ack_delay` to zero for Initial and Handshake packet
+    /// number spaces because those acknowledgments are not intentionally
+    /// delayed.
+    pub fn ptoMsWithoutMaxAckDelay(self: Recovery) u64 {
+        return self.ptoMsIncludingMaxAckDelay(false);
+    }
+
+    fn ptoMsIncludingMaxAckDelay(self: Recovery, include_max_ack_delay: bool) u64 {
         const variance_delay = @max(saturatingMulU64(4, self.rttvar_ms), timer_granularity_ms);
-        var timeout = saturatingAddU64(saturatingAddU64(self.smoothed_rtt_ms, variance_delay), self.max_ack_delay_ms);
+        const ack_delay = if (include_max_ack_delay) self.max_ack_delay_ms else 0;
+        var timeout = saturatingAddU64(saturatingAddU64(self.smoothed_rtt_ms, variance_delay), ack_delay);
 
         var count = self.pto_count;
         while (count != 0) : (count -= 1) {
@@ -231,8 +245,10 @@ test "pto uses rtt variance and exponential backoff" {
     var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100, .max_ack_delay_ms = 25 });
 
     try std.testing.expectEqual(@as(u64, 325), recovery.ptoMs());
+    try std.testing.expectEqual(@as(u64, 300), recovery.ptoMsWithoutMaxAckDelay());
     recovery.onPtoExpired();
     try std.testing.expectEqual(@as(u64, 650), recovery.ptoMs());
+    try std.testing.expectEqual(@as(u64, 600), recovery.ptoMsWithoutMaxAckDelay());
 
     recovery.onPacketAcked(0, 0, 80, 0);
     try std.testing.expectEqual(@as(u8, 0), recovery.pto_count);

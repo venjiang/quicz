@@ -809,7 +809,11 @@ fn saturatingAddMillis(now_millis: i64, duration_millis: u64) i64 {
     return std.math.add(i64, now_millis, duration_i64) catch std.math.maxInt(i64);
 }
 
-fn ptoDeadlineFor(sent_packets: []const SentPacket, recovery_state: recovery.Recovery) ?i64 {
+fn ptoDeadlineFor(
+    sent_packets: []const SentPacket,
+    recovery_state: recovery.Recovery,
+    include_max_ack_delay: bool,
+) ?i64 {
     var latest_sent_time: ?i64 = null;
     for (sent_packets) |sent_packet| {
         latest_sent_time = if (latest_sent_time) |current|
@@ -818,7 +822,11 @@ fn ptoDeadlineFor(sent_packets: []const SentPacket, recovery_state: recovery.Rec
             sent_packet.sent_time_millis;
     }
     const sent_time = latest_sent_time orelse return null;
-    return saturatingAddMillis(sent_time, recovery_state.ptoMs());
+    const pto_ms = if (include_max_ack_delay)
+        recovery_state.ptoMs()
+    else
+        recovery_state.ptoMsWithoutMaxAckDelay();
+    return saturatingAddMillis(sent_time, pto_ms);
 }
 
 fn zeroEcnCounts() frame.EcnCounts {
@@ -1768,9 +1776,9 @@ pub const QuicConnection = struct {
     /// tracked in `sent_packets`, so they do not arm PTO.
     pub fn ptoDeadlineMillis(self: QuicConnection, space: PacketNumberSpace) ?i64 {
         return switch (space) {
-            .initial => ptoDeadlineFor(self.initial_packet_space.sent_packets.items, self.initial_packet_space.recovery_state),
-            .handshake => ptoDeadlineFor(self.handshake_packet_space.sent_packets.items, self.handshake_packet_space.recovery_state),
-            .application => ptoDeadlineFor(self.sent_packets.items, self.recovery_state),
+            .initial => ptoDeadlineFor(self.initial_packet_space.sent_packets.items, self.initial_packet_space.recovery_state, false),
+            .handshake => ptoDeadlineFor(self.handshake_packet_space.sent_packets.items, self.handshake_packet_space.recovery_state, false),
+            .application => ptoDeadlineFor(self.sent_packets.items, self.recovery_state, true),
         };
     }
 
@@ -11500,20 +11508,20 @@ test "checkPtoTimeouts queues Initial and Handshake PING probes independently" {
     _ = try conn.recordPacketSentInSpace(.initial, 10, 100);
     _ = try conn.recordPacketSentInSpace(.handshake, 20, 100);
 
-    try std.testing.expectEqual(@as(?i64, 335), conn.ptoDeadlineMillis(.initial));
-    try std.testing.expectEqual(@as(?i64, 345), conn.ptoDeadlineMillis(.handshake));
+    try std.testing.expectEqual(@as(?i64, 310), conn.ptoDeadlineMillis(.initial));
+    try std.testing.expectEqual(@as(?i64, 320), conn.ptoDeadlineMillis(.handshake));
 
-    try conn.checkPtoTimeouts(334);
+    try conn.checkPtoTimeouts(309);
     try std.testing.expectEqual(@as(usize, 0), conn.initial_packet_space.pending_ping_count);
     try std.testing.expectEqual(@as(usize, 0), conn.handshake_packet_space.pending_ping_count);
 
-    try conn.checkPtoTimeouts(335);
+    try conn.checkPtoTimeouts(310);
     try std.testing.expectEqual(@as(usize, 1), conn.initial_packet_space.pending_ping_count);
     try std.testing.expectEqual(@as(usize, 0), conn.handshake_packet_space.pending_ping_count);
     try std.testing.expectEqual(@as(u8, 1), conn.initial_packet_space.recovery_state.pto_count);
 
     var out_buf: [32]u8 = undefined;
-    const initial_payload = (try conn.pollTxInSpace(.initial, 336, &out_buf)) orelse return error.TestUnexpectedResult;
+    const initial_payload = (try conn.pollTxInSpace(.initial, 311, &out_buf)) orelse return error.TestUnexpectedResult;
     var initial_decoded = try frame.decodeFrameSlice(initial_payload, std.testing.allocator);
     defer frame.deinitFrame(&initial_decoded.frame, std.testing.allocator);
     switch (initial_decoded.frame) {
@@ -11522,11 +11530,11 @@ test "checkPtoTimeouts queues Initial and Handshake PING probes independently" {
     }
     try std.testing.expectEqual(@as(usize, 0), conn.initial_packet_space.pending_ping_count);
 
-    try conn.checkPtoTimeouts(345);
+    try conn.checkPtoTimeouts(320);
     try std.testing.expectEqual(@as(usize, 1), conn.handshake_packet_space.pending_ping_count);
     try std.testing.expectEqual(@as(u8, 1), conn.handshake_packet_space.recovery_state.pto_count);
 
-    const handshake_payload = (try conn.pollTxInSpace(.handshake, 346, &out_buf)) orelse return error.TestUnexpectedResult;
+    const handshake_payload = (try conn.pollTxInSpace(.handshake, 321, &out_buf)) orelse return error.TestUnexpectedResult;
     var handshake_decoded = try frame.decodeFrameSlice(handshake_payload, std.testing.allocator);
     defer frame.deinitFrame(&handshake_decoded.frame, std.testing.allocator);
     switch (handshake_decoded.frame) {
