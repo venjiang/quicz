@@ -121,10 +121,30 @@ pub const RouteResult = struct {
     path_changed: bool,
 };
 
+/// Endpoint-level information needed to accept a new server-side Initial.
+///
+/// Slices borrow from the triggering datagram. The destination CID is the
+/// client's Original Destination Connection ID; the source CID is the peer CID
+/// that a server uses as the destination CID for its first response.
+pub const InitialAcceptResult = struct {
+    /// UDP path that carried the new Initial.
+    path: Udp4Tuple,
+    /// QUIC version from the long header.
+    version: packet.Version,
+    /// Destination Connection ID from the client Initial.
+    original_destination_connection_id: []const u8,
+    /// Source Connection ID from the client Initial.
+    source_connection_id: []const u8,
+    /// Initial token, if present.
+    token: []const u8,
+};
+
 /// Endpoint-level action for one received UDP datagram.
 pub const DatagramAction = union(enum) {
     /// Deliver the datagram to a caller-owned connection.
     routed: RouteResult,
+    /// Accept this supported-version Initial as a new server-side connection.
+    accept_initial: InitialAcceptResult,
     /// Send this Version Negotiation datagram on the same UDP path.
     version_negotiation: []const u8,
     /// Send this stateless reset datagram on the same UDP path.
@@ -884,7 +904,15 @@ pub const EndpointRouter = struct {
         if (try writeVersionNegotiationForUnsupportedVersion(out, datagram, supported_versions)) |response| {
             return .{ .version_negotiation = response };
         }
-        return self.handleDatagram(out, path, datagram, unpredictable_prefix);
+        const action = try self.handleDatagram(out, path, datagram, unpredictable_prefix);
+        switch (action) {
+            .dropped => {},
+            else => return action,
+        }
+        if (try peekInitialAcceptDatagram(path, datagram, supported_versions)) |accept| {
+            return .{ .accept_initial = accept };
+        }
+        return .dropped;
     }
 
     /// Route a datagram by peeking the destination connection ID.
@@ -1042,6 +1070,69 @@ pub fn writeVersionNegotiationForUnsupportedVersion(
         else => return error.InvalidDatagram,
     };
     return writer.getWritten();
+}
+
+/// Peek a supported-version client Initial that can create a server connection.
+///
+/// This helper only classifies complete Initial headers. It does not remove
+/// packet protection, validate Retry/address tokens, or mutate route state.
+/// Non-Initial long headers, unsupported versions, Version Negotiation packets,
+/// and short headers return `null`.
+pub fn peekInitialAcceptDatagram(
+    path: Udp4Tuple,
+    datagram: []const u8,
+    supported_versions: []const packet.Version,
+) RouteError!?InitialAcceptResult {
+    if (datagram.len < 1) return error.InvalidDatagram;
+    if ((datagram[0] & 0x80) == 0) return null;
+    if (supported_versions.len == 0) return error.InvalidVersionList;
+    for (supported_versions) |supported| {
+        if (@intFromEnum(supported) == 0) return error.InvalidVersionList;
+    }
+
+    var reader = buffer.fixedReader(datagram);
+    const first_byte = reader.readByte() catch return error.InvalidDatagram;
+    const packet_number_len: usize = @as(usize, first_byte & 0x03) + 1;
+    const packet_type_bits: u2 = @intCast((first_byte >> 4) & 0x03);
+
+    var version_buf: [4]u8 = undefined;
+    reader.readNoEof(&version_buf) catch return error.InvalidDatagram;
+    const version: packet.Version = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
+    if (@intFromEnum(version) == 0) return null;
+    if ((first_byte & 0x40) == 0) return error.InvalidDatagram;
+    if (!versionListContains(supported_versions, version)) return null;
+    if (packet.longHeaderPacketTypeFromBits(version, packet_type_bits) != .initial) return null;
+
+    const dcid_len = reader.readByte() catch return error.InvalidDatagram;
+    if (dcid_len > max_connection_id_len) return error.InvalidConnectionIdLength;
+    if (reader.remainingLen() < dcid_len) return error.InvalidDatagram;
+    const dcid_start = reader.pos;
+    reader.pos += dcid_len;
+
+    const scid_len = reader.readByte() catch return error.InvalidDatagram;
+    if (scid_len > max_connection_id_len) return error.InvalidConnectionIdLength;
+    if (reader.remainingLen() < scid_len) return error.InvalidDatagram;
+    const scid_start = reader.pos;
+    reader.pos += scid_len;
+
+    const token_len_varint = packet.decodeVarInt(reader.reader()) catch return error.InvalidDatagram;
+    const token_len = std.math.cast(usize, token_len_varint.value) orelse return error.InvalidDatagram;
+    if (reader.remainingLen() < token_len) return error.InvalidDatagram;
+    const token_start = reader.pos;
+    reader.pos += token_len;
+
+    const length_varint = packet.decodeVarInt(reader.reader()) catch return error.InvalidDatagram;
+    if (length_varint.value < packet_number_len) return error.InvalidDatagram;
+    const encoded_packet_len = std.math.cast(usize, length_varint.value) orelse return error.InvalidDatagram;
+    if (reader.remainingLen() < encoded_packet_len) return error.InvalidDatagram;
+
+    return .{
+        .path = path,
+        .version = version,
+        .original_destination_connection_id = datagram[dcid_start..][0..dcid_len],
+        .source_connection_id = datagram[scid_start..][0..scid_len],
+        .token = datagram[token_start..][0..token_len],
+    };
 }
 
 /// Peek version-independent long-header connection IDs from one UDP datagram.
@@ -1507,6 +1598,104 @@ test "Endpoint handleDatagram can emit version negotiation before route lookup" 
     var parsed = try packet.parseVersionNegotiationPacket(response, std.testing.allocator);
     defer packet.deinitVersionNegotiationPacket(&parsed, std.testing.allocator);
     try std.testing.expectEqualSlices(packet.Version, &supported_versions, parsed.versions);
+}
+
+test "Endpoint handleDatagram classifies supported unknown Initial for server accept" {
+    const supported_versions = [_]packet.Version{.v1};
+    const path = testPath(50_000);
+    const original_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11 };
+    const client_scid = [_]u8{ 0x12, 0x34, 0x56, 0x78 };
+    const token = [_]u8{ 0x99, 0x88, 0x77 };
+    const initial = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0xaa, 0xbb, 0xcc, 0xdd,
+        0xee, 0xff, 0x00, 0x11, 0x04,
+        0x12, 0x34, 0x56, 0x78, 0x03,
+        0x99, 0x88, 0x77, 0x02, 0x00,
+        0xaa,
+    };
+    var router = EndpointRouter.init(std.testing.allocator);
+    defer router.deinit();
+
+    const accept = (try peekInitialAcceptDatagram(path, &initial, &supported_versions)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, accept.version);
+    try std.testing.expect(accept.path.eql(path));
+    try std.testing.expectEqualSlices(u8, &original_dcid, accept.original_destination_connection_id);
+    try std.testing.expectEqualSlices(u8, &client_scid, accept.source_connection_id);
+    try std.testing.expectEqualSlices(u8, &token, accept.token);
+
+    var out: [64]u8 = undefined;
+    const action = try router.handleDatagramWithVersionNegotiation(
+        &out,
+        path,
+        &initial,
+        &[_]u8{ 0x55, 0x56, 0x57, 0x58, 0x59 },
+        &supported_versions,
+    );
+    switch (action) {
+        .accept_initial => |result| {
+            try std.testing.expectEqual(packet.Version.v1, result.version);
+            try std.testing.expect(result.path.eql(path));
+            try std.testing.expectEqualSlices(u8, &original_dcid, result.original_destination_connection_id);
+            try std.testing.expectEqualSlices(u8, &client_scid, result.source_connection_id);
+            try std.testing.expectEqualSlices(u8, &token, result.token);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try router.registerConnectionId(7, &original_dcid, path, .{});
+    const routed = try router.handleDatagramWithVersionNegotiation(
+        &out,
+        path,
+        &initial,
+        &[_]u8{ 0x55, 0x56, 0x57, 0x58, 0x59 },
+        &supported_versions,
+    );
+    switch (routed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 7), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "Endpoint Initial accept ignores non-Initial and rejects malformed Initial headers" {
+    const supported_versions = [_]packet.Version{.v1};
+    const path = testPath(50_000);
+    const short_header = [_]u8{ 0x40, 0xaa, 0xbb };
+    const version_negotiation = [_]u8{
+        0x80, 0x00, 0x00, 0x00, 0x00,
+        0x01, 0xaa, 0x01, 0xbb, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    const handshake = [_]u8{
+        0xe0, 0x00, 0x00, 0x00, 0x01,
+        0x01, 0xaa, 0x01, 0xbb, 0x02,
+        0x00, 0xaa,
+    };
+    const unsupported_initial = [_]u8{
+        0xc0, 0xfa, 0xce, 0xb0, 0x0c,
+        0x01, 0xaa, 0x01, 0xbb, 0x00,
+        0x02, 0x00, 0xaa,
+    };
+    const truncated_initial = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0xaa, 0xbb,
+    };
+    const bad_length_initial = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        0x01, 0xaa, 0x01, 0xbb, 0x00,
+        0x01,
+    };
+
+    try std.testing.expect((try peekInitialAcceptDatagram(path, &short_header, &supported_versions)) == null);
+    try std.testing.expect((try peekInitialAcceptDatagram(path, &version_negotiation, &supported_versions)) == null);
+    try std.testing.expect((try peekInitialAcceptDatagram(path, &handshake, &supported_versions)) == null);
+    try std.testing.expect((try peekInitialAcceptDatagram(path, &unsupported_initial, &supported_versions)) == null);
+    try std.testing.expectError(error.InvalidDatagram, peekInitialAcceptDatagram(path, &truncated_initial, &supported_versions));
+    try std.testing.expectError(error.InvalidDatagram, peekInitialAcceptDatagram(path, &bad_length_initial, &supported_versions));
+    try std.testing.expectError(error.InvalidVersionList, peekInitialAcceptDatagram(path, &bad_length_initial, &[_]packet.Version{}));
+
+    const zero_version = [_]packet.Version{@enumFromInt(0)};
+    try std.testing.expectError(error.InvalidVersionList, peekInitialAcceptDatagram(path, &bad_length_initial, &zero_version));
 }
 
 test "EndpointRouter reports path changes and active migration rejection" {

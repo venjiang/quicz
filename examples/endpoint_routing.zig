@@ -217,7 +217,33 @@ pub fn main() !void {
         else => return error.UnexpectedState,
     };
 
-    std.debug.print("[endpoint] routed_long={} routed_short={} retry_switched={} preferred_migrated={} zero_cid={} cid_seq_retired={} path_changed={} path_updated={} migration_rejected={} retired={} stateless_reset={} reset_bytes={} action_routed={} action_reset={} action_dropped={} version_negotiation_versions={} routes={}\n", .{
+    const accept_initial_datagram = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x81, 0x82, 0x83, 0x84,
+        0x85, 0x86, 0x87, 0x88, 0x04,
+        0x91, 0x92, 0x93, 0x94, 0x02,
+        0xa1, 0xa2, 0x02, 0x00, 0xff,
+    };
+    const accept_initial_action = try router.handleDatagramWithVersionNegotiation(
+        &reset_out,
+        path(50_008),
+        &accept_initial_datagram,
+        &reset_prefix,
+        &supported_versions,
+    );
+    const action_accept_initial = switch (accept_initial_action) {
+        .accept_initial => |accept| blk: {
+            try require(accept.version == .v1);
+            try require(std.mem.eql(u8, accept.original_destination_connection_id, &[_]u8{ 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88 }));
+            try require(std.mem.eql(u8, accept.source_connection_id, &[_]u8{ 0x91, 0x92, 0x93, 0x94 }));
+            try require(std.mem.eql(u8, accept.token, &[_]u8{ 0xa1, 0xa2 }));
+            break :blk true;
+        },
+        else => false,
+    };
+    try require(action_accept_initial);
+
+    std.debug.print("[endpoint] routed_long={} routed_short={} retry_switched={} preferred_migrated={} zero_cid={} cid_seq_retired={} path_changed={} path_updated={} migration_rejected={} retired={} stateless_reset={} reset_bytes={} action_routed={} action_reset={} action_dropped={} version_negotiation_versions={} action_accept_initial={} routes={}\n", .{
         long_route.connection_id,
         short_route.connection_id,
         retry_original_retired,
@@ -234,6 +260,7 @@ pub fn main() !void {
         action_reset,
         action_dropped,
         version_negotiation_versions,
+        action_accept_initial,
         router.routeCount(),
     });
 }
