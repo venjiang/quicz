@@ -24,7 +24,7 @@
 - [x] 实验性的 Initial/Handshake/Application packet number space 模型，用于 frame-payload ACK/recovery 隔离、RFC 9000 Initial/Handshake/0-RTT frame-type filtering，并包含建模的 RFC 9001 Initial discard 与 Initial/Handshake discard cleanup
 - [x] 针对已建模 ECT(0)/ECT(1) 发送 packet 的 frame-payload ACK_ECN counter 校验，以及按 UDP path identity 隔离的内存态 endpoint ECN 状态
 - [x] 带 constant-time token matching 的 stateless reset packet helper，以及针对对端签发 CID 的连接层 reset-token 检测和唯一性校验
-- [x] 内存态 endpoint DCID/IPv4 UDP 四元组 router，覆盖 long-header DCID peeking、unsupported-version RFC 8999 Version Negotiation response generation、supported-version unknown-DCID Initial accept classification、short-header registered-CID matching、zero-length CID tuple routing、Retry Source CID route switching、调用方验证后的 preferred-address migration commit、sequence/retire-prior-to route retirement、endpoint replacement-CID registration、stateless-reset-token 唯一性校验、调用方验证后的 path update、active-migration-disabled rejection、inactive-CID stateless reset token lookup、reset datagram construction 和 route/version-negotiation/reset/drop/accept receive classification
+- [x] 内存态 endpoint DCID/IPv4 UDP 四元组 router，覆盖 long-header DCID peeking、unsupported-version RFC 8999 Version Negotiation response generation、client Initial Source CID route registration、supported-version unknown-DCID Initial accept classification、accepted Initial Original DCID/server Initial SCID route registration、short-header registered-CID matching、zero-length CID tuple routing、Retry Source CID route switching、调用方验证后的 preferred-address migration commit、sequence/retire-prior-to 和 connection-handle route retirement、endpoint replacement-CID registration、stateless-reset-token 唯一性校验、调用方验证后的 path update、active-migration-disabled rejection、inactive-CID stateless reset token lookup、reset datagram construction、socket-backed UDP endpoint/protected packet/stateless reset loopback 示例，以及 route/version-negotiation/reset/drop/accept receive classification
 - [ ] 完整连接状态机与 protected-packet packet number space 路由
 - [ ] 完整 RFC 9002 丢包检测与拥塞控制（含 protected-packet loss/PTO timer 调度、PTO recovery 行为与剩余 NewReno 细节）
 - [ ] TLS 1.3 集成（RFC 9001）
@@ -86,6 +86,9 @@ zig build
   - `zig-out/bin/quicz-stateless-reset`
   - `zig-out/bin/quicz-initial-keys`
   - `zig-out/bin/quicz-endpoint-routing`
+  - `zig-out/bin/quicz-udp-endpoint-loopback`
+  - `zig-out/bin/quicz-udp-protected-loopback`
+  - `zig-out/bin/quicz-udp-stateless-reset-loopback`
 
 ## 作为库使用（Using quicz as a library）
 
@@ -302,6 +305,9 @@ pub fn main() !void {
 - [`examples/stateless_reset.zig`](examples/stateless_reset.zig)
 - [`examples/initial_keys.zig`](examples/initial_keys.zig)
 - [`examples/endpoint_routing.zig`](examples/endpoint_routing.zig)
+- [`examples/udp_endpoint_loopback.zig`](examples/udp_endpoint_loopback.zig)
+- [`examples/udp_protected_loopback.zig`](examples/udp_protected_loopback.zig)
+- [`examples/udp_stateless_reset_loopback.zig`](examples/udp_stateless_reset_loopback.zig)
 
 这些示例当前用于演示内存态 frame-payload API、包含 QUIC v2 long-header
 type-bit 映射的 codec API、包含 RFC 9368 version information 的 transport-parameter
@@ -309,7 +315,7 @@ API、flow-control API、unidirectional stream API、stream-reset API、STOP_SEN
 close-state API、idle-timeout API、handshake-state API、packet-number-space discard 与 0-RTT frame filtering API、
 ECN-validation API、包含 ACK-delay、recovery-period 与 persistent congestion 处理的
 loss-recovery API、PTO-recovery API、
-path-validation API、包含 token version binding 的 address-validation API、Retry-token 处理与 v1/v2 integrity-tag API、connection-ID API、stateless-reset API、v1/v2 Initial key、key-update/protected-packet/header-protection API 与 endpoint-routing/Retry-DCID/preferred-address/stateless-reset-token lookup API，并不是
+path-validation API、包含 token version binding 的 address-validation API、Retry-token 处理与 v1/v2 integrity-tag API、connection-ID API、stateless-reset API、v1/v2 Initial key、key-update/protected-packet/header-protection API、endpoint-routing/Retry-DCID/preferred-address/stateless-reset-token lookup API、真实 loopback UDP endpoint routing、调用方 key protected UDP packet 和 socket-backed UDP stateless-reset emission 示例，并不是
 可互通的 QUIC-over-UDP 程序。
 
 ## 文档结构（Documentation Layout）
