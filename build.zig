@@ -352,6 +352,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_protected_loopback);
 
+    // UDP Retry loopback executable
+    const exe_udp_retry_loopback = b.addExecutable(.{
+        .name = "quicz-udp-retry-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_retry_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_retry_loopback);
+
     // UDP stateless reset loopback executable
     const exe_udp_stateless_reset_loopback = b.addExecutable(.{
         .name = "quicz-udp-stateless-reset-loopback",
@@ -571,6 +585,15 @@ pub fn build(b: *std.Build) void {
     run_udp_protected_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_protected_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-retry-loopback
+    const run_udp_retry_loopback = b.step("run-udp-retry-loopback", "Run quicz UDP Retry loopback example");
+    const run_udp_retry_loopback_cmd = b.addRunArtifact(exe_udp_retry_loopback);
+    run_udp_retry_loopback.dependOn(&run_udp_retry_loopback_cmd.step);
+    run_udp_retry_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_retry_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-stateless-reset-loopback
