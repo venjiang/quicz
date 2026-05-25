@@ -338,6 +338,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_endpoint_loopback);
 
+    // UDP zero-length CID loopback executable
+    const exe_udp_zero_cid_loopback = b.addExecutable(.{
+        .name = "quicz-udp-zero-cid-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_zero_cid_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_zero_cid_loopback);
+
     // UDP protected loopback executable
     const exe_udp_protected_loopback = b.addExecutable(.{
         .name = "quicz-udp-protected-loopback",
@@ -604,6 +618,15 @@ pub fn build(b: *std.Build) void {
     run_udp_endpoint_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_endpoint_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-zero-cid-loopback
+    const run_udp_zero_cid_loopback = b.step("run-udp-zero-cid-loopback", "Run quicz UDP zero-length CID loopback example");
+    const run_udp_zero_cid_loopback_cmd = b.addRunArtifact(exe_udp_zero_cid_loopback);
+    run_udp_zero_cid_loopback.dependOn(&run_udp_zero_cid_loopback_cmd.step);
+    run_udp_zero_cid_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_zero_cid_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-protected-loopback
