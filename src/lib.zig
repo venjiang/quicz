@@ -556,6 +556,7 @@ const BuiltProtectedShortPacket = struct {
     packet_number: u64,
     datagram: []u8,
     ack_eliciting: bool,
+    sent_stream_frame: ?PendingStreamFrame = null,
     clear_ack: bool = false,
     consume_ping: bool = false,
     consume_crypto: bool = false,
@@ -571,6 +572,13 @@ const BuiltProtectedShortPacket = struct {
     consume_stop_sending: bool = false,
     consume_stream: bool = false,
     close_packet: bool = false,
+
+    fn deinitSidecars(self: *BuiltProtectedShortPacket, allocator: std.mem.Allocator) void {
+        if (self.sent_stream_frame) |pending| {
+            allocator.free(pending.data);
+            self.sent_stream_frame = null;
+        }
+    }
 };
 
 const PendingRecvStreamFrame = struct {
@@ -615,7 +623,37 @@ const SentPacket = struct {
     sent_time_millis: i64,
     bytes: usize,
     ecn_codepoint: EcnCodepoint = .not_ect,
+    stream_frame: ?PendingStreamFrame = null,
+
+    fn deinit(self: *SentPacket, allocator: std.mem.Allocator) void {
+        if (self.stream_frame) |pending| {
+            allocator.free(pending.data);
+            self.stream_frame = null;
+        }
+    }
 };
+
+fn deinitPendingStreamFrameSlice(allocator: std.mem.Allocator, frames: []PendingStreamFrame) void {
+    for (frames) |pending| {
+        allocator.free(pending.data);
+    }
+}
+
+fn deinitSentPacketSlice(allocator: std.mem.Allocator, sent_packets: []SentPacket) void {
+    for (sent_packets) |*sent_packet| {
+        sent_packet.deinit(allocator);
+    }
+}
+
+fn clearSentPacketList(allocator: std.mem.Allocator, sent_packets: *std.ArrayList(SentPacket)) void {
+    deinitSentPacketSlice(allocator, sent_packets.items);
+    sent_packets.items.len = 0;
+}
+
+fn deinitSentPacketList(allocator: std.mem.Allocator, sent_packets: *std.ArrayList(SentPacket)) void {
+    clearSentPacketList(allocator, sent_packets);
+    sent_packets.deinit(allocator);
+}
 
 const LossDetectionResult = struct {
     lost_bytes: usize = 0,
@@ -701,7 +739,7 @@ const PacketNumberSpaceState = struct {
         self.crypto_recv_buffer.deinit(allocator);
         self.crypto_send_queue.deinit(allocator);
         self.crypto_recv_pending.deinit(allocator);
-        self.sent_packets.deinit(allocator);
+        deinitSentPacketList(allocator, &self.sent_packets);
     }
 };
 
@@ -1543,7 +1581,7 @@ pub const QuicConnection = struct {
         for (self.send_queue.items) |pending| {
             self.allocator.free(pending.data);
         }
-        self.sent_packets.deinit(self.allocator);
+        deinitSentPacketList(self.allocator, &self.sent_packets);
         self.pending_path_responses.deinit(self.allocator);
         self.pending_path_challenges.deinit(self.allocator);
         self.outstanding_path_challenges.deinit(self.allocator);
@@ -2468,7 +2506,7 @@ pub const QuicConnection = struct {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
-        self.expireLossDetectionTimeouts(now_millis);
+        try self.expireLossDetectionTimeouts(now_millis);
     }
 
     /// Queue PTO probes when simplified PTO deadlines expire.
@@ -2482,7 +2520,7 @@ pub const QuicConnection = struct {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
-        self.expireLossDetectionTimeouts(now_millis);
+        try self.expireLossDetectionTimeouts(now_millis);
         try self.checkPtoTimeoutInSpace(.initial, now_millis);
         try self.checkPtoTimeoutInSpace(.handshake, now_millis);
         try self.checkPtoTimeoutInSpace(.application, now_millis);
@@ -2530,7 +2568,7 @@ pub const QuicConnection = struct {
         packet_space.largest_acknowledged.* = null;
         packet_space.first_rtt_sample_sent_time_millis.* = null;
         packet_space.loss_deadline_millis.* = null;
-        packet_space.sent_packets.items.len = 0;
+        clearSentPacketList(self.allocator, packet_space.sent_packets);
         packet_space.pending_ping_count.* = 0;
         self.rollbackCryptoSendQueue(packet_space.crypto_send_queue, 0);
         packet_space.crypto_send_offset.* = 0;
@@ -3548,15 +3586,20 @@ pub const QuicConnection = struct {
         }
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
 
-        const built = (try self.buildNextProtectedShortPacket(dcid, keys, key_phase)) orelse return null;
-        errdefer self.allocator.free(built.datagram);
+        var built = (try self.buildNextProtectedShortPacket(dcid, keys, key_phase)) orelse return null;
+        errdefer {
+            built.deinitSidecars(self.allocator);
+            self.allocator.free(built.datagram);
+        }
 
         if (built.datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
         if (!self.canSendToPeerAddress(built.datagram.len)) {
+            built.deinitSidecars(self.allocator);
             self.allocator.free(built.datagram);
             return null;
         }
         if (built.ack_eliciting and !self.recovery_state.canSend(built.datagram.len)) {
+            built.deinitSidecars(self.allocator);
             self.allocator.free(built.datagram);
             return null;
         }
@@ -3610,11 +3653,15 @@ pub const QuicConnection = struct {
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
     ) Error!?[]u8 {
-        const built = try self.buildProtectedShortClosePacket(dcid, keys, key_phase);
-        errdefer self.allocator.free(built.datagram);
+        var built = try self.buildProtectedShortClosePacket(dcid, keys, key_phase);
+        errdefer {
+            built.deinitSidecars(self.allocator);
+            self.allocator.free(built.datagram);
+        }
 
         if (built.datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
         if (!self.canSendToPeerAddress(built.datagram.len)) {
+            built.deinitSidecars(self.allocator);
             self.allocator.free(built.datagram);
             return null;
         }
@@ -5396,10 +5443,13 @@ pub const QuicConnection = struct {
         errdefer self.allocator.free(datagram);
 
         if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        const sent_stream_frame = try self.clonePendingStreamFrame(pending);
+        errdefer self.allocator.free(sent_stream_frame.data);
         return .{
             .packet_number = packet_number,
             .datagram = datagram,
             .ack_eliciting = true,
+            .sent_stream_frame = sent_stream_frame,
             .clear_ack = ack_to_send != null,
             .consume_stream = true,
         };
@@ -5476,6 +5526,7 @@ pub const QuicConnection = struct {
                 .packet_number = built.packet_number,
                 .sent_time_millis = now_millis,
                 .bytes = built.datagram.len,
+                .stream_frame = built.sent_stream_frame,
             });
         }
 
@@ -5553,10 +5604,14 @@ pub const QuicConnection = struct {
         var packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
         const recovery_snapshot = packet_space.recovery_state.*;
-        const sent_packet_count = packet_space.sent_packets.items.len;
-        const sent_packet_snapshots = self.allocator.alloc(SentPacket, sent_packet_count) catch return error.OutOfMemory;
-        defer self.allocator.free(sent_packet_snapshots);
-        @memcpy(sent_packet_snapshots, packet_space.sent_packets.items);
+        const sent_packet_snapshots = try self.cloneSentPackets(packet_space.sent_packets.items);
+        var sent_packet_snapshots_restored = false;
+        defer {
+            if (!sent_packet_snapshots_restored) {
+                deinitSentPacketSlice(self.allocator, sent_packet_snapshots);
+            }
+            self.allocator.free(sent_packet_snapshots);
+        }
         const largest_acknowledged_snapshot = packet_space.largest_acknowledged.*;
         const first_rtt_sample_sent_time_snapshot = packet_space.first_rtt_sample_sent_time_millis.*;
         const loss_deadline_millis_snapshot = packet_space.loss_deadline_millis.*;
@@ -5621,6 +5676,14 @@ pub const QuicConnection = struct {
         const send_stream_snapshots = self.allocator.alloc(SendStreamState, send_stream_count) catch return error.OutOfMemory;
         defer self.allocator.free(send_stream_snapshots);
         @memcpy(send_stream_snapshots, self.send_streams.items);
+        const send_queue_snapshots = try self.clonePendingStreamFrames(self.send_queue.items);
+        var send_queue_snapshots_restored = false;
+        defer {
+            if (!send_queue_snapshots_restored) {
+                deinitPendingStreamFrameSlice(self.allocator, send_queue_snapshots);
+            }
+            self.allocator.free(send_queue_snapshots);
+        }
 
         const recv_data_bytes_snapshot = self.recv_data_bytes;
         const recv_stream_count = self.recv_streams.items.len;
@@ -5642,6 +5705,8 @@ pub const QuicConnection = struct {
             self.rollbackRecvStreams(recv_stream_count, recv_snapshots);
             self.recv_data_bytes = recv_data_bytes_snapshot;
             self.rollbackSendStreams(send_stream_count, send_stream_snapshots);
+            self.rollbackSendQueueFromSnapshots(send_queue_snapshots);
+            send_queue_snapshots_restored = true;
             self.peer_max_streams_uni = peer_max_streams_uni_snapshot;
             self.peer_max_streams_bidi = peer_max_streams_bidi_snapshot;
             self.peer_max_data = peer_max_data_snapshot;
@@ -5679,7 +5744,8 @@ pub const QuicConnection = struct {
             packet_space.crypto_recv_buffer.items.len = crypto_recv_buffer_len_snapshot;
             self.rollbackCryptoFrameQueue(packet_space.crypto_recv_pending, crypto_recv_pending_count_snapshot);
             packet_space.crypto_read_offset.* = crypto_read_offset_snapshot;
-            self.rollbackSentPackets(packet_space.sent_packets, sent_packet_count, sent_packet_snapshots);
+            self.rollbackSentPackets(packet_space.sent_packets, sent_packet_snapshots);
+            sent_packet_snapshots_restored = true;
             packet_space.largest_acknowledged.* = largest_acknowledged_snapshot;
             packet_space.first_rtt_sample_sent_time_millis.* = first_rtt_sample_sent_time_snapshot;
             packet_space.loss_deadline_millis.* = loss_deadline_millis_snapshot;
@@ -5873,9 +5939,16 @@ pub const QuicConnection = struct {
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
+        const sent_stream_frame = try self.clonePendingStreamFrame(pending);
+        var sent_stream_frame_transferred = false;
+        errdefer if (!sent_stream_frame_transferred) {
+            self.allocator.free(sent_stream_frame.data);
+        };
+
         var appended_sent_packet = false;
         errdefer if (appended_sent_packet) {
-            self.sent_packets.items.len -= 1;
+            var removed_sent_packet = self.sent_packets.orderedRemove(self.sent_packets.items.len - 1);
+            removed_sent_packet.deinit(self.allocator);
         };
 
         const packet_number = self.next_packet_number;
@@ -5883,7 +5956,9 @@ pub const QuicConnection = struct {
             .packet_number = packet_number,
             .sent_time_millis = now_millis,
             .bytes = encoded_len,
+            .stream_frame = sent_stream_frame,
         }) catch return error.OutOfMemory;
+        sent_stream_frame_transferred = true;
         appended_sent_packet = true;
 
         var out = buffer.fixedWriter(out_buf[0..encoded_len]);
@@ -6817,6 +6892,67 @@ pub const QuicConnection = struct {
         }
     }
 
+    fn rollbackSendQueueFromSnapshots(
+        self: *QuicConnection,
+        snapshots: []const PendingStreamFrame,
+    ) void {
+        deinitPendingStreamFrameSlice(self.allocator, self.send_queue.items);
+        self.send_queue.items.len = snapshots.len;
+        @memcpy(self.send_queue.items[0..snapshots.len], snapshots);
+    }
+
+    fn clonePendingStreamFrame(self: *QuicConnection, pending: PendingStreamFrame) Error!PendingStreamFrame {
+        const data = self.allocator.dupe(u8, pending.data) catch return error.OutOfMemory;
+        return .{
+            .stream_id = pending.stream_id,
+            .offset = pending.offset,
+            .fin = pending.fin,
+            .data = data,
+        };
+    }
+
+    fn clonePendingStreamFrames(
+        self: *QuicConnection,
+        frames: []const PendingStreamFrame,
+    ) Error![]PendingStreamFrame {
+        const snapshots = self.allocator.alloc(PendingStreamFrame, frames.len) catch return error.OutOfMemory;
+        var cloned_count: usize = 0;
+        errdefer {
+            deinitPendingStreamFrameSlice(self.allocator, snapshots[0..cloned_count]);
+            self.allocator.free(snapshots);
+        }
+
+        for (frames, 0..) |pending, i| {
+            snapshots[i] = try self.clonePendingStreamFrame(pending);
+            cloned_count += 1;
+        }
+        return snapshots;
+    }
+
+    fn cloneSentPacket(self: *QuicConnection, sent_packet: SentPacket) Error!SentPacket {
+        var cloned = sent_packet;
+        cloned.stream_frame = if (sent_packet.stream_frame) |pending|
+            try self.clonePendingStreamFrame(pending)
+        else
+            null;
+        return cloned;
+    }
+
+    fn cloneSentPackets(self: *QuicConnection, sent_packets: []const SentPacket) Error![]SentPacket {
+        const snapshots = self.allocator.alloc(SentPacket, sent_packets.len) catch return error.OutOfMemory;
+        var cloned_count: usize = 0;
+        errdefer {
+            deinitSentPacketSlice(self.allocator, snapshots[0..cloned_count]);
+            self.allocator.free(snapshots);
+        }
+
+        for (sent_packets, 0..) |sent_packet, i| {
+            snapshots[i] = try self.cloneSentPacket(sent_packet);
+            cloned_count += 1;
+        }
+        return snapshots;
+    }
+
     fn rollbackStoredNewTokens(self: *QuicConnection, original_len: usize) void {
         while (self.stored_new_tokens.items.len > original_len) {
             const removed = self.stored_new_tokens.orderedRemove(self.stored_new_tokens.items.len - 1);
@@ -6871,12 +7007,11 @@ pub const QuicConnection = struct {
     fn rollbackSentPackets(
         self: *QuicConnection,
         sent_packets: *std.ArrayList(SentPacket),
-        original_len: usize,
         snapshots: []const SentPacket,
     ) void {
-        _ = self;
-        sent_packets.items.len = original_len;
-        @memcpy(sent_packets.items[0..original_len], snapshots);
+        clearSentPacketList(self.allocator, sent_packets);
+        sent_packets.items.len = snapshots.len;
+        @memcpy(sent_packets.items[0..snapshots.len], snapshots);
     }
 
     fn rollbackActiveConnectionIds(
@@ -6993,7 +7128,7 @@ pub const QuicConnection = struct {
                 continue;
             }
 
-            const removed = packet_space.sent_packets.orderedRemove(i);
+            var removed = packet_space.sent_packets.orderedRemove(i);
             acked_bytes = std.math.add(usize, acked_bytes, removed.bytes) catch std.math.maxInt(usize);
             if (space == .application) {
                 if (self.local_one_rtt_key_update_ack_threshold) |threshold| {
@@ -7003,13 +7138,19 @@ pub const QuicConnection = struct {
                 }
             }
             if (largest_acked_packet == null or removed.packet_number > largest_acked_packet.?.packet_number) {
-                largest_acked_packet = removed;
+                largest_acked_packet = .{
+                    .packet_number = removed.packet_number,
+                    .sent_time_millis = removed.sent_time_millis,
+                    .bytes = removed.bytes,
+                    .ecn_codepoint = removed.ecn_codepoint,
+                };
             }
             switch (removed.ecn_codepoint) {
                 .not_ect => {},
                 .ect0 => newly_acked_ect0 += 1,
                 .ect1 => newly_acked_ect1 += 1,
             }
+            removed.deinit(self.allocator);
         }
 
         self.validateEcnAck(
@@ -7035,7 +7176,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        const loss_result = self.removeAckDrivenLosses(
+        const loss_result = try self.removeAckDrivenLosses(
             packet_space,
             packet_space.largest_acknowledged.* orelse ack.largest_acknowledged,
             latest_rtt_sample,
@@ -7132,13 +7273,47 @@ pub const QuicConnection = struct {
         largest_acknowledged: u64,
         latest_rtt_sample_ms: ?u64,
         now_millis: i64,
-    ) LossDetectionResult {
-        _ = self;
+    ) Error!LossDetectionResult {
         const loss_delay_ms = recovery.timeThresholdLossDelayMs(
             latest_rtt_sample_ms orelse packet_space.recovery_state.latest_rtt_ms,
             packet_space.recovery_state.smoothed_rtt_ms,
         );
-        packet_space.loss_deadline_millis.* = null;
+
+        var retransmit_frames: std.ArrayList(PendingStreamFrame) = .empty;
+        defer {
+            deinitPendingStreamFrameSlice(self.allocator, retransmit_frames.items);
+            retransmit_frames.deinit(self.allocator);
+        }
+
+        var next_loss_deadline: ?i64 = null;
+        for (packet_space.sent_packets.items) |sent_packet| {
+            if (sent_packet.packet_number > largest_acknowledged) continue;
+            const packet_threshold_lost = largest_acknowledged >=
+                saturatingAddU64(sent_packet.packet_number, packet_threshold_loss_gap);
+            const time_threshold_lost = saturatingAddMillis(sent_packet.sent_time_millis, loss_delay_ms) <= now_millis;
+            if (!packet_threshold_lost and !time_threshold_lost) {
+                const deadline = saturatingAddMillis(sent_packet.sent_time_millis, loss_delay_ms);
+                next_loss_deadline = if (next_loss_deadline) |current|
+                    @min(current, deadline)
+                else
+                    deadline;
+                continue;
+            }
+
+            if (sent_packet.stream_frame) |pending| {
+                const cloned = try self.clonePendingStreamFrame(pending);
+                errdefer self.allocator.free(cloned.data);
+                retransmit_frames.append(self.allocator, cloned) catch return error.OutOfMemory;
+            }
+        }
+
+        self.send_queue.ensureUnusedCapacity(self.allocator, retransmit_frames.items.len) catch return error.OutOfMemory;
+        packet_space.loss_deadline_millis.* = next_loss_deadline;
+        for (retransmit_frames.items, 0..) |pending, i| {
+            self.send_queue.insertAssumeCapacity(i, pending);
+        }
+        retransmit_frames.items.len = 0;
+
         var result: LossDetectionResult = .{};
         var i: usize = 0;
         while (i < packet_space.sent_packets.items.len) {
@@ -7160,19 +7335,20 @@ pub const QuicConnection = struct {
                 continue;
             }
 
-            const removed = packet_space.sent_packets.orderedRemove(i);
+            var removed = packet_space.sent_packets.orderedRemove(i);
             result.recordLostPacket(removed, packet_space.first_rtt_sample_sent_time_millis.*);
+            removed.deinit(self.allocator);
         }
         return result;
     }
 
-    fn expireLossDetectionTimeouts(self: *QuicConnection, now_millis: i64) void {
-        self.expireLossDetectionTimeoutInSpace(.initial, now_millis);
-        self.expireLossDetectionTimeoutInSpace(.handshake, now_millis);
-        self.expireLossDetectionTimeoutInSpace(.application, now_millis);
+    fn expireLossDetectionTimeouts(self: *QuicConnection, now_millis: i64) Error!void {
+        try self.expireLossDetectionTimeoutInSpace(.initial, now_millis);
+        try self.expireLossDetectionTimeoutInSpace(.handshake, now_millis);
+        try self.expireLossDetectionTimeoutInSpace(.application, now_millis);
     }
 
-    fn expireLossDetectionTimeoutInSpace(self: *QuicConnection, space: PacketNumberSpace, now_millis: i64) void {
+    fn expireLossDetectionTimeoutInSpace(self: *QuicConnection, space: PacketNumberSpace, now_millis: i64) Error!void {
         const packet_space = self.packetNumberSpace(space);
         const deadline = packet_space.loss_deadline_millis.* orelse return;
         if (deadline > now_millis) return;
@@ -7180,7 +7356,7 @@ pub const QuicConnection = struct {
             packet_space.loss_deadline_millis.* = null;
             return;
         };
-        const loss_result = self.removeAckDrivenLosses(packet_space, largest_acknowledged, null, now_millis);
+        const loss_result = try self.removeAckDrivenLosses(packet_space, largest_acknowledged, null, now_millis);
         if (loss_result.lost_bytes != 0) {
             packet_space.recovery_state.onPacketLost(
                 loss_result.lost_bytes,
@@ -16149,6 +16325,82 @@ test "ACK ranges keep unacknowledged sent packets in flight" {
     try std.testing.expectEqual(@as(usize, 1), conn.sent_packets.items.len);
     try std.testing.expectEqual(@as(u64, 1), conn.sent_packets.items[0].packet_number);
     try std.testing.expectEqual(unacked_payload.len, conn.recovery_state.bytes_in_flight);
+}
+
+test "ACK-driven loss requeues STREAM frame for retransmission" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "lost", false);
+
+    var out_buf: [128]u8 = undefined;
+    _ = (try conn.pollTx(10, &out_buf)).?;
+    try conn.sendPing();
+    _ = (try conn.pollTx(20, &out_buf)).?;
+    try conn.sendPing();
+    _ = (try conn.pollTx(30, &out_buf)).?;
+    try conn.sendPing();
+    _ = (try conn.pollTx(40, &out_buf)).?;
+    try std.testing.expectEqual(@as(usize, 4), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.send_queue.items.len);
+
+    try conn.receiveAckInSpace(.application, 70, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(usize, 1), conn.send_queue.items.len);
+    try std.testing.expectEqual(stream_id, conn.send_queue.items[0].stream_id);
+    try std.testing.expectEqual(@as(u64, 0), conn.send_queue.items[0].offset);
+    try std.testing.expectEqualStrings("lost", conn.send_queue.items[0].data);
+
+    const retransmit_payload = (try conn.pollTx(80, &out_buf)).?;
+    var decoded = try frame.decodeFrameSlice(retransmit_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .stream => |stream| {
+            try std.testing.expectEqual(stream_id, stream.stream_id);
+            try std.testing.expectEqual(@as(u64, 0), stream.offset);
+            try std.testing.expectEqualStrings("lost", stream.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "processDatagram rolls back STREAM retransmission requeue when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "lost", false);
+
+    var out_buf: [128]u8 = undefined;
+    _ = (try conn.pollTx(10, &out_buf)).?;
+    try conn.sendPing();
+    _ = (try conn.pollTx(20, &out_buf)).?;
+    try conn.sendPing();
+    _ = (try conn.pollTx(30, &out_buf)).?;
+    try conn.sendPing();
+    _ = (try conn.pollTx(40, &out_buf)).?;
+    const bytes_in_flight = conn.recovery_state.bytes_in_flight;
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .ack = .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(70, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 4), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.send_queue.items.len);
+    try std.testing.expectEqual(bytes_in_flight, conn.recovery_state.bytes_in_flight);
+    try std.testing.expectEqual(@as(?u64, null), conn.recovery_state.latest_rtt_ms);
 }
 
 test "processDatagram rolls back ACK recovery state when payload is invalid" {

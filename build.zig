@@ -464,6 +464,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_loss_recovery_loopback);
 
+    // UDP STREAM retransmission loopback executable
+    const exe_udp_stream_retransmission_loopback = b.addExecutable(.{
+        .name = "quicz-udp-stream-retransmission-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_stream_retransmission_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_stream_retransmission_loopback);
+
     // UDP congestion recovery loopback executable
     const exe_udp_congestion_recovery_loopback = b.addExecutable(.{
         .name = "quicz-udp-congestion-recovery-loopback",
@@ -839,6 +853,15 @@ pub fn build(b: *std.Build) void {
     run_udp_loss_recovery_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_loss_recovery_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-stream-retransmission-loopback
+    const run_udp_stream_retransmission_loopback = b.step("run-udp-stream-retransmission-loopback", "Run quicz UDP STREAM retransmission loopback example");
+    const run_udp_stream_retransmission_loopback_cmd = b.addRunArtifact(exe_udp_stream_retransmission_loopback);
+    run_udp_stream_retransmission_loopback.dependOn(&run_udp_stream_retransmission_loopback_cmd.step);
+    run_udp_stream_retransmission_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_stream_retransmission_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-congestion-recovery-loopback
