@@ -394,6 +394,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_connection_ids_loopback);
 
+    // UDP flow-control loopback executable
+    const exe_udp_flow_control_loopback = b.addExecutable(.{
+        .name = "quicz-udp-flow-control-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_flow_control_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_flow_control_loopback);
+
     // UDP protected loopback executable
     const exe_udp_protected_loopback = b.addExecutable(.{
         .name = "quicz-udp-protected-loopback",
@@ -710,6 +724,15 @@ pub fn build(b: *std.Build) void {
     run_udp_connection_ids_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_connection_ids_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-flow-control-loopback
+    const run_udp_flow_control_loopback = b.step("run-udp-flow-control-loopback", "Run quicz UDP flow-control loopback example");
+    const run_udp_flow_control_loopback_cmd = b.addRunArtifact(exe_udp_flow_control_loopback);
+    run_udp_flow_control_loopback.dependOn(&run_udp_flow_control_loopback_cmd.step);
+    run_udp_flow_control_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_flow_control_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-protected-loopback
