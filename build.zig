@@ -464,6 +464,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_loss_recovery_loopback);
 
+    // UDP congestion recovery loopback executable
+    const exe_udp_congestion_recovery_loopback = b.addExecutable(.{
+        .name = "quicz-udp-congestion-recovery-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_congestion_recovery_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_congestion_recovery_loopback);
+
     // UDP protected loopback executable
     const exe_udp_protected_loopback = b.addExecutable(.{
         .name = "quicz-udp-protected-loopback",
@@ -825,6 +839,15 @@ pub fn build(b: *std.Build) void {
     run_udp_loss_recovery_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_loss_recovery_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-congestion-recovery-loopback
+    const run_udp_congestion_recovery_loopback = b.step("run-udp-congestion-recovery-loopback", "Run quicz UDP congestion recovery loopback example");
+    const run_udp_congestion_recovery_loopback_cmd = b.addRunArtifact(exe_udp_congestion_recovery_loopback);
+    run_udp_congestion_recovery_loopback.dependOn(&run_udp_congestion_recovery_loopback_cmd.step);
+    run_udp_congestion_recovery_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_congestion_recovery_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-protected-loopback
