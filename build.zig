@@ -422,6 +422,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_spin_bit_loopback);
 
+    // UDP ECN validation loopback executable
+    const exe_udp_ecn_validation_loopback = b.addExecutable(.{
+        .name = "quicz-udp-ecn-validation-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_ecn_validation_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_ecn_validation_loopback);
+
     // UDP protected loopback executable
     const exe_udp_protected_loopback = b.addExecutable(.{
         .name = "quicz-udp-protected-loopback",
@@ -756,6 +770,15 @@ pub fn build(b: *std.Build) void {
     run_udp_spin_bit_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_spin_bit_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-ecn-validation-loopback
+    const run_udp_ecn_validation_loopback = b.step("run-udp-ecn-validation-loopback", "Run quicz UDP ECN validation loopback example");
+    const run_udp_ecn_validation_loopback_cmd = b.addRunArtifact(exe_udp_ecn_validation_loopback);
+    run_udp_ecn_validation_loopback.dependOn(&run_udp_ecn_validation_loopback_cmd.step);
+    run_udp_ecn_validation_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_ecn_validation_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-protected-loopback
