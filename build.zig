@@ -380,6 +380,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_replacement_cid_loopback);
 
+    // UDP connection ID loopback executable
+    const exe_udp_connection_ids_loopback = b.addExecutable(.{
+        .name = "quicz-udp-connection-ids-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_connection_ids_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_connection_ids_loopback);
+
     // UDP protected loopback executable
     const exe_udp_protected_loopback = b.addExecutable(.{
         .name = "quicz-udp-protected-loopback",
@@ -673,6 +687,15 @@ pub fn build(b: *std.Build) void {
     run_udp_replacement_cid_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_replacement_cid_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-connection-ids-loopback
+    const run_udp_connection_ids_loopback = b.step("run-udp-connection-ids-loopback", "Run quicz UDP connection ID loopback example");
+    const run_udp_connection_ids_loopback_cmd = b.addRunArtifact(exe_udp_connection_ids_loopback);
+    run_udp_connection_ids_loopback.dependOn(&run_udp_connection_ids_loopback_cmd.step);
+    run_udp_connection_ids_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_connection_ids_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-protected-loopback
