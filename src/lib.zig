@@ -4496,18 +4496,24 @@ pub const QuicConnection = struct {
         now_millis: i64,
     ) void {
         var packet_space = self.packetNumberSpace(built.space);
+        var sent_crypto_frame: ?PendingCryptoFrame = null;
+        if (built.consume_crypto) {
+            sent_crypto_frame = packet_space.crypto_send_queue.orderedRemove(0);
+        }
+
         if (built.ack_eliciting) {
             packet_space.sent_packets.appendAssumeCapacity(.{
                 .packet_number = built.packet_number,
                 .sent_time_millis = now_millis,
                 .bytes = built.datagram.len,
+                .crypto_frame = sent_crypto_frame,
             });
+            sent_crypto_frame = null;
+        }
+        if (sent_crypto_frame) |pending| {
+            self.allocator.free(pending.data);
         }
 
-        if (built.consume_crypto) {
-            const removed = packet_space.crypto_send_queue.orderedRemove(0);
-            self.allocator.free(removed.data);
-        }
         if (built.consume_ping) packet_space.pending_ping_count.* -= 1;
         if (built.consume_reset_stream) _ = self.pending_reset_streams.orderedRemove(0);
         if (built.consume_stop_sending) _ = self.pending_stop_sending.orderedRemove(0);
@@ -5531,20 +5537,26 @@ pub const QuicConnection = struct {
         built: BuiltProtectedShortPacket,
         now_millis: i64,
     ) void {
+        var sent_crypto_frame: ?PendingCryptoFrame = null;
+        if (built.consume_crypto) {
+            sent_crypto_frame = self.crypto_send_queue.orderedRemove(0);
+        }
+
         if (built.ack_eliciting) {
             self.sent_packets.appendAssumeCapacity(.{
                 .packet_number = built.packet_number,
                 .sent_time_millis = now_millis,
                 .bytes = built.datagram.len,
                 .stream_frame = built.sent_stream_frame,
+                .crypto_frame = sent_crypto_frame,
             });
+            sent_crypto_frame = null;
+        }
+        if (sent_crypto_frame) |pending| {
+            self.allocator.free(pending.data);
         }
 
         if (built.consume_ping) self.pending_ping_count -= 1;
-        if (built.consume_crypto) {
-            const removed = self.crypto_send_queue.orderedRemove(0);
-            self.allocator.free(removed.data);
-        }
         if (built.consume_path_response) _ = self.pending_path_responses.orderedRemove(0);
         if (built.consume_path_challenge) {
             const removed = self.pending_path_challenges.orderedRemove(0);
@@ -12172,6 +12184,73 @@ test "pollInitialProtectedDatagram emits protected Initial CRYPTO packet" {
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
 }
 
+test "ACK-driven loss requeues protected Initial CRYPTO frame for retransmission" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    try client.sendCryptoInSpace(.initial, "lost protected initial");
+    const protected = (try client.pollInitialProtectedDatagram(
+        10,
+        &dcid,
+        &scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 0), client.initial_packet_space.crypto_send_queue.items.len);
+    try std.testing.expect(client.initial_packet_space.sent_packets.items[0].crypto_frame != null);
+
+    _ = try client.recordPacketSentInSpace(.initial, 20, 1);
+    _ = try client.recordPacketSentInSpace(.initial, 30, 1);
+    _ = try client.recordPacketSentInSpace(.initial, 40, 1);
+    try client.receiveAckInSpace(.initial, 70, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 1), client.initial_packet_space.crypto_send_queue.items.len);
+    try std.testing.expectEqual(@as(u64, 0), client.initial_packet_space.crypto_send_queue.items[0].offset);
+    try std.testing.expectEqualStrings("lost protected initial", client.initial_packet_space.crypto_send_queue.items[0].data);
+
+    const retransmit = (try client.pollInitialProtectedDatagram(
+        80,
+        &dcid,
+        &scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(retransmit);
+
+    var opened = try protection.unprotectLongPacketAes128(std.testing.allocator, secrets.client, retransmit, 4);
+    defer protection.deinitProtectedLongPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 4), opened.packet.header.packet_number);
+
+    var payload_offset: usize = 0;
+    var found_crypto = false;
+    while (payload_offset < opened.packet.plaintext.len) {
+        var decoded = try frame.decodeFrameSlice(opened.packet.plaintext[payload_offset..], std.testing.allocator);
+        defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+        switch (decoded.frame) {
+            .crypto => |crypto| {
+                try std.testing.expectEqual(@as(u64, 0), crypto.offset);
+                try std.testing.expectEqualStrings("lost protected initial", crypto.data);
+                found_crypto = true;
+            },
+            .padding => {},
+            else => return error.TestUnexpectedResult,
+        }
+        payload_offset += decoded.len;
+    }
+    try std.testing.expect(found_crypto);
+}
+
 test "Initial datagram size follows RFC 9000 minimum rules" {
     const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
@@ -13887,6 +13966,61 @@ test "pollProtectedShortDatagram emits protected CRYPTO and ACK response" {
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
     try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.application));
+}
+
+test "ACK-driven loss requeues protected short CRYPTO frame for retransmission" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    try client.sendCrypto("lost protected crypto");
+    const protected = (try client.pollProtectedShortDatagram(
+        10,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.crypto_send_queue.items.len);
+    try std.testing.expect(client.sent_packets.items[0].crypto_frame != null);
+
+    _ = try client.recordPacketSentInSpace(.application, 20, 1);
+    _ = try client.recordPacketSentInSpace(.application, 30, 1);
+    _ = try client.recordPacketSentInSpace(.application, 40, 1);
+    try client.receiveAckInSpace(.application, 70, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), client.crypto_send_queue.items.len);
+    try std.testing.expectEqual(@as(u64, 0), client.crypto_send_queue.items[0].offset);
+    try std.testing.expectEqualStrings("lost protected crypto", client.crypto_send_queue.items[0].data);
+
+    const retransmit = (try client.pollProtectedShortDatagram(
+        80,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(retransmit);
+
+    var opened = try protection.unprotectShortPacketAes128(std.testing.allocator, secrets.client, retransmit, server_dcid.len, 4);
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 4), opened.packet.header.packet_number);
+
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .crypto => |crypto| {
+            try std.testing.expectEqual(@as(u64, 0), crypto.offset);
+            try std.testing.expectEqualStrings("lost protected crypto", crypto.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "pollProtectedShortDatagram preserves STREAM when anti-amplification blocks" {

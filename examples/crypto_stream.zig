@@ -62,6 +62,26 @@ fn appendCryptoPayload(
     }
 }
 
+fn appendProtectedShortCryptoPayload(
+    allocator: std.mem.Allocator,
+    keys: quicz.protection.Aes128PacketProtectionKeys,
+    datagram: []const u8,
+    dcid_len: usize,
+    packet_number: u64,
+    out: []u8,
+    out_len: *usize,
+) !void {
+    var opened = try quicz.protection.unprotectShortPacketAes128(
+        allocator,
+        keys,
+        datagram,
+        dcid_len,
+        packet_number,
+    );
+    defer quicz.protection.deinitProtectedShortPacket(&opened, allocator);
+    try appendCryptoPayload(allocator, opened.packet.plaintext, out, out_len);
+}
+
 fn expectStreamClosed(
     conn: *quicz.QuicConnection,
     stream_id: u64,
@@ -231,6 +251,46 @@ pub fn main() !void {
         retransmit_crypto[0..retransmit_crypto_len],
         crypto_loss.sentPacketCount(.handshake),
         crypto_loss.bytesInFlight(.handshake),
+    });
+
+    var protected_crypto_loss = try quicz.QuicConnection.init(gpa, .client, .{});
+    defer protected_crypto_loss.deinit();
+    try protected_crypto_loss.sendCrypto("lost protected crypto");
+    const lost_protected_crypto = (try protected_crypto_loss.pollProtectedShortDatagram(
+        10,
+        &server_scid,
+        initial_secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer gpa.free(lost_protected_crypto);
+    _ = try protected_crypto_loss.recordPacketSentInSpace(.application, 20, 1);
+    _ = try protected_crypto_loss.recordPacketSentInSpace(.application, 30, 1);
+    _ = try protected_crypto_loss.recordPacketSentInSpace(.application, 40, 1);
+    try protected_crypto_loss.receiveAckInSpace(.application, 70, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const protected_crypto_retransmit = (try protected_crypto_loss.pollProtectedShortDatagram(
+        80,
+        &server_scid,
+        initial_secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer gpa.free(protected_crypto_retransmit);
+    var protected_retransmit_crypto: [64]u8 = undefined;
+    var protected_retransmit_crypto_len: usize = 0;
+    try appendProtectedShortCryptoPayload(
+        gpa,
+        initial_secrets.client,
+        protected_crypto_retransmit,
+        server_scid.len,
+        4,
+        &protected_retransmit_crypto,
+        &protected_retransmit_crypto_len,
+    );
+    std.debug.print("[crypto] protected_loss_recovery retransmit={s} remaining={} inflight={}\n", .{
+        protected_retransmit_crypto[0..protected_retransmit_crypto_len],
+        protected_crypto_loss.sentPacketCount(.application),
+        protected_crypto_loss.bytesInFlight(.application),
     });
 
     var bridged = try quicz.QuicConnection.init(gpa, .server, .{});
