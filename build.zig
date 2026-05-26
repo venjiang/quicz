@@ -352,6 +352,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_zero_cid_loopback);
 
+    // UDP preferred-address loopback executable
+    const exe_udp_preferred_address_loopback = b.addExecutable(.{
+        .name = "quicz-udp-preferred-address-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_preferred_address_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_preferred_address_loopback);
+
     // UDP protected loopback executable
     const exe_udp_protected_loopback = b.addExecutable(.{
         .name = "quicz-udp-protected-loopback",
@@ -627,6 +641,15 @@ pub fn build(b: *std.Build) void {
     run_udp_zero_cid_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_zero_cid_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-preferred-address-loopback
+    const run_udp_preferred_address_loopback = b.step("run-udp-preferred-address-loopback", "Run quicz UDP preferred-address loopback example");
+    const run_udp_preferred_address_loopback_cmd = b.addRunArtifact(exe_udp_preferred_address_loopback);
+    run_udp_preferred_address_loopback.dependOn(&run_udp_preferred_address_loopback_cmd.step);
+    run_udp_preferred_address_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_preferred_address_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-protected-loopback
