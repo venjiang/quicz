@@ -97,6 +97,44 @@ fn sendServerPacket(
     try client.processProtectedShortDatagram(now_millis, keys, client_dcid.len, received.data);
 }
 
+fn packetContainsStream(
+    allocator: std.mem.Allocator,
+    packet: []const u8,
+    keys: quicz.protection.Aes128PacketProtectionKeys,
+    dcid_len: usize,
+    expected_packet_number: u64,
+    stream_id: u64,
+    expected_offset: u64,
+    expected_data: []const u8,
+) !bool {
+    var opened = try quicz.protection.unprotectShortPacketAes128(
+        allocator,
+        keys,
+        packet,
+        dcid_len,
+        expected_packet_number,
+    );
+    defer quicz.protection.deinitProtectedShortPacket(&opened, allocator);
+
+    var offset: usize = 0;
+    while (offset < opened.packet.plaintext.len) {
+        var decoded = try quicz.frame.decodeFrameSlice(opened.packet.plaintext[offset..], allocator);
+        defer quicz.frame.deinitFrame(&decoded.frame, allocator);
+        if (decoded.len == 0) return error.UnexpectedState;
+        offset += decoded.len;
+
+        switch (decoded.frame) {
+            .stream => |stream| {
+                return stream.stream_id == stream_id and
+                    stream.offset == expected_offset and
+                    std.mem.eql(u8, stream.data, expected_data);
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -265,14 +303,85 @@ pub fn main() !void {
     try require(client.bytesInFlight(.application) == 0);
     try require(client.ptoDeadlineMillis(.application) == null);
 
-    std.debug.print("[udp-pto] client_port={} server_port={} ping_deadline={} pto_ping_bytes={} stream_deadline={} stream_probe_bytes={} received=\"{s}\" client_inflight={}\n", .{
+    const retransmit_stream_id = try client.openStream();
+    try client.sendOnStream(retransmit_stream_id, "again", false);
+    const first_retransmit_stream = (try client.pollProtectedShortDatagram(2000, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
+    defer allocator.free(first_retransmit_stream);
+    try sendClientPacket(
+        io,
+        &client_socket,
+        &server_socket,
+        &server_router,
+        &server,
+        first_retransmit_stream,
+        2001,
+        &server_dcid,
+        &server_receive_buf,
+        secrets.client,
+    );
+
+    var retransmit_read_buf: [16]u8 = undefined;
+    const retransmit_read_len = (try server.recvOnStream(retransmit_stream_id, &retransmit_read_buf)) orelse return error.UnexpectedState;
+    try require(std.mem.eql(u8, retransmit_read_buf[0..retransmit_read_len], "again"));
+
+    const retransmit_deadline = client.ptoDeadlineMillis(.application) orelse return error.UnexpectedState;
+    try client.checkPtoTimeouts(retransmit_deadline);
+    const retransmit_probe = (try client.pollProtectedShortDatagram(retransmit_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
+    defer allocator.free(retransmit_probe);
+    try require(client.sentPacketCount(.application) == 2);
+    try require(try packetContainsStream(
+        allocator,
+        retransmit_probe,
+        secrets.client,
+        server_dcid.len,
+        5,
+        retransmit_stream_id,
+        0,
+        "again",
+    ));
+    try sendClientPacket(
+        io,
+        &client_socket,
+        &server_socket,
+        &server_router,
+        &server,
+        retransmit_probe,
+        retransmit_deadline + 2,
+        &server_dcid,
+        &server_receive_buf,
+        secrets.client,
+    );
+    try require((try server.recvOnStream(retransmit_stream_id, &retransmit_read_buf)) == null);
+
+    const retransmit_ack = (try server.pollProtectedShortDatagram(retransmit_deadline + 3, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
+    defer allocator.free(retransmit_ack);
+    try sendServerPacket(
+        io,
+        &server_socket,
+        &client_socket,
+        &client_router,
+        &client,
+        retransmit_ack,
+        retransmit_deadline + 4,
+        &client_dcid,
+        &client_receive_buf,
+        secrets.server,
+    );
+    try require(client.sentPacketCount(.application) == 0);
+    try require(client.bytesInFlight(.application) == 0);
+    try require(client.ptoDeadlineMillis(.application) == null);
+
+    std.debug.print("[udp-pto] client_port={} server_port={} ping_deadline={} pto_ping_bytes={} stream_deadline={} stream_probe_bytes={} retransmit_deadline={} retransmit_probe_bytes={} received=\"{s}\" retransmitted=\"{s}\" client_inflight={}\n", .{
         client_local.port,
         server_local.port,
         ping_deadline,
         pto_ping.len,
         stream_deadline,
         stream_probe.len,
+        retransmit_deadline,
+        retransmit_probe.len,
         stream_read_buf[0..stream_read_len],
+        retransmit_read_buf[0..retransmit_read_len],
         client.bytesInFlight(.application),
     });
 }

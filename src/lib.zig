@@ -7401,9 +7401,24 @@ pub const QuicConnection = struct {
         const deadline = self.ptoDeadlineMillis(space) orelse return;
         if (deadline > now_millis) return;
         if (!self.hasPendingPtoProbeDataInSpace(space)) {
-            try self.queuePingInSpace(space);
+            if (!try self.queuePtoStreamRetransmission(space)) {
+                try self.queuePingInSpace(space);
+            }
         }
         packet_space.recovery_state.onPtoExpired();
+    }
+
+    fn queuePtoStreamRetransmission(self: *QuicConnection, space: PacketNumberSpace) Error!bool {
+        if (space != .application) return false;
+        const packet_space = self.packetNumberSpace(space);
+        for (packet_space.sent_packets.items) |sent_packet| {
+            const pending = sent_packet.stream_frame orelse continue;
+            const cloned = try self.clonePendingStreamFrame(pending);
+            errdefer self.allocator.free(cloned.data);
+            self.send_queue.append(self.allocator, cloned) catch return error.OutOfMemory;
+            return true;
+        }
+        return false;
     }
 
     fn pendingAckFrame(self: QuicConnection, space: PacketNumberSpace) ?frame.AckFrame {
@@ -11668,6 +11683,44 @@ test "checkPtoTimeouts uses queued STREAM data as application probe before PING"
             try std.testing.expectEqual(stream_id, stream_frame.stream_id);
             try std.testing.expectEqual(@as(u64, 3), stream_frame.offset);
             try std.testing.expectEqualStrings("new", stream_frame.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 2), conn.sentPacketCount(.application));
+}
+
+test "checkPtoTimeouts retransmits in-flight STREAM data before PING" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "old", false);
+
+    var out_buf: [64]u8 = undefined;
+    _ = (try conn.pollTx(10, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), conn.send_queue.items.len);
+
+    const deadline = conn.ptoDeadlineMillis(.application) orelse return error.TestUnexpectedResult;
+    try conn.checkPtoTimeouts(deadline);
+
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), conn.send_queue.items.len);
+    try std.testing.expectEqual(stream_id, conn.send_queue.items[0].stream_id);
+    try std.testing.expectEqual(@as(u64, 0), conn.send_queue.items[0].offset);
+    try std.testing.expectEqualStrings("old", conn.send_queue.items[0].data);
+
+    const payload = (try conn.pollTx(deadline + 1, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .stream => |stream_frame| {
+            try std.testing.expectEqual(stream_id, stream_frame.stream_id);
+            try std.testing.expectEqual(@as(u64, 0), stream_frame.offset);
+            try std.testing.expectEqualStrings("old", stream_frame.data);
         },
         else => return error.TestUnexpectedResult,
     }
