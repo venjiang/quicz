@@ -366,6 +366,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_preferred_address_loopback);
 
+    // UDP replacement CID loopback executable
+    const exe_udp_replacement_cid_loopback = b.addExecutable(.{
+        .name = "quicz-udp-replacement-cid-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_replacement_cid_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_replacement_cid_loopback);
+
     // UDP protected loopback executable
     const exe_udp_protected_loopback = b.addExecutable(.{
         .name = "quicz-udp-protected-loopback",
@@ -650,6 +664,15 @@ pub fn build(b: *std.Build) void {
     run_udp_preferred_address_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_preferred_address_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-replacement-cid-loopback
+    const run_udp_replacement_cid_loopback = b.step("run-udp-replacement-cid-loopback", "Run quicz UDP replacement CID loopback example");
+    const run_udp_replacement_cid_loopback_cmd = b.addRunArtifact(exe_udp_replacement_cid_loopback);
+    run_udp_replacement_cid_loopback.dependOn(&run_udp_replacement_cid_loopback_cmd.step);
+    run_udp_replacement_cid_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_replacement_cid_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-protected-loopback
