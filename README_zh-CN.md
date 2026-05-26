@@ -14,7 +14,7 @@
 - [x] 项目骨架：Zig 构建集成 + 内存态示例 echo client/server
 - [x] `QuicConnection` 的基础 API 设计（初版）
 - [x] QUIC 变长整数（varint）编解码工具
-- [x] 最小 QUIC 包头（long/short，含 RFC 9369 QUIC v2 long-header packet type bits、short-header spin-bit 保留与 protected short-packet spin-bit peeking）、header-level packet number 截断/重建、RFC 9000 long/short packet envelope 解析/序列化、packet number 编码选择/重建、Retry packet codec、RFC 8999 Version Negotiation packet 解析/序列化，以及带 RFC 9368 downgrade-check handoff 的 client-side Version Negotiation validation/selection state
+- [x] 最小 QUIC 包头（long/short，含 RFC 9369 QUIC v2 long-header packet type bits、short-header spin-bit 保留、protected short-packet spin-bit peeking 与 socket-backed UDP spin-bit loopback）、header-level packet number 截断/重建、RFC 9000 long/short packet envelope 解析/序列化、packet number 编码选择/重建、Retry packet codec、RFC 8999 Version Negotiation packet 解析/序列化，以及带 RFC 9368 downgrade-check handoff 的 client-side Version Negotiation validation/selection state
 - [x] RFC 9000 transport parameter 类型化 codec，含默认值、重复参数拒绝、未知参数忽略、preferred_address 支持、RFC 9368 `version_information`、包含 VN 后 server Version Information downgrade validation 的 `QuicConnection` 导出/应用 helper，以及 TLS extension byte 编码/应用 helper
 - [x] RFC 9000/RFC 9368 transport error code helper，含固定错误码、VERSION_NEGOTIATION_ERROR 与 CRYPTO_ERROR TLS alert 映射
 - [x] RFC 9001 QUIC v1 和 RFC 9369 QUIC v2 Initial secret/key/IV/header-protection key 派生、RFC 9001 `quic ku` key-update 派生、调用方持有和连接已安装的 short-packet key-phase 状态与 selection，并带 ACK-gated installed-key update initiation 和 socket-backed UDP installed-key key-update loopback、mock backend Handshake/0-RTT/1-RTT traffic-secret handoff、显式 installed-key 0-RTT accept/reject 与 discard cleanup、建模 1-RTT 边界的 0-RTT key discard、AEAD_AES_128_GCM payload protection helper、protected long/short-packet seal/open、v1/v2 Retry Integrity Tag 校验与 AES header-protection mask 应用，覆盖 Appendix A 向量
@@ -24,7 +24,7 @@
 - [x] 实验性的 Initial/Handshake/Application packet number space 模型，用于 frame-payload ACK/recovery 隔离、RFC 9000 Initial/Handshake/0-RTT frame-type filtering，并包含建模的 RFC 9001 Initial discard 与 Initial/Handshake discard cleanup
 - [x] 针对已建模 ECT(0)/ECT(1) 发送 packet 的 frame-payload ACK_ECN counter 校验，以及按 UDP path identity 隔离的内存态 endpoint ECN 状态
 - [x] 带 constant-time token matching 的 stateless reset packet helper，以及针对对端签发 CID 的连接层 reset-token 检测和唯一性校验
-- [x] 内存态 endpoint DCID/IPv4 UDP 四元组 router，覆盖 long-header DCID peeking、unsupported-version RFC 8999 Version Negotiation response generation、client Initial Source CID route registration、supported-version unknown-DCID Initial accept classification、accepted Initial Original DCID/server Initial SCID route registration、short-header registered-CID matching、zero-length CID tuple routing、Retry Source CID route switching、调用方验证后的 preferred-address migration commit、sequence/retire-prior-to 和 connection-handle route retirement、endpoint replacement-CID registration、stateless-reset-token 唯一性校验、调用方验证后的 path update、active-migration-disabled rejection、inactive-CID stateless reset token lookup、reset datagram construction、socket-backed UDP endpoint/zero-CID/preferred-address/replacement-CID/connection-ID/protected packet/flow-control/key-update/path-validation/Retry/close/stateless reset loopback 示例，以及 route/version-negotiation/reset/drop/accept receive classification
+- [x] 内存态 endpoint DCID/IPv4 UDP 四元组 router，覆盖 long-header DCID peeking、unsupported-version RFC 8999 Version Negotiation response generation、client Initial Source CID route registration、supported-version unknown-DCID Initial accept classification、accepted Initial Original DCID/server Initial SCID route registration、short-header registered-CID matching、zero-length CID tuple routing、Retry Source CID route switching、调用方验证后的 preferred-address migration commit、sequence/retire-prior-to 和 connection-handle route retirement、endpoint replacement-CID registration、stateless-reset-token 唯一性校验、调用方验证后的 path update、active-migration-disabled rejection、inactive-CID stateless reset token lookup、reset datagram construction、socket-backed UDP endpoint/zero-CID/preferred-address/replacement-CID/connection-ID/protected packet/flow-control/spin-bit/key-update/path-validation/Retry/close/stateless reset loopback 示例，以及 route/version-negotiation/reset/drop/accept receive classification
 - [ ] 完整连接状态机与 protected-packet packet number space 路由
 - [ ] 完整 RFC 9002 丢包检测与拥塞控制（含 protected-packet loss/PTO timer 调度、PTO recovery 行为与剩余 NewReno 细节）
 - [ ] TLS 1.3 集成（RFC 9001）
@@ -93,6 +93,7 @@ zig build
   - `zig-out/bin/quicz-udp-connection-ids-loopback`
   - `zig-out/bin/quicz-udp-protected-loopback`
   - `zig-out/bin/quicz-udp-flow-control-loopback`
+  - `zig-out/bin/quicz-udp-spin-bit-loopback`
   - `zig-out/bin/quicz-udp-key-update-loopback`
   - `zig-out/bin/quicz-udp-path-validation-loopback`
   - `zig-out/bin/quicz-udp-retry-loopback`
@@ -321,6 +322,7 @@ pub fn main() !void {
 - [`examples/udp_connection_ids_loopback.zig`](examples/udp_connection_ids_loopback.zig)
 - [`examples/udp_protected_loopback.zig`](examples/udp_protected_loopback.zig)
 - [`examples/udp_flow_control_loopback.zig`](examples/udp_flow_control_loopback.zig)
+- [`examples/udp_spin_bit_loopback.zig`](examples/udp_spin_bit_loopback.zig)
 - [`examples/udp_key_update_loopback.zig`](examples/udp_key_update_loopback.zig)
 - [`examples/udp_path_validation_loopback.zig`](examples/udp_path_validation_loopback.zig)
 - [`examples/udp_retry_loopback.zig`](examples/udp_retry_loopback.zig)
@@ -333,7 +335,7 @@ API、flow-control API、unidirectional stream API、stream-reset API、STOP_SEN
 close-state API、idle-timeout API、handshake-state API、packet-number-space discard 与 0-RTT frame filtering API、
 ECN-validation API、包含 ACK-delay、recovery-period 与 persistent congestion 处理的
 loss-recovery API、PTO-recovery API、
-path-validation API、包含 token version binding 的 address-validation API、Retry-token 处理与 v1/v2 integrity-tag API、connection-ID API、stateless-reset API、v1/v2 Initial key、key-update/protected-packet/header-protection API、endpoint-routing/Retry-DCID/preferred-address/stateless-reset-token lookup API、带 client-side Version Negotiation selection 的真实 loopback UDP endpoint routing、socket-backed UDP zero-length CID tuple routing、socket-backed UDP preferred-address route migration、socket-backed UDP replacement-CID route retirement、socket-backed UDP connection-ID NEW/RETIRE exchange、调用方 key protected UDP packet、socket-backed UDP flow-control credit refresh、socket-backed UDP installed-key key update、socket-backed UDP path-validation route update、socket-backed UDP Retry/address-validation routing、socket-backed close-triggered route retirement 和 socket-backed UDP stateless-reset emission 示例，并不是
+path-validation API、包含 token version binding 的 address-validation API、Retry-token 处理与 v1/v2 integrity-tag API、connection-ID API、stateless-reset API、v1/v2 Initial key、key-update/protected-packet/header-protection API、endpoint-routing/Retry-DCID/preferred-address/stateless-reset-token lookup API、带 client-side Version Negotiation selection 的真实 loopback UDP endpoint routing、socket-backed UDP zero-length CID tuple routing、socket-backed UDP preferred-address route migration、socket-backed UDP replacement-CID route retirement、socket-backed UDP connection-ID NEW/RETIRE exchange、调用方 key protected UDP packet、socket-backed UDP flow-control credit refresh、socket-backed UDP spin-bit signaling、socket-backed UDP installed-key key update、socket-backed UDP path-validation route update、socket-backed UDP Retry/address-validation routing、socket-backed close-triggered route retirement 和 socket-backed UDP stateless-reset emission 示例，并不是
 可互通的 QUIC-over-UDP 程序。
 
 ## 文档结构（Documentation Layout）

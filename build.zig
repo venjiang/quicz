@@ -408,6 +408,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_flow_control_loopback);
 
+    // UDP spin-bit loopback executable
+    const exe_udp_spin_bit_loopback = b.addExecutable(.{
+        .name = "quicz-udp-spin-bit-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_spin_bit_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_spin_bit_loopback);
+
     // UDP protected loopback executable
     const exe_udp_protected_loopback = b.addExecutable(.{
         .name = "quicz-udp-protected-loopback",
@@ -733,6 +747,15 @@ pub fn build(b: *std.Build) void {
     run_udp_flow_control_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_flow_control_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-spin-bit-loopback
+    const run_udp_spin_bit_loopback = b.step("run-udp-spin-bit-loopback", "Run quicz UDP spin-bit loopback example");
+    const run_udp_spin_bit_loopback_cmd = b.addRunArtifact(exe_udp_spin_bit_loopback);
+    run_udp_spin_bit_loopback.dependOn(&run_udp_spin_bit_loopback_cmd.step);
+    run_udp_spin_bit_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_spin_bit_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-protected-loopback

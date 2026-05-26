@@ -14,7 +14,7 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] Project skeleton with Zig build integration and in-memory example echo client/server
 - [x] Basic API surface for `QuicConnection` (initial draft)
 - [x] QUIC variable-length integer (varint) encode/decode helpers
-- [x] Minimal QUIC packet headers (long/short, including RFC 9369 QUIC v2 long-header packet type bits, short-header spin-bit preservation, and protected short-packet spin-bit peeking), header-level packet number truncation/reconstruction, RFC 9000 long/short packet envelope parsing/serialization, packet number encoding selection/reconstruction, Retry packet codec, RFC 8999 Version Negotiation packet parsing/serialization, and client-side Version Negotiation validation/selection state with RFC 9368 downgrade-check handoff
+- [x] Minimal QUIC packet headers (long/short, including RFC 9369 QUIC v2 long-header packet type bits, short-header spin-bit preservation, protected short-packet spin-bit peeking, and socket-backed UDP spin-bit loopback), header-level packet number truncation/reconstruction, RFC 9000 long/short packet envelope parsing/serialization, packet number encoding selection/reconstruction, Retry packet codec, RFC 8999 Version Negotiation packet parsing/serialization, and client-side Version Negotiation validation/selection state with RFC 9368 downgrade-check handoff
 - [x] RFC 9000 transport parameter typed codec with defaults, duplicate rejection, unknown-parameter ignore behavior, preferred_address support, RFC 9368 `version_information`, `QuicConnection` export/application helpers including post-VN server Version Information downgrade validation, and TLS extension byte encode/apply helpers
 - [x] RFC 9000/RFC 9368 transport error code helpers, including fixed codes, VERSION_NEGOTIATION_ERROR, and CRYPTO_ERROR TLS alert mapping
 - [x] RFC 9001 QUIC v1 and RFC 9369 QUIC v2 Initial secret/key/IV/header-protection key derivation, RFC 9001 `quic ku` key-update derivation, caller-owned and connection-installed short-packet key-phase state and selection with ACK-gated installed-key update initiation plus a socket-backed UDP installed-key key-update loopback, mock backend Handshake/0-RTT/1-RTT traffic-secret handoff, explicit installed-key 0-RTT accept/reject and discard cleanup, 0-RTT key discard at modeled 1-RTT boundaries, AEAD_AES_128_GCM payload protection helpers, protected long/short-packet seal/open, v1/v2 Retry Integrity Tag verification, and AES header-protection mask application with Appendix A vectors
@@ -24,7 +24,7 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] Experimental Initial/Handshake/Application packet number space model for frame-payload ACK/recovery isolation, RFC 9000 Initial/Handshake/0-RTT frame-type filtering, modeled RFC 9001 Initial discard, and Initial/Handshake discard cleanup
 - [x] Frame-payload ACK_ECN counter validation for modeled ECT(0)/ECT(1) sent packets plus in-memory endpoint ECN state scoped by UDP path identity
 - [x] Stateless reset packet helper with constant-time token matching plus connection-level reset-token detection and uniqueness checks for peer-issued CIDs
-- [x] In-memory endpoint DCID/IPv4 UDP tuple router for long-header DCID peeking, unsupported-version RFC 8999 Version Negotiation response generation, client Initial Source CID route registration, supported-version unknown-DCID Initial accept classification, accepted Initial Original DCID/server Initial SCID route registration, short-header registered-CID matching, zero-length CID tuple routing, Retry Source CID route switching, caller-validated preferred-address migration commit, sequence/retire-prior-to and connection-handle route retirement, endpoint replacement-CID registration, stateless-reset-token uniqueness enforcement, caller-validated path updates, active-migration-disabled rejection, inactive-CID stateless reset token lookup, reset datagram construction, socket-backed UDP endpoint/zero-CID/preferred-address/replacement-CID/connection-ID/protected packet/flow-control/key-update/path-validation/Retry/close/stateless reset loopback examples, and route/version-negotiation/reset/drop/accept receive classification
+- [x] In-memory endpoint DCID/IPv4 UDP tuple router for long-header DCID peeking, unsupported-version RFC 8999 Version Negotiation response generation, client Initial Source CID route registration, supported-version unknown-DCID Initial accept classification, accepted Initial Original DCID/server Initial SCID route registration, short-header registered-CID matching, zero-length CID tuple routing, Retry Source CID route switching, caller-validated preferred-address migration commit, sequence/retire-prior-to and connection-handle route retirement, endpoint replacement-CID registration, stateless-reset-token uniqueness enforcement, caller-validated path updates, active-migration-disabled rejection, inactive-CID stateless reset token lookup, reset datagram construction, socket-backed UDP endpoint/zero-CID/preferred-address/replacement-CID/connection-ID/protected packet/flow-control/spin-bit/key-update/path-validation/Retry/close/stateless reset loopback examples, and route/version-negotiation/reset/drop/accept receive classification
 - [ ] Full connection state machine and protected-packet packet number space routing
 - [ ] Full RFC 9002 loss detection & congestion control with protected-packet loss/PTO timer scheduling, PTO recovery behavior, and remaining NewReno details
 - [ ] TLS 1.3 integration for QUIC (RFC 9001)
@@ -91,6 +91,7 @@ This builds:
   - `zig-out/bin/quicz-udp-connection-ids-loopback`
   - `zig-out/bin/quicz-udp-protected-loopback`
   - `zig-out/bin/quicz-udp-flow-control-loopback`
+  - `zig-out/bin/quicz-udp-spin-bit-loopback`
   - `zig-out/bin/quicz-udp-key-update-loopback`
   - `zig-out/bin/quicz-udp-path-validation-loopback`
   - `zig-out/bin/quicz-udp-retry-loopback`
@@ -345,6 +346,7 @@ See [`examples/echo_server.zig`](examples/echo_server.zig),
 [`examples/udp_connection_ids_loopback.zig`](examples/udp_connection_ids_loopback.zig),
 [`examples/udp_protected_loopback.zig`](examples/udp_protected_loopback.zig),
 [`examples/udp_flow_control_loopback.zig`](examples/udp_flow_control_loopback.zig),
+[`examples/udp_spin_bit_loopback.zig`](examples/udp_spin_bit_loopback.zig),
 [`examples/udp_key_update_loopback.zig`](examples/udp_key_update_loopback.zig),
 [`examples/udp_path_validation_loopback.zig`](examples/udp_path_validation_loopback.zig),
 [`examples/udp_retry_loopback.zig`](examples/udp_retry_loopback.zig),
@@ -359,7 +361,7 @@ loss-recovery including ACK-delay, recovery-period, and persistent congestion ha
 PTO-recovery, path-validation, address-validation including token version binding, Retry-token processing and v1/v2 integrity-tag,
 connection-ID, stateless-reset, v1/v2 Initial key, key-update/protected-packet/header-protection,
 endpoint-routing/client-Initial route registration/accepted-Initial route registration/Retry-DCID/preferred-address/stateless-reset-token lookup APIs,
-socket-backed UDP endpoint routing with client-side Version Negotiation selection, socket-backed UDP zero-length CID tuple routing, socket-backed UDP preferred-address route migration, socket-backed UDP replacement-CID route retirement, socket-backed UDP connection-ID NEW/RETIRE exchange, caller-keyed protected UDP packet loopbacks, socket-backed UDP flow-control credit refresh, socket-backed UDP installed-key key update, socket-backed UDP path-validation route updates, socket-backed UDP Retry/address-validation routing, socket-backed close-triggered route retirement, and socket-backed UDP stateless-reset emission; they are not yet interoperable
+socket-backed UDP endpoint routing with client-side Version Negotiation selection, socket-backed UDP zero-length CID tuple routing, socket-backed UDP preferred-address route migration, socket-backed UDP replacement-CID route retirement, socket-backed UDP connection-ID NEW/RETIRE exchange, caller-keyed protected UDP packet loopbacks, socket-backed UDP flow-control credit refresh, socket-backed UDP spin-bit signaling, socket-backed UDP installed-key key update, socket-backed UDP path-validation route updates, socket-backed UDP Retry/address-validation routing, socket-backed close-triggered route retirement, and socket-backed UDP stateless-reset emission; they are not yet interoperable
 QUIC-over-UDP programs.
 
 ## 中文说明（Chinese Overview）
