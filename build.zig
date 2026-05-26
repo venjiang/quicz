@@ -450,6 +450,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_pto_recovery_loopback);
 
+    // UDP loss recovery loopback executable
+    const exe_udp_loss_recovery_loopback = b.addExecutable(.{
+        .name = "quicz-udp-loss-recovery-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_loss_recovery_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_loss_recovery_loopback);
+
     // UDP protected loopback executable
     const exe_udp_protected_loopback = b.addExecutable(.{
         .name = "quicz-udp-protected-loopback",
@@ -802,6 +816,15 @@ pub fn build(b: *std.Build) void {
     run_udp_pto_recovery_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_pto_recovery_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-loss-recovery-loopback
+    const run_udp_loss_recovery_loopback = b.step("run-udp-loss-recovery-loopback", "Run quicz UDP loss recovery loopback example");
+    const run_udp_loss_recovery_loopback_cmd = b.addRunArtifact(exe_udp_loss_recovery_loopback);
+    run_udp_loss_recovery_loopback.dependOn(&run_udp_loss_recovery_loopback_cmd.step);
+    run_udp_loss_recovery_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_loss_recovery_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-protected-loopback
