@@ -408,6 +408,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_protected_loopback);
 
+    // UDP key update loopback executable
+    const exe_udp_key_update_loopback = b.addExecutable(.{
+        .name = "quicz-udp-key-update-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_key_update_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_key_update_loopback);
+
     // UDP path validation loopback executable
     const exe_udp_path_validation_loopback = b.addExecutable(.{
         .name = "quicz-udp-path-validation-loopback",
@@ -705,6 +719,15 @@ pub fn build(b: *std.Build) void {
     run_udp_protected_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_protected_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-key-update-loopback
+    const run_udp_key_update_loopback = b.step("run-udp-key-update-loopback", "Run quicz UDP key update loopback example");
+    const run_udp_key_update_loopback_cmd = b.addRunArtifact(exe_udp_key_update_loopback);
+    run_udp_key_update_loopback.dependOn(&run_udp_key_update_loopback_cmd.step);
+    run_udp_key_update_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_key_update_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-path-validation-loopback
