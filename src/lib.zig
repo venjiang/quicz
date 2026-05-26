@@ -624,16 +624,27 @@ const SentPacket = struct {
     bytes: usize,
     ecn_codepoint: EcnCodepoint = .not_ect,
     stream_frame: ?PendingStreamFrame = null,
+    crypto_frame: ?PendingCryptoFrame = null,
 
     fn deinit(self: *SentPacket, allocator: std.mem.Allocator) void {
         if (self.stream_frame) |pending| {
             allocator.free(pending.data);
             self.stream_frame = null;
         }
+        if (self.crypto_frame) |pending| {
+            allocator.free(pending.data);
+            self.crypto_frame = null;
+        }
     }
 };
 
 fn deinitPendingStreamFrameSlice(allocator: std.mem.Allocator, frames: []PendingStreamFrame) void {
+    for (frames) |pending| {
+        allocator.free(pending.data);
+    }
+}
+
+fn deinitPendingCryptoFrameSlice(allocator: std.mem.Allocator, frames: []PendingCryptoFrame) void {
     for (frames) |pending| {
         allocator.free(pending.data);
     }
@@ -2512,10 +2523,9 @@ pub const QuicConnection = struct {
     /// Queue PTO probes when simplified PTO deadlines expire.
     ///
     /// This is a deterministic hook for the current frame-payload model. It
-    /// lets already queued ack-eliciting data serve as the probe; otherwise it
-    /// queues one PING in every non-discarded packet number space whose PTO is
-    /// due. It does not yet clone already-sent data frames for retransmission;
-    /// if no packet is in flight, it is a no-op.
+    /// lets already queued ack-eliciting data serve as the probe; Application
+    /// space can also reuse an in-flight STREAM copy before falling back to a
+    /// PING. If no packet is in flight, it is a no-op.
     pub fn checkPtoTimeouts(self: *QuicConnection, now_millis: i64) Error!void {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
@@ -5669,6 +5679,14 @@ pub const QuicConnection = struct {
         const closed_snapshot = self.closed;
         const state_snapshot = self.state;
         const close_deadline_millis_snapshot = self.close_deadline_millis;
+        const crypto_send_queue_snapshots = try self.clonePendingCryptoFrames(packet_space.crypto_send_queue.items);
+        var crypto_send_queue_snapshots_restored = false;
+        defer {
+            if (!crypto_send_queue_snapshots_restored) {
+                deinitPendingCryptoFrameSlice(self.allocator, crypto_send_queue_snapshots);
+            }
+            self.allocator.free(crypto_send_queue_snapshots);
+        }
         const crypto_recv_buffer_len_snapshot = packet_space.crypto_recv_buffer.items.len;
         const crypto_recv_pending_count_snapshot = packet_space.crypto_recv_pending.items.len;
         const crypto_read_offset_snapshot = packet_space.crypto_read_offset.*;
@@ -5741,6 +5759,8 @@ pub const QuicConnection = struct {
             self.state = state_snapshot;
             self.close_deadline_millis = close_deadline_millis_snapshot;
             if (peer_close_snapshot == .absent) self.clearPeerClose();
+            self.rollbackCryptoFrameQueueFromSnapshots(packet_space.crypto_send_queue, crypto_send_queue_snapshots);
+            crypto_send_queue_snapshots_restored = true;
             packet_space.crypto_recv_buffer.items.len = crypto_recv_buffer_len_snapshot;
             self.rollbackCryptoFrameQueue(packet_space.crypto_recv_pending, crypto_recv_pending_count_snapshot);
             packet_space.crypto_read_offset.* = crypto_read_offset_snapshot;
@@ -6885,6 +6905,16 @@ pub const QuicConnection = struct {
         }
     }
 
+    fn rollbackCryptoFrameQueueFromSnapshots(
+        self: *QuicConnection,
+        queue: *std.ArrayList(PendingCryptoFrame),
+        snapshots: []const PendingCryptoFrame,
+    ) void {
+        deinitPendingCryptoFrameSlice(self.allocator, queue.items);
+        queue.items.len = snapshots.len;
+        @memcpy(queue.items[0..snapshots.len], snapshots);
+    }
+
     fn rollbackSendQueue(self: *QuicConnection, original_len: usize) void {
         while (self.send_queue.items.len > original_len) {
             const removed = self.send_queue.orderedRemove(self.send_queue.items.len - 1);
@@ -6929,10 +6959,43 @@ pub const QuicConnection = struct {
         return snapshots;
     }
 
+    fn clonePendingCryptoFrame(self: *QuicConnection, pending: PendingCryptoFrame) Error!PendingCryptoFrame {
+        const data = self.allocator.dupe(u8, pending.data) catch return error.OutOfMemory;
+        return .{
+            .offset = pending.offset,
+            .data = data,
+        };
+    }
+
+    fn clonePendingCryptoFrames(
+        self: *QuicConnection,
+        frames: []const PendingCryptoFrame,
+    ) Error![]PendingCryptoFrame {
+        const snapshots = self.allocator.alloc(PendingCryptoFrame, frames.len) catch return error.OutOfMemory;
+        var cloned_count: usize = 0;
+        errdefer {
+            deinitPendingCryptoFrameSlice(self.allocator, snapshots[0..cloned_count]);
+            self.allocator.free(snapshots);
+        }
+
+        for (frames, 0..) |pending, i| {
+            snapshots[i] = try self.clonePendingCryptoFrame(pending);
+            cloned_count += 1;
+        }
+        return snapshots;
+    }
+
     fn cloneSentPacket(self: *QuicConnection, sent_packet: SentPacket) Error!SentPacket {
         var cloned = sent_packet;
+        cloned.stream_frame = null;
+        cloned.crypto_frame = null;
+        errdefer cloned.deinit(self.allocator);
         cloned.stream_frame = if (sent_packet.stream_frame) |pending|
             try self.clonePendingStreamFrame(pending)
+        else
+            null;
+        cloned.crypto_frame = if (sent_packet.crypto_frame) |pending|
+            try self.clonePendingCryptoFrame(pending)
         else
             null;
         return cloned;
@@ -7284,6 +7347,11 @@ pub const QuicConnection = struct {
             deinitPendingStreamFrameSlice(self.allocator, retransmit_frames.items);
             retransmit_frames.deinit(self.allocator);
         }
+        var retransmit_crypto_frames: std.ArrayList(PendingCryptoFrame) = .empty;
+        defer {
+            deinitPendingCryptoFrameSlice(self.allocator, retransmit_crypto_frames.items);
+            retransmit_crypto_frames.deinit(self.allocator);
+        }
 
         var next_loss_deadline: ?i64 = null;
         for (packet_space.sent_packets.items) |sent_packet| {
@@ -7305,14 +7373,24 @@ pub const QuicConnection = struct {
                 errdefer self.allocator.free(cloned.data);
                 retransmit_frames.append(self.allocator, cloned) catch return error.OutOfMemory;
             }
+            if (sent_packet.crypto_frame) |pending| {
+                const cloned = try self.clonePendingCryptoFrame(pending);
+                errdefer self.allocator.free(cloned.data);
+                retransmit_crypto_frames.append(self.allocator, cloned) catch return error.OutOfMemory;
+            }
         }
 
         self.send_queue.ensureUnusedCapacity(self.allocator, retransmit_frames.items.len) catch return error.OutOfMemory;
+        packet_space.crypto_send_queue.ensureUnusedCapacity(self.allocator, retransmit_crypto_frames.items.len) catch return error.OutOfMemory;
         packet_space.loss_deadline_millis.* = next_loss_deadline;
         for (retransmit_frames.items, 0..) |pending, i| {
             self.send_queue.insertAssumeCapacity(i, pending);
         }
         retransmit_frames.items.len = 0;
+        for (retransmit_crypto_frames.items, 0..) |pending, i| {
+            packet_space.crypto_send_queue.insertAssumeCapacity(i, pending);
+        }
+        retransmit_crypto_frames.items.len = 0;
 
         var result: LossDetectionResult = .{};
         var i: usize = 0;
@@ -8075,7 +8153,8 @@ pub const QuicConnection = struct {
 
         var appended_sent_packet = false;
         errdefer if (appended_sent_packet) {
-            packet_space.sent_packets.items.len -= 1;
+            var removed_sent_packet = packet_space.sent_packets.orderedRemove(packet_space.sent_packets.items.len - 1);
+            removed_sent_packet.deinit(self.allocator);
         };
 
         const packet_number = packet_space.next_packet_number.*;
@@ -8397,9 +8476,16 @@ pub const QuicConnection = struct {
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (packet_space.next_packet_number.* > max_quic_varint) return error.Internal;
 
+        const sent_crypto_frame = try self.clonePendingCryptoFrame(pending);
+        var sent_crypto_frame_transferred = false;
+        errdefer if (!sent_crypto_frame_transferred) {
+            self.allocator.free(sent_crypto_frame.data);
+        };
+
         var appended_sent_packet = false;
         errdefer if (appended_sent_packet) {
-            packet_space.sent_packets.items.len -= 1;
+            var removed_sent_packet = packet_space.sent_packets.orderedRemove(packet_space.sent_packets.items.len - 1);
+            removed_sent_packet.deinit(self.allocator);
         };
 
         const packet_number = packet_space.next_packet_number.*;
@@ -8407,7 +8493,9 @@ pub const QuicConnection = struct {
             .packet_number = packet_number,
             .sent_time_millis = now_millis,
             .bytes = encoded_len,
+            .crypto_frame = sent_crypto_frame,
         }) catch return error.OutOfMemory;
+        sent_crypto_frame_transferred = true;
         appended_sent_packet = true;
 
         var out = buffer.fixedWriter(out_buf[0..encoded_len]);
@@ -16454,6 +16542,72 @@ test "processDatagram rolls back STREAM retransmission requeue when payload is i
     try std.testing.expectEqual(@as(usize, 0), conn.send_queue.items.len);
     try std.testing.expectEqual(bytes_in_flight, conn.recovery_state.bytes_in_flight);
     try std.testing.expectEqual(@as(?u64, null), conn.recovery_state.latest_rtt_ms);
+}
+
+test "ACK-driven loss requeues CRYPTO frame for retransmission" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    try conn.sendCryptoInSpace(.handshake, "lost crypto");
+
+    var out_buf: [128]u8 = undefined;
+    _ = (try conn.pollTxInSpace(.handshake, 10, &out_buf)).?;
+    _ = try conn.recordPacketSentInSpace(.handshake, 20, 1);
+    _ = try conn.recordPacketSentInSpace(.handshake, 30, 1);
+    _ = try conn.recordPacketSentInSpace(.handshake, 40, 1);
+    try std.testing.expectEqual(@as(usize, 4), conn.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), conn.handshake_packet_space.crypto_send_queue.items.len);
+
+    try conn.receiveAckInSpace(.handshake, 70, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), conn.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 1), conn.handshake_packet_space.crypto_send_queue.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.handshake_packet_space.crypto_send_queue.items[0].offset);
+    try std.testing.expectEqualStrings("lost crypto", conn.handshake_packet_space.crypto_send_queue.items[0].data);
+
+    const retransmit_payload = (try conn.pollTxInSpace(.handshake, 80, &out_buf)).?;
+    var decoded = try frame.decodeFrameSlice(retransmit_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .crypto => |crypto| {
+            try std.testing.expectEqual(@as(u64, 0), crypto.offset);
+            try std.testing.expectEqualStrings("lost crypto", crypto.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "processDatagram rolls back CRYPTO retransmission requeue when payload is invalid" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    try conn.sendCryptoInSpace(.handshake, "lost crypto");
+
+    var out_buf: [128]u8 = undefined;
+    _ = (try conn.pollTxInSpace(.handshake, 10, &out_buf)).?;
+    _ = try conn.recordPacketSentInSpace(.handshake, 20, 1);
+    _ = try conn.recordPacketSentInSpace(.handshake, 30, 1);
+    _ = try conn.recordPacketSentInSpace(.handshake, 40, 1);
+    const bytes_in_flight = conn.bytesInFlight(.handshake);
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .ack = .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+    try out.writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramInSpace(.handshake, 70, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 4), conn.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), conn.handshake_packet_space.crypto_send_queue.items.len);
+    try std.testing.expectEqual(bytes_in_flight, conn.bytesInFlight(.handshake));
+    try std.testing.expectEqual(@as(?u64, null), conn.handshake_packet_space.recovery_state.latest_rtt_ms);
 }
 
 test "processDatagram rolls back ACK recovery state when payload is invalid" {

@@ -210,6 +210,29 @@ pub fn main() !void {
         reassembly.pendingAckLargest(.handshake),
     });
 
+    var crypto_loss = try quicz.QuicConnection.init(gpa, .client, .{});
+    defer crypto_loss.deinit();
+    try crypto_loss.sendCryptoInSpace(.handshake, "lost crypto");
+    var loss_payload_buf: [96]u8 = undefined;
+    _ = (try crypto_loss.pollTxInSpace(.handshake, 10, &loss_payload_buf)) orelse return error.UnexpectedState;
+    _ = try crypto_loss.recordPacketSentInSpace(.handshake, 20, 1);
+    _ = try crypto_loss.recordPacketSentInSpace(.handshake, 30, 1);
+    _ = try crypto_loss.recordPacketSentInSpace(.handshake, 40, 1);
+    try crypto_loss.receiveAckInSpace(.handshake, 70, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const crypto_retransmit = (try crypto_loss.pollTxInSpace(.handshake, 80, &loss_payload_buf)) orelse return error.UnexpectedState;
+    var retransmit_crypto: [32]u8 = undefined;
+    var retransmit_crypto_len: usize = 0;
+    try appendCryptoPayload(gpa, crypto_retransmit, &retransmit_crypto, &retransmit_crypto_len);
+    std.debug.print("[crypto] loss_recovery retransmit={s} remaining={} inflight={}\n", .{
+        retransmit_crypto[0..retransmit_crypto_len],
+        crypto_loss.sentPacketCount(.handshake),
+        crypto_loss.bytesInFlight(.handshake),
+    });
+
     var bridged = try quicz.QuicConnection.init(gpa, .server, .{});
     defer bridged.deinit();
     try processCryptoFrame(&bridged, .handshake, 103, 6, " hello");
