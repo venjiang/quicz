@@ -53,6 +53,7 @@ const TimeThresholdResult = struct {
     remaining_after_deadline: usize,
     bytes_after_deadline: usize,
     ack_bytes: usize,
+    timers_after_deadline: usize,
 };
 
 fn fixedWriter(buffer: []u8) FixedWriter {
@@ -263,6 +264,8 @@ fn runPacketThresholdPhase(allocator: std.mem.Allocator, io: std.Io) !PacketThre
 }
 
 fn runTimeThresholdPhase(allocator: std.mem.Allocator, io: std.Io) !TimeThresholdResult {
+    const client_connection_id: u64 = 41;
+
     var client_socket = try bindLoopbackUdp(io);
     defer client_socket.close(io);
     var server_socket = try bindLoopbackUdp(io);
@@ -288,6 +291,8 @@ fn runTimeThresholdPhase(allocator: std.mem.Allocator, io: std.Io) !TimeThreshol
     defer client_router.deinit();
     var server_router = quicz.endpoint.EndpointRouter.init(allocator);
     defer server_router.deinit();
+    var timers = quicz.EndpointLossDetectionTimers.init(allocator);
+    defer timers.deinit();
     try prepareLoopbackPair(&client_socket, &server_socket, &client_router, &server_router);
 
     var server_receive_buf: [1500]u8 = undefined;
@@ -304,23 +309,28 @@ fn runTimeThresholdPhase(allocator: std.mem.Allocator, io: std.Io) !TimeThreshol
         .first_ack_range = 0,
     }, &client_receive_buf, secrets.server);
 
-    const timer = client.lossDetectionTimerDeadlineMillis() orelse return error.UnexpectedState;
-    try require(timer.space == .application);
-    try require(timer.kind == .loss_time);
-    const deadline = timer.deadline_millis;
+    try timers.armFromConnection(client_connection_id, &client);
+    const timer = timers.earliestDeadline() orelse return error.UnexpectedState;
+    try require(timer.connection_id == client_connection_id);
+    try require(timer.timer.space == .application);
+    try require(timer.timer.kind == .loss_time);
+    const deadline = timer.timer.deadline_millis;
     try require(client.sentPacketCount(.application) == 1);
     try require(client.bytesInFlight(.application) == first_packet_len);
 
-    try require((try client.serviceLossDetectionTimer(deadline - 1)) == null);
+    try require((try timers.serviceConnection(client_connection_id, &client, deadline - 1)) == null);
     const remaining_before_deadline = client.sentPacketCount(.application);
     try require(remaining_before_deadline == 1);
     try require(client.bytesInFlight(.application) == first_packet_len);
+    try require(timers.count() == 1);
 
-    const serviced = (try client.serviceLossDetectionTimer(deadline)) orelse return error.UnexpectedState;
-    try require(serviced.space == .application);
-    try require(serviced.kind == .loss_time);
+    const serviced = (try timers.serviceConnection(client_connection_id, &client, deadline)) orelse return error.UnexpectedState;
+    try require(serviced.connection_id == client_connection_id);
+    try require(serviced.timer.space == .application);
+    try require(serviced.timer.kind == .loss_time);
     try require(client.sentPacketCount(.application) == 0);
     try require(client.bytesInFlight(.application) == 0);
+    try require(timers.count() == 0);
 
     return .{
         .client_port = client_local.port,
@@ -330,6 +340,7 @@ fn runTimeThresholdPhase(allocator: std.mem.Allocator, io: std.Io) !TimeThreshol
         .remaining_after_deadline = client.sentPacketCount(.application),
         .bytes_after_deadline = client.bytesInFlight(.application),
         .ack_bytes = ack_bytes,
+        .timers_after_deadline = timers.count(),
     };
 }
 
@@ -343,7 +354,7 @@ pub fn main() !void {
     const packet_threshold = try runPacketThresholdPhase(allocator, io);
     const time_threshold = try runTimeThresholdPhase(allocator, io);
 
-    std.debug.print("[udp-loss] packet_client_port={} packet_server_port={} packet_remaining={} packet_inflight={} packet_ack_bytes={} time_client_port={} time_server_port={} time_deadline={} time_before_deadline={} time_remaining={} time_inflight={} time_ack_bytes={}\n", .{
+    std.debug.print("[udp-loss] packet_client_port={} packet_server_port={} packet_remaining={} packet_inflight={} packet_ack_bytes={} time_client_port={} time_server_port={} time_deadline={} time_before_deadline={} time_remaining={} time_inflight={} time_ack_bytes={} time_timers={}\n", .{
         packet_threshold.client_port,
         packet_threshold.server_port,
         packet_threshold.remaining_packets,
@@ -356,5 +367,6 @@ pub fn main() !void {
         time_threshold.remaining_after_deadline,
         time_threshold.bytes_after_deadline,
         time_threshold.ack_bytes,
+        time_threshold.timers_after_deadline,
     });
 }

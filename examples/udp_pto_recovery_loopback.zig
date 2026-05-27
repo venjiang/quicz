@@ -171,6 +171,7 @@ fn packetContainsCrypto(
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
+    const client_connection_id: u64 = 41;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -208,6 +209,8 @@ pub fn main() !void {
     defer client_router.deinit();
     var server_router = quicz.endpoint.EndpointRouter.init(allocator);
     defer server_router.deinit();
+    var timers = quicz.EndpointLossDetectionTimers.init(allocator);
+    defer timers.deinit();
 
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
     const server_path = try udp4Tuple(server_socket.address, client_socket.address);
@@ -238,19 +241,25 @@ pub fn main() !void {
     );
     try require(server.pendingAckLargest(.application) == 0);
 
-    const ping_timer = client.lossDetectionTimerDeadlineMillis() orelse return error.UnexpectedState;
-    try require(ping_timer.space == .application);
-    try require(ping_timer.kind == .pto);
-    const ping_deadline = ping_timer.deadline_millis;
-    try require((try client.serviceLossDetectionTimer(ping_deadline - 1)) == null);
+    try timers.armFromConnection(client_connection_id, &client);
+    const ping_timer = timers.earliestDeadline() orelse return error.UnexpectedState;
+    try require(ping_timer.connection_id == client_connection_id);
+    try require(ping_timer.timer.space == .application);
+    try require(ping_timer.timer.kind == .pto);
+    const ping_deadline = ping_timer.timer.deadline_millis;
+    try require((try timers.serviceConnection(client_connection_id, &client, ping_deadline - 1)) == null);
     try require(client.sentPacketCount(.application) == 1);
+    try require(timers.count() == 1);
 
-    const ping_serviced = (try client.serviceLossDetectionTimer(ping_deadline)) orelse return error.UnexpectedState;
-    try require(ping_serviced.space == .application);
-    try require(ping_serviced.kind == .pto);
+    const ping_serviced = (try timers.serviceConnection(client_connection_id, &client, ping_deadline)) orelse return error.UnexpectedState;
+    try require(ping_serviced.connection_id == client_connection_id);
+    try require(ping_serviced.timer.space == .application);
+    try require(ping_serviced.timer.kind == .pto);
     const pto_ping = (try client.pollProtectedShortDatagram(ping_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer allocator.free(pto_ping);
     try require(client.sentPacketCount(.application) == 2);
+    try timers.armFromConnection(client_connection_id, &client);
+    try require(timers.count() == 1);
     try sendClientPacket(
         io,
         &client_socket,
@@ -282,6 +291,8 @@ pub fn main() !void {
     try require(client.sentPacketCount(.application) == 0);
     try require(client.bytesInFlight(.application) == 0);
     try require(client.ptoDeadlineMillis(.application) == null);
+    try timers.armFromConnection(client_connection_id, &client);
+    try require(timers.count() == 0);
 
     const stream_id = try client.openStream();
     try client.sendOnStream(stream_id, "old", false);
@@ -301,16 +312,21 @@ pub fn main() !void {
     );
 
     try client.sendOnStream(stream_id, "new", true);
-    const stream_timer = client.lossDetectionTimerDeadlineMillis() orelse return error.UnexpectedState;
-    try require(stream_timer.space == .application);
-    try require(stream_timer.kind == .pto);
-    const stream_deadline = stream_timer.deadline_millis;
-    const stream_serviced = (try client.serviceLossDetectionTimer(stream_deadline)) orelse return error.UnexpectedState;
-    try require(stream_serviced.space == .application);
-    try require(stream_serviced.kind == .pto);
+    try timers.armFromConnection(client_connection_id, &client);
+    const stream_timer = timers.earliestDeadline() orelse return error.UnexpectedState;
+    try require(stream_timer.connection_id == client_connection_id);
+    try require(stream_timer.timer.space == .application);
+    try require(stream_timer.timer.kind == .pto);
+    const stream_deadline = stream_timer.timer.deadline_millis;
+    const stream_serviced = (try timers.serviceConnection(client_connection_id, &client, stream_deadline)) orelse return error.UnexpectedState;
+    try require(stream_serviced.connection_id == client_connection_id);
+    try require(stream_serviced.timer.space == .application);
+    try require(stream_serviced.timer.kind == .pto);
     const stream_probe = (try client.pollProtectedShortDatagram(stream_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer allocator.free(stream_probe);
     try require(client.sentPacketCount(.application) == 2);
+    try timers.armFromConnection(client_connection_id, &client);
+    try require(timers.count() == 1);
     try sendClientPacket(
         io,
         &client_socket,
@@ -346,6 +362,8 @@ pub fn main() !void {
     try require(client.sentPacketCount(.application) == 0);
     try require(client.bytesInFlight(.application) == 0);
     try require(client.ptoDeadlineMillis(.application) == null);
+    try timers.armFromConnection(client_connection_id, &client);
+    try require(timers.count() == 0);
 
     const retransmit_stream_id = try client.openStream();
     try client.sendOnStream(retransmit_stream_id, "again", false);
@@ -368,16 +386,21 @@ pub fn main() !void {
     const retransmit_read_len = (try server.recvOnStream(retransmit_stream_id, &retransmit_read_buf)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, retransmit_read_buf[0..retransmit_read_len], "again"));
 
-    const retransmit_timer = client.lossDetectionTimerDeadlineMillis() orelse return error.UnexpectedState;
-    try require(retransmit_timer.space == .application);
-    try require(retransmit_timer.kind == .pto);
-    const retransmit_deadline = retransmit_timer.deadline_millis;
-    const retransmit_serviced = (try client.serviceLossDetectionTimer(retransmit_deadline)) orelse return error.UnexpectedState;
-    try require(retransmit_serviced.space == .application);
-    try require(retransmit_serviced.kind == .pto);
+    try timers.armFromConnection(client_connection_id, &client);
+    const retransmit_timer = timers.earliestDeadline() orelse return error.UnexpectedState;
+    try require(retransmit_timer.connection_id == client_connection_id);
+    try require(retransmit_timer.timer.space == .application);
+    try require(retransmit_timer.timer.kind == .pto);
+    const retransmit_deadline = retransmit_timer.timer.deadline_millis;
+    const retransmit_serviced = (try timers.serviceConnection(client_connection_id, &client, retransmit_deadline)) orelse return error.UnexpectedState;
+    try require(retransmit_serviced.connection_id == client_connection_id);
+    try require(retransmit_serviced.timer.space == .application);
+    try require(retransmit_serviced.timer.kind == .pto);
     const retransmit_probe = (try client.pollProtectedShortDatagram(retransmit_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer allocator.free(retransmit_probe);
     try require(client.sentPacketCount(.application) == 2);
+    try timers.armFromConnection(client_connection_id, &client);
+    try require(timers.count() == 1);
     try require(try packetContainsStream(
         allocator,
         retransmit_probe,
@@ -419,6 +442,8 @@ pub fn main() !void {
     try require(client.sentPacketCount(.application) == 0);
     try require(client.bytesInFlight(.application) == 0);
     try require(client.ptoDeadlineMillis(.application) == null);
+    try timers.armFromConnection(client_connection_id, &client);
+    try require(timers.count() == 0);
 
     try client.sendCrypto("udp crypto");
     const first_crypto = (try client.pollProtectedShortDatagram(3000, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
@@ -439,16 +464,21 @@ pub fn main() !void {
     const crypto_read_len = (try server.recvCrypto(&crypto_read_buf)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, crypto_read_buf[0..crypto_read_len], "udp crypto"));
 
-    const crypto_timer = client.lossDetectionTimerDeadlineMillis() orelse return error.UnexpectedState;
-    try require(crypto_timer.space == .application);
-    try require(crypto_timer.kind == .pto);
-    const crypto_deadline = crypto_timer.deadline_millis;
-    const crypto_serviced = (try client.serviceLossDetectionTimer(crypto_deadline)) orelse return error.UnexpectedState;
-    try require(crypto_serviced.space == .application);
-    try require(crypto_serviced.kind == .pto);
+    try timers.armFromConnection(client_connection_id, &client);
+    const crypto_timer = timers.earliestDeadline() orelse return error.UnexpectedState;
+    try require(crypto_timer.connection_id == client_connection_id);
+    try require(crypto_timer.timer.space == .application);
+    try require(crypto_timer.timer.kind == .pto);
+    const crypto_deadline = crypto_timer.timer.deadline_millis;
+    const crypto_serviced = (try timers.serviceConnection(client_connection_id, &client, crypto_deadline)) orelse return error.UnexpectedState;
+    try require(crypto_serviced.connection_id == client_connection_id);
+    try require(crypto_serviced.timer.space == .application);
+    try require(crypto_serviced.timer.kind == .pto);
     const crypto_probe = (try client.pollProtectedShortDatagram(crypto_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer allocator.free(crypto_probe);
     try require(client.sentPacketCount(.application) == 2);
+    try timers.armFromConnection(client_connection_id, &client);
+    try require(timers.count() == 1);
     try require(try packetContainsCrypto(
         allocator,
         crypto_probe,
@@ -488,8 +518,10 @@ pub fn main() !void {
     try require(client.sentPacketCount(.application) == 0);
     try require(client.bytesInFlight(.application) == 0);
     try require(client.ptoDeadlineMillis(.application) == null);
+    try timers.armFromConnection(client_connection_id, &client);
+    try require(timers.count() == 0);
 
-    std.debug.print("[udp-pto] client_port={} server_port={} ping_deadline={} pto_ping_bytes={} stream_deadline={} stream_probe_bytes={} retransmit_deadline={} retransmit_probe_bytes={} crypto_deadline={} crypto_probe_bytes={} received=\"{s}\" retransmitted=\"{s}\" crypto=\"{s}\" client_inflight={}\n", .{
+    std.debug.print("[udp-pto] client_port={} server_port={} ping_deadline={} pto_ping_bytes={} stream_deadline={} stream_probe_bytes={} retransmit_deadline={} retransmit_probe_bytes={} crypto_deadline={} crypto_probe_bytes={} received=\"{s}\" retransmitted=\"{s}\" crypto=\"{s}\" client_inflight={} timers_remaining={}\n", .{
         client_local.port,
         server_local.port,
         ping_deadline,
@@ -504,5 +536,6 @@ pub fn main() !void {
         retransmit_read_buf[0..retransmit_read_len],
         crypto_read_buf[0..crypto_read_len],
         client.bytesInFlight(.application),
+        timers.count(),
     });
 }

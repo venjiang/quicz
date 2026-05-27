@@ -12109,6 +12109,124 @@ test "EndpointLossDetectionTimers disarms connection after loss-time service" {
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), timers.earliestDeadline());
 }
 
+test "EndpointLossDetectionTimers drives protected short PTO and ACK disarm" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var timers = EndpointLossDetectionTimers.init(std.testing.allocator);
+    defer timers.deinit();
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+
+    try client.sendPing();
+    const first = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+
+    try timers.armFromConnection(41, &client);
+    const deadline = timers.earliestDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 41), deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, deadline.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline.timer.kind);
+    try std.testing.expectEqual(@as(i64, 335), deadline.timer.deadline_millis);
+
+    try std.testing.expectEqual(
+        @as(?EndpointLossDetectionTimerDeadline, null),
+        try timers.serviceConnection(41, &client, deadline.timer.deadline_millis - 1),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 1), timers.count());
+
+    const serviced = (try timers.serviceConnection(41, &client, deadline.timer.deadline_millis)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 41), serviced.connection_id);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+
+    const probe = (try client.pollProtectedShortDatagram(deadline.timer.deadline_millis + 1, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try timers.armFromConnection(41, &client);
+    try std.testing.expectEqual(@as(usize, 1), timers.count());
+
+    var ack_payload_buf: [64]u8 = undefined;
+    var ack_payload = buffer.fixedWriter(&ack_payload_buf);
+    try frame.encodeFrame(ack_payload.writer(), .{ .ack = .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 1,
+    } });
+    const ack_packet_number_encoding = try packet.encodePacketNumberForHeader(0, null);
+    const ack_packet = try protection.protectShortPacketAes128(
+        std.testing.allocator,
+        .{
+            .dcid = &client_dcid,
+            .spin_bit = false,
+            .key_phase = false,
+            .packet_number = 0,
+        },
+        ack_packet_number_encoding,
+        secrets.server,
+        ack_payload.getWritten(),
+    );
+    defer std.testing.allocator.free(ack_packet);
+
+    try client.processProtectedShortDatagram(deadline.timer.deadline_millis + 2, secrets.server, client_dcid.len, ack_packet);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+    try timers.armFromConnection(41, &client);
+    try std.testing.expectEqual(@as(usize, 0), timers.count());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), timers.earliestDeadline());
+}
+
+test "EndpointLossDetectionTimers services protected short loss-time retransmission" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var timers = EndpointLossDetectionTimers.init(std.testing.allocator);
+    defer timers.deinit();
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    try client.sendCrypto("endpoint timer protected crypto");
+    const first = (try client.pollProtectedShortDatagram(300, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+
+    try client.sendPing();
+    const second = (try client.pollProtectedShortDatagram(500, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.crypto_send_queue.items.len);
+
+    try client.receiveAckInSpace(.application, 600, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try timers.armFromConnection(42, &client);
+    const deadline = timers.earliestDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 42), deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, deadline.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.loss_time, deadline.timer.kind);
+    try std.testing.expectEqual(@as(i64, 675), deadline.timer.deadline_millis);
+
+    const serviced = (try timers.serviceConnection(42, &client, deadline.timer.deadline_millis)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 42), serviced.connection_id);
+    try std.testing.expectEqual(LossDetectionTimerKind.loss_time, serviced.timer.kind);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), client.crypto_send_queue.items.len);
+    try std.testing.expectEqualStrings("endpoint timer protected crypto", client.crypto_send_queue.items[0].data);
+    try std.testing.expectEqual(@as(usize, 0), timers.count());
+}
+
 test "loss detection timer expires protected short CRYPTO retransmission" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
