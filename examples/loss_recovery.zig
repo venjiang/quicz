@@ -54,6 +54,39 @@ pub fn main() !void {
         .{ deadline, time_threshold.sentPacketCount(.application), time_threshold.bytesInFlight(.application) },
     );
 
+    var newreno = try quicz.QuicConnection.init(allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer newreno.deinit();
+
+    const initial_cwnd = newreno.congestionWindow(.application);
+    _ = try newreno.recordPacketSentInSpace(.application, 0, 1200);
+    try newreno.receiveAckInSpace(.application, 100, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const slow_start_cwnd = newreno.congestionWindow(.application);
+    if (slow_start_cwnd != initial_cwnd + 1200) return error.LossRecoveryExampleFailed;
+
+    newreno.recovery_state.ssthresh = slow_start_cwnd;
+    _ = try newreno.recordPacketSentInSpace(.application, 120, 1200);
+    const avoidance_before = newreno.congestionWindow(.application);
+    const avoidance_increase = @max(@as(usize, 1), (1200 * 1200) / avoidance_before);
+    try newreno.receiveAckInSpace(.application, 220, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const avoidance_cwnd = newreno.congestionWindow(.application);
+    if (avoidance_cwnd != avoidance_before + avoidance_increase) return error.LossRecoveryExampleFailed;
+    if (newreno.bytesInFlight(.application) != 0) return error.LossRecoveryExampleFailed;
+    std.debug.print(
+        "[loss] NewReno slow_start_cwnd={d} congestion_avoidance_cwnd={d} avoidance_increase={d}\n",
+        .{ slow_start_cwnd, avoidance_cwnd, avoidance_increase },
+    );
+
     var persistent = try quicz.QuicConnection.init(allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,

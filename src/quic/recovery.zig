@@ -241,6 +241,30 @@ test "sent acked and lost packets update bytes in flight and congestion window" 
     try std.testing.expect(recovery.congestion_window >= minimumCongestionWindow(1200));
 }
 
+test "NewReno slow start grows congestion window by acked bytes" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    const initial_window = recovery.congestion_window;
+
+    recovery.onPacketSent(1200);
+    recovery.onPacketAcked(1200, 0, 100, 0);
+
+    try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
+    try std.testing.expectEqual(initial_window + 1200, recovery.congestion_window);
+    try std.testing.expectEqual(std.math.maxInt(usize), recovery.ssthresh);
+}
+
+test "NewReno congestion avoidance grows by max datagram scaled by bytes acked" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    recovery.congestion_window = 12_000;
+    recovery.ssthresh = 12_000;
+
+    recovery.onPacketSent(1200);
+    recovery.onPacketAcked(1200, 10, 100, 0);
+
+    try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
+    try std.testing.expectEqual(@as(usize, 12_120), recovery.congestion_window);
+}
+
 test "pto uses rtt variance and exponential backoff" {
     var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100, .max_ack_delay_ms = 25 });
 

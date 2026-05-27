@@ -12270,6 +12270,41 @@ test "ACK losses respect NewReno congestion recovery period" {
     try std.testing.expectEqual(recovery_window, conn.congestionWindow(.application));
 }
 
+test "ACK growth follows NewReno slow start then congestion avoidance" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    const initial_window = conn.congestionWindow(.application);
+    try std.testing.expectEqual(recovery.initialCongestionWindow(1200), initial_window);
+
+    _ = try conn.recordPacketSentInSpace(.application, 0, 1200);
+    try conn.receiveAckInSpace(.application, 100, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    const slow_start_window = conn.congestionWindow(.application);
+    try std.testing.expectEqual(initial_window + 1200, slow_start_window);
+    try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
+
+    conn.recovery_state.ssthresh = slow_start_window;
+    _ = try conn.recordPacketSentInSpace(.application, 120, 1200);
+    const avoidance_before = conn.congestionWindow(.application);
+    const expected_increase = @max(@as(usize, 1), (1200 * 1200) / avoidance_before);
+    try conn.receiveAckInSpace(.application, 220, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(avoidance_before + expected_increase, conn.congestionWindow(.application));
+    try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
+}
+
 test "processDatagram rolls back packet-threshold losses when later frame is invalid" {
     var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
