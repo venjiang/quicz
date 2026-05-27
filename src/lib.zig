@@ -462,6 +462,103 @@ pub const EndpointLossDetectionTimers = struct {
     }
 };
 
+/// Result of retiring one endpoint connection handle.
+pub const EndpointConnectionRetireResult = struct {
+    /// Number of active destination-CID routes removed for the connection.
+    routes_retired: usize,
+    /// Whether an armed loss/PTO timer was removed for the connection.
+    recovery_timer_disarmed: bool,
+};
+
+/// Endpoint-owned routing and recovery-timer lifecycle for connection handles.
+///
+/// This helper owns the endpoint router and aggregate loss/PTO timer table for
+/// a socket event loop. It still does not own `QuicConnection` instances or
+/// perform socket I/O; callers pass the selected connection into the timer
+/// service path and use `router` for datagram routing.
+pub const EndpointConnectionLifecycle = struct {
+    /// Destination-CID router owned by this endpoint lifecycle.
+    router: endpoint.EndpointRouter,
+    /// Aggregate loss/PTO timers keyed by caller-owned connection handle.
+    recovery_timers: EndpointLossDetectionTimers,
+
+    /// Create an endpoint lifecycle owner with empty routes and timers.
+    pub fn init(allocator: std.mem.Allocator) EndpointConnectionLifecycle {
+        return .{
+            .router = endpoint.EndpointRouter.init(allocator),
+            .recovery_timers = EndpointLossDetectionTimers.init(allocator),
+        };
+    }
+
+    /// Release route and timer storage owned by this endpoint lifecycle.
+    pub fn deinit(self: *EndpointConnectionLifecycle) void {
+        self.recovery_timers.deinit();
+        self.router.deinit();
+    }
+
+    /// Return the number of active destination-CID routes.
+    pub fn routeCount(self: *const EndpointConnectionLifecycle) usize {
+        return self.router.routeCount();
+    }
+
+    /// Return the number of armed recovery timers.
+    pub fn recoveryTimerCount(self: *const EndpointConnectionLifecycle) usize {
+        return self.recovery_timers.count();
+    }
+
+    /// Register a destination connection ID for a caller-owned connection.
+    pub fn registerConnectionId(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        destination_connection_id: []const u8,
+        path: endpoint.Udp4Tuple,
+        options: endpoint.RouteOptions,
+    ) endpoint.RouteError!void {
+        return self.router.registerConnectionId(connection_id, destination_connection_id, path, options);
+    }
+
+    /// Route one received datagram using the owned endpoint routing table.
+    pub fn routeDatagram(
+        self: *const EndpointConnectionLifecycle,
+        path: endpoint.Udp4Tuple,
+        datagram: []const u8,
+    ) endpoint.RouteError!endpoint.RouteResult {
+        return self.router.routeDatagram(path, datagram);
+    }
+
+    /// Mirror one connection's current aggregate loss/PTO timer.
+    pub fn armRecoveryTimerFromConnection(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *const QuicConnection,
+    ) Error!void {
+        try self.recovery_timers.armFromConnection(connection_id, connection);
+    }
+
+    /// Return the earliest connection-level recovery timer known to the endpoint.
+    pub fn earliestRecoveryDeadline(self: *const EndpointConnectionLifecycle) ?EndpointLossDetectionTimerDeadline {
+        return self.recovery_timers.earliestDeadline();
+    }
+
+    /// Service one connection's due loss/PTO timer and refresh endpoint state.
+    pub fn serviceRecoveryTimer(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *QuicConnection,
+        now_millis: i64,
+    ) Error!?EndpointLossDetectionTimerDeadline {
+        return self.recovery_timers.serviceConnection(connection_id, connection, now_millis);
+    }
+
+    /// Retire all routes and any armed recovery timer for one connection handle.
+    pub fn retireConnection(self: *EndpointConnectionLifecycle, connection_id: u64) EndpointConnectionRetireResult {
+        return .{
+            .routes_retired = self.router.retireConnectionRoutes(connection_id),
+            .recovery_timer_disarmed = self.recovery_timers.disarmConnection(connection_id),
+        };
+    }
+};
+
 /// TLS-produced Handshake traffic secrets for one QUIC connection.
 ///
 /// `local` is this endpoint's write secret; `peer` is the remote endpoint's
@@ -12140,6 +12237,51 @@ test "EndpointLossDetectionTimers disarms connection after loss-time service" {
     try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
     try std.testing.expectEqual(@as(usize, 0), timers.count());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), timers.earliestDeadline());
+}
+
+test "EndpointConnectionLifecycle retires routes with recovery timer" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const cid0 = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const cid1 = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const short_datagram = [_]u8{ 0x40, 0x10, 0x20, 0x30, 0x40, 0x00 };
+
+    try lifecycle.registerConnectionId(41, &cid0, path, .{ .sequence_number = 0 });
+    try lifecycle.registerConnectionId(41, &cid1, path, .{ .sequence_number = 1 });
+
+    const routed = try lifecycle.routeDatagram(path, &short_datagram);
+    try std.testing.expectEqual(@as(u64, 41), routed.connection_id);
+    try std.testing.expectEqualSlices(u8, &cid0, routed.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 2), lifecycle.routeCount());
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(41, &conn);
+    const armed = lifecycle.earliestRecoveryDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 41), armed.connection_id);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, armed.timer.kind);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const retired = lifecycle.retireConnection(41);
+    try std.testing.expectEqual(@as(usize, 2), retired.routes_retired);
+    try std.testing.expect(retired.recovery_timer_disarmed);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+    try std.testing.expectError(error.UnknownConnectionId, lifecycle.routeDatagram(path, &short_datagram));
+
+    const retired_again = lifecycle.retireConnection(41);
+    try std.testing.expectEqual(@as(usize, 0), retired_again.routes_retired);
+    try std.testing.expect(!retired_again.recovery_timer_disarmed);
 }
 
 test "EndpointLossDetectionTimers drives protected short PTO and ACK disarm" {
