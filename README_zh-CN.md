@@ -275,6 +275,7 @@ pub fn main() !void {
     // MAX_STREAMS_BIDI/UNI。closeConnection() 与 closeApplication()
     // 会排队 CONNECTION_CLOSE 变体；pollTx() 会在 closing 期间发出并重发
     // close frame；peerClose() 会在 draining 期间暴露已接受的对端 close 诊断；
+    // closing 或 draining 期间的入站 datagram 会直接丢弃，不再解析；
     // max_idle_timeout 会通过 transport parameter 导出/应用，成功
     // 收发会刷新 idleTimeoutDeadlineMillis()，checkIdleTimeouts() 会在建模的
     // idle deadline 到期时关闭 active 连接。connectionState() 会暴露 active/closing/draining/closed

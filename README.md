@@ -296,7 +296,8 @@ pub fn main() !void {
     // closeConnection() and
     // closeApplication() queue CONNECTION_CLOSE variants; pollTx() emits and
     // retransmits the close frame while the connection is closing. peerClose()
-    // exposes accepted peer close diagnostics while draining. max_idle_timeout
+    // exposes accepted peer close diagnostics while draining. Inbound datagrams
+    // are discarded without parsing while closing or draining. max_idle_timeout
     // is exported and applied through transport parameters; successful send/receive
     // activity refreshes idleTimeoutDeadlineMillis(), and checkIdleTimeouts()
     // closes active connections at the modeled idle deadline. connectionState()

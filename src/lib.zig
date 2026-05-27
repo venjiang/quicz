@@ -3227,6 +3227,14 @@ pub const QuicConnection = struct {
         return self.state != .active or self.pending_close != null or self.closed;
     }
 
+    fn prepareInboundDatagramProcessing(self: *QuicConnection, now_millis: i64) Error!bool {
+        self.expireIdleState(now_millis);
+        self.expireCloseState(now_millis);
+        if (self.state == .closing or self.state == .draining) return false;
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        return true;
+    }
+
     fn maxTxDatagramSize(self: QuicConnection) usize {
         return @min(@as(usize, self.config.max_datagram_size), self.peer_max_udp_payload_size);
     }
@@ -3366,6 +3374,8 @@ pub const QuicConnection = struct {
     }
 
     /// Process one unencrypted packet payload containing one or more QUIC frames.
+    ///
+    /// Closing or draining connections discard the datagram before parsing.
     pub fn processDatagram(
         self: *QuicConnection,
         now_millis: i64,
@@ -3378,7 +3388,8 @@ pub const QuicConnection = struct {
     ///
     /// This keeps ACK generation and ACK processing isolated between Initial,
     /// Handshake, and Application spaces while the repository still lacks
-    /// protected QUIC packetization.
+    /// protected QUIC packetization. Closing or draining connections discard
+    /// the datagram before parsing.
     pub fn processDatagramInSpace(
         self: *QuicConnection,
         space: PacketNumberSpace,
@@ -3400,10 +3411,11 @@ pub const QuicConnection = struct {
     /// caller-supplied keys and a supported packet type, so missing-key or
     /// unsupported-type failures do not partially mutate connection state. Each
     /// successfully opened packet is then routed through the matching packet
-    /// number space. 0-RTT uses Application packet numbers while still applying
-    /// 0-RTT frame restrictions. Retry packets are handled separately by
-    /// `processRetryDatagram()`. Real TLS transcript ownership and key discard
-    /// remain future endpoint/TLS work.
+    /// number space. It returns 0 when closing or draining packets are discarded
+    /// before parsing. 0-RTT uses Application packet numbers while still
+    /// applying 0-RTT frame restrictions. Retry packets are handled separately
+    /// by `processRetryDatagram()`. Real TLS transcript ownership and key
+    /// discard remain future endpoint/TLS work.
     pub fn processProtectedLongDatagram(
         self: *QuicConnection,
         now_millis: i64,
@@ -3411,9 +3423,7 @@ pub const QuicConnection = struct {
         datagram: []const u8,
     ) Error!usize {
         if (datagram.len == 0) return error.InvalidPacket;
-        self.expireIdleState(now_millis);
-        self.expireCloseState(now_millis);
-        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (!try self.prepareInboundDatagramProcessing(now_millis)) return 0;
 
         var offset: usize = 0;
         var packet_count: usize = 0;
@@ -3452,6 +3462,7 @@ pub const QuicConnection = struct {
     /// Initial or Handshake packet number space, decrypts it with caller-supplied
     /// keys, requires the packet number to match the next expected value for
     /// that space, then routes the plaintext through the matching frame rules.
+    /// Closing or draining connections discard the datagram before parsing.
     /// Coalesced packets, 1-RTT protected transmit, real TLS transcript
     /// ownership, key discard, and key update remain endpoint/TLS integration
     /// work.
@@ -3462,9 +3473,7 @@ pub const QuicConnection = struct {
         keys: protection.Aes128PacketProtectionKeys,
         datagram: []const u8,
     ) Error!void {
-        self.expireIdleState(now_millis);
-        self.expireCloseState(now_millis);
-        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
 
         const long_space = protectedLongPacketSpaceFor(space) orelse return error.InvalidPacket;
         const packet_space = self.packetNumberSpace(space);
@@ -3559,7 +3568,8 @@ pub const QuicConnection = struct {
     /// Remove 0-RTT long-header packet protection and process the decrypted payload.
     ///
     /// 0-RTT packets share the Application packet number space with 1-RTT, but
-    /// this method routes the plaintext through 0-RTT frame restrictions. The
+    /// this method routes the plaintext through 0-RTT frame restrictions.
+    /// Closing or draining connections discard the datagram before parsing. The
     /// caller supplies the 0-RTT traffic keys; TLS secret production, rejection
     /// policy, and replay defenses remain endpoint/TLS integration work.
     pub fn processProtectedZeroRttDatagram(
@@ -3568,9 +3578,7 @@ pub const QuicConnection = struct {
         keys: protection.Aes128PacketProtectionKeys,
         datagram: []const u8,
     ) Error!void {
-        self.expireIdleState(now_millis);
-        self.expireCloseState(now_millis);
-        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
 
         try self.processProtectedLongDatagramWithRoute(.{
             .space = .application,
@@ -3614,7 +3622,8 @@ pub const QuicConnection = struct {
     /// This accepts exactly one protected short-header datagram, decrypts it
     /// with caller-supplied keys, requires the packet number to match the next
     /// expected Application packet number, then routes the plaintext through
-    /// 1-RTT frame rules. Use `processProtectedShortDatagramWithKeyUpdate()`
+    /// 1-RTT frame rules. Closing or draining connections discard the datagram
+    /// before parsing. Use `processProtectedShortDatagramWithKeyUpdate()`
     /// when the datagram might carry the next key phase. Installed 1-RTT keys
     /// are available through `processProtectedShortDatagramWithInstalledKeys()`;
     /// connection-installed server 0-RTT receive keys are discarded after the
@@ -3628,9 +3637,7 @@ pub const QuicConnection = struct {
         dcid_len: usize,
         datagram: []const u8,
     ) Error!void {
-        self.expireIdleState(now_millis);
-        self.expireCloseState(now_millis);
-        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
 
         const packet_space = self.packetNumberSpace(.application);
         if (packet_space.discarded.*) return error.InvalidPacket;
@@ -3668,9 +3675,7 @@ pub const QuicConnection = struct {
         dcid_len: usize,
         datagram: []const u8,
     ) Error!void {
-        self.expireIdleState(now_millis);
-        self.expireCloseState(now_millis);
-        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
 
         const packet_space = self.packetNumberSpace(.application);
         if (packet_space.discarded.*) return error.InvalidPacket;
@@ -3706,9 +3711,7 @@ pub const QuicConnection = struct {
         dcid_len: usize,
         datagram: []const u8,
     ) Error!void {
-        self.expireIdleState(now_millis);
-        self.expireCloseState(now_millis);
-        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
 
         const packet_space = self.packetNumberSpace(.application);
         if (packet_space.discarded.*) return error.InvalidPacket;
@@ -5855,6 +5858,7 @@ pub const QuicConnection = struct {
     ///
     /// 0-RTT and 1-RTT both use the Application packet number space, but 0-RTT
     /// rejects frames that are only valid after the handshake has progressed.
+    /// Closing or draining connections discard the datagram before parsing.
     pub fn processDatagramForPacketType(
         self: *QuicConnection,
         packet_type: FramePacketType,
@@ -5876,9 +5880,7 @@ pub const QuicConnection = struct {
         now_millis: i64,
         datagram: []const u8,
     ) Error!void {
-        self.expireIdleState(now_millis);
-        self.expireCloseState(now_millis);
-        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
         if (datagram.len == 0 or datagram.len > self.config.max_datagram_size) return error.InvalidPacket;
 
         var packet_space = self.packetNumberSpace(space);
@@ -14645,6 +14647,41 @@ test "processProtectedShortDatagram routes protected 1-RTT payload" {
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
 }
 
+test "processProtectedShortDatagram discards packets while draining" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var close_buf: [64]u8 = undefined;
+    var close_out = buffer.fixedWriter(&close_buf);
+    try frame.encodeFrame(close_out.writer(), .{ .application_close = .{
+        .error_code = 0,
+        .reason_phrase = "stop",
+    } });
+    const close_packet = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, close_out.getWritten());
+    defer std.testing.allocator.free(close_packet);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try server.processProtectedShortDatagram(10, secrets.client, server_dcid.len, close_packet);
+    const next_peer_packet_number = server.nextPeerPacketNumber(.application);
+    try std.testing.expect(server.closed);
+    try std.testing.expectEqual(ConnectionState.draining, server.connectionState());
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    const invalid_protected = [_]u8{0xff};
+    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, &invalid_protected);
+    try std.testing.expectEqual(ConnectionState.draining, server.connectionState());
+    try std.testing.expectEqual(next_peer_packet_number, server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+}
+
 test "protected short datagram spin bit follows enabled single-path policy" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
@@ -18712,7 +18749,11 @@ test "connection close frame closes public connection API" {
     try std.testing.expectError(error.ConnectionClosed, conn.recvOnStream(0, &recv_buf));
 
     const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
-    try std.testing.expectError(error.ConnectionClosed, conn.processDatagram(0, &ping));
+    const next_peer_packet_number = conn.nextPeerPacketNumber(.application);
+    try conn.processDatagram(0, &ping);
+    try std.testing.expectEqual(ConnectionState.draining, conn.connectionState());
+    try std.testing.expectEqual(next_peer_packet_number, conn.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
 }
 
 test "invalid payload rolls back connection close state" {
@@ -18747,7 +18788,12 @@ test "closeConnection queues CONNECTION_CLOSE and closes after pollTx" {
     try std.testing.expectError(error.ConnectionClosed, conn.sendPing());
 
     const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
-    try std.testing.expectError(error.ConnectionClosed, conn.processDatagram(0, &ping));
+    try conn.processDatagram(0, &ping);
+    try std.testing.expect(!conn.closed);
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
 
     var out_buf: [64]u8 = undefined;
     const payload = (try conn.pollTx(0, &out_buf)).?;
@@ -18860,11 +18906,14 @@ test "remote close enters draining state until close timeout expires" {
     try std.testing.expectEqual(ConnectionState.draining, conn.connectionState());
     try std.testing.expect(deadline > 20);
 
-    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
-    try std.testing.expectError(error.ConnectionClosed, conn.processDatagram(deadline - 1, &ping));
+    const invalid_payload = [_]u8{0xff};
+    const next_peer_packet_number = conn.nextPeerPacketNumber(.application);
+    try conn.processDatagram(deadline - 1, &invalid_payload);
     try std.testing.expectEqual(ConnectionState.draining, conn.connectionState());
+    try std.testing.expectEqual(next_peer_packet_number, conn.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
 
-    try std.testing.expectError(error.ConnectionClosed, conn.processDatagram(deadline, &ping));
+    try std.testing.expectError(error.ConnectionClosed, conn.processDatagram(deadline, &invalid_payload));
     try std.testing.expectEqual(ConnectionState.closed, conn.connectionState());
     try std.testing.expectEqual(@as(?i64, null), conn.closeDeadlineMillis());
 }

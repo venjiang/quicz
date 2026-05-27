@@ -89,17 +89,22 @@ fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {
     defer gpa.free(protected_close);
     try server.processProtectedShortDatagram(1, secrets.client, server_dcid.len, protected_close);
     printPeerClose("protected receiver", server.peerClose() orelse return error.UnexpectedState);
+    const protected_next_peer = server.nextPeerPacketNumber(.application);
+    const invalid_protected = [_]u8{0xff};
+    try server.processProtectedShortDatagram(2, secrets.client, server_dcid.len, &invalid_protected);
+    if (server.nextPeerPacketNumber(.application) != protected_next_peer) return error.UnexpectedState;
 
-    const retransmit = (try client.pollProtectedShortDatagram(2, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
+    const retransmit = (try client.pollProtectedShortDatagram(3, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer gpa.free(retransmit);
 
     std.debug.print(
-        "[close] protected close bytes={} retransmit={} sender={s} receiver={s}\n",
+        "[close] protected close bytes={} retransmit={} sender={s} receiver={s} discarded_next_peer={}\n",
         .{
             protected_close.len,
             retransmit.len,
             @tagName(client.connectionState()),
             @tagName(server.connectionState()),
+            protected_next_peer,
         },
     );
 
@@ -139,10 +144,14 @@ pub fn main() !void {
     );
     try server.processDatagram(0, connection_close);
     printPeerClose("receiver", server.peerClose() orelse return error.UnexpectedState);
+    const receiver_next_peer = server.nextPeerPacketNumber(.application);
+    const invalid_payload = [_]u8{0xff};
+    try server.processDatagram(1, &invalid_payload);
+    if (server.nextPeerPacketNumber(.application) != receiver_next_peer) return error.UnexpectedState;
     try requireError(error.ConnectionClosed, server.sendPing());
     std.debug.print(
-        "[close] receiver state={s} rejected send after CONNECTION_CLOSE\n",
-        .{@tagName(server.connectionState())},
+        "[close] receiver state={s} rejected send after CONNECTION_CLOSE discarded_next_peer={}\n",
+        .{ @tagName(server.connectionState()), receiver_next_peer },
     );
 
     const retransmitted_close = (try client.pollTx(1, &datagram)) orelse return error.UnexpectedState;
