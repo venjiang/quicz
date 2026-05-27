@@ -46,6 +46,8 @@ pub fn main() !void {
     if (timer.space != .application) return error.PtoRecoveryExampleFailed;
     if (timer.kind != .pto) return error.PtoRecoveryExampleFailed;
     const deadline = timer.deadline_millis;
+    conn.recovery_state.congestion_window = conn.bytesInFlight(.application);
+    if (conn.recovery_state.canSend(1)) return error.PtoRecoveryExampleFailed;
 
     if ((try conn.serviceLossDetectionTimer(deadline - 1)) != null) return error.PtoRecoveryExampleFailed;
     if (conn.ptoDeadlineMillis(.application) != deadline) return error.PtoRecoveryExampleFailed;
@@ -54,9 +56,12 @@ pub fn main() !void {
     if (serviced.space != .application) return error.PtoRecoveryExampleFailed;
     if (serviced.kind != .pto) return error.PtoRecoveryExampleFailed;
     if (conn.ptoDeadlineMillis(.application) == null) return error.PtoRecoveryExampleFailed;
+    if (conn.pto_probe_count != 1) return error.PtoRecoveryExampleFailed;
 
     var out_buf: [32]u8 = undefined;
     const payload = (try conn.pollTx(deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
+    if (conn.pto_probe_count != 0) return error.PtoRecoveryExampleFailed;
+    if (conn.bytesInFlight(.application) <= conn.congestionWindow(.application)) return error.PtoRecoveryExampleFailed;
     var decoded = try quicz.frame.decodeFrameSlice(payload, allocator);
     defer quicz.frame.deinitFrame(&decoded.frame, allocator);
 
@@ -66,8 +71,8 @@ pub fn main() !void {
     }
 
     std.debug.print(
-        "[pto] deadline={d} queued and emitted PTO PING bytes={d}\n",
-        .{ deadline, payload.len },
+        "[pto] deadline={d} queued and emitted PTO PING bytes={d} cwnd={d} inflight={d}\n",
+        .{ deadline, payload.len, conn.congestionWindow(.application), conn.bytesInFlight(.application) },
     );
 
     var stream_probe = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });

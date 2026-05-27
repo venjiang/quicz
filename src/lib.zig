@@ -978,6 +978,7 @@ const PacketNumberSpaceState = struct {
     recovery_state: recovery.Recovery,
     sent_packets: std.ArrayList(SentPacket) = .empty,
     pending_ping_count: usize = 0,
+    pto_probe_count: usize = 0,
     crypto_send_offset: u64 = 0,
     crypto_recv_buffer: std.ArrayList(u8) = .empty,
     crypto_read_offset: usize = 0,
@@ -1024,6 +1025,7 @@ const PacketNumberSpaceView = struct {
     recovery_state: *recovery.Recovery,
     sent_packets: *std.ArrayList(SentPacket),
     pending_ping_count: *usize,
+    pto_probe_count: *usize,
     crypto_send_offset: *u64,
     crypto_recv_buffer: *std.ArrayList(u8),
     crypto_read_offset: *usize,
@@ -1633,6 +1635,7 @@ pub const QuicConnection = struct {
     pending_blocked_frames: std.ArrayList(PendingBlockedFrame),
     pending_max_frames: std.ArrayList(PendingMaxFrame),
     pending_ping_count: usize,
+    pto_probe_count: usize,
     peer_max_udp_payload_size: usize,
     peer_max_data: u64,
     peer_initial_max_stream_data_bidi_local: u64,
@@ -1773,6 +1776,7 @@ pub const QuicConnection = struct {
             .pending_blocked_frames = .empty,
             .pending_max_frames = .empty,
             .pending_ping_count = 0,
+            .pto_probe_count = 0,
             .peer_max_udp_payload_size = config.max_datagram_size,
             .peer_max_data = config.initial_max_data,
             .peer_initial_max_stream_data_bidi_local = config.initial_max_stream_data,
@@ -2900,6 +2904,7 @@ pub const QuicConnection = struct {
         packet_space.loss_deadline_millis.* = null;
         clearSentPacketList(self.allocator, packet_space.sent_packets);
         packet_space.pending_ping_count.* = 0;
+        packet_space.pto_probe_count.* = 0;
         self.rollbackCryptoSendQueue(packet_space.crypto_send_queue, 0);
         packet_space.crypto_send_offset.* = 0;
         packet_space.crypto_recv_buffer.items.len = 0;
@@ -2952,7 +2957,7 @@ pub const QuicConnection = struct {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
         if (packet_space.next_packet_number.* > max_quic_varint) return error.Internal;
-        if (!packet_space.recovery_state.canSend(bytes)) return error.FlowControlBlocked;
+        if (!self.canSendAckElicitingInSpace(space, bytes)) return error.FlowControlBlocked;
         if (!self.canSendToPeerAddress(bytes)) return error.FlowControlBlocked;
 
         const packet_number = packet_space.next_packet_number.*;
@@ -2970,7 +2975,7 @@ pub const QuicConnection = struct {
             .ect0 => packet_space.ecn_sent_ect0.* += 1,
             .ect1 => packet_space.ecn_sent_ect1.* += 1,
         }
-        packet_space.recovery_state.onPacketSent(bytes);
+        self.recordAckElicitingSendInSpace(space, bytes);
         self.recordPeerAddressBytesSent(bytes);
         self.recordPacketActivity(now_millis);
         self.maybeDiscardInitialAfterHandshakePacketSent(space);
@@ -3417,6 +3422,7 @@ pub const QuicConnection = struct {
                 .recovery_state = &self.initial_packet_space.recovery_state,
                 .sent_packets = &self.initial_packet_space.sent_packets,
                 .pending_ping_count = &self.initial_packet_space.pending_ping_count,
+                .pto_probe_count = &self.initial_packet_space.pto_probe_count,
                 .crypto_send_offset = &self.initial_packet_space.crypto_send_offset,
                 .crypto_recv_buffer = &self.initial_packet_space.crypto_recv_buffer,
                 .crypto_read_offset = &self.initial_packet_space.crypto_read_offset,
@@ -3439,6 +3445,7 @@ pub const QuicConnection = struct {
                 .recovery_state = &self.handshake_packet_space.recovery_state,
                 .sent_packets = &self.handshake_packet_space.sent_packets,
                 .pending_ping_count = &self.handshake_packet_space.pending_ping_count,
+                .pto_probe_count = &self.handshake_packet_space.pto_probe_count,
                 .crypto_send_offset = &self.handshake_packet_space.crypto_send_offset,
                 .crypto_recv_buffer = &self.handshake_packet_space.crypto_recv_buffer,
                 .crypto_read_offset = &self.handshake_packet_space.crypto_read_offset,
@@ -3461,6 +3468,7 @@ pub const QuicConnection = struct {
                 .recovery_state = &self.recovery_state,
                 .sent_packets = &self.sent_packets,
                 .pending_ping_count = &self.pending_ping_count,
+                .pto_probe_count = &self.pto_probe_count,
                 .crypto_send_offset = &self.crypto_send_offset,
                 .crypto_recv_buffer = &self.crypto_recv_buffer,
                 .crypto_read_offset = &self.crypto_read_offset,
@@ -3473,6 +3481,26 @@ pub const QuicConnection = struct {
                 .ecn_validation_state = &self.ecn_validation_state,
             },
         };
+    }
+
+    fn canSendAckElicitingInSpace(self: *QuicConnection, space: PacketNumberSpace, bytes: usize) bool {
+        const packet_space = self.packetNumberSpace(space);
+        return packet_space.pto_probe_count.* != 0 or packet_space.recovery_state.canSend(bytes);
+    }
+
+    fn armPtoProbeInSpace(self: *QuicConnection, space: PacketNumberSpace) void {
+        const packet_space = self.packetNumberSpace(space);
+        if (packet_space.pto_probe_count.* == 0) {
+            packet_space.pto_probe_count.* = 1;
+        }
+    }
+
+    fn recordAckElicitingSendInSpace(self: *QuicConnection, space: PacketNumberSpace, bytes: usize) void {
+        const packet_space = self.packetNumberSpace(space);
+        packet_space.recovery_state.onPacketSent(bytes);
+        if (packet_space.pto_probe_count.* != 0) {
+            packet_space.pto_probe_count.* -= 1;
+        }
     }
 
     /// Process one unencrypted packet payload containing one or more QUIC frames.
@@ -3931,7 +3959,7 @@ pub const QuicConnection = struct {
             self.allocator.free(built.datagram);
             return null;
         }
-        if (built.ack_eliciting and !self.recovery_state.canSend(built.datagram.len)) {
+        if (built.ack_eliciting and !self.canSendAckElicitingInSpace(.application, built.datagram.len)) {
             built.deinitSidecars(self.allocator);
             self.allocator.free(built.datagram);
             return null;
@@ -4031,7 +4059,7 @@ pub const QuicConnection = struct {
             self.deinitBuiltProtectedLongPacket(built);
             return null;
         }
-        if (built.ack_eliciting and !self.recovery_state.canSend(built.datagram.len)) {
+        if (built.ack_eliciting and !self.canSendAckElicitingInSpace(.application, built.datagram.len)) {
             self.deinitBuiltProtectedLongPacket(built);
             return null;
         }
@@ -4192,8 +4220,7 @@ pub const QuicConnection = struct {
             return null;
         }
         if (initial_packet) |built| {
-            const packet_space = self.packetNumberSpace(built.space);
-            if (built.ack_eliciting and !packet_space.recovery_state.canSend(built.datagram.len)) {
+            if (built.ack_eliciting and !self.canSendAckElicitingInSpace(built.space, built.datagram.len)) {
                 self.deinitBuiltProtectedLongPacketIfPresent(&initial_packet);
                 self.deinitBuiltProtectedLongPacketIfPresent(&zero_rtt_packet);
                 self.deinitBuiltProtectedLongPacketIfPresent(&handshake_packet);
@@ -4201,8 +4228,7 @@ pub const QuicConnection = struct {
             }
         }
         if (zero_rtt_packet) |built| {
-            const packet_space = self.packetNumberSpace(built.space);
-            if (built.ack_eliciting and !packet_space.recovery_state.canSend(built.datagram.len)) {
+            if (built.ack_eliciting and !self.canSendAckElicitingInSpace(built.space, built.datagram.len)) {
                 self.deinitBuiltProtectedLongPacketIfPresent(&initial_packet);
                 self.deinitBuiltProtectedLongPacketIfPresent(&zero_rtt_packet);
                 self.deinitBuiltProtectedLongPacketIfPresent(&handshake_packet);
@@ -4210,8 +4236,7 @@ pub const QuicConnection = struct {
             }
         }
         if (handshake_packet) |built| {
-            const packet_space = self.packetNumberSpace(built.space);
-            if (built.ack_eliciting and !packet_space.recovery_state.canSend(built.datagram.len)) {
+            if (built.ack_eliciting and !self.canSendAckElicitingInSpace(built.space, built.datagram.len)) {
                 self.deinitBuiltProtectedLongPacketIfPresent(&initial_packet);
                 self.deinitBuiltProtectedLongPacketIfPresent(&zero_rtt_packet);
                 self.deinitBuiltProtectedLongPacketIfPresent(&handshake_packet);
@@ -4285,8 +4310,7 @@ pub const QuicConnection = struct {
             self.allocator.free(built.datagram);
             return null;
         }
-        const packet_space = self.packetNumberSpace(.handshake);
-        if (built.ack_eliciting and !packet_space.recovery_state.canSend(built.datagram.len)) {
+        if (built.ack_eliciting and !self.canSendAckElicitingInSpace(.handshake, built.datagram.len)) {
             self.allocator.free(built.datagram);
             return null;
         }
@@ -4323,8 +4347,7 @@ pub const QuicConnection = struct {
         const built = (try self.buildProtectedLongCryptoPacketInSpace(space, dcid, scid, token, keys, min_datagram_len)) orelse return null;
         errdefer self.allocator.free(built.datagram);
 
-        const packet_space = self.packetNumberSpace(space);
-        if (!packet_space.recovery_state.canSend(built.datagram.len) or !self.canSendToPeerAddress(built.datagram.len)) {
+        if (!self.canSendAckElicitingInSpace(space, built.datagram.len) or !self.canSendToPeerAddress(built.datagram.len)) {
             self.allocator.free(built.datagram);
             return null;
         }
@@ -4886,7 +4909,7 @@ pub const QuicConnection = struct {
         }
         if (built.clear_ack) packet_space.pending_ack_largest.* = null;
         packet_space.next_packet_number.* = built.packet_number + 1;
-        if (built.ack_eliciting) packet_space.recovery_state.onPacketSent(built.datagram.len);
+        if (built.ack_eliciting) self.recordAckElicitingSendInSpace(built.space, built.datagram.len);
         self.recordPeerAddressBytesSent(built.datagram.len);
         self.recordPacketActivity(now_millis);
         if (built.local_original_destination_connection_id_len) |len| {
@@ -5950,7 +5973,7 @@ pub const QuicConnection = struct {
         }
         if (built.clear_ack) self.pending_ack_largest = null;
         self.next_packet_number = built.packet_number + 1;
-        if (built.ack_eliciting) self.recovery_state.onPacketSent(built.datagram.len);
+        if (built.ack_eliciting) self.recordAckElicitingSendInSpace(.application, built.datagram.len);
         if (built.close_packet and !self.closed) self.enterClosingState(now_millis);
         self.recordPeerAddressBytesSent(built.datagram.len);
         self.recordPacketActivity(now_millis);
@@ -6320,7 +6343,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, stream_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(.application, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -6331,7 +6354,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(.application, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
@@ -6381,7 +6404,7 @@ pub const QuicConnection = struct {
         self.allocator.free(removed.data);
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        self.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(.application, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         return written;
@@ -7876,7 +7899,10 @@ pub const QuicConnection = struct {
     }
 
     fn queuePtoProbeInSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
-        if (self.hasPendingPtoProbeDataInSpace(space)) return;
+        if (self.hasPendingPtoProbeDataInSpace(space)) {
+            self.armPtoProbeInSpace(space);
+            return;
+        }
 
         const queued_crypto_probe = try self.queuePtoCryptoRetransmission(space);
         const queued_control_probe = if (!queued_crypto_probe)
@@ -7890,6 +7916,7 @@ pub const QuicConnection = struct {
         if (!queued_crypto_probe and !queued_control_probe and !queued_stream_probe) {
             try self.queuePingInSpace(space);
         }
+        self.armPtoProbeInSpace(space);
     }
 
     fn queuePtoPeerSpaceProbes(self: *QuicConnection, expired_space: PacketNumberSpace) Error!void {
@@ -8088,7 +8115,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, response_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(.application, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -8099,7 +8126,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(.application, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
@@ -8135,7 +8162,7 @@ pub const QuicConnection = struct {
         _ = self.pending_path_responses.orderedRemove(0);
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        self.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(.application, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         return written;
@@ -8158,7 +8185,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, reset_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(.application, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -8169,7 +8196,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(.application, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
@@ -8204,7 +8231,7 @@ pub const QuicConnection = struct {
         _ = self.pending_reset_streams.orderedRemove(0);
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        self.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(.application, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         return written;
@@ -8227,7 +8254,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, stop_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(.application, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -8238,7 +8265,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(.application, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
@@ -8273,7 +8300,7 @@ pub const QuicConnection = struct {
         _ = self.pending_stop_sending.orderedRemove(0);
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        self.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(.application, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         return written;
@@ -8296,7 +8323,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, retire_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(.application, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -8307,7 +8334,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(.application, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
@@ -8342,7 +8369,7 @@ pub const QuicConnection = struct {
         _ = self.pending_retire_connection_ids.orderedRemove(0);
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        self.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(.application, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         return written;
@@ -8366,7 +8393,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, new_connection_id_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(.application, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -8377,7 +8404,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(.application, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
@@ -8417,7 +8444,7 @@ pub const QuicConnection = struct {
         self.local_connection_ids.items[local_index].sent = true;
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        self.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(.application, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         return written;
@@ -8439,7 +8466,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, handshake_done_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(.application, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -8450,7 +8477,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(.application, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
@@ -8486,7 +8513,7 @@ pub const QuicConnection = struct {
         self.handshake_done_sent = true;
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        self.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(.application, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         return written;
@@ -8509,7 +8536,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, new_token_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(.application, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -8520,7 +8547,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(.application, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
@@ -8556,7 +8583,7 @@ pub const QuicConnection = struct {
         self.allocator.free(removed);
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        self.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(.application, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         return written;
@@ -8591,7 +8618,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, ping_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                packet_space.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(space, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -8602,7 +8629,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!packet_space.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(space, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (packet_space.next_packet_number.* > max_quic_varint) return error.Internal;
 
@@ -8638,7 +8665,7 @@ pub const QuicConnection = struct {
         packet_space.pending_ping_count.* -= 1;
         if (include_ack) packet_space.pending_ack_largest.* = null;
         packet_space.next_packet_number.* = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        packet_space.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(space, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         self.maybeDiscardInitialAfterHandshakePacketSent(space);
@@ -8661,7 +8688,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, challenge_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(.application, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -8672,7 +8699,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(.application, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
@@ -8723,7 +8750,7 @@ pub const QuicConnection = struct {
         _ = self.pending_path_challenges.orderedRemove(0);
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        self.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(.application, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         return written;
@@ -8746,7 +8773,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, blocked_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(.application, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -8757,7 +8784,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(.application, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
@@ -8806,7 +8833,7 @@ pub const QuicConnection = struct {
         _ = self.pending_blocked_frames.orderedRemove(0);
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        self.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(.application, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         return written;
@@ -8829,7 +8856,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, max_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                self.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(.application, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -8840,7 +8867,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!self.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(.application, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
@@ -8889,7 +8916,7 @@ pub const QuicConnection = struct {
         _ = self.pending_max_frames.orderedRemove(0);
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        self.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(.application, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         return written;
@@ -8916,7 +8943,7 @@ pub const QuicConnection = struct {
             const ack_encoded_len = try ackFrameWireLen(ack);
             const coalesced_len = try addWireLen(ack_encoded_len, crypto_encoded_len);
             if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                packet_space.recovery_state.canSend(coalesced_len) and self.canSendToPeerAddress(coalesced_len))
+                self.canSendAckElicitingInSpace(space, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
             {
                 encoded_len = coalesced_len;
                 include_ack = true;
@@ -8927,7 +8954,7 @@ pub const QuicConnection = struct {
             }
         }
 
-        if (!packet_space.recovery_state.canSend(encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
+        if (!self.canSendAckElicitingInSpace(space, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (packet_space.next_packet_number.* > max_quic_varint) return error.Internal;
 
@@ -8975,7 +9002,7 @@ pub const QuicConnection = struct {
         self.allocator.free(removed.data);
         if (include_ack) packet_space.pending_ack_largest.* = null;
         packet_space.next_packet_number.* = std.math.add(u64, packet_number, 1) catch return error.Internal;
-        packet_space.recovery_state.onPacketSent(written.len);
+        self.recordAckElicitingSendInSpace(space, written.len);
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         self.maybeDiscardInitialAfterHandshakePacketSent(space);
@@ -12143,6 +12170,36 @@ test "serviceLossDetectionTimer handles PTO deadline through aggregate timer" {
     try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
 }
 
+test "PTO frame-payload probe bypasses congestion window once" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    const deadline = conn.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    conn.recovery_state.congestion_window = conn.bytesInFlight(.application);
+
+    const serviced = (try conn.serviceLossDetectionTimer(deadline.deadline_millis)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.kind);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 1), conn.pto_probe_count);
+    try std.testing.expect(!conn.recovery_state.canSend(1));
+
+    var out_buf: [32]u8 = undefined;
+    const payload = (try conn.pollTx(deadline.deadline_millis + 1, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 0), conn.pto_probe_count);
+    try std.testing.expect(conn.bytesInFlight(.application) > conn.congestionWindow(.application));
+}
+
 test "EndpointLossDetectionTimers selects and services earliest connection timer" {
     var timers = EndpointLossDetectionTimers.init(std.testing.allocator);
     defer timers.deinit();
@@ -12357,6 +12414,37 @@ test "EndpointLossDetectionTimers drives protected short PTO and ACK disarm" {
     try timers.armFromConnection(41, &client);
     try std.testing.expectEqual(@as(usize, 0), timers.count());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), timers.earliestDeadline());
+}
+
+test "protected short PTO probe bypasses congestion window once" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+
+    try client.sendPing();
+    const first = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    const deadline = client.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    client.recovery_state.congestion_window = client.bytesInFlight(.application);
+
+    const serviced = (try client.serviceLossDetectionTimer(deadline.deadline_millis)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.kind);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 1), client.pto_probe_count);
+    try std.testing.expect(!client.recovery_state.canSend(first.len));
+
+    const probe = (try client.pollProtectedShortDatagram(deadline.deadline_millis + 1, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 0), client.pto_probe_count);
+    try std.testing.expect(client.bytesInFlight(.application) > client.congestionWindow(.application));
 }
 
 test "EndpointLossDetectionTimers services protected short loss-time retransmission" {
