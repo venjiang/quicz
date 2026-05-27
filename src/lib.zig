@@ -2743,15 +2743,20 @@ pub const QuicConnection = struct {
     /// This is a deterministic hook for the current frame-payload model. It
     /// lets already queued ack-eliciting data serve as the probe. If nothing is
     /// queued, it reuses in-flight CRYPTO first, then Application STREAM, before
-    /// falling back to a PING. If no packet is in flight, it is a no-op.
+    /// falling back to a PING. When a space expires, other packet number spaces
+    /// that still have in-flight packets also get probes without advancing their
+    /// own PTO backoff until their own deadline expires.
     pub fn checkPtoTimeouts(self: *QuicConnection, now_millis: i64) Error!void {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         try self.expireLossDetectionTimeouts(now_millis);
-        try self.checkPtoTimeoutInSpace(.initial, now_millis);
-        try self.checkPtoTimeoutInSpace(.handshake, now_millis);
-        try self.checkPtoTimeoutInSpace(.application, now_millis);
+        const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
+        for (spaces) |space| {
+            if (try self.checkPtoTimeoutInSpace(space, now_millis)) {
+                try self.queuePtoPeerSpaceProbes(space);
+            }
+        }
     }
 
     /// Apply the modeled QUIC idle timeout under a controlled clock.
@@ -7773,26 +7778,42 @@ pub const QuicConnection = struct {
         return self.send_queue.items.len != 0;
     }
 
-    fn checkPtoTimeoutInSpace(self: *QuicConnection, space: PacketNumberSpace, now_millis: i64) Error!void {
-        const packet_space = self.packetNumberSpace(space);
-        if (packet_space.discarded.*) return;
-        const deadline = self.ptoDeadlineMillis(space) orelse return;
-        if (deadline > now_millis) return;
-        if (!self.hasPendingPtoProbeDataInSpace(space)) {
-            const queued_crypto_probe = try self.queuePtoCryptoRetransmission(space);
-            const queued_control_probe = if (!queued_crypto_probe)
-                try self.queuePtoControlRetransmission(space)
-            else
-                false;
-            const queued_stream_probe = if (!queued_crypto_probe and !queued_control_probe)
-                try self.queuePtoStreamRetransmission(space)
-            else
-                false;
-            if (!queued_crypto_probe and !queued_control_probe and !queued_stream_probe) {
-                try self.queuePingInSpace(space);
-            }
+    fn queuePtoProbeInSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
+        if (self.hasPendingPtoProbeDataInSpace(space)) return;
+
+        const queued_crypto_probe = try self.queuePtoCryptoRetransmission(space);
+        const queued_control_probe = if (!queued_crypto_probe)
+            try self.queuePtoControlRetransmission(space)
+        else
+            false;
+        const queued_stream_probe = if (!queued_crypto_probe and !queued_control_probe)
+            try self.queuePtoStreamRetransmission(space)
+        else
+            false;
+        if (!queued_crypto_probe and !queued_control_probe and !queued_stream_probe) {
+            try self.queuePingInSpace(space);
         }
+    }
+
+    fn queuePtoPeerSpaceProbes(self: *QuicConnection, expired_space: PacketNumberSpace) Error!void {
+        const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
+        for (spaces) |space| {
+            if (space == expired_space) continue;
+
+            const packet_space = self.packetNumberSpace(space);
+            if (packet_space.discarded.* or packet_space.sent_packets.items.len == 0) continue;
+            try self.queuePtoProbeInSpace(space);
+        }
+    }
+
+    fn checkPtoTimeoutInSpace(self: *QuicConnection, space: PacketNumberSpace, now_millis: i64) Error!bool {
+        const packet_space = self.packetNumberSpace(space);
+        if (packet_space.discarded.*) return false;
+        const deadline = self.ptoDeadlineMillis(space) orelse return false;
+        if (deadline > now_millis) return false;
+        try self.queuePtoProbeInSpace(space);
         packet_space.recovery_state.onPtoExpired();
+        return true;
     }
 
     fn queuePtoCryptoRetransmission(self: *QuicConnection, space: PacketNumberSpace) Error!bool {
@@ -12778,7 +12799,7 @@ test "checkPtoTimeouts retransmits protected short CRYPTO data before PING" {
     }
 }
 
-test "checkPtoTimeouts queues Initial and Handshake PING probes independently" {
+test "checkPtoTimeouts queues peer-space PTO probes without early backoff" {
     var conn = try QuicConnection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
@@ -12797,11 +12818,18 @@ test "checkPtoTimeouts queues Initial and Handshake PING probes independently" {
 
     try conn.checkPtoTimeouts(310);
     try std.testing.expectEqual(@as(usize, 1), conn.initial_packet_space.pending_ping_count);
-    try std.testing.expectEqual(@as(usize, 0), conn.handshake_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 1), conn.handshake_packet_space.pending_ping_count);
     try std.testing.expectEqual(@as(u8, 1), conn.initial_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 0), conn.handshake_packet_space.recovery_state.pto_count);
+
+    try conn.checkPtoTimeouts(320);
+    try std.testing.expectEqual(@as(usize, 1), conn.initial_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 1), conn.handshake_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.initial_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.handshake_packet_space.recovery_state.pto_count);
 
     var out_buf: [32]u8 = undefined;
-    const initial_payload = (try conn.pollTxInSpace(.initial, 311, &out_buf)) orelse return error.TestUnexpectedResult;
+    const initial_payload = (try conn.pollTxInSpace(.initial, 321, &out_buf)) orelse return error.TestUnexpectedResult;
     var initial_decoded = try frame.decodeFrameSlice(initial_payload, std.testing.allocator);
     defer frame.deinitFrame(&initial_decoded.frame, std.testing.allocator);
     switch (initial_decoded.frame) {
@@ -12809,10 +12837,6 @@ test "checkPtoTimeouts queues Initial and Handshake PING probes independently" {
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(usize, 0), conn.initial_packet_space.pending_ping_count);
-
-    try conn.checkPtoTimeouts(320);
-    try std.testing.expectEqual(@as(usize, 1), conn.handshake_packet_space.pending_ping_count);
-    try std.testing.expectEqual(@as(u8, 1), conn.handshake_packet_space.recovery_state.pto_count);
 
     const handshake_payload = (try conn.pollTxInSpace(.handshake, 321, &out_buf)) orelse return error.TestUnexpectedResult;
     var handshake_decoded = try frame.decodeFrameSlice(handshake_payload, std.testing.allocator);

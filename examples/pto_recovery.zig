@@ -178,6 +178,8 @@ pub fn main() !void {
     const initial_serviced = (try spaces.serviceLossDetectionTimer(initial_deadline)) orelse return error.PtoRecoveryExampleFailed;
     if (initial_serviced.space != .initial) return error.PtoRecoveryExampleFailed;
     if (initial_serviced.kind != .pto) return error.PtoRecoveryExampleFailed;
+    if (spaces.ptoDeadlineMillis(.handshake) != handshake_deadline) return error.PtoRecoveryExampleFailed;
+
     const initial_payload = (try spaces.pollTxInSpace(.initial, initial_deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
     var initial_decoded = try quicz.frame.decodeFrameSlice(initial_payload, allocator);
     defer quicz.frame.deinitFrame(&initial_decoded.frame, allocator);
@@ -186,10 +188,7 @@ pub fn main() !void {
         else => return error.PtoRecoveryExampleFailed,
     }
 
-    const handshake_serviced = (try spaces.serviceLossDetectionTimer(handshake_deadline)) orelse return error.PtoRecoveryExampleFailed;
-    if (handshake_serviced.space != .handshake) return error.PtoRecoveryExampleFailed;
-    if (handshake_serviced.kind != .pto) return error.PtoRecoveryExampleFailed;
-    const handshake_payload = (try spaces.pollTxInSpace(.handshake, handshake_deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
+    const handshake_payload = (try spaces.pollTxInSpace(.handshake, initial_deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
     var handshake_decoded = try quicz.frame.decodeFrameSlice(handshake_payload, allocator);
     defer quicz.frame.deinitFrame(&handshake_decoded.frame, allocator);
     switch (handshake_decoded.frame) {
@@ -198,7 +197,7 @@ pub fn main() !void {
     }
 
     std.debug.print(
-        "[pto] spaces initial_deadline={d} handshake_deadline={d} initial_probe={d} handshake_probe={d}\n",
+        "[pto] spaces initial_deadline={d} handshake_deadline={d} initial_probe={d} handshake_peer_probe={d}\n",
         .{ initial_deadline, handshake_deadline, initial_payload.len, handshake_payload.len },
     );
 }
