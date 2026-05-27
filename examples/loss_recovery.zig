@@ -99,6 +99,9 @@ pub fn main() !void {
         .ack_delay = 0,
         .first_ack_range = 0,
     });
+    persistent.recovery_state.onPtoExpired();
+    persistent.recovery_state.onPtoExpired();
+    const persistent_duration = persistent.recovery_state.persistentCongestionDurationMs();
     _ = try persistent.recordPacketSentInSpace(.application, 10, 100);
     _ = try persistent.recordPacketSentInSpace(.application, 1000, 100);
     _ = try persistent.recordPacketSentInSpace(.application, 1100, 100);
@@ -112,8 +115,8 @@ pub fn main() !void {
         return error.LossRecoveryExampleFailed;
     }
     std.debug.print(
-        "[loss] persistent congestion reduced cwnd={d}\n",
-        .{persistent.congestionWindow(.application)},
+        "[loss] persistent congestion duration={d} reduced cwnd={d}\n",
+        .{ persistent_duration, persistent.congestionWindow(.application) },
     );
 
     var recovery_period = try quicz.QuicConnection.init(allocator, .client, .{

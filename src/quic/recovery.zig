@@ -126,7 +126,7 @@ pub const Recovery = struct {
 
     /// Current Probe Timeout in milliseconds.
     pub fn ptoMs(self: Recovery) u64 {
-        return self.ptoMsIncludingMaxAckDelay(true);
+        return self.backedOffPtoMs(true);
     }
 
     /// Current Initial/Handshake Probe Timeout in milliseconds.
@@ -135,13 +135,17 @@ pub const Recovery = struct {
     /// number spaces because those acknowledgments are not intentionally
     /// delayed.
     pub fn ptoMsWithoutMaxAckDelay(self: Recovery) u64 {
-        return self.ptoMsIncludingMaxAckDelay(false);
+        return self.backedOffPtoMs(false);
     }
 
-    fn ptoMsIncludingMaxAckDelay(self: Recovery, include_max_ack_delay: bool) u64 {
+    fn basePtoMs(self: Recovery, include_max_ack_delay: bool) u64 {
         const variance_delay = @max(saturatingMulU64(4, self.rttvar_ms), timer_granularity_ms);
         const ack_delay = if (include_max_ack_delay) self.max_ack_delay_ms else 0;
-        var timeout = saturatingAddU64(saturatingAddU64(self.smoothed_rtt_ms, variance_delay), ack_delay);
+        return saturatingAddU64(saturatingAddU64(self.smoothed_rtt_ms, variance_delay), ack_delay);
+    }
+
+    fn backedOffPtoMs(self: Recovery, include_max_ack_delay: bool) u64 {
+        var timeout = self.basePtoMs(include_max_ack_delay);
 
         var count = self.pto_count;
         while (count != 0) : (count -= 1) {
@@ -152,7 +156,7 @@ pub const Recovery = struct {
 
     /// Persistent congestion duration from RFC 9002 Section 7.6.1.
     pub fn persistentCongestionDurationMs(self: Recovery) u64 {
-        return std.math.mul(u64, self.ptoMs(), persistent_congestion_threshold) catch std.math.maxInt(u64);
+        return std.math.mul(u64, self.basePtoMs(true), persistent_congestion_threshold) catch std.math.maxInt(u64);
     }
 
     /// Apply the persistent congestion response by reducing cwnd to kMinimumWindow.
@@ -331,6 +335,10 @@ test "ECN congestion event enters recovery without removing bytes in flight" {
 test "persistent congestion duration and response follow RFC 9002 bounds" {
     var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100, .max_ack_delay_ms = 25 });
 
+    try std.testing.expectEqual(@as(u64, 975), recovery.persistentCongestionDurationMs());
+    recovery.onPtoExpired();
+    recovery.onPtoExpired();
+    try std.testing.expectEqual(@as(u64, 1300), recovery.ptoMs());
     try std.testing.expectEqual(@as(u64, 975), recovery.persistentCongestionDurationMs());
 
     recovery.congestion_window = 12_000;
