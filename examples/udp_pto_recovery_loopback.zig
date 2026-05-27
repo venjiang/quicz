@@ -135,6 +135,40 @@ fn packetContainsStream(
     return false;
 }
 
+fn packetContainsCrypto(
+    allocator: std.mem.Allocator,
+    packet: []const u8,
+    keys: quicz.protection.Aes128PacketProtectionKeys,
+    dcid_len: usize,
+    expected_packet_number: u64,
+    expected_data: []const u8,
+) !bool {
+    var opened = try quicz.protection.unprotectShortPacketAes128(
+        allocator,
+        keys,
+        packet,
+        dcid_len,
+        expected_packet_number,
+    );
+    defer quicz.protection.deinitProtectedShortPacket(&opened, allocator);
+
+    var offset: usize = 0;
+    while (offset < opened.packet.plaintext.len) {
+        var decoded = try quicz.frame.decodeFrameSlice(opened.packet.plaintext[offset..], allocator);
+        defer quicz.frame.deinitFrame(&decoded.frame, allocator);
+        if (decoded.len == 0) return error.UnexpectedState;
+        offset += decoded.len;
+
+        switch (decoded.frame) {
+            .crypto => |crypto| {
+                return crypto.offset == 0 and std.mem.eql(u8, crypto.data, expected_data);
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -371,7 +405,71 @@ pub fn main() !void {
     try require(client.bytesInFlight(.application) == 0);
     try require(client.ptoDeadlineMillis(.application) == null);
 
-    std.debug.print("[udp-pto] client_port={} server_port={} ping_deadline={} pto_ping_bytes={} stream_deadline={} stream_probe_bytes={} retransmit_deadline={} retransmit_probe_bytes={} received=\"{s}\" retransmitted=\"{s}\" client_inflight={}\n", .{
+    try client.sendCrypto("udp crypto");
+    const first_crypto = (try client.pollProtectedShortDatagram(3000, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
+    defer allocator.free(first_crypto);
+    try sendClientPacket(
+        io,
+        &client_socket,
+        &server_socket,
+        &server_router,
+        &server,
+        first_crypto,
+        3001,
+        &server_dcid,
+        &server_receive_buf,
+        secrets.client,
+    );
+    var crypto_read_buf: [16]u8 = undefined;
+    const crypto_read_len = (try server.recvCrypto(&crypto_read_buf)) orelse return error.UnexpectedState;
+    try require(std.mem.eql(u8, crypto_read_buf[0..crypto_read_len], "udp crypto"));
+
+    const crypto_deadline = client.ptoDeadlineMillis(.application) orelse return error.UnexpectedState;
+    try client.checkPtoTimeouts(crypto_deadline);
+    const crypto_probe = (try client.pollProtectedShortDatagram(crypto_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
+    defer allocator.free(crypto_probe);
+    try require(client.sentPacketCount(.application) == 2);
+    try require(try packetContainsCrypto(
+        allocator,
+        crypto_probe,
+        secrets.client,
+        server_dcid.len,
+        7,
+        "udp crypto",
+    ));
+    try sendClientPacket(
+        io,
+        &client_socket,
+        &server_socket,
+        &server_router,
+        &server,
+        crypto_probe,
+        crypto_deadline + 2,
+        &server_dcid,
+        &server_receive_buf,
+        secrets.client,
+    );
+    try require((try server.recvCrypto(&crypto_read_buf)) == null);
+
+    const crypto_ack = (try server.pollProtectedShortDatagram(crypto_deadline + 3, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
+    defer allocator.free(crypto_ack);
+    try sendServerPacket(
+        io,
+        &server_socket,
+        &client_socket,
+        &client_router,
+        &client,
+        crypto_ack,
+        crypto_deadline + 4,
+        &client_dcid,
+        &client_receive_buf,
+        secrets.server,
+    );
+    try require(client.sentPacketCount(.application) == 0);
+    try require(client.bytesInFlight(.application) == 0);
+    try require(client.ptoDeadlineMillis(.application) == null);
+
+    std.debug.print("[udp-pto] client_port={} server_port={} ping_deadline={} pto_ping_bytes={} stream_deadline={} stream_probe_bytes={} retransmit_deadline={} retransmit_probe_bytes={} crypto_deadline={} crypto_probe_bytes={} received=\"{s}\" retransmitted=\"{s}\" crypto=\"{s}\" client_inflight={}\n", .{
         client_local.port,
         server_local.port,
         ping_deadline,
@@ -380,8 +478,11 @@ pub fn main() !void {
         stream_probe.len,
         retransmit_deadline,
         retransmit_probe.len,
+        crypto_deadline,
+        crypto_probe.len,
         stream_read_buf[0..stream_read_len],
         retransmit_read_buf[0..retransmit_read_len],
+        crypto_read_buf[0..crypto_read_len],
         client.bytesInFlight(.application),
     });
 }

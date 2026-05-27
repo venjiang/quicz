@@ -2523,9 +2523,9 @@ pub const QuicConnection = struct {
     /// Queue PTO probes when simplified PTO deadlines expire.
     ///
     /// This is a deterministic hook for the current frame-payload model. It
-    /// lets already queued ack-eliciting data serve as the probe; Application
-    /// space can also reuse an in-flight STREAM copy before falling back to a
-    /// PING. If no packet is in flight, it is a no-op.
+    /// lets already queued ack-eliciting data serve as the probe. If nothing is
+    /// queued, it reuses in-flight CRYPTO first, then Application STREAM, before
+    /// falling back to a PING. If no packet is in flight, it is a no-op.
     pub fn checkPtoTimeouts(self: *QuicConnection, now_millis: i64) Error!void {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
@@ -7491,11 +7491,28 @@ pub const QuicConnection = struct {
         const deadline = self.ptoDeadlineMillis(space) orelse return;
         if (deadline > now_millis) return;
         if (!self.hasPendingPtoProbeDataInSpace(space)) {
-            if (!try self.queuePtoStreamRetransmission(space)) {
+            const queued_crypto_probe = try self.queuePtoCryptoRetransmission(space);
+            const queued_stream_probe = if (!queued_crypto_probe)
+                try self.queuePtoStreamRetransmission(space)
+            else
+                false;
+            if (!queued_crypto_probe and !queued_stream_probe) {
                 try self.queuePingInSpace(space);
             }
         }
         packet_space.recovery_state.onPtoExpired();
+    }
+
+    fn queuePtoCryptoRetransmission(self: *QuicConnection, space: PacketNumberSpace) Error!bool {
+        const packet_space = self.packetNumberSpace(space);
+        for (packet_space.sent_packets.items) |sent_packet| {
+            const pending = sent_packet.crypto_frame orelse continue;
+            const cloned = try self.clonePendingCryptoFrame(pending);
+            errdefer self.allocator.free(cloned.data);
+            packet_space.crypto_send_queue.append(self.allocator, cloned) catch return error.OutOfMemory;
+            return true;
+        }
+        return false;
     }
 
     fn queuePtoStreamRetransmission(self: *QuicConnection, space: PacketNumberSpace) Error!bool {
@@ -11825,6 +11842,120 @@ test "checkPtoTimeouts retransmits in-flight STREAM data before PING" {
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(usize, 2), conn.sentPacketCount(.application));
+}
+
+test "checkPtoTimeouts retransmits protected Initial CRYPTO data before PING" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+
+    try client.sendCryptoInSpace(.initial, "pto protected initial");
+    const protected = (try client.pollInitialProtectedDatagram(
+        10,
+        &dcid,
+        &scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 0), client.initial_packet_space.crypto_send_queue.items.len);
+
+    const deadline = client.ptoDeadlineMillis(.initial) orelse return error.TestUnexpectedResult;
+    try client.checkPtoTimeouts(deadline);
+    try std.testing.expectEqual(@as(usize, 0), client.initial_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), client.initial_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), client.initial_packet_space.crypto_send_queue.items.len);
+    try std.testing.expectEqual(@as(u64, 0), client.initial_packet_space.crypto_send_queue.items[0].offset);
+    try std.testing.expectEqualStrings("pto protected initial", client.initial_packet_space.crypto_send_queue.items[0].data);
+
+    const retransmit = (try client.pollInitialProtectedDatagram(
+        deadline + 1,
+        &dcid,
+        &scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(retransmit);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.initial));
+
+    var opened = try protection.unprotectLongPacketAes128(std.testing.allocator, secrets.client, retransmit, 1);
+    defer protection.deinitProtectedLongPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), opened.packet.header.packet_number);
+
+    var payload_offset: usize = 0;
+    var found_crypto = false;
+    while (payload_offset < opened.packet.plaintext.len) {
+        var decoded = try frame.decodeFrameSlice(opened.packet.plaintext[payload_offset..], std.testing.allocator);
+        defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+        switch (decoded.frame) {
+            .crypto => |crypto| {
+                try std.testing.expectEqual(@as(u64, 0), crypto.offset);
+                try std.testing.expectEqualStrings("pto protected initial", crypto.data);
+                found_crypto = true;
+            },
+            .padding => {},
+            else => return error.TestUnexpectedResult,
+        }
+        payload_offset += decoded.len;
+    }
+    try std.testing.expect(found_crypto);
+}
+
+test "checkPtoTimeouts retransmits protected short CRYPTO data before PING" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+
+    try client.sendCrypto("pto protected crypto");
+    const protected = (try client.pollProtectedShortDatagram(
+        10,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.crypto_send_queue.items.len);
+
+    const deadline = client.ptoDeadlineMillis(.application) orelse return error.TestUnexpectedResult;
+    try client.checkPtoTimeouts(deadline);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), client.crypto_send_queue.items.len);
+    try std.testing.expectEqual(@as(u64, 0), client.crypto_send_queue.items[0].offset);
+    try std.testing.expectEqualStrings("pto protected crypto", client.crypto_send_queue.items[0].data);
+
+    const retransmit = (try client.pollProtectedShortDatagram(
+        deadline + 1,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(retransmit);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+
+    var opened = try protection.unprotectShortPacketAes128(std.testing.allocator, secrets.client, retransmit, server_dcid.len, 1);
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 1), opened.packet.header.packet_number);
+
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .crypto => |crypto| {
+            try std.testing.expectEqual(@as(u64, 0), crypto.offset);
+            try std.testing.expectEqualStrings("pto protected crypto", crypto.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "checkPtoTimeouts queues Initial and Handshake PING probes independently" {

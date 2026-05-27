@@ -1,6 +1,38 @@
 const std = @import("std");
 const quicz = @import("quicz");
 
+fn packetContainsCrypto(
+    allocator: std.mem.Allocator,
+    packet: []const u8,
+    keys: quicz.protection.Aes128PacketProtectionKeys,
+    dcid_len: usize,
+    expected_packet_number: u64,
+    expected_data: []const u8,
+) !bool {
+    var opened = try quicz.protection.unprotectShortPacketAes128(
+        allocator,
+        keys,
+        packet,
+        dcid_len,
+        expected_packet_number,
+    );
+    defer quicz.protection.deinitProtectedShortPacket(&opened, allocator);
+
+    var offset: usize = 0;
+    while (offset < opened.packet.plaintext.len) {
+        var decoded = try quicz.frame.decodeFrameSlice(opened.packet.plaintext[offset..], allocator);
+        defer quicz.frame.deinitFrame(&decoded.frame, allocator);
+        if (decoded.len == 0) return error.PtoRecoveryExampleFailed;
+        offset += decoded.len;
+
+        switch (decoded.frame) {
+            .crypto => |crypto| return crypto.offset == 0 and std.mem.eql(u8, crypto.data, expected_data),
+            else => {},
+        }
+    }
+    return false;
+}
+
 pub fn main() !void {
     var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
     defer _ = debug_allocator.deinit();
@@ -82,6 +114,44 @@ pub fn main() !void {
     std.debug.print(
         "[pto] in-flight STREAM data used as PTO probe bytes={d}\n",
         .{retransmit_payload.len},
+    );
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var crypto_probe = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer crypto_probe.deinit();
+    try crypto_probe.sendCrypto("pto protected crypto");
+    const first_crypto = (try crypto_probe.pollProtectedShortDatagram(
+        10,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.PtoRecoveryExampleFailed;
+    defer allocator.free(first_crypto);
+
+    const crypto_deadline = crypto_probe.ptoDeadlineMillis(.application) orelse return error.PtoRecoveryExampleFailed;
+    try crypto_probe.checkPtoTimeouts(crypto_deadline);
+    if (crypto_probe.pending_ping_count != 0) return error.PtoRecoveryExampleFailed;
+
+    const crypto_payload = (try crypto_probe.pollProtectedShortDatagram(
+        crypto_deadline + 1,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.PtoRecoveryExampleFailed;
+    defer allocator.free(crypto_payload);
+    if (!try packetContainsCrypto(
+        allocator,
+        crypto_payload,
+        secrets.client,
+        server_dcid.len,
+        1,
+        "pto protected crypto",
+    )) return error.PtoRecoveryExampleFailed;
+
+    std.debug.print(
+        "[pto] in-flight protected CRYPTO data used as PTO probe bytes={d}\n",
+        .{crypto_payload.len},
     );
 
     var spaces = try quicz.QuicConnection.init(allocator, .server, .{ .initial_rtt_ms = 100 });
