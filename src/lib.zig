@@ -338,6 +338,130 @@ pub const LossDetectionTimerDeadline = struct {
     deadline_millis: i64,
 };
 
+/// Endpoint-owned scheduled loss detection timer for one connection handle.
+///
+/// The endpoint stores the caller's connection handle alongside the connection's
+/// current aggregate recovery timer. The `timer` field remains connection-owned
+/// recovery state; endpoint code uses this wrapper to choose which connection
+/// should be serviced next.
+pub const EndpointLossDetectionTimerDeadline = struct {
+    /// Caller-owned connection handle used by endpoint routing and event loops.
+    connection_id: u64,
+    /// Connection-level aggregate loss/PTO timer snapshot.
+    timer: LossDetectionTimerDeadline,
+};
+
+/// Endpoint/event-loop owner for QUIC loss detection timer scheduling.
+///
+/// This helper does not own `QuicConnection` objects and performs no socket I/O.
+/// Call `armFromConnection()` after packet send, ACK processing, key discard, or
+/// timer service to mirror the connection's current aggregate recovery timer.
+/// `earliestDeadline()` returns the next connection handle to wake, and
+/// `serviceConnection()` dispatches the due timer through the connection helper
+/// before refreshing endpoint scheduling state.
+pub const EndpointLossDetectionTimers = struct {
+    allocator: std.mem.Allocator,
+    entries: std.ArrayList(EndpointLossDetectionTimerDeadline) = .empty,
+
+    /// Create an empty endpoint recovery timer owner.
+    pub fn init(allocator: std.mem.Allocator) EndpointLossDetectionTimers {
+        return .{ .allocator = allocator };
+    }
+
+    /// Release all endpoint timer storage.
+    pub fn deinit(self: *EndpointLossDetectionTimers) void {
+        self.entries.deinit(self.allocator);
+    }
+
+    /// Return the number of connection timers currently armed by the endpoint.
+    pub fn count(self: *const EndpointLossDetectionTimers) usize {
+        return self.entries.items.len;
+    }
+
+    /// Mirror one connection's current aggregate loss/PTO timer.
+    ///
+    /// If the connection has no armed recovery timer, any existing endpoint
+    /// entry for `connection_id` is removed. Otherwise the existing entry is
+    /// updated or a new entry is appended.
+    pub fn armFromConnection(
+        self: *EndpointLossDetectionTimers,
+        connection_id: u64,
+        connection: *const QuicConnection,
+    ) Error!void {
+        try self.update(connection_id, connection.lossDetectionTimerDeadlineMillis());
+    }
+
+    /// Remove one connection timer from endpoint scheduling state.
+    pub fn disarmConnection(self: *EndpointLossDetectionTimers, connection_id: u64) bool {
+        const index = self.findIndex(connection_id) orelse return false;
+        _ = self.entries.orderedRemove(index);
+        return true;
+    }
+
+    /// Return the earliest connection-level recovery timer known to the endpoint.
+    pub fn earliestDeadline(self: *const EndpointLossDetectionTimers) ?EndpointLossDetectionTimerDeadline {
+        if (self.entries.items.len == 0) return null;
+        var earliest = self.entries.items[0];
+        for (self.entries.items[1..]) |entry| {
+            if (entry.timer.deadline_millis < earliest.timer.deadline_millis) {
+                earliest = entry;
+            }
+        }
+        return earliest;
+    }
+
+    /// Service one connection's due loss detection timer and refresh scheduling.
+    ///
+    /// This is the endpoint event-loop bridge for a caller-owned connection
+    /// selected by `earliestDeadline()`. It is safe to call before the deadline:
+    /// the connection helper is a no-op and the endpoint entry is refreshed from
+    /// the connection's current timer. A connection with no remaining timer is
+    /// disarmed.
+    pub fn serviceConnection(
+        self: *EndpointLossDetectionTimers,
+        connection_id: u64,
+        connection: *QuicConnection,
+        now_millis: i64,
+    ) Error!?EndpointLossDetectionTimerDeadline {
+        const serviced = try connection.serviceLossDetectionTimer(now_millis);
+        try self.armFromConnection(connection_id, connection);
+        const timer = serviced orelse return null;
+        return .{
+            .connection_id = connection_id,
+            .timer = timer,
+        };
+    }
+
+    /// Set or clear a connection timer from an already computed deadline.
+    pub fn update(
+        self: *EndpointLossDetectionTimers,
+        connection_id: u64,
+        timer: ?LossDetectionTimerDeadline,
+    ) Error!void {
+        const index = self.findIndex(connection_id);
+        if (timer) |deadline| {
+            const entry = EndpointLossDetectionTimerDeadline{
+                .connection_id = connection_id,
+                .timer = deadline,
+            };
+            if (index) |existing| {
+                self.entries.items[existing] = entry;
+            } else {
+                self.entries.append(self.allocator, entry) catch return error.OutOfMemory;
+            }
+        } else if (index) |existing| {
+            _ = self.entries.orderedRemove(existing);
+        }
+    }
+
+    fn findIndex(self: *const EndpointLossDetectionTimers, connection_id: u64) ?usize {
+        for (self.entries.items, 0..) |entry, index| {
+            if (entry.connection_id == connection_id) return index;
+        }
+        return null;
+    }
+};
+
 /// TLS-produced Handshake traffic secrets for one QUIC connection.
 ///
 /// `local` is this endpoint's write secret; `peer` is the remote endpoint's
@@ -11887,6 +12011,102 @@ test "serviceLossDetectionTimer handles PTO deadline through aggregate timer" {
     try std.testing.expectEqual(@as(i64, 335), serviced.deadline_millis);
     try std.testing.expectEqual(@as(usize, 1), conn.pending_ping_count);
     try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+}
+
+test "EndpointLossDetectionTimers selects and services earliest connection timer" {
+    var timers = EndpointLossDetectionTimers.init(std.testing.allocator);
+    defer timers.deinit();
+
+    var fast = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer fast.deinit();
+    var slow = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 200,
+    });
+    defer slow.deinit();
+
+    _ = try fast.recordPacketSentInSpace(.application, 10, 100);
+    _ = try slow.recordPacketSentInSpace(.application, 20, 100);
+
+    const fast_timer = fast.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    const slow_timer = slow.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(fast_timer.deadline_millis < slow_timer.deadline_millis);
+
+    try timers.armFromConnection(20, &slow);
+    try timers.armFromConnection(10, &fast);
+    try std.testing.expectEqual(@as(usize, 2), timers.count());
+
+    const earliest = timers.earliestDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 10), earliest.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, earliest.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, earliest.timer.kind);
+    try std.testing.expectEqual(fast_timer.deadline_millis, earliest.timer.deadline_millis);
+
+    try std.testing.expectEqual(
+        @as(?EndpointLossDetectionTimerDeadline, null),
+        try timers.serviceConnection(10, &fast, fast_timer.deadline_millis - 1),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fast.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 2), timers.count());
+
+    const serviced = (try timers.serviceConnection(10, &fast, fast_timer.deadline_millis)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 10), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    try std.testing.expectEqual(fast_timer.deadline_millis, serviced.timer.deadline_millis);
+    try std.testing.expectEqual(@as(usize, 1), fast.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), fast.recovery_state.pto_count);
+
+    try fast.receiveAckInSpace(.application, fast_timer.deadline_millis + 1, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try timers.armFromConnection(10, &fast);
+    try std.testing.expectEqual(@as(usize, 1), timers.count());
+
+    const remaining = timers.earliestDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 20), remaining.connection_id);
+    try std.testing.expectEqual(slow_timer.deadline_millis, remaining.timer.deadline_millis);
+}
+
+test "EndpointLossDetectionTimers disarms connection after loss-time service" {
+    var timers = EndpointLossDetectionTimers.init(std.testing.allocator);
+    defer timers.deinit();
+
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 300, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 500, 100);
+    try conn.receiveAckInSpace(.application, 600, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    const timer = conn.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.loss_time, timer.kind);
+    try timers.armFromConnection(99, &conn);
+    try std.testing.expectEqual(@as(usize, 1), timers.count());
+
+    try std.testing.expectEqual(
+        @as(?EndpointLossDetectionTimerDeadline, null),
+        try timers.serviceConnection(99, &conn, timer.deadline_millis - 1),
+    );
+    try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), timers.count());
+
+    const serviced = (try timers.serviceConnection(99, &conn, timer.deadline_millis)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 99), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.loss_time, serviced.timer.kind);
+    try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(usize, 0), timers.count());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), timers.earliestDeadline());
 }
 
 test "loss detection timer expires protected short CRYPTO retransmission" {

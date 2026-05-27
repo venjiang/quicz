@@ -226,6 +226,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_pto_recovery);
 
+    // Endpoint recovery timer executable
+    const exe_endpoint_recovery_timers = b.addExecutable(.{
+        .name = "quicz-endpoint-recovery-timers",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/endpoint_recovery_timers.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_endpoint_recovery_timers);
+
     // Path validation executable
     const exe_path_validation = b.addExecutable(.{
         .name = "quicz-path-validation",
@@ -700,6 +714,15 @@ pub fn build(b: *std.Build) void {
     run_pto_recovery_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_pto_recovery_cmd.addArgs(args);
+    }
+
+    // zig build run-endpoint-recovery-timers
+    const run_endpoint_recovery_timers = b.step("run-endpoint-recovery-timers", "Run quicz endpoint recovery timer example");
+    const run_endpoint_recovery_timers_cmd = b.addRunArtifact(exe_endpoint_recovery_timers);
+    run_endpoint_recovery_timers.dependOn(&run_endpoint_recovery_timers_cmd.step);
+    run_endpoint_recovery_timers_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_endpoint_recovery_timers_cmd.addArgs(args);
     }
 
     // zig build run-path-validation
