@@ -89,6 +89,57 @@ fn protectedZeroRttHasStream(
     return false;
 }
 
+const ControlExpectation = union(enum) {
+    reset_stream: quicz.frame.ResetStreamFrame,
+    stop_sending: quicz.frame.StopSendingFrame,
+};
+
+fn protectedZeroRttHasControl(
+    datagram: []const u8,
+    keys: quicz.protection.Aes128PacketProtectionKeys,
+    expected_packet_number: u64,
+    expected: ControlExpectation,
+) !bool {
+    var opened = try quicz.protection.unprotectLongPacketAes128(
+        std.heap.page_allocator,
+        keys,
+        datagram,
+        expected_packet_number,
+    );
+    defer quicz.protection.deinitProtectedLongPacket(&opened, std.heap.page_allocator);
+
+    try require(opened.packet.header.packet_type == .zero_rtt);
+    try require(opened.packet.header.packet_number == expected_packet_number);
+
+    var payload_offset: usize = 0;
+    while (payload_offset < opened.packet.plaintext.len) {
+        var decoded = try quicz.frame.decodeFrameSlice(
+            opened.packet.plaintext[payload_offset..],
+            std.heap.page_allocator,
+        );
+        defer quicz.frame.deinitFrame(&decoded.frame, std.heap.page_allocator);
+
+        const matched = switch (decoded.frame) {
+            .reset_stream => |reset| switch (expected) {
+                .reset_stream => |want| reset.stream_id == want.stream_id and
+                    reset.application_error_code == want.application_error_code and
+                    reset.final_size == want.final_size,
+                else => false,
+            },
+            .stop_sending => |stop_sending| switch (expected) {
+                .stop_sending => |want| stop_sending.stream_id == want.stream_id and
+                    stop_sending.application_error_code == want.application_error_code,
+                else => false,
+            },
+            .padding => false,
+            else => return error.UnexpectedState,
+        };
+        if (matched) return true;
+        payload_offset += decoded.len;
+    }
+    return false;
+}
+
 pub fn main() !void {
     var conn = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{});
     defer conn.deinit();
@@ -230,6 +281,105 @@ pub fn main() !void {
         true,
     ));
 
+    var zero_rtt_reset_client = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{});
+    defer zero_rtt_reset_client.deinit();
+
+    const reset_stream_id = try zero_rtt_reset_client.openStream();
+    try zero_rtt_reset_client.sendOnStream(reset_stream_id, "reset", false);
+    try zero_rtt_reset_client.resetStream(reset_stream_id, 17);
+    const zero_rtt_reset = (try zero_rtt_reset_client.pollProtectedZeroRttDatagram(
+        200,
+        &server_scid,
+        &client_scid,
+        protected_secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.heap.page_allocator.free(zero_rtt_reset);
+    try require(try protectedZeroRttHasControl(
+        zero_rtt_reset,
+        protected_secrets.client,
+        0,
+        .{ .reset_stream = .{
+            .stream_id = reset_stream_id,
+            .application_error_code = 17,
+            .final_size = 5,
+        } },
+    ));
+
+    _ = try zero_rtt_reset_client.recordPacketSentInSpace(.application, 210, 1);
+    _ = try zero_rtt_reset_client.recordPacketSentInSpace(.application, 220, 1);
+    _ = try zero_rtt_reset_client.recordPacketSentInSpace(.application, 230, 1);
+    try zero_rtt_reset_client.receiveAckInSpace(.application, 240, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    const zero_rtt_reset_retransmit = (try zero_rtt_reset_client.pollProtectedZeroRttDatagram(
+        250,
+        &server_scid,
+        &client_scid,
+        protected_secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.heap.page_allocator.free(zero_rtt_reset_retransmit);
+    try require(try protectedZeroRttHasControl(
+        zero_rtt_reset_retransmit,
+        protected_secrets.client,
+        4,
+        .{ .reset_stream = .{
+            .stream_id = reset_stream_id,
+            .application_error_code = 17,
+            .final_size = 5,
+        } },
+    ));
+
+    var zero_rtt_stop_client = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{});
+    defer zero_rtt_stop_client.deinit();
+
+    const stop_stream_id = try zero_rtt_stop_client.openStream();
+    try zero_rtt_stop_client.stopSending(stop_stream_id, 19);
+    const zero_rtt_stop = (try zero_rtt_stop_client.pollProtectedZeroRttDatagram(
+        260,
+        &server_scid,
+        &client_scid,
+        protected_secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.heap.page_allocator.free(zero_rtt_stop);
+    try require(try protectedZeroRttHasControl(
+        zero_rtt_stop,
+        protected_secrets.client,
+        0,
+        .{ .stop_sending = .{
+            .stream_id = stop_stream_id,
+            .application_error_code = 19,
+        } },
+    ));
+
+    _ = try zero_rtt_stop_client.recordPacketSentInSpace(.application, 270, 1);
+    _ = try zero_rtt_stop_client.recordPacketSentInSpace(.application, 280, 1);
+    _ = try zero_rtt_stop_client.recordPacketSentInSpace(.application, 290, 1);
+    try zero_rtt_stop_client.receiveAckInSpace(.application, 300, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    const zero_rtt_stop_retransmit = (try zero_rtt_stop_client.pollProtectedZeroRttDatagram(
+        310,
+        &server_scid,
+        &client_scid,
+        protected_secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.heap.page_allocator.free(zero_rtt_stop_retransmit);
+    try require(try protectedZeroRttHasControl(
+        zero_rtt_stop_retransmit,
+        protected_secrets.client,
+        4,
+        .{ .stop_sending = .{
+            .stream_id = stop_stream_id,
+            .application_error_code = 19,
+        } },
+    ));
+
     std.debug.print("[spaces] initial_pn={} application_pn={}\n", .{ initial_pn, app_pn });
     std.debug.print("[spaces] after initial ACK bytes initial={} application={}\n", .{
         conn.bytesInFlight(.initial),
@@ -254,5 +404,9 @@ pub fn main() !void {
         zero_rtt_retransmit.len,
         loss_stream_id,
         zero_rtt_loss_client.bytesInFlight(.application),
+    });
+    std.debug.print("[spaces] protected 0-rtt control retransmit reset_bytes={} stop_bytes={}\n", .{
+        zero_rtt_reset_retransmit.len,
+        zero_rtt_stop_retransmit.len,
     });
 }

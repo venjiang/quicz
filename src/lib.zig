@@ -527,6 +527,8 @@ const BuiltProtectedLongPacket = struct {
     datagram: []u8,
     ack_eliciting: bool,
     sent_stream_frame: ?PendingStreamFrame = null,
+    sent_reset_stream_frame: ?frame.ResetStreamFrame = null,
+    sent_stop_sending_frame: ?frame.StopSendingFrame = null,
     local_original_destination_connection_id: [max_connection_id_len]u8 = undefined,
     local_original_destination_connection_id_len: ?u8 = null,
     local_initial_source_connection_id: [max_connection_id_len]u8 = undefined,
@@ -633,6 +635,8 @@ const SentPacket = struct {
     ecn_codepoint: EcnCodepoint = .not_ect,
     stream_frame: ?PendingStreamFrame = null,
     crypto_frame: ?PendingCryptoFrame = null,
+    reset_stream_frame: ?frame.ResetStreamFrame = null,
+    stop_sending_frame: ?frame.StopSendingFrame = null,
 
     fn deinit(self: *SentPacket, allocator: std.mem.Allocator) void {
         if (self.stream_frame) |pending| {
@@ -4267,6 +4271,20 @@ pub const QuicConnection = struct {
         errdefer if (sent_stream_frame) |pending| {
             self.allocator.free(pending.data);
         };
+        const sent_reset_stream_frame: ?frame.ResetStreamFrame = if (consume.reset_stream)
+            switch (frame_to_send) {
+                .reset_stream => |reset| reset,
+                else => return error.Internal,
+            }
+        else
+            null;
+        const sent_stop_sending_frame: ?frame.StopSendingFrame = if (consume.stop_sending)
+            switch (frame_to_send) {
+                .stop_sending => |stop_sending| stop_sending,
+                else => return error.Internal,
+            }
+        else
+            null;
 
         if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
         return .{
@@ -4275,6 +4293,8 @@ pub const QuicConnection = struct {
             .datagram = datagram,
             .ack_eliciting = frameIsAckEliciting(frame_to_send),
             .sent_stream_frame = sent_stream_frame,
+            .sent_reset_stream_frame = sent_reset_stream_frame,
+            .sent_stop_sending_frame = sent_stop_sending_frame,
             .consume_reset_stream = consume.reset_stream,
             .consume_stop_sending = consume.stop_sending,
             .consume_stream = consume.stream,
@@ -4518,6 +4538,8 @@ pub const QuicConnection = struct {
         var packet_space = self.packetNumberSpace(built.space);
         var sent_crypto_frame: ?PendingCryptoFrame = null;
         var sent_stream_frame = built.sent_stream_frame;
+        var sent_reset_stream_frame = built.sent_reset_stream_frame;
+        var sent_stop_sending_frame = built.sent_stop_sending_frame;
         if (built.consume_crypto) {
             sent_crypto_frame = packet_space.crypto_send_queue.orderedRemove(0);
         }
@@ -4529,9 +4551,13 @@ pub const QuicConnection = struct {
                 .bytes = built.datagram.len,
                 .stream_frame = sent_stream_frame,
                 .crypto_frame = sent_crypto_frame,
+                .reset_stream_frame = sent_reset_stream_frame,
+                .stop_sending_frame = sent_stop_sending_frame,
             });
             sent_stream_frame = null;
             sent_crypto_frame = null;
+            sent_reset_stream_frame = null;
+            sent_stop_sending_frame = null;
         }
         if (sent_stream_frame) |pending| {
             self.allocator.free(pending.data);
@@ -5691,6 +5717,7 @@ pub const QuicConnection = struct {
         const pending_retire_connection_id_count = self.pending_retire_connection_ids.items.len;
         const stored_new_token_count = self.stored_new_tokens.items.len;
         const pending_reset_stream_count = self.pending_reset_streams.items.len;
+        const pending_stop_sending_count = self.pending_stop_sending.items.len;
         const pending_max_frame_count = self.pending_max_frames.items.len;
         const recv_max_data_snapshot = self.recv_max_data;
         const recv_max_streams_bidi_snapshot = self.recv_max_streams_bidi;
@@ -5789,6 +5816,7 @@ pub const QuicConnection = struct {
             self.pending_retire_connection_ids.items.len = pending_retire_connection_id_count;
             self.rollbackStoredNewTokens(stored_new_token_count);
             self.pending_reset_streams.items.len = pending_reset_stream_count;
+            self.pending_stop_sending.items.len = pending_stop_sending_count;
             self.pending_max_frames.items.len = pending_max_frame_count;
             self.recv_max_data = recv_max_data_snapshot;
             self.recv_max_streams_bidi = recv_max_streams_bidi_snapshot;
@@ -7390,6 +7418,10 @@ pub const QuicConnection = struct {
             deinitPendingCryptoFrameSlice(self.allocator, retransmit_crypto_frames.items);
             retransmit_crypto_frames.deinit(self.allocator);
         }
+        var retransmit_reset_stream_frames: std.ArrayList(frame.ResetStreamFrame) = .empty;
+        defer retransmit_reset_stream_frames.deinit(self.allocator);
+        var retransmit_stop_sending_frames: std.ArrayList(frame.StopSendingFrame) = .empty;
+        defer retransmit_stop_sending_frames.deinit(self.allocator);
 
         var next_loss_deadline: ?i64 = null;
         for (packet_space.sent_packets.items) |sent_packet| {
@@ -7416,11 +7448,27 @@ pub const QuicConnection = struct {
                 errdefer self.allocator.free(cloned.data);
                 retransmit_crypto_frames.append(self.allocator, cloned) catch return error.OutOfMemory;
             }
+            if (sent_packet.reset_stream_frame) |reset| {
+                retransmit_reset_stream_frames.append(self.allocator, reset) catch return error.OutOfMemory;
+            }
+            if (sent_packet.stop_sending_frame) |stop_sending| {
+                retransmit_stop_sending_frames.append(self.allocator, stop_sending) catch return error.OutOfMemory;
+            }
         }
 
         self.send_queue.ensureUnusedCapacity(self.allocator, retransmit_frames.items.len) catch return error.OutOfMemory;
         packet_space.crypto_send_queue.ensureUnusedCapacity(self.allocator, retransmit_crypto_frames.items.len) catch return error.OutOfMemory;
+        self.pending_reset_streams.ensureUnusedCapacity(self.allocator, retransmit_reset_stream_frames.items.len) catch return error.OutOfMemory;
+        self.pending_stop_sending.ensureUnusedCapacity(self.allocator, retransmit_stop_sending_frames.items.len) catch return error.OutOfMemory;
         packet_space.loss_deadline_millis.* = next_loss_deadline;
+        for (retransmit_reset_stream_frames.items, 0..) |reset, i| {
+            self.pending_reset_streams.insertAssumeCapacity(i, reset);
+        }
+        retransmit_reset_stream_frames.items.len = 0;
+        for (retransmit_stop_sending_frames.items, 0..) |stop_sending, i| {
+            self.pending_stop_sending.insertAssumeCapacity(i, stop_sending);
+        }
+        retransmit_stop_sending_frames.items.len = 0;
         for (retransmit_frames.items, 0..) |pending, i| {
             self.send_queue.insertAssumeCapacity(i, pending);
         }
@@ -7518,11 +7566,15 @@ pub const QuicConnection = struct {
         if (deadline > now_millis) return;
         if (!self.hasPendingPtoProbeDataInSpace(space)) {
             const queued_crypto_probe = try self.queuePtoCryptoRetransmission(space);
-            const queued_stream_probe = if (!queued_crypto_probe)
+            const queued_control_probe = if (!queued_crypto_probe)
+                try self.queuePtoControlRetransmission(space)
+            else
+                false;
+            const queued_stream_probe = if (!queued_crypto_probe and !queued_control_probe)
                 try self.queuePtoStreamRetransmission(space)
             else
                 false;
-            if (!queued_crypto_probe and !queued_stream_probe) {
+            if (!queued_crypto_probe and !queued_control_probe and !queued_stream_probe) {
                 try self.queuePingInSpace(space);
             }
         }
@@ -7537,6 +7589,22 @@ pub const QuicConnection = struct {
             errdefer self.allocator.free(cloned.data);
             packet_space.crypto_send_queue.append(self.allocator, cloned) catch return error.OutOfMemory;
             return true;
+        }
+        return false;
+    }
+
+    fn queuePtoControlRetransmission(self: *QuicConnection, space: PacketNumberSpace) Error!bool {
+        if (space != .application) return false;
+        const packet_space = self.packetNumberSpace(space);
+        for (packet_space.sent_packets.items) |sent_packet| {
+            if (sent_packet.reset_stream_frame) |reset| {
+                self.pending_reset_streams.append(self.allocator, reset) catch return error.OutOfMemory;
+                return true;
+            }
+            if (sent_packet.stop_sending_frame) |stop_sending| {
+                self.pending_stop_sending.append(self.allocator, stop_sending) catch return error.OutOfMemory;
+                return true;
+            }
         }
         return false;
     }
@@ -9280,6 +9348,62 @@ const TestMaxFrameExpectation = union(enum) {
     streams_bidi: u64,
     streams_uni: u64,
 };
+
+const TestControlFrameExpectation = union(enum) {
+    reset_stream: frame.ResetStreamFrame,
+    stop_sending: frame.StopSendingFrame,
+};
+
+fn payloadContainsExpectedControlFrame(
+    payload: []const u8,
+    expected: TestControlFrameExpectation,
+) !bool {
+    var offset: usize = 0;
+    while (offset < payload.len) {
+        var decoded = try frame.decodeFrameSlice(payload[offset..], std.testing.allocator);
+        const decoded_len = decoded.len;
+        defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+        const matched = switch (decoded.frame) {
+            .reset_stream => |reset| switch (expected) {
+                .reset_stream => |want| reset.stream_id == want.stream_id and
+                    reset.application_error_code == want.application_error_code and
+                    reset.final_size == want.final_size,
+                else => false,
+            },
+            .stop_sending => |stop_sending| switch (expected) {
+                .stop_sending => |want| stop_sending.stream_id == want.stream_id and
+                    stop_sending.application_error_code == want.application_error_code,
+                else => false,
+            },
+            .padding => false,
+            else => false,
+        };
+        if (matched) return true;
+        if (decoded_len == 0) return error.TestUnexpectedResult;
+        offset += decoded_len;
+    }
+    return false;
+}
+
+fn protectedZeroRttContainsControlFrame(
+    datagram: []const u8,
+    keys: protection.Aes128PacketProtectionKeys,
+    expected_packet_number: u64,
+    expected: TestControlFrameExpectation,
+) !bool {
+    var opened = try protection.unprotectLongPacketAes128(
+        std.testing.allocator,
+        keys,
+        datagram,
+        expected_packet_number,
+    );
+    defer protection.deinitProtectedLongPacket(&opened, std.testing.allocator);
+
+    try std.testing.expectEqual(packet.PacketType.zero_rtt, opened.packet.header.packet_type);
+    try std.testing.expectEqual(expected_packet_number, opened.packet.header.packet_number);
+    return try payloadContainsExpectedControlFrame(opened.packet.plaintext, expected);
+}
 
 fn payloadContainsExpectedMaxFrame(
     payload: []const u8,
@@ -13253,6 +13377,254 @@ test "checkPtoTimeouts retransmits protected 0-RTT STREAM data before PING" {
         payload_offset += decoded.len;
     }
     try std.testing.expect(found_stream);
+}
+
+test "ACK-driven loss requeues protected 0-RTT control frames for retransmission" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var reset_client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer reset_client.deinit();
+
+    const reset_stream_id = try reset_client.openStream();
+    try reset_client.sendOnStream(reset_stream_id, "hello", false);
+    try reset_client.resetStream(reset_stream_id, 7);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = reset_stream_id,
+        .application_error_code = 7,
+        .final_size = 5,
+    };
+
+    const protected_reset = (try reset_client.pollProtectedZeroRttDatagram(
+        10,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected_reset);
+
+    try std.testing.expectEqual(@as(usize, 0), reset_client.pending_reset_streams.items.len);
+    try std.testing.expect(reset_client.sent_packets.items[0].reset_stream_frame != null);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        protected_reset,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
+
+    _ = try reset_client.recordPacketSentInSpace(.application, 20, 1);
+    _ = try reset_client.recordPacketSentInSpace(.application, 30, 1);
+    _ = try reset_client.recordPacketSentInSpace(.application, 40, 1);
+    try reset_client.receiveAckInSpace(.application, 70, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), reset_client.pending_reset_streams.items.len);
+    try std.testing.expectEqual(reset_frame.stream_id, reset_client.pending_reset_streams.items[0].stream_id);
+    try std.testing.expectEqual(reset_frame.application_error_code, reset_client.pending_reset_streams.items[0].application_error_code);
+    try std.testing.expectEqual(reset_frame.final_size, reset_client.pending_reset_streams.items[0].final_size);
+
+    const reset_retransmit = (try reset_client.pollProtectedZeroRttDatagram(
+        80,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(reset_retransmit);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        reset_retransmit,
+        secrets.client,
+        4,
+        .{ .reset_stream = reset_frame },
+    ));
+
+    var stop_client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer stop_client.deinit();
+
+    const stop_stream_id = try stop_client.openStream();
+    try stop_client.stopSending(stop_stream_id, 9);
+    const stop_frame: frame.StopSendingFrame = .{
+        .stream_id = stop_stream_id,
+        .application_error_code = 9,
+    };
+
+    const protected_stop = (try stop_client.pollProtectedZeroRttDatagram(
+        10,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected_stop);
+
+    try std.testing.expectEqual(@as(usize, 0), stop_client.pending_stop_sending.items.len);
+    try std.testing.expect(stop_client.sent_packets.items[0].stop_sending_frame != null);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        protected_stop,
+        secrets.client,
+        0,
+        .{ .stop_sending = stop_frame },
+    ));
+
+    _ = try stop_client.recordPacketSentInSpace(.application, 20, 1);
+    _ = try stop_client.recordPacketSentInSpace(.application, 30, 1);
+    _ = try stop_client.recordPacketSentInSpace(.application, 40, 1);
+    try stop_client.receiveAckInSpace(.application, 70, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), stop_client.pending_stop_sending.items.len);
+    try std.testing.expectEqual(stop_frame.stream_id, stop_client.pending_stop_sending.items[0].stream_id);
+    try std.testing.expectEqual(stop_frame.application_error_code, stop_client.pending_stop_sending.items[0].application_error_code);
+
+    const stop_retransmit = (try stop_client.pollProtectedZeroRttDatagram(
+        80,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(stop_retransmit);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        stop_retransmit,
+        secrets.client,
+        4,
+        .{ .stop_sending = stop_frame },
+    ));
+}
+
+test "checkPtoTimeouts retransmits protected 0-RTT control frames before PING" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var reset_client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer reset_client.deinit();
+
+    const reset_stream_id = try reset_client.openStream();
+    try reset_client.sendOnStream(reset_stream_id, "bye", false);
+    try reset_client.resetStream(reset_stream_id, 11);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = reset_stream_id,
+        .application_error_code = 11,
+        .final_size = 3,
+    };
+
+    const protected_reset = (try reset_client.pollProtectedZeroRttDatagram(
+        10,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected_reset);
+
+    const reset_deadline = reset_client.ptoDeadlineMillis(.application) orelse return error.TestUnexpectedResult;
+    try reset_client.checkPtoTimeouts(reset_deadline);
+    try std.testing.expectEqual(@as(usize, 0), reset_client.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), reset_client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), reset_client.pending_reset_streams.items.len);
+
+    const reset_retransmit = (try reset_client.pollProtectedZeroRttDatagram(
+        reset_deadline + 1,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(reset_retransmit);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        reset_retransmit,
+        secrets.client,
+        1,
+        .{ .reset_stream = reset_frame },
+    ));
+
+    var stop_client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer stop_client.deinit();
+
+    const stop_stream_id = try stop_client.openStream();
+    try stop_client.stopSending(stop_stream_id, 13);
+    const stop_frame: frame.StopSendingFrame = .{
+        .stream_id = stop_stream_id,
+        .application_error_code = 13,
+    };
+
+    const protected_stop = (try stop_client.pollProtectedZeroRttDatagram(
+        10,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected_stop);
+
+    const stop_deadline = stop_client.ptoDeadlineMillis(.application) orelse return error.TestUnexpectedResult;
+    try stop_client.checkPtoTimeouts(stop_deadline);
+    try std.testing.expectEqual(@as(usize, 0), stop_client.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), stop_client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), stop_client.pending_stop_sending.items.len);
+
+    const stop_retransmit = (try stop_client.pollProtectedZeroRttDatagram(
+        stop_deadline + 1,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(stop_retransmit);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        stop_retransmit,
+        secrets.client,
+        1,
+        .{ .stop_sending = stop_frame },
+    ));
+}
+
+test "invalid ACK payload rolls back protected 0-RTT control-frame requeue" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    const stream_id = try client.openStream();
+    try client.stopSending(stream_id, 15);
+    const protected = (try client.pollProtectedZeroRttDatagram(
+        10,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_stop_sending.items.len);
+
+    _ = try client.recordPacketSentInSpace(.application, 20, 1);
+    _ = try client.recordPacketSentInSpace(.application, 30, 1);
+    _ = try client.recordPacketSentInSpace(.application, 40, 1);
+
+    var ack_buf: [32]u8 = undefined;
+    var ack_out = buffer.fixedWriter(&ack_buf);
+    try frame.encodeFrame(ack_out.writer(), .{ .ack = .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+    try ack_out.writeByte(0xff);
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        client.processDatagramForPacketType(.one_rtt, 70, ack_out.getWritten()),
+    );
+    try std.testing.expectEqual(@as(usize, 4), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_stop_sending.items.len);
 }
 
 test "driveCryptoBackendInSpace installs zero RTT traffic secrets for long packet exchange" {
