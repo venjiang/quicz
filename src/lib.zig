@@ -526,6 +526,7 @@ const BuiltProtectedLongPacket = struct {
     packet_number: u64,
     datagram: []u8,
     ack_eliciting: bool,
+    sent_stream_frame: ?PendingStreamFrame = null,
     local_original_destination_connection_id: [max_connection_id_len]u8 = undefined,
     local_original_destination_connection_id_len: ?u8 = null,
     local_initial_source_connection_id: [max_connection_id_len]u8 = undefined,
@@ -549,6 +550,13 @@ const BuiltProtectedLongPacket = struct {
         std.debug.assert(value.len <= max_connection_id_len);
         @memcpy(self.local_initial_source_connection_id[0..value.len], value);
         self.local_initial_source_connection_id_len = @intCast(value.len);
+    }
+
+    fn deinitSidecars(self: *BuiltProtectedLongPacket, allocator: std.mem.Allocator) void {
+        if (self.sent_stream_frame) |pending| {
+            allocator.free(pending.data);
+            self.sent_stream_frame = null;
+        }
     }
 };
 
@@ -3701,15 +3709,15 @@ pub const QuicConnection = struct {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
 
         const built = (try self.buildNextProtectedZeroRttPacket(dcid, scid, keys)) orelse return null;
-        errdefer self.allocator.free(built.datagram);
+        errdefer self.deinitBuiltProtectedLongPacket(built);
 
         if (built.datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
         if (!self.canSendToPeerAddress(built.datagram.len)) {
-            self.allocator.free(built.datagram);
+            self.deinitBuiltProtectedLongPacket(built);
             return null;
         }
         if (built.ack_eliciting and !self.recovery_state.canSend(built.datagram.len)) {
-            self.allocator.free(built.datagram);
+            self.deinitBuiltProtectedLongPacket(built);
             return null;
         }
 
@@ -3762,9 +3770,9 @@ pub const QuicConnection = struct {
         var zero_rtt_packet: ?BuiltProtectedLongPacket = null;
         var handshake_packet: ?BuiltProtectedLongPacket = null;
         errdefer {
-            if (initial_packet) |built| self.allocator.free(built.datagram);
-            if (zero_rtt_packet) |built| self.allocator.free(built.datagram);
-            if (handshake_packet) |built| self.allocator.free(built.datagram);
+            self.deinitBuiltProtectedLongPacketIfPresent(&initial_packet);
+            self.deinitBuiltProtectedLongPacketIfPresent(&zero_rtt_packet);
+            self.deinitBuiltProtectedLongPacketIfPresent(&handshake_packet);
         }
 
         if (self.initial_packet_space.crypto_send_queue.items.len != 0 or
@@ -3812,8 +3820,7 @@ pub const QuicConnection = struct {
         if (zero_rtt_packet) |built| {
             const next_total = std.math.add(usize, total_len, built.datagram.len) catch return error.BufferTooSmall;
             if (total_len != 0 and next_total > self.maxTxDatagramSize()) {
-                self.allocator.free(built.datagram);
-                zero_rtt_packet = null;
+                self.deinitBuiltProtectedLongPacketIfPresent(&zero_rtt_packet);
             } else {
                 total_len = next_total;
             }
@@ -3821,8 +3828,7 @@ pub const QuicConnection = struct {
         if (handshake_packet) |built| {
             const next_total = std.math.add(usize, total_len, built.datagram.len) catch return error.BufferTooSmall;
             if (total_len != 0 and next_total > self.maxTxDatagramSize()) {
-                self.allocator.free(built.datagram);
-                handshake_packet = null;
+                self.deinitBuiltProtectedLongPacketIfPresent(&handshake_packet);
             } else {
                 total_len = next_total;
             }
@@ -3831,8 +3837,7 @@ pub const QuicConnection = struct {
             const required_initial_datagram_len = self.minimumOutgoingInitialDatagramLen(.initial, built.ack_eliciting);
             if (required_initial_datagram_len != 0 and total_len < required_initial_datagram_len) {
                 const target_initial_len = try addWireLen(built.datagram.len, required_initial_datagram_len - total_len);
-                self.allocator.free(built.datagram);
-                initial_packet = null;
+                self.deinitBuiltProtectedLongPacketIfPresent(&initial_packet);
                 initial_packet = try self.buildNextProtectedLongPacketInSpace(
                     .initial,
                     dcid,
@@ -3848,16 +3853,9 @@ pub const QuicConnection = struct {
                 if (handshake_packet) |handshake| total_len = std.math.add(usize, total_len, handshake.datagram.len) catch return error.BufferTooSmall;
 
                 if (total_len > self.maxTxDatagramSize()) {
-                    if (zero_rtt_packet) |zero_rtt| {
-                        self.allocator.free(zero_rtt.datagram);
-                        zero_rtt_packet = null;
-                    }
-                    if (handshake_packet) |handshake| {
-                        self.allocator.free(handshake.datagram);
-                        handshake_packet = null;
-                    }
-                    if (initial_packet) |expanded_initial| self.allocator.free(expanded_initial.datagram);
-                    initial_packet = null;
+                    self.deinitBuiltProtectedLongPacketIfPresent(&zero_rtt_packet);
+                    self.deinitBuiltProtectedLongPacketIfPresent(&handshake_packet);
+                    self.deinitBuiltProtectedLongPacketIfPresent(&initial_packet);
                     initial_packet = try self.buildNextProtectedLongPacketInSpace(
                         .initial,
                         dcid,
@@ -3873,47 +3871,35 @@ pub const QuicConnection = struct {
         if (total_len == 0) return null;
         if (total_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
         if (!self.canSendToPeerAddress(total_len)) {
-            if (initial_packet) |built| self.allocator.free(built.datagram);
-            if (zero_rtt_packet) |built| self.allocator.free(built.datagram);
-            if (handshake_packet) |built| self.allocator.free(built.datagram);
-            initial_packet = null;
-            zero_rtt_packet = null;
-            handshake_packet = null;
+            self.deinitBuiltProtectedLongPacketIfPresent(&initial_packet);
+            self.deinitBuiltProtectedLongPacketIfPresent(&zero_rtt_packet);
+            self.deinitBuiltProtectedLongPacketIfPresent(&handshake_packet);
             return null;
         }
         if (initial_packet) |built| {
             const packet_space = self.packetNumberSpace(built.space);
             if (built.ack_eliciting and !packet_space.recovery_state.canSend(built.datagram.len)) {
-                if (initial_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
-                if (zero_rtt_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
-                if (handshake_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
-                initial_packet = null;
-                zero_rtt_packet = null;
-                handshake_packet = null;
+                self.deinitBuiltProtectedLongPacketIfPresent(&initial_packet);
+                self.deinitBuiltProtectedLongPacketIfPresent(&zero_rtt_packet);
+                self.deinitBuiltProtectedLongPacketIfPresent(&handshake_packet);
                 return null;
             }
         }
         if (zero_rtt_packet) |built| {
             const packet_space = self.packetNumberSpace(built.space);
             if (built.ack_eliciting and !packet_space.recovery_state.canSend(built.datagram.len)) {
-                if (initial_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
-                if (zero_rtt_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
-                if (handshake_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
-                initial_packet = null;
-                zero_rtt_packet = null;
-                handshake_packet = null;
+                self.deinitBuiltProtectedLongPacketIfPresent(&initial_packet);
+                self.deinitBuiltProtectedLongPacketIfPresent(&zero_rtt_packet);
+                self.deinitBuiltProtectedLongPacketIfPresent(&handshake_packet);
                 return null;
             }
         }
         if (handshake_packet) |built| {
             const packet_space = self.packetNumberSpace(built.space);
             if (built.ack_eliciting and !packet_space.recovery_state.canSend(built.datagram.len)) {
-                if (initial_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
-                if (zero_rtt_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
-                if (handshake_packet) |packet_to_free| self.allocator.free(packet_to_free.datagram);
-                initial_packet = null;
-                zero_rtt_packet = null;
-                handshake_packet = null;
+                self.deinitBuiltProtectedLongPacketIfPresent(&initial_packet);
+                self.deinitBuiltProtectedLongPacketIfPresent(&zero_rtt_packet);
+                self.deinitBuiltProtectedLongPacketIfPresent(&handshake_packet);
                 return null;
             }
         }
@@ -4265,12 +4251,30 @@ pub const QuicConnection = struct {
         };
         errdefer self.allocator.free(datagram);
 
+        var sent_stream_frame: ?PendingStreamFrame = null;
+        if (consume.stream) {
+            const stream = switch (frame_to_send) {
+                .stream => |stream| stream,
+                else => return error.Internal,
+            };
+            sent_stream_frame = .{
+                .stream_id = stream.stream_id,
+                .offset = stream.offset,
+                .fin = stream.fin,
+                .data = self.allocator.dupe(u8, stream.data) catch return error.OutOfMemory,
+            };
+        }
+        errdefer if (sent_stream_frame) |pending| {
+            self.allocator.free(pending.data);
+        };
+
         if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
         return .{
             .space = .application,
             .packet_number = packet_number,
             .datagram = datagram,
             .ack_eliciting = frameIsAckEliciting(frame_to_send),
+            .sent_stream_frame = sent_stream_frame,
             .consume_reset_stream = consume.reset_stream,
             .consume_stop_sending = consume.stop_sending,
             .consume_stream = consume.stream,
@@ -4490,6 +4494,22 @@ pub const QuicConnection = struct {
         packet_space.sent_packets.ensureUnusedCapacity(self.allocator, 1) catch return error.OutOfMemory;
     }
 
+    fn deinitBuiltProtectedLongPacket(self: *QuicConnection, built: BuiltProtectedLongPacket) void {
+        var owned = built;
+        owned.deinitSidecars(self.allocator);
+        self.allocator.free(owned.datagram);
+    }
+
+    fn deinitBuiltProtectedLongPacketIfPresent(
+        self: *QuicConnection,
+        built: *?BuiltProtectedLongPacket,
+    ) void {
+        if (built.*) |packet_to_free| {
+            self.deinitBuiltProtectedLongPacket(packet_to_free);
+            built.* = null;
+        }
+    }
+
     fn commitBuiltProtectedLongPacket(
         self: *QuicConnection,
         built: BuiltProtectedLongPacket,
@@ -4497,6 +4517,7 @@ pub const QuicConnection = struct {
     ) void {
         var packet_space = self.packetNumberSpace(built.space);
         var sent_crypto_frame: ?PendingCryptoFrame = null;
+        var sent_stream_frame = built.sent_stream_frame;
         if (built.consume_crypto) {
             sent_crypto_frame = packet_space.crypto_send_queue.orderedRemove(0);
         }
@@ -4506,9 +4527,14 @@ pub const QuicConnection = struct {
                 .packet_number = built.packet_number,
                 .sent_time_millis = now_millis,
                 .bytes = built.datagram.len,
+                .stream_frame = sent_stream_frame,
                 .crypto_frame = sent_crypto_frame,
             });
+            sent_stream_frame = null;
             sent_crypto_frame = null;
+        }
+        if (sent_stream_frame) |pending| {
+            self.allocator.free(pending.data);
         }
         if (sent_crypto_frame) |pending| {
             self.allocator.free(pending.data);
@@ -13085,6 +13111,148 @@ test "pollProtectedZeroRttDatagram emits protected STREAM in Application packet 
     try std.testing.expectEqualStrings("early data", recv_buf[0..recv_len]);
     try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+}
+
+test "ACK-driven loss requeues protected 0-RTT STREAM frame for retransmission" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "lost early", true);
+    const protected = (try client.pollProtectedZeroRttDatagram(
+        10,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.send_queue.items.len);
+    try std.testing.expect(client.sent_packets.items[0].stream_frame != null);
+
+    _ = try client.recordPacketSentInSpace(.application, 20, 1);
+    _ = try client.recordPacketSentInSpace(.application, 30, 1);
+    _ = try client.recordPacketSentInSpace(.application, 40, 1);
+    try client.receiveAckInSpace(.application, 70, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), client.send_queue.items.len);
+    try std.testing.expectEqual(stream_id, client.send_queue.items[0].stream_id);
+    try std.testing.expectEqual(@as(u64, 0), client.send_queue.items[0].offset);
+    try std.testing.expect(client.send_queue.items[0].fin);
+    try std.testing.expectEqualStrings("lost early", client.send_queue.items[0].data);
+
+    const retransmit = (try client.pollProtectedZeroRttDatagram(
+        80,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(retransmit);
+
+    var opened = try protection.unprotectLongPacketAes128(std.testing.allocator, secrets.client, retransmit, 4);
+    defer protection.deinitProtectedLongPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqual(packet.PacketType.zero_rtt, opened.packet.header.packet_type);
+    try std.testing.expectEqual(@as(u64, 4), opened.packet.header.packet_number);
+
+    var payload_offset: usize = 0;
+    var found_stream = false;
+    while (payload_offset < opened.packet.plaintext.len) {
+        var decoded = try frame.decodeFrameSlice(opened.packet.plaintext[payload_offset..], std.testing.allocator);
+        defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+        switch (decoded.frame) {
+            .stream => |stream| {
+                try std.testing.expectEqual(stream_id, stream.stream_id);
+                try std.testing.expectEqual(@as(u64, 0), stream.offset);
+                try std.testing.expect(stream.fin);
+                try std.testing.expectEqualStrings("lost early", stream.data);
+                found_stream = true;
+            },
+            .padding => {},
+            else => return error.TestUnexpectedResult,
+        }
+        payload_offset += decoded.len;
+    }
+    try std.testing.expect(found_stream);
+}
+
+test "checkPtoTimeouts retransmits protected 0-RTT STREAM data before PING" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "pto early", true);
+    const protected = (try client.pollProtectedZeroRttDatagram(
+        10,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.send_queue.items.len);
+    try std.testing.expect(client.sent_packets.items[0].stream_frame != null);
+
+    const deadline = client.ptoDeadlineMillis(.application) orelse return error.TestUnexpectedResult;
+    try client.checkPtoTimeouts(deadline);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), client.send_queue.items.len);
+    try std.testing.expectEqual(stream_id, client.send_queue.items[0].stream_id);
+    try std.testing.expectEqual(@as(u64, 0), client.send_queue.items[0].offset);
+    try std.testing.expect(client.send_queue.items[0].fin);
+    try std.testing.expectEqualStrings("pto early", client.send_queue.items[0].data);
+
+    const retransmit = (try client.pollProtectedZeroRttDatagram(
+        deadline + 1,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(retransmit);
+
+    var opened = try protection.unprotectLongPacketAes128(std.testing.allocator, secrets.client, retransmit, 1);
+    defer protection.deinitProtectedLongPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqual(packet.PacketType.zero_rtt, opened.packet.header.packet_type);
+    try std.testing.expectEqual(@as(u64, 1), opened.packet.header.packet_number);
+
+    var payload_offset: usize = 0;
+    var found_stream = false;
+    while (payload_offset < opened.packet.plaintext.len) {
+        var decoded = try frame.decodeFrameSlice(opened.packet.plaintext[payload_offset..], std.testing.allocator);
+        defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+        switch (decoded.frame) {
+            .stream => |stream| {
+                try std.testing.expectEqual(stream_id, stream.stream_id);
+                try std.testing.expectEqual(@as(u64, 0), stream.offset);
+                try std.testing.expect(stream.fin);
+                try std.testing.expectEqualStrings("pto early", stream.data);
+                found_stream = true;
+            },
+            .padding => {},
+            else => return error.TestUnexpectedResult,
+        }
+        payload_offset += decoded.len;
+    }
+    try std.testing.expect(found_stream);
 }
 
 test "driveCryptoBackendInSpace installs zero RTT traffic secrets for long packet exchange" {

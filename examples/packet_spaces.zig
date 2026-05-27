@@ -44,6 +44,51 @@ fn requireError(expected: anyerror, result: anyerror!void) !void {
     return error.UnexpectedState;
 }
 
+fn protectedZeroRttHasStream(
+    datagram: []const u8,
+    keys: quicz.protection.Aes128PacketProtectionKeys,
+    expected_packet_number: u64,
+    expected_stream_id: u64,
+    expected_data: []const u8,
+    expected_fin: bool,
+) !bool {
+    var opened = try quicz.protection.unprotectLongPacketAes128(
+        std.heap.page_allocator,
+        keys,
+        datagram,
+        expected_packet_number,
+    );
+    defer quicz.protection.deinitProtectedLongPacket(&opened, std.heap.page_allocator);
+
+    try require(opened.packet.header.packet_type == .zero_rtt);
+    try require(opened.packet.header.packet_number == expected_packet_number);
+
+    var payload_offset: usize = 0;
+    while (payload_offset < opened.packet.plaintext.len) {
+        var decoded = try quicz.frame.decodeFrameSlice(
+            opened.packet.plaintext[payload_offset..],
+            std.heap.page_allocator,
+        );
+        defer quicz.frame.deinitFrame(&decoded.frame, std.heap.page_allocator);
+
+        switch (decoded.frame) {
+            .stream => |stream| {
+                if (stream.stream_id == expected_stream_id and
+                    stream.offset == 0 and
+                    stream.fin == expected_fin and
+                    std.mem.eql(u8, stream.data, expected_data))
+                {
+                    return true;
+                }
+            },
+            .padding => {},
+            else => return error.UnexpectedState,
+        }
+        payload_offset += decoded.len;
+    }
+    return false;
+}
+
 pub fn main() !void {
     var conn = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{});
     defer conn.deinit();
@@ -139,6 +184,52 @@ pub fn main() !void {
     try require(protected_zero_rtt_server.pendingAckLargest(.application) == 0);
     try require(protected_zero_rtt_server.nextPeerPacketNumber(.application) == 1);
 
+    var zero_rtt_loss_client = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{});
+    defer zero_rtt_loss_client.deinit();
+
+    const loss_stream_id = try zero_rtt_loss_client.openStream();
+    try zero_rtt_loss_client.sendOnStream(loss_stream_id, "lost early", true);
+    const lost_zero_rtt = (try zero_rtt_loss_client.pollProtectedZeroRttDatagram(
+        140,
+        &server_scid,
+        &client_scid,
+        protected_secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.heap.page_allocator.free(lost_zero_rtt);
+    try require(try protectedZeroRttHasStream(
+        lost_zero_rtt,
+        protected_secrets.client,
+        0,
+        loss_stream_id,
+        "lost early",
+        true,
+    ));
+
+    _ = try zero_rtt_loss_client.recordPacketSentInSpace(.application, 150, 1);
+    _ = try zero_rtt_loss_client.recordPacketSentInSpace(.application, 160, 1);
+    _ = try zero_rtt_loss_client.recordPacketSentInSpace(.application, 170, 1);
+    try zero_rtt_loss_client.receiveAckInSpace(.application, 180, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    const zero_rtt_retransmit = (try zero_rtt_loss_client.pollProtectedZeroRttDatagram(
+        190,
+        &server_scid,
+        &client_scid,
+        protected_secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.heap.page_allocator.free(zero_rtt_retransmit);
+    try require(try protectedZeroRttHasStream(
+        zero_rtt_retransmit,
+        protected_secrets.client,
+        4,
+        loss_stream_id,
+        "lost early",
+        true,
+    ));
+
     std.debug.print("[spaces] initial_pn={} application_pn={}\n", .{ initial_pn, app_pn });
     std.debug.print("[spaces] after initial ACK bytes initial={} application={}\n", .{
         conn.bytesInFlight(.initial),
@@ -158,5 +249,10 @@ pub fn main() !void {
         protected_zero_rtt.len,
         protected_zero_rtt_server.nextPeerPacketNumber(.application),
         protected_zero_rtt_server.pendingAckLargest(.application),
+    });
+    std.debug.print("[spaces] protected 0-rtt retransmit bytes={} stream_id={} remaining_inflight={}\n", .{
+        zero_rtt_retransmit.len,
+        loss_stream_id,
+        zero_rtt_loss_client.bytesInFlight(.application),
     });
 }
