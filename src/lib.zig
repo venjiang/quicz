@@ -655,6 +655,10 @@ pub const EcnValidationState = enum {
     failed,
 };
 
+const EcnAckValidationResult = struct {
+    ce_congestion_event: bool = false,
+};
+
 const PendingStreamFrame = struct {
     stream_id: u64,
     offset: u64,
@@ -7484,7 +7488,7 @@ pub const QuicConnection = struct {
             removed.deinit(self.allocator);
         }
 
-        self.validateEcnAck(
+        const ecn_result = self.validateEcnAck(
             packet_space,
             ack.largest_acknowledged,
             newly_acked_ect0,
@@ -7513,6 +7517,11 @@ pub const QuicConnection = struct {
             latest_rtt_sample,
             now_millis,
         );
+        if (ecn_result.ce_congestion_event) {
+            if (largest_acked_packet) |acked_packet| {
+                packet_space.recovery_state.onCongestionEvent(acked_packet.sent_time_millis, now_millis);
+            }
+        }
         const persistent_congestion_established = loss_result.persistentCongestionEstablished(packet_space.recovery_state.*);
         if (loss_result.lost_bytes != 0) {
             packet_space.recovery_state.onPacketLost(
@@ -7550,18 +7559,18 @@ pub const QuicConnection = struct {
         newly_acked_ect0: u64,
         newly_acked_ect1: u64,
         ecn_counts: ?frame.EcnCounts,
-    ) void {
+    ) EcnAckValidationResult {
         _ = self;
-        if (packet_space.ecn_validation_state.* == .failed) return;
+        if (packet_space.ecn_validation_state.* == .failed) return .{};
         if (packet_space.ecn_largest_acknowledged.*) |previous_largest| {
-            if (largest_acknowledged <= previous_largest) return;
+            if (largest_acknowledged <= previous_largest) return .{};
         }
 
         const counts = ecn_counts orelse {
             if (newly_acked_ect0 != 0 or newly_acked_ect1 != 0) {
                 packet_space.ecn_validation_state.* = .failed;
             }
-            return;
+            return .{};
         };
 
         if (counts.ect0_count > packet_space.ecn_sent_ect0.* or
@@ -7569,7 +7578,7 @@ pub const QuicConnection = struct {
             counts.ecn_ce_count > saturatingAddU64(packet_space.ecn_sent_ect0.*, packet_space.ecn_sent_ect1.*))
         {
             packet_space.ecn_validation_state.* = .failed;
-            return;
+            return .{};
         }
 
         const previous = packet_space.ecn_counts.*;
@@ -7578,7 +7587,7 @@ pub const QuicConnection = struct {
             counts.ecn_ce_count < previous.ecn_ce_count)
         {
             packet_space.ecn_validation_state.* = .failed;
-            return;
+            return .{};
         }
 
         const ect0_increase = counts.ect0_count - previous.ect0_count;
@@ -7588,7 +7597,7 @@ pub const QuicConnection = struct {
             saturatingAddU64(ect1_increase, ce_increase) < newly_acked_ect1)
         {
             packet_space.ecn_validation_state.* = .failed;
-            return;
+            return .{};
         }
 
         packet_space.ecn_counts.* = counts;
@@ -7596,6 +7605,7 @@ pub const QuicConnection = struct {
         if (packet_space.ecn_validation_state.* == .capable or newly_acked_ect0 != 0 or newly_acked_ect1 != 0) {
             packet_space.ecn_validation_state.* = .capable;
         }
+        return .{ .ce_congestion_event = ce_increase != 0 };
     }
 
     fn removeAckDrivenLosses(
@@ -16509,6 +16519,82 @@ test "ACK_ECN validates ECT0 counters for modeled sent packets" {
     try std.testing.expectEqual(@as(u64, 1), conn.ecnCounts(.application).ect0_count);
 }
 
+test "ACK_ECN CE increase enters NewReno recovery" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    const initial_window = conn.congestionWindow(.application);
+    _ = try conn.recordEcnPacketSentInSpace(.application, 10, 100, .ect0);
+
+    try conn.receiveAckEcnInSpace(.application, 60, .{
+        .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 0,
+            .ect1_count = 0,
+            .ecn_ce_count = 1,
+        },
+    });
+
+    const recovery_window = conn.congestionWindow(.application);
+    try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(EcnValidationState.capable, conn.ecnValidationState(.application));
+    try std.testing.expectEqual(@as(u64, 1), conn.ecnCounts(.application).ecn_ce_count);
+    try std.testing.expectEqual(@max(initial_window / 2, recovery.minimumCongestionWindow(1200)), recovery_window);
+    try std.testing.expectEqual(recovery_window, conn.recovery_state.ssthresh);
+}
+
+test "ACK_ECN CE increase respects NewReno recovery period" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    _ = try conn.recordEcnPacketSentInSpace(.application, 10, 100, .ect0);
+    _ = try conn.recordEcnPacketSentInSpace(.application, 20, 100, .ect0);
+
+    try conn.receiveAckEcnInSpace(.application, 60, .{
+        .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 0,
+            .ect1_count = 0,
+            .ecn_ce_count = 1,
+        },
+    });
+    const recovery_window = conn.congestionWindow(.application);
+
+    try conn.receiveAckEcnInSpace(.application, 70, .{
+        .ack = .{
+            .largest_acknowledged = 1,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 0,
+            .ect1_count = 0,
+            .ecn_ce_count = 2,
+        },
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(EcnValidationState.capable, conn.ecnValidationState(.application));
+    try std.testing.expectEqual(@as(u64, 2), conn.ecnCounts(.application).ecn_ce_count);
+    try std.testing.expectEqual(recovery_window, conn.congestionWindow(.application));
+}
+
 test "regular ACK disables ECN validation for newly acknowledged ECT packet" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
@@ -16616,6 +16702,8 @@ test "processDatagram rolls back ECN validation state when later frame is invali
     defer conn.deinit();
     try conn.validatePeerAddress();
 
+    const congestion_window_before = conn.congestionWindow(.application);
+    const ssthresh_before = conn.recovery_state.ssthresh;
     _ = try conn.recordEcnPacketSentInSpace(.application, 10, 100, .ect0);
 
     var payload_buf: [64]u8 = undefined;
@@ -16627,9 +16715,9 @@ test "processDatagram rolls back ECN validation state when later frame is invali
             .first_ack_range = 0,
         },
         .ecn_counts = .{
-            .ect0_count = 1,
+            .ect0_count = 0,
             .ect1_count = 0,
-            .ecn_ce_count = 0,
+            .ecn_ce_count = 1,
         },
     } });
     try payload.writer().writeByte(@intFromEnum(frame.FrameType.handshake_done));
@@ -16637,8 +16725,12 @@ test "processDatagram rolls back ECN validation state when later frame is invali
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(60, payload.getWritten()));
     try std.testing.expectEqual(EcnValidationState.unknown, conn.ecnValidationState(.application));
     try std.testing.expectEqual(@as(u64, 0), conn.ecnCounts(.application).ect0_count);
+    try std.testing.expectEqual(@as(u64, 0), conn.ecnCounts(.application).ecn_ce_count);
     try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 100), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(congestion_window_before, conn.congestionWindow(.application));
+    try std.testing.expectEqual(ssthresh_before, conn.recovery_state.ssthresh);
+    try std.testing.expectEqual(@as(?i64, null), conn.recovery_state.congestion_recovery_start_time_millis);
 }
 
 test "processDatagram rejects ACK for packet number never sent" {

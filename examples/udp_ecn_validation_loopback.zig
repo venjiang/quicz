@@ -215,22 +215,69 @@ pub fn main() !void {
     try require(client.sentPacketCount(.application) == 0);
     try require(client.ecnValidationState(.application) == .capable);
     try require(client.ecnCounts(.application).ect0_count == 1);
+    const no_ce_cwnd = client.congestionWindow(.application);
+
+    const ce_ping = try protectShortPacket(allocator, &server_dcid, 1, secrets.client, &ping_payload);
+    defer allocator.free(ce_ping);
+    try require(try client.recordEcnPacketSentInSpace(.application, 10, ce_ping.len, .ect0) == 1);
+    try client_socket.send(io, &server_socket.address, ce_ping);
+
+    const received_ce_ping = try receiveRoute(io, &server_router, &server_socket, &server_receive_buf);
+    try require(received_ce_ping.route.connection_id == 51);
+    try require(std.mem.eql(u8, received_ce_ping.route.destination_connection_id.asSlice(), &server_dcid));
+    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, received_ce_ping.data);
+    try require(server.pendingAckLargest(.application) == 1);
+
+    var ce_ack_payload: [64]u8 = undefined;
+    var ce_ack_out = fixedWriter(&ce_ack_payload);
+    try quicz.frame.encodeFrame(ce_ack_out.writer(), .{ .ack_ecn = .{
+        .ack = .{
+            .largest_acknowledged = 1,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 1,
+            .ect1_count = 0,
+            .ecn_ce_count = 1,
+        },
+    } });
+    const ce_ack = try protectShortPacket(allocator, &client_dcid, 1, secrets.server, ce_ack_out.getWritten());
+    defer allocator.free(ce_ack);
+    try server_socket.send(io, &client_socket.address, ce_ack);
+
+    const received_ce_ack = try receiveRoute(io, &client_router, &client_socket, &client_receive_buf);
+    try require(received_ce_ack.route.connection_id == 41);
+    try require(std.mem.eql(u8, received_ce_ack.route.destination_connection_id.asSlice(), &client_dcid));
+    try client.processProtectedShortDatagram(12, secrets.server, client_dcid.len, received_ce_ack.data);
+
+    const ce_cwnd = client.congestionWindow(.application);
+    try require(client.bytesInFlight(.application) == 0);
+    try require(client.sentPacketCount(.application) == 0);
+    try require(client.ecnValidationState(.application) == .capable);
+    try require(client.ecnCounts(.application).ecn_ce_count == 1);
+    try require(ce_cwnd == @max(no_ce_cwnd / 2, quicz.recovery.minimumCongestionWindow(1350)));
 
     try ecn_policy.setStateForPath(client_path, mapEcnState(client.ecnValidationState(.application)));
     try require(ecn_policy.stateForPath(client_path) == .capable);
     try require(ecn_policy.stateForPath(migrated_path) == .unknown);
     try require(ecn_policy.mayUseEct(migrated_path));
 
-    std.debug.print("[udp-ecn] client_port={} server_port={} migrated_port={} ping_bytes={} ack_ecn_bytes={} client_ecn={s} path_ecn={s} migrated_ecn={s} ect0_count={} client_inflight={}\n", .{
+    std.debug.print("[udp-ecn] client_port={} server_port={} migrated_port={} ping_bytes={} ack_ecn_bytes={} ce_ping_bytes={} ce_ack_bytes={} client_ecn={s} path_ecn={s} migrated_ecn={s} ect0_count={} ce_count={} no_ce_cwnd={} ce_cwnd={} client_inflight={}\n", .{
         client_local.port,
         server_local.port,
         migrated_local.port,
         ecn_ping.len,
         ack_ecn.len,
+        ce_ping.len,
+        ce_ack.len,
         @tagName(client.ecnValidationState(.application)),
         @tagName(ecn_policy.stateForPath(client_path)),
         @tagName(ecn_policy.stateForPath(migrated_path)),
         client.ecnCounts(.application).ect0_count,
+        client.ecnCounts(.application).ecn_ce_count,
+        no_ce_cwnd,
+        ce_cwnd,
         client.bytesInFlight(.application),
     });
 }

@@ -102,8 +102,16 @@ pub const Recovery = struct {
     /// Record packet loss and start a congestion recovery period if needed.
     pub fn onPacketLost(self: *Recovery, bytes: usize, lost_packet_sent_time_millis: i64, now_millis: i64) void {
         self.removeBytesInFlight(bytes);
-        if (self.inCongestionRecovery(lost_packet_sent_time_millis)) return;
+        self.onCongestionEvent(lost_packet_sent_time_millis, now_millis);
+    }
 
+    /// Enter NewReno congestion recovery for a loss or ECN-CE congestion event.
+    ///
+    /// The caller is responsible for bytes-in-flight accounting. Loss removes
+    /// packet bytes before calling this; ECN-CE marks an acknowledged packet as
+    /// a congestion signal without treating that packet as lost.
+    pub fn onCongestionEvent(self: *Recovery, sent_time_millis: i64, now_millis: i64) void {
+        if (self.inCongestionRecovery(sent_time_millis)) return;
         self.congestion_recovery_start_time_millis = now_millis;
         self.ssthresh = @max(self.congestion_window / 2, minimumCongestionWindow(self.max_datagram_size));
         self.congestion_window = self.ssthresh;
@@ -298,6 +306,26 @@ test "congestion recovery period avoids repeated loss reduction and ACK growth" 
     recovery.onPacketSent(1200);
     recovery.onPacketAcked(1200, 150, 100, 0);
     try std.testing.expect(recovery.congestion_window > recovery_window);
+}
+
+test "ECN congestion event enters recovery without removing bytes in flight" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    const initial_window = recovery.congestion_window;
+
+    recovery.onPacketSent(2400);
+    recovery.onCongestionEvent(10, 100);
+    const recovery_window = recovery.congestion_window;
+    try std.testing.expect(recovery_window < initial_window);
+    try std.testing.expectEqual(recovery_window, recovery.ssthresh);
+    try std.testing.expectEqual(@as(usize, 2400), recovery.bytes_in_flight);
+    try std.testing.expectEqual(@as(?i64, 100), recovery.congestion_recovery_start_time_millis);
+
+    recovery.onCongestionEvent(20, 110);
+    try std.testing.expectEqual(recovery_window, recovery.congestion_window);
+
+    recovery.onPacketAcked(1200, 50, 100, 0);
+    try std.testing.expectEqual(@as(usize, 1200), recovery.bytes_in_flight);
+    try std.testing.expectEqual(recovery_window, recovery.congestion_window);
 }
 
 test "persistent congestion duration and response follow RFC 9002 bounds" {
