@@ -12454,6 +12454,29 @@ test "ACK losses respect NewReno congestion recovery period" {
     try std.testing.expectEqual(recovery_window, conn.congestionWindow(.application));
 }
 
+test "ACK-driven NewReno loss keeps ssthresh below minimum cwnd clamp" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    conn.recovery_state.congestion_window = 3_000;
+    var packet_number: u64 = 0;
+    while (packet_number < 4) : (packet_number += 1) {
+        _ = try conn.recordPacketSentInSpace(.application, @as(i64, @intCast(packet_number + 1)) * 10, 100);
+    }
+
+    try conn.receiveAckInSpace(.application, 100, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(recovery.minimumCongestionWindow(1200), conn.congestionWindow(.application));
+    try std.testing.expectEqual(@as(usize, 1_500), conn.recovery_state.ssthresh);
+}
+
 test "ACK growth follows NewReno slow start then congestion avoidance" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,

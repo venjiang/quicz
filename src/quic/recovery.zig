@@ -113,8 +113,8 @@ pub const Recovery = struct {
     pub fn onCongestionEvent(self: *Recovery, sent_time_millis: i64, now_millis: i64) void {
         if (self.inCongestionRecovery(sent_time_millis)) return;
         self.congestion_recovery_start_time_millis = now_millis;
-        self.ssthresh = @max(self.congestion_window / 2, minimumCongestionWindow(self.max_datagram_size));
-        self.congestion_window = self.ssthresh;
+        self.ssthresh = self.congestion_window / 2;
+        self.congestion_window = @max(self.ssthresh, minimumCongestionWindow(self.max_datagram_size));
     }
 
     /// Mark one PTO expiration and apply exponential backoff to future PTOs.
@@ -310,6 +310,16 @@ test "congestion recovery period avoids repeated loss reduction and ACK growth" 
     recovery.onPacketSent(1200);
     recovery.onPacketAcked(1200, 150, 100, 0);
     try std.testing.expect(recovery.congestion_window > recovery_window);
+}
+
+test "NewReno congestion event clamps cwnd without clamping ssthresh" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    recovery.congestion_window = 3_000;
+
+    recovery.onCongestionEvent(10, 100);
+
+    try std.testing.expectEqual(@as(usize, 1_500), recovery.ssthresh);
+    try std.testing.expectEqual(minimumCongestionWindow(1200), recovery.congestion_window);
 }
 
 test "ECN congestion event enters recovery without removing bytes in flight" {

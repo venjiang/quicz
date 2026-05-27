@@ -87,6 +87,29 @@ pub fn main() !void {
         .{ slow_start_cwnd, avoidance_cwnd, avoidance_increase },
     );
 
+    var newreno_clamp = try quicz.QuicConnection.init(allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer newreno_clamp.deinit();
+    newreno_clamp.recovery_state.congestion_window = 3_000;
+    var clamp_packet_number: u64 = 0;
+    while (clamp_packet_number < 4) : (clamp_packet_number += 1) {
+        _ = try newreno_clamp.recordPacketSentInSpace(.application, @as(i64, @intCast(clamp_packet_number + 1)) * 10, 100);
+    }
+    try newreno_clamp.receiveAckInSpace(.application, 100, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const minimum_cwnd = quicz.recovery.minimumCongestionWindow(1200);
+    if (newreno_clamp.congestionWindow(.application) != minimum_cwnd) return error.LossRecoveryExampleFailed;
+    if (newreno_clamp.recovery_state.ssthresh != 1_500) return error.LossRecoveryExampleFailed;
+    std.debug.print(
+        "[loss] NewReno min clamp cwnd={d} ssthresh={d}\n",
+        .{ newreno_clamp.congestionWindow(.application), newreno_clamp.recovery_state.ssthresh },
+    );
+
     var persistent = try quicz.QuicConnection.init(allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
