@@ -1902,6 +1902,25 @@ pub const QuicConnection = struct {
         return pto_deadline;
     }
 
+    /// Service the aggregate modeled QUIC loss detection timer if it is due.
+    ///
+    /// This is the endpoint/event-loop entry point for the simplified recovery
+    /// model. It recomputes the aggregate timer, does nothing before the
+    /// deadline, and when due dispatches to loss-time handling before PTO
+    /// probing. A late call may service multiple due packet number spaces via
+    /// the existing per-space timeout handlers; the returned value is the
+    /// earliest timer that caused this service call to run.
+    pub fn serviceLossDetectionTimer(self: *QuicConnection, now_millis: i64) Error!?LossDetectionTimerDeadline {
+        const deadline = self.lossDetectionTimerDeadlineMillis() orelse return null;
+        if (deadline.deadline_millis > now_millis) return null;
+
+        switch (deadline.kind) {
+            .loss_time => try self.checkLossDetectionTimeouts(now_millis),
+            .pto => try self.checkPtoTimeouts(now_millis),
+        }
+        return deadline;
+    }
+
     /// Return the current ECN validation state for one packet number space.
     pub fn ecnValidationState(self: QuicConnection, space: PacketNumberSpace) EcnValidationState {
         return switch (space) {
@@ -11810,6 +11829,64 @@ test "loss detection timer reports earliest PTO when no loss time is armed" {
     try std.testing.expectEqual(PacketNumberSpace.initial, deadline.space);
     try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline.kind);
     try std.testing.expectEqual(@as(i64, 310), deadline.deadline_millis);
+}
+
+test "serviceLossDetectionTimer is no-op before aggregate deadline" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    const deadline = conn.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, deadline.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline.kind);
+    try std.testing.expectEqual(@as(i64, 335), deadline.deadline_millis);
+
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), try conn.serviceLossDetectionTimer(334));
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
+}
+
+test "serviceLossDetectionTimer handles loss-time before due PTO probes" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 1000, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 1200, 100);
+    _ = try conn.recordPacketSentInSpace(.initial, 0, 100);
+
+    try conn.receiveAckInSpace(.application, 1300, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    const serviced = (try conn.serviceLossDetectionTimer(1375)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.loss_time, serviced.kind);
+    try std.testing.expectEqual(@as(i64, 1375), serviced.deadline_millis);
+    try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 0), conn.initial_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 0), conn.initial_packet_space.recovery_state.pto_count);
+}
+
+test "serviceLossDetectionTimer handles PTO deadline through aggregate timer" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+
+    const serviced = (try conn.serviceLossDetectionTimer(335)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.kind);
+    try std.testing.expectEqual(@as(i64, 335), serviced.deadline_millis);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
 }
 
 test "loss detection timer expires protected short CRYPTO retransmission" {

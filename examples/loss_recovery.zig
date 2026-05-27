@@ -43,7 +43,9 @@ pub fn main() !void {
     if (timer.kind != .loss_time) return error.LossRecoveryExampleFailed;
     const deadline = timer.deadline_millis;
     if (time_threshold.sentPacketCount(.application) != 1) return error.LossRecoveryExampleFailed;
-    try time_threshold.checkLossDetectionTimeouts(deadline);
+    const serviced = (try time_threshold.serviceLossDetectionTimer(deadline)) orelse return error.LossRecoveryExampleFailed;
+    if (serviced.space != .application) return error.LossRecoveryExampleFailed;
+    if (serviced.kind != .loss_time) return error.LossRecoveryExampleFailed;
 
     if (time_threshold.sentPacketCount(.application) != 0) return error.LossRecoveryExampleFailed;
     if (time_threshold.bytesInFlight(.application) != 0) return error.LossRecoveryExampleFailed;

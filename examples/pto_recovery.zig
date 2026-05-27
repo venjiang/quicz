@@ -47,10 +47,12 @@ pub fn main() !void {
     if (timer.kind != .pto) return error.PtoRecoveryExampleFailed;
     const deadline = timer.deadline_millis;
 
-    try conn.checkPtoTimeouts(deadline - 1);
+    if ((try conn.serviceLossDetectionTimer(deadline - 1)) != null) return error.PtoRecoveryExampleFailed;
     if (conn.ptoDeadlineMillis(.application) != deadline) return error.PtoRecoveryExampleFailed;
 
-    try conn.checkPtoTimeouts(deadline);
+    const serviced = (try conn.serviceLossDetectionTimer(deadline)) orelse return error.PtoRecoveryExampleFailed;
+    if (serviced.space != .application) return error.PtoRecoveryExampleFailed;
+    if (serviced.kind != .pto) return error.PtoRecoveryExampleFailed;
     if (conn.ptoDeadlineMillis(.application) == null) return error.PtoRecoveryExampleFailed;
 
     var out_buf: [32]u8 = undefined;
@@ -173,7 +175,9 @@ pub fn main() !void {
     if (spaces_timer.kind != .pto) return error.PtoRecoveryExampleFailed;
     if (spaces_timer.deadline_millis != initial_deadline) return error.PtoRecoveryExampleFailed;
 
-    try spaces.checkPtoTimeouts(initial_deadline);
+    const initial_serviced = (try spaces.serviceLossDetectionTimer(initial_deadline)) orelse return error.PtoRecoveryExampleFailed;
+    if (initial_serviced.space != .initial) return error.PtoRecoveryExampleFailed;
+    if (initial_serviced.kind != .pto) return error.PtoRecoveryExampleFailed;
     const initial_payload = (try spaces.pollTxInSpace(.initial, initial_deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
     var initial_decoded = try quicz.frame.decodeFrameSlice(initial_payload, allocator);
     defer quicz.frame.deinitFrame(&initial_decoded.frame, allocator);
@@ -182,7 +186,9 @@ pub fn main() !void {
         else => return error.PtoRecoveryExampleFailed,
     }
 
-    try spaces.checkPtoTimeouts(handshake_deadline);
+    const handshake_serviced = (try spaces.serviceLossDetectionTimer(handshake_deadline)) orelse return error.PtoRecoveryExampleFailed;
+    if (handshake_serviced.space != .handshake) return error.PtoRecoveryExampleFailed;
+    if (handshake_serviced.kind != .pto) return error.PtoRecoveryExampleFailed;
     const handshake_payload = (try spaces.pollTxInSpace(.handshake, handshake_deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
     var handshake_decoded = try quicz.frame.decodeFrameSlice(handshake_payload, allocator);
     defer quicz.frame.deinitFrame(&handshake_decoded.frame, allocator);
