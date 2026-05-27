@@ -316,6 +316,28 @@ pub const PacketNumberSpace = enum {
     application,
 };
 
+/// Cause that arms the modeled QUIC loss detection timer.
+pub const LossDetectionTimerKind = enum {
+    /// Time-threshold loss detection is pending.
+    loss_time,
+    /// Probe Timeout is pending for ack-eliciting data in flight.
+    pto,
+};
+
+/// Earliest modeled QUIC loss detection timer deadline.
+///
+/// `deadline_millis` uses the same caller-controlled millisecond clock passed
+/// to send, receive, and recovery APIs. When any packet number space has a
+/// loss-time deadline, RFC 9002 gives that timer precedence over PTO.
+pub const LossDetectionTimerDeadline = struct {
+    /// Packet number space whose timer should be serviced.
+    space: PacketNumberSpace,
+    /// Timer cause to handle at `deadline_millis`.
+    kind: LossDetectionTimerKind,
+    /// Absolute deadline in the connection's caller-controlled millisecond clock.
+    deadline_millis: i64,
+};
+
 /// TLS-produced Handshake traffic secrets for one QUIC connection.
 ///
 /// `local` is this endpoint's write secret; `peer` is the remote endpoint's
@@ -1841,6 +1863,43 @@ pub const QuicConnection = struct {
             .handshake => ptoDeadlineFor(self.handshake_packet_space.sent_packets.items, self.handshake_packet_space.recovery_state, false),
             .application => ptoDeadlineFor(self.sent_packets.items, self.recovery_state, true),
         };
+    }
+
+    /// Return the earliest modeled loss detection timer across packet spaces.
+    ///
+    /// This follows the RFC 9002 scheduling rule used by the simplified
+    /// recovery model: any pending loss-time deadline wins over PTO; otherwise
+    /// the earliest PTO deadline is returned. The caller can pass the same clock
+    /// value to `checkLossDetectionTimeouts()` and `checkPtoTimeouts()` when the
+    /// deadline expires.
+    pub fn lossDetectionTimerDeadlineMillis(self: QuicConnection) ?LossDetectionTimerDeadline {
+        const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
+
+        var loss_deadline: ?LossDetectionTimerDeadline = null;
+        for (spaces) |space| {
+            const deadline = self.lossDetectionDeadlineMillis(space) orelse continue;
+            if (loss_deadline == null or deadline < loss_deadline.?.deadline_millis) {
+                loss_deadline = .{
+                    .space = space,
+                    .kind = .loss_time,
+                    .deadline_millis = deadline,
+                };
+            }
+        }
+        if (loss_deadline) |deadline| return deadline;
+
+        var pto_deadline: ?LossDetectionTimerDeadline = null;
+        for (spaces) |space| {
+            const deadline = self.ptoDeadlineMillis(space) orelse continue;
+            if (pto_deadline == null or deadline < pto_deadline.?.deadline_millis) {
+                pto_deadline = .{
+                    .space = space,
+                    .kind = .pto,
+                    .deadline_millis = deadline,
+                };
+            }
+        }
+        return pto_deadline;
     }
 
     /// Return the current ECN validation state for one packet number space.
@@ -11714,6 +11773,122 @@ test "ACK keeps earlier packet while time-threshold delay has not elapsed" {
     try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
     try std.testing.expectEqual(@as(?i64, null), conn.lossDetectionDeadlineMillis(.application));
+}
+
+test "loss detection timer reports loss-time before PTO across packet spaces" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 300, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 500, 100);
+    _ = try conn.recordPacketSentInSpace(.initial, 10, 100);
+
+    try conn.receiveAckInSpace(.application, 600, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    const deadline = conn.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, deadline.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.loss_time, deadline.kind);
+    try std.testing.expectEqual(@as(i64, 675), deadline.deadline_millis);
+}
+
+test "loss detection timer reports earliest PTO when no loss time is armed" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    _ = try conn.recordPacketSentInSpace(.initial, 10, 100);
+    _ = try conn.recordPacketSentInSpace(.handshake, 20, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 0, 100);
+
+    const deadline = conn.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, deadline.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline.kind);
+    try std.testing.expectEqual(@as(i64, 310), deadline.deadline_millis);
+}
+
+test "loss detection timer expires protected short CRYPTO retransmission" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+
+    try client.sendCrypto("loss-timer protected crypto");
+    const first = (try client.pollProtectedShortDatagram(
+        300,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+
+    try client.sendPing();
+    const second = (try client.pollProtectedShortDatagram(
+        500,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.crypto_send_queue.items.len);
+
+    try client.receiveAckInSpace(.application, 600, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    const timer = client.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.loss_time, timer.kind);
+    try std.testing.expectEqual(@as(i64, 675), timer.deadline_millis);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.crypto_send_queue.items.len);
+
+    try client.checkLossDetectionTimeouts(timer.deadline_millis - 1);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.crypto_send_queue.items.len);
+
+    try client.checkLossDetectionTimeouts(timer.deadline_millis);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), client.crypto_send_queue.items.len);
+    try std.testing.expectEqual(@as(u64, 0), client.crypto_send_queue.items[0].offset);
+    try std.testing.expectEqualStrings("loss-timer protected crypto", client.crypto_send_queue.items[0].data);
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadlineMillis());
+
+    const retransmit = (try client.pollProtectedShortDatagram(
+        timer.deadline_millis + 1,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(retransmit);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        secrets.client,
+        retransmit,
+        server_dcid.len,
+        2,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 2), opened.packet.header.packet_number);
+
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .crypto => |crypto| {
+            try std.testing.expectEqual(@as(u64, 0), crypto.offset);
+            try std.testing.expectEqualStrings("loss-timer protected crypto", crypto.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "ACK-driven losses establish persistent congestion after prior RTT sample" {

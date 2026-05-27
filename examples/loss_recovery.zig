@@ -38,7 +38,10 @@ pub fn main() !void {
         .ack_delay = 0,
         .first_ack_range = 0,
     });
-    const deadline = time_threshold.lossDetectionDeadlineMillis(.application) orelse return error.LossRecoveryExampleFailed;
+    const timer = time_threshold.lossDetectionTimerDeadlineMillis() orelse return error.LossRecoveryExampleFailed;
+    if (timer.space != .application) return error.LossRecoveryExampleFailed;
+    if (timer.kind != .loss_time) return error.LossRecoveryExampleFailed;
+    const deadline = timer.deadline_millis;
     if (time_threshold.sentPacketCount(.application) != 1) return error.LossRecoveryExampleFailed;
     try time_threshold.checkLossDetectionTimeouts(deadline);
 

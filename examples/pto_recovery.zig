@@ -42,7 +42,10 @@ pub fn main() !void {
     defer conn.deinit();
 
     _ = try conn.recordPacketSentInSpace(.application, 10, 100);
-    const deadline = conn.ptoDeadlineMillis(.application) orelse return error.PtoRecoveryExampleFailed;
+    const timer = conn.lossDetectionTimerDeadlineMillis() orelse return error.PtoRecoveryExampleFailed;
+    if (timer.space != .application) return error.PtoRecoveryExampleFailed;
+    if (timer.kind != .pto) return error.PtoRecoveryExampleFailed;
+    const deadline = timer.deadline_millis;
 
     try conn.checkPtoTimeouts(deadline - 1);
     if (conn.ptoDeadlineMillis(.application) != deadline) return error.PtoRecoveryExampleFailed;
@@ -165,6 +168,10 @@ pub fn main() !void {
     const handshake_deadline = spaces.ptoDeadlineMillis(.handshake) orelse return error.PtoRecoveryExampleFailed;
     if (initial_deadline != 310) return error.PtoRecoveryExampleFailed;
     if (handshake_deadline != 320) return error.PtoRecoveryExampleFailed;
+    const spaces_timer = spaces.lossDetectionTimerDeadlineMillis() orelse return error.PtoRecoveryExampleFailed;
+    if (spaces_timer.space != .initial) return error.PtoRecoveryExampleFailed;
+    if (spaces_timer.kind != .pto) return error.PtoRecoveryExampleFailed;
+    if (spaces_timer.deadline_millis != initial_deadline) return error.PtoRecoveryExampleFailed;
 
     try spaces.checkPtoTimeouts(initial_deadline);
     const initial_payload = (try spaces.pollTxInSpace(.initial, initial_deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
