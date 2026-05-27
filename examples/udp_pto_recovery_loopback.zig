@@ -238,11 +238,16 @@ pub fn main() !void {
     );
     try require(server.pendingAckLargest(.application) == 0);
 
-    const ping_deadline = client.ptoDeadlineMillis(.application) orelse return error.UnexpectedState;
-    try client.checkPtoTimeouts(ping_deadline - 1);
+    const ping_timer = client.lossDetectionTimerDeadlineMillis() orelse return error.UnexpectedState;
+    try require(ping_timer.space == .application);
+    try require(ping_timer.kind == .pto);
+    const ping_deadline = ping_timer.deadline_millis;
+    try require((try client.serviceLossDetectionTimer(ping_deadline - 1)) == null);
     try require(client.sentPacketCount(.application) == 1);
 
-    try client.checkPtoTimeouts(ping_deadline);
+    const ping_serviced = (try client.serviceLossDetectionTimer(ping_deadline)) orelse return error.UnexpectedState;
+    try require(ping_serviced.space == .application);
+    try require(ping_serviced.kind == .pto);
     const pto_ping = (try client.pollProtectedShortDatagram(ping_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer allocator.free(pto_ping);
     try require(client.sentPacketCount(.application) == 2);
@@ -296,8 +301,13 @@ pub fn main() !void {
     );
 
     try client.sendOnStream(stream_id, "new", true);
-    const stream_deadline = client.ptoDeadlineMillis(.application) orelse return error.UnexpectedState;
-    try client.checkPtoTimeouts(stream_deadline);
+    const stream_timer = client.lossDetectionTimerDeadlineMillis() orelse return error.UnexpectedState;
+    try require(stream_timer.space == .application);
+    try require(stream_timer.kind == .pto);
+    const stream_deadline = stream_timer.deadline_millis;
+    const stream_serviced = (try client.serviceLossDetectionTimer(stream_deadline)) orelse return error.UnexpectedState;
+    try require(stream_serviced.space == .application);
+    try require(stream_serviced.kind == .pto);
     const stream_probe = (try client.pollProtectedShortDatagram(stream_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer allocator.free(stream_probe);
     try require(client.sentPacketCount(.application) == 2);
@@ -358,8 +368,13 @@ pub fn main() !void {
     const retransmit_read_len = (try server.recvOnStream(retransmit_stream_id, &retransmit_read_buf)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, retransmit_read_buf[0..retransmit_read_len], "again"));
 
-    const retransmit_deadline = client.ptoDeadlineMillis(.application) orelse return error.UnexpectedState;
-    try client.checkPtoTimeouts(retransmit_deadline);
+    const retransmit_timer = client.lossDetectionTimerDeadlineMillis() orelse return error.UnexpectedState;
+    try require(retransmit_timer.space == .application);
+    try require(retransmit_timer.kind == .pto);
+    const retransmit_deadline = retransmit_timer.deadline_millis;
+    const retransmit_serviced = (try client.serviceLossDetectionTimer(retransmit_deadline)) orelse return error.UnexpectedState;
+    try require(retransmit_serviced.space == .application);
+    try require(retransmit_serviced.kind == .pto);
     const retransmit_probe = (try client.pollProtectedShortDatagram(retransmit_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer allocator.free(retransmit_probe);
     try require(client.sentPacketCount(.application) == 2);
@@ -424,8 +439,13 @@ pub fn main() !void {
     const crypto_read_len = (try server.recvCrypto(&crypto_read_buf)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, crypto_read_buf[0..crypto_read_len], "udp crypto"));
 
-    const crypto_deadline = client.ptoDeadlineMillis(.application) orelse return error.UnexpectedState;
-    try client.checkPtoTimeouts(crypto_deadline);
+    const crypto_timer = client.lossDetectionTimerDeadlineMillis() orelse return error.UnexpectedState;
+    try require(crypto_timer.space == .application);
+    try require(crypto_timer.kind == .pto);
+    const crypto_deadline = crypto_timer.deadline_millis;
+    const crypto_serviced = (try client.serviceLossDetectionTimer(crypto_deadline)) orelse return error.UnexpectedState;
+    try require(crypto_serviced.space == .application);
+    try require(crypto_serviced.kind == .pto);
     const crypto_probe = (try client.pollProtectedShortDatagram(crypto_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer allocator.free(crypto_probe);
     try require(client.sentPacketCount(.application) == 2);

@@ -304,16 +304,21 @@ fn runTimeThresholdPhase(allocator: std.mem.Allocator, io: std.Io) !TimeThreshol
         .first_ack_range = 0,
     }, &client_receive_buf, secrets.server);
 
-    const deadline = client.lossDetectionDeadlineMillis(.application) orelse return error.UnexpectedState;
+    const timer = client.lossDetectionTimerDeadlineMillis() orelse return error.UnexpectedState;
+    try require(timer.space == .application);
+    try require(timer.kind == .loss_time);
+    const deadline = timer.deadline_millis;
     try require(client.sentPacketCount(.application) == 1);
     try require(client.bytesInFlight(.application) == first_packet_len);
 
-    try client.checkLossDetectionTimeouts(deadline - 1);
+    try require((try client.serviceLossDetectionTimer(deadline - 1)) == null);
     const remaining_before_deadline = client.sentPacketCount(.application);
     try require(remaining_before_deadline == 1);
     try require(client.bytesInFlight(.application) == first_packet_len);
 
-    try client.checkLossDetectionTimeouts(deadline);
+    const serviced = (try client.serviceLossDetectionTimer(deadline)) orelse return error.UnexpectedState;
+    try require(serviced.space == .application);
+    try require(serviced.kind == .loss_time);
     try require(client.sentPacketCount(.application) == 0);
     try require(client.bytesInFlight(.application) == 0);
 
