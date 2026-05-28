@@ -122,9 +122,10 @@ fn protectedShortRoundtrip(allocator: std.mem.Allocator) !void {
     const old_path = endpointPath(50_000);
     const new_path = endpointPath(50_001);
 
-    var router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer router.deinit();
-    try router.registerConnectionId(33, &client_dcid, old_path, .{});
+    var lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(33, &client_dcid, old_path, .{});
+    try require(lifecycle.routeCount() == 1);
 
     var client = try quicz.QuicConnection.init(allocator, .client, .{});
     defer client.deinit();
@@ -144,16 +145,16 @@ fn protectedShortRoundtrip(allocator: std.mem.Allocator) !void {
 
     const response = (try server.pollProtectedShortDatagram(2, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
     defer allocator.free(response);
-    const migrated_route = try router.routeDatagram(new_path, response);
+    const migrated_route = try lifecycle.routeDatagram(new_path, response);
     try require(migrated_route.path_changed);
 
     try client.processProtectedShortDatagram(3, secrets.server, client_dcid.len, response);
     try require(client.outstandingPathChallengeCount() == 0);
     try require(client.bytesInFlight(.application) == 0);
 
-    const updated_route = try router.updateRoutePath(&client_dcid, old_path, new_path);
+    const updated_route = try lifecycle.updateRoutePath(&client_dcid, old_path, new_path);
     try require(!updated_route.path_changed);
-    const confirmed_route = try router.routeDatagram(new_path, response);
+    const confirmed_route = try lifecycle.routeDatagram(new_path, response);
     try require(!confirmed_route.path_changed);
 
     const ack = (try client.pollProtectedShortDatagram(4, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
