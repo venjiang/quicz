@@ -920,8 +920,9 @@ produce or consume TLS-owned QUIC packets over UDP.
   lifecycle route path update after protected PATH_RESPONSE validation.
 - 2026-05-22: Added `examples/connection_ids.zig` and
   `zig build run-connection-ids`. The example demonstrates local
-  NEW_CONNECTION_ID issuance, peer RETIRE_CONNECTION_ID handling, and issuing a
-  replacement CID with retire_prior_to.
+  NEW_CONNECTION_ID issuance, peer RETIRE_CONNECTION_ID handling, and
+  lifecycle-owned endpoint replacement-CID route registration with
+  retire_prior_to.
 - 2026-05-22: Added stateless reset helpers in `quicz.packet` and read-only
   connection-level reset detection. `encodeStatelessReset()` serializes a reset
   datagram from caller-provided unpredictable bytes plus a 16-byte token,
@@ -1740,7 +1741,7 @@ run from `build.zig`.
 | `idle_timeout` | Current max_idle_timeout transport parameter application, activity deadline refresh, and active-to-closed expiry. | Present |
 | `packet_spaces` | Current frame-payload Initial/Handshake/Application ACK/recovery isolation, RFC 9001 Initial discard, Initial/Handshake discard cleanup, 0-RTT packet-type filtering, and caller-keyed protected 0-RTT STREAM/RESET_STREAM/STOP_SENDING delivery plus ACK-loss retransmission. | Present |
 | `path_validation` | Current frame-payload PATH_CHALLENGE timeout retry, success, retry exhaustion, caller-keyed protected 1-RTT PATH_CHALLENGE/PATH_RESPONSE exchange, and `EndpointConnectionLifecycle` route path update after protected PATH_RESPONSE validation. | Present |
-| `connection_ids` | Current local NEW_CONNECTION_ID issuing with stateless-reset-token uniqueness checks, peer RETIRE_CONNECTION_ID handling, endpoint and lifecycle-owned replacement-CID registration with retire_prior_to route retirement, and caller-keyed protected 1-RTT NEW_CONNECTION_ID/RETIRE_CONNECTION_ID exchange. | Present |
+| `connection_ids` | Current local NEW_CONNECTION_ID issuing with stateless-reset-token uniqueness checks, peer RETIRE_CONNECTION_ID handling, lifecycle-owned endpoint replacement-CID registration with retire_prior_to route retirement, and caller-keyed protected 1-RTT NEW_CONNECTION_ID/RETIRE_CONNECTION_ID exchange. | Present |
 | `stateless_reset` | Current constant-time stateless reset token match, false-positive rejection, and endpoint inactive-CID reset action construction. | Present |
 | `ecn_validation` | Current frame-payload ECT send modeling, ACK_ECN counter validation, and endpoint path-identity ECN state isolation. | Present |
 | `loss_recovery` | Current frame-payload packet-threshold loss, time-threshold loss, aggregate loss-time timer service, NewReno slow-start/congestion-avoidance growth, recovery period, minimum-window ssthresh clamp, PTO-backoff-independent persistent congestion, and ACK-delay handling. | Present |
