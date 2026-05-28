@@ -139,14 +139,6 @@ pub fn main() !void {
         .local = secrets.server.secret,
         .peer = secrets.client.secret,
     });
-    try protected_client.installOneRttTrafficSecrets(.{
-        .local = secrets.client.secret,
-        .peer = secrets.server.secret,
-    });
-    try protected_server.installOneRttTrafficSecrets(.{
-        .local = secrets.server.secret,
-        .peer = secrets.client.secret,
-    });
 
     try protected_client_lifecycle.registerConnectionId(protected_client_id, &client_dcid, client_receive_path, .{
         .sequence_number = 0,
@@ -248,11 +240,50 @@ pub fn main() !void {
     try require(protected_server.bytesInFlight(.handshake) == 0);
     try require(protected_server_lifecycle.recoveryTimerCount() == 0);
 
+    try protected_client.installZeroRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+    });
+    try protected_server.installZeroRttTrafficSecrets(.{
+        .peer = secrets.client.secret,
+    });
+    try protected_server.acceptZeroRtt();
+    const early_stream_id = try protected_client.openStream();
+    try protected_client.sendOnStream(early_stream_id, "installed early", true);
+    const installed_zero = (try protected_client_lifecycle.pollProtectedZeroRttDatagramWithInstalledKeys(
+        protected_client_id,
+        &protected_client,
+        16,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(installed_zero);
+    try require(protected_client_lifecycle.recoveryTimerCount() == 1);
+
+    const installed_zero_route = try protected_server_lifecycle.routeDatagram(server_receive_path, installed_zero);
+    try require(installed_zero_route.connection_id == protected_server_id);
+    try protected_server_lifecycle.processProtectedZeroRttDatagramWithInstalledKeys(
+        installed_zero_route.connection_id,
+        &protected_server,
+        17,
+        installed_zero,
+    );
+    try require(protected_server.pendingAckLargest(.application) == 0);
+    try require(protected_server_lifecycle.recoveryTimerCount() == 0);
+
+    try protected_client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try protected_server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
     try protected_client.sendPing();
     const ping = (try protected_client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         protected_client_id,
         &protected_client,
-        16,
+        18,
         &server_dcid,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
     defer allocator.free(ping);
@@ -263,16 +294,16 @@ pub fn main() !void {
     try protected_server_lifecycle.processProtectedShortDatagramWithInstalledKeys(
         ping_route.connection_id,
         &protected_server,
-        17,
+        19,
         server_dcid.len,
         ping,
     );
-    try require(protected_server.pendingAckLargest(.application) == 0);
+    try require(protected_server.pendingAckLargest(.application) == 1);
 
     const ack = (try protected_server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         protected_server_id,
         &protected_server,
-        18,
+        20,
         &client_dcid,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
     defer allocator.free(ack);
@@ -283,7 +314,7 @@ pub fn main() !void {
     try protected_client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
         ack_route.connection_id,
         &protected_client,
-        19,
+        21,
         client_dcid.len,
         ack,
     );
@@ -301,7 +332,7 @@ pub fn main() !void {
         loss_conn.sentPacketCount(.application),
         endpoint_lifecycle.recoveryTimerCount(),
         endpoint_lifecycle.routeCount(),
-        long_initial.len + long_ack.len + installed_handshake.len + installed_handshake_ack.len + ping.len + ack.len,
+        long_initial.len + long_ack.len + installed_handshake.len + installed_handshake_ack.len + installed_zero.len + ping.len + ack.len,
         protected_timers_remaining,
     });
 }
