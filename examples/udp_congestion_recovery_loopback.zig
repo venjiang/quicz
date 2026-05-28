@@ -95,7 +95,7 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
 
 fn receiveRoute(
     io: std.Io,
-    router: *const quicz.endpoint.EndpointRouter,
+    lifecycle: *const quicz.EndpointConnectionLifecycle,
     socket: *std.Io.net.Socket,
     receive_buf: []u8,
 ) !ReceivedRoute {
@@ -103,7 +103,7 @@ fn receiveRoute(
     const path = try udp4Tuple(socket.address, received.from);
     return .{
         .data = received.data,
-        .route = try router.routeDatagram(path, received.data),
+        .route = try lifecycle.routeDatagram(path, received.data),
     };
 }
 
@@ -132,15 +132,15 @@ fn protectShortPacket(
 fn prepareLoopbackPair(
     client_socket: *std.Io.net.Socket,
     server_socket: *std.Io.net.Socket,
-    client_router: *quicz.endpoint.EndpointRouter,
-    server_router: *quicz.endpoint.EndpointRouter,
+    client_lifecycle: *quicz.EndpointConnectionLifecycle,
+    server_lifecycle: *quicz.EndpointConnectionLifecycle,
 ) !void {
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
     const server_path = try udp4Tuple(server_socket.address, client_socket.address);
-    try client_router.registerConnectionId(41, &client_dcid, client_path, .{
+    try client_lifecycle.registerConnectionId(41, &client_dcid, client_path, .{
         .active_migration_disabled = true,
     });
-    try server_router.registerConnectionId(51, &server_dcid, server_path, .{
+    try server_lifecycle.registerConnectionId(51, &server_dcid, server_path, .{
         .active_migration_disabled = true,
     });
 }
@@ -150,7 +150,7 @@ fn sendClientPing(
     io: std.Io,
     client_socket: *std.Io.net.Socket,
     server_socket: *std.Io.net.Socket,
-    server_router: *const quicz.endpoint.EndpointRouter,
+    server_lifecycle: *const quicz.EndpointConnectionLifecycle,
     client: *quicz.QuicConnection,
     server: *quicz.QuicConnection,
     now_millis: i64,
@@ -162,7 +162,7 @@ fn sendClientPing(
     defer allocator.free(packet);
 
     try client_socket.send(io, &server_socket.address, packet);
-    const received = try receiveRoute(io, server_router, server_socket, receive_buf);
+    const received = try receiveRoute(io, server_lifecycle, server_socket, receive_buf);
     try require(received.route.connection_id == 51);
     try require(std.mem.eql(u8, received.route.destination_connection_id.asSlice(), &server_dcid));
     try server.processProtectedShortDatagram(now_millis + 1, keys, server_dcid.len, received.data);
@@ -174,7 +174,7 @@ fn sendServerAck(
     io: std.Io,
     server_socket: *std.Io.net.Socket,
     client_socket: *std.Io.net.Socket,
-    client_router: *const quicz.endpoint.EndpointRouter,
+    client_lifecycle: *const quicz.EndpointConnectionLifecycle,
     client: *quicz.QuicConnection,
     now_millis: i64,
     server_packet_number: u64,
@@ -196,7 +196,7 @@ fn sendServerAck(
     defer allocator.free(packet);
 
     try server_socket.send(io, &client_socket.address, packet);
-    const received = try receiveRoute(io, client_router, client_socket, receive_buf);
+    const received = try receiveRoute(io, client_lifecycle, client_socket, receive_buf);
     try require(received.route.connection_id == 41);
     try require(std.mem.eql(u8, received.route.destination_connection_id.asSlice(), &client_dcid));
     try client.processProtectedShortDatagram(now_millis, keys, client_dcid.len, received.data);
@@ -231,11 +231,11 @@ fn runRecoveryPeriodPhase(allocator: std.mem.Allocator, io: std.Io) !RecoveryPer
     try client.confirmHandshake();
     try server.confirmHandshake();
 
-    var client_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer client_router.deinit();
-    var server_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer server_router.deinit();
-    try prepareLoopbackPair(&client_socket, &server_socket, &client_router, &server_router);
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+    try prepareLoopbackPair(&client_socket, &server_socket, &client_lifecycle, &server_lifecycle);
 
     var server_receive_buf: [1500]u8 = undefined;
     var client_receive_buf: [1500]u8 = undefined;
@@ -243,12 +243,12 @@ fn runRecoveryPeriodPhase(allocator: std.mem.Allocator, io: std.Io) !RecoveryPer
     var packet_number: u64 = 0;
     while (packet_number < 8) : (packet_number += 1) {
         const now_millis = @as(i64, @intCast(packet_number + 1)) * 10;
-        _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_router, &client, &server, now_millis, &server_receive_buf, secrets.client);
+        _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_lifecycle, &client, &server, now_millis, &server_receive_buf, secrets.client);
     }
     try require(client.sentPacketCount(.application) == 8);
     try require(server.pendingAckLargest(.application) == 7);
 
-    _ = try sendServerAck(allocator, io, &server_socket, &client_socket, &client_router, &client, 100, 0, .{
+    _ = try sendServerAck(allocator, io, &server_socket, &client_socket, &client_lifecycle, &client, 100, 0, .{
         .largest_acknowledged = 3,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -256,7 +256,7 @@ fn runRecoveryPeriodPhase(allocator: std.mem.Allocator, io: std.Io) !RecoveryPer
     const first_recovery_window = client.congestionWindow(.application);
     try require(client.sentPacketCount(.application) == 6);
 
-    _ = try sendServerAck(allocator, io, &server_socket, &client_socket, &client_router, &client, 120, 1, .{
+    _ = try sendServerAck(allocator, io, &server_socket, &client_socket, &client_lifecycle, &client, 120, 1, .{
         .largest_acknowledged = 7,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -301,30 +301,30 @@ fn runPersistentCongestionPhase(allocator: std.mem.Allocator, io: std.Io) !Persi
     try client.confirmHandshake();
     try server.confirmHandshake();
 
-    var client_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer client_router.deinit();
-    var server_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer server_router.deinit();
-    try prepareLoopbackPair(&client_socket, &server_socket, &client_router, &server_router);
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+    try prepareLoopbackPair(&client_socket, &server_socket, &client_lifecycle, &server_lifecycle);
 
     var server_receive_buf: [1500]u8 = undefined;
     var client_receive_buf: [1500]u8 = undefined;
 
-    _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_router, &client, &server, 0, &server_receive_buf, secrets.client);
-    _ = try sendServerAck(allocator, io, &server_socket, &client_socket, &client_router, &client, 100, 0, .{
+    _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_lifecycle, &client, &server, 0, &server_receive_buf, secrets.client);
+    _ = try sendServerAck(allocator, io, &server_socket, &client_socket, &client_lifecycle, &client, 100, 0, .{
         .largest_acknowledged = 0,
         .ack_delay = 0,
         .first_ack_range = 0,
     }, &client_receive_buf, secrets.server);
     try require(client.sentPacketCount(.application) == 0);
 
-    _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_router, &client, &server, 10, &server_receive_buf, secrets.client);
-    _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_router, &client, &server, 1000, &server_receive_buf, secrets.client);
-    _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_router, &client, &server, 1100, &server_receive_buf, secrets.client);
-    _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_router, &client, &server, 1200, &server_receive_buf, secrets.client);
+    _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_lifecycle, &client, &server, 10, &server_receive_buf, secrets.client);
+    _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_lifecycle, &client, &server, 1000, &server_receive_buf, secrets.client);
+    _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_lifecycle, &client, &server, 1100, &server_receive_buf, secrets.client);
+    _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_lifecycle, &client, &server, 1200, &server_receive_buf, secrets.client);
     try require(client.sentPacketCount(.application) == 4);
 
-    _ = try sendServerAck(allocator, io, &server_socket, &client_socket, &client_router, &client, 1300, 1, .{
+    _ = try sendServerAck(allocator, io, &server_socket, &client_socket, &client_lifecycle, &client, 1300, 1, .{
         .largest_acknowledged = 4,
         .ack_delay = 0,
         .first_ack_range = 0,
