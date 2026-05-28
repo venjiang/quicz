@@ -366,6 +366,63 @@ pub fn main() !void {
     );
     try require(protected_client.bytesInFlight(.application) == 0);
 
+    const explicit_next_client_keys = quicz.protection.nextAes128PacketProtectionKeys(secrets.client);
+    const explicit_next_server_keys = quicz.protection.nextAes128PacketProtectionKeys(secrets.server);
+    try protected_client.sendPing();
+    const explicit_key_phase_ping = (try protected_client_lifecycle.pollProtectedShortDatagramWithKeyPhase(
+        protected_client_id,
+        &protected_client,
+        26,
+        &server_dcid,
+        explicit_next_client_keys,
+        true,
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(explicit_key_phase_ping);
+    try require(protected_client_lifecycle.recoveryTimerCount() == 1);
+
+    const explicit_key_phase_ping_route = try protected_server_lifecycle.routeDatagram(server_receive_path, explicit_key_phase_ping);
+    try require(explicit_key_phase_ping_route.connection_id == protected_server_id);
+    try protected_server_lifecycle.processProtectedShortDatagramWithKeyUpdate(
+        explicit_key_phase_ping_route.connection_id,
+        &protected_server,
+        27,
+        .{
+            .current = secrets.client,
+            .next = explicit_next_client_keys,
+            .current_key_phase = false,
+        },
+        server_dcid.len,
+        explicit_key_phase_ping,
+    );
+    try require(protected_server.pendingAckLargest(.application) == 3);
+
+    const explicit_key_phase_ack = (try protected_server_lifecycle.pollProtectedShortDatagramWithKeyPhase(
+        protected_server_id,
+        &protected_server,
+        28,
+        &client_dcid,
+        secrets.server,
+        false,
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(explicit_key_phase_ack);
+    try require(protected_server_lifecycle.recoveryTimerCount() == 0);
+
+    const explicit_key_phase_ack_route = try protected_client_lifecycle.routeDatagram(client_receive_path, explicit_key_phase_ack);
+    try require(explicit_key_phase_ack_route.connection_id == protected_client_id);
+    try protected_client_lifecycle.processProtectedShortDatagramWithKeyUpdate(
+        explicit_key_phase_ack_route.connection_id,
+        &protected_client,
+        29,
+        .{
+            .current = secrets.server,
+            .next = explicit_next_server_keys,
+            .current_key_phase = false,
+        },
+        client_dcid.len,
+        explicit_key_phase_ack,
+    );
+    try require(protected_client.bytesInFlight(.application) == 0);
+
     var key_phase_client_send_state = quicz.protection.Aes128KeyPhaseState.init(secrets.client, false);
     var key_phase_server_recv_state = quicz.protection.Aes128KeyPhaseState.init(secrets.client, false);
     var key_phase_server_send_state = quicz.protection.Aes128KeyPhaseState.init(secrets.server, false);
@@ -376,7 +433,7 @@ pub fn main() !void {
     const key_phase_ping = (try protected_client_lifecycle.pollProtectedShortDatagramWithKeyPhaseState(
         protected_client_id,
         &protected_client,
-        26,
+        30,
         &server_dcid,
         &key_phase_client_send_state,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
@@ -388,18 +445,18 @@ pub fn main() !void {
     try protected_server_lifecycle.processProtectedShortDatagramWithKeyPhaseState(
         key_phase_ping_route.connection_id,
         &protected_server,
-        27,
+        31,
         &key_phase_server_recv_state,
         server_dcid.len,
         key_phase_ping,
     );
     try require(key_phase_server_recv_state.currentKeyPhase());
-    try require(protected_server.pendingAckLargest(.application) == 3);
+    try require(protected_server.pendingAckLargest(.application) == 4);
 
     const key_phase_ack = (try protected_server_lifecycle.pollProtectedShortDatagramWithKeyPhaseState(
         protected_server_id,
         &protected_server,
-        28,
+        32,
         &client_dcid,
         &key_phase_server_send_state,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
@@ -411,7 +468,7 @@ pub fn main() !void {
     try protected_client_lifecycle.processProtectedShortDatagramWithKeyPhaseState(
         key_phase_ack_route.connection_id,
         &protected_client,
-        29,
+        33,
         &key_phase_client_recv_state,
         client_dcid.len,
         key_phase_ack,
@@ -431,7 +488,7 @@ pub fn main() !void {
         loss_conn.sentPacketCount(.application),
         endpoint_lifecycle.recoveryTimerCount(),
         endpoint_lifecycle.routeCount(),
-        long_initial.len + long_ack.len + installed_handshake.len + installed_handshake_ack.len + installed_zero.len + caller_short.len + caller_short_ack.len + ping.len + ack.len + key_phase_ping.len + key_phase_ack.len,
+        long_initial.len + long_ack.len + installed_handshake.len + installed_handshake_ack.len + installed_zero.len + caller_short.len + caller_short_ack.len + ping.len + ack.len + explicit_key_phase_ping.len + explicit_key_phase_ack.len + key_phase_ping.len + key_phase_ack.len,
         protected_timers_remaining,
     });
 }
