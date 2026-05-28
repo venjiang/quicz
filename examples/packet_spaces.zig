@@ -161,6 +161,21 @@ pub fn main() !void {
     try require(conn.sentPacketCount(.initial) == 0);
     try require(conn.sentPacketCount(.application) == 1);
 
+    const handshake_ecn_pn = try conn.recordEcnPacketSentInSpace(.handshake, 65, 100, .ect0);
+    try conn.receiveAckEcnInSpace(.handshake, 66, .{
+        .ack = .{
+            .largest_acknowledged = handshake_ecn_pn,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 1,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
+    });
+    try require(conn.ecnValidationState(.handshake) == .capable);
+
     const ping = [_]u8{@intFromEnum(quicz.frame.FrameType.ping)};
     try conn.processDatagramInSpace(.handshake, 70, &ping);
     try conn.processDatagramInSpace(.application, 80, &ping);
@@ -169,6 +184,8 @@ pub fn main() !void {
     try conn.discardPacketNumberSpace(.handshake);
     try require(conn.packetNumberSpaceDiscarded(.handshake));
     try require(conn.pendingAckLargest(.handshake) == null);
+    try require(conn.ecnValidationState(.handshake) == .unknown);
+    try require(conn.ecnCounts(.handshake).ect0_count == 0);
 
     var zero_rtt_server = try quicz.QuicConnection.init(std.heap.page_allocator, .server, .{});
     defer zero_rtt_server.deinit();
@@ -389,6 +406,10 @@ pub fn main() !void {
         conn.packetNumberSpaceDiscarded(.handshake),
         conn.pendingAckLargest(.handshake),
         conn.pendingAckLargest(.application),
+    });
+    std.debug.print("[spaces] discarded handshake ECN state={s} ect0_count={}\n", .{
+        @tagName(conn.ecnValidationState(.handshake)),
+        conn.ecnCounts(.handshake).ect0_count,
     });
     std.debug.print("[spaces] 0-rtt shared application next_peer_pn={} pending_ack={?}\n", .{
         zero_rtt_server.nextPeerPacketNumber(.application),

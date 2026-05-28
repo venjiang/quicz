@@ -3506,6 +3506,11 @@ pub const QuicConnection = struct {
         self.rollbackCryptoFrameQueue(packet_space.crypto_recv_pending, 0);
         packet_space.recovery_state.bytes_in_flight = 0;
         packet_space.recovery_state.pto_count = 0;
+        packet_space.ecn_sent_ect0.* = 0;
+        packet_space.ecn_sent_ect1.* = 0;
+        packet_space.ecn_largest_acknowledged.* = null;
+        packet_space.ecn_counts.* = zeroEcnCounts();
+        packet_space.ecn_validation_state.* = .unknown;
     }
 
     /// Record a modeled ack-eliciting packet in the selected packet number space.
@@ -15011,13 +15016,20 @@ test "discardPacketNumberSpace clears Initial recovery and prevents reuse" {
     defer conn.deinit();
 
     _ = try conn.recordPacketSentInSpace(.initial, 300, 100);
-    _ = try conn.recordPacketSentInSpace(.initial, 500, 100);
+    _ = try conn.recordEcnPacketSentInSpace(.initial, 500, 100, .ect0);
     _ = try conn.recordPacketSentInSpace(.application, 10, 200);
     try conn.sendCryptoInSpace(.initial, "queued crypto");
-    try conn.receiveAckInSpace(.initial, 600, .{
-        .largest_acknowledged = 1,
-        .ack_delay = 0,
-        .first_ack_range = 0,
+    try conn.receiveAckEcnInSpace(.initial, 600, .{
+        .ack = .{
+            .largest_acknowledged = 1,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 1,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
     });
     var crypto_datagram: [32]u8 = undefined;
     var crypto_out = buffer.fixedWriter(&crypto_datagram);
@@ -15036,6 +15048,8 @@ test "discardPacketNumberSpace clears Initial recovery and prevents reuse" {
     try std.testing.expectEqual(@as(?i64, 675), conn.lossDetectionDeadlineMillis(.initial));
     try std.testing.expectEqual(@as(?u64, 1), conn.pendingAckLargest(.initial));
     try std.testing.expectEqual(@as(usize, 100), conn.bytesInFlight(.initial));
+    try std.testing.expectEqual(EcnValidationState.capable, conn.ecnValidationState(.initial));
+    try std.testing.expectEqual(@as(u64, 1), conn.ecnCounts(.initial).ect0_count);
 
     try conn.discardPacketNumberSpace(.initial);
     try std.testing.expect(conn.packetNumberSpaceDiscarded(.initial));
@@ -15048,6 +15062,8 @@ test "discardPacketNumberSpace clears Initial recovery and prevents reuse" {
     try std.testing.expectEqual(@as(u64, 0), conn.initial_packet_space.crypto_send_offset);
     try std.testing.expectEqual(@as(usize, 0), conn.initial_packet_space.crypto_send_queue.items.len);
     try std.testing.expectEqual(@as(usize, 0), conn.initial_packet_space.crypto_recv_buffer.items.len);
+    try std.testing.expectEqual(EcnValidationState.unknown, conn.ecnValidationState(.initial));
+    try std.testing.expectEqual(zeroEcnCounts(), conn.ecnCounts(.initial));
     try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 200), conn.bytesInFlight(.application));
 
