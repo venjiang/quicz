@@ -1573,6 +1573,7 @@ const PacketNumberSpaceState = struct {
     sent_packets: std.ArrayList(SentPacket) = .empty,
     pending_ping_count: usize = 0,
     pto_probe_count: usize = 0,
+    congestion_probe_count: usize = 0,
     crypto_send_offset: u64 = 0,
     crypto_recv_buffer: std.ArrayList(u8) = .empty,
     crypto_read_offset: usize = 0,
@@ -1620,6 +1621,7 @@ const PacketNumberSpaceView = struct {
     sent_packets: *std.ArrayList(SentPacket),
     pending_ping_count: *usize,
     pto_probe_count: *usize,
+    congestion_probe_count: *usize,
     crypto_send_offset: *u64,
     crypto_recv_buffer: *std.ArrayList(u8),
     crypto_read_offset: *usize,
@@ -2230,6 +2232,7 @@ pub const QuicConnection = struct {
     pending_max_frames: std.ArrayList(PendingMaxFrame),
     pending_ping_count: usize,
     pto_probe_count: usize,
+    congestion_probe_count: usize,
     peer_max_udp_payload_size: usize,
     peer_max_data: u64,
     peer_initial_max_stream_data_bidi_local: u64,
@@ -2371,6 +2374,7 @@ pub const QuicConnection = struct {
             .pending_max_frames = .empty,
             .pending_ping_count = 0,
             .pto_probe_count = 0,
+            .congestion_probe_count = 0,
             .peer_max_udp_payload_size = config.max_datagram_size,
             .peer_max_data = config.initial_max_data,
             .peer_initial_max_stream_data_bidi_local = config.initial_max_stream_data,
@@ -3499,6 +3503,7 @@ pub const QuicConnection = struct {
         clearSentPacketList(self.allocator, packet_space.sent_packets);
         packet_space.pending_ping_count.* = 0;
         packet_space.pto_probe_count.* = 0;
+        packet_space.congestion_probe_count.* = 0;
         self.rollbackCryptoSendQueue(packet_space.crypto_send_queue, 0);
         packet_space.crypto_send_offset.* = 0;
         packet_space.crypto_recv_buffer.items.len = 0;
@@ -4022,6 +4027,7 @@ pub const QuicConnection = struct {
                 .sent_packets = &self.initial_packet_space.sent_packets,
                 .pending_ping_count = &self.initial_packet_space.pending_ping_count,
                 .pto_probe_count = &self.initial_packet_space.pto_probe_count,
+                .congestion_probe_count = &self.initial_packet_space.congestion_probe_count,
                 .crypto_send_offset = &self.initial_packet_space.crypto_send_offset,
                 .crypto_recv_buffer = &self.initial_packet_space.crypto_recv_buffer,
                 .crypto_read_offset = &self.initial_packet_space.crypto_read_offset,
@@ -4045,6 +4051,7 @@ pub const QuicConnection = struct {
                 .sent_packets = &self.handshake_packet_space.sent_packets,
                 .pending_ping_count = &self.handshake_packet_space.pending_ping_count,
                 .pto_probe_count = &self.handshake_packet_space.pto_probe_count,
+                .congestion_probe_count = &self.handshake_packet_space.congestion_probe_count,
                 .crypto_send_offset = &self.handshake_packet_space.crypto_send_offset,
                 .crypto_recv_buffer = &self.handshake_packet_space.crypto_recv_buffer,
                 .crypto_read_offset = &self.handshake_packet_space.crypto_read_offset,
@@ -4068,6 +4075,7 @@ pub const QuicConnection = struct {
                 .sent_packets = &self.sent_packets,
                 .pending_ping_count = &self.pending_ping_count,
                 .pto_probe_count = &self.pto_probe_count,
+                .congestion_probe_count = &self.congestion_probe_count,
                 .crypto_send_offset = &self.crypto_send_offset,
                 .crypto_recv_buffer = &self.crypto_recv_buffer,
                 .crypto_read_offset = &self.crypto_read_offset,
@@ -4084,7 +4092,9 @@ pub const QuicConnection = struct {
 
     fn canSendAckElicitingInSpace(self: *QuicConnection, space: PacketNumberSpace, bytes: usize) bool {
         const packet_space = self.packetNumberSpace(space);
-        return packet_space.pto_probe_count.* != 0 or packet_space.recovery_state.canSend(bytes);
+        return packet_space.pto_probe_count.* != 0 or
+            packet_space.congestion_probe_count.* != 0 or
+            packet_space.recovery_state.canSend(bytes);
     }
 
     fn armPtoProbeInSpace(self: *QuicConnection, space: PacketNumberSpace) void {
@@ -4094,11 +4104,21 @@ pub const QuicConnection = struct {
         }
     }
 
+    fn armCongestionProbeInSpace(self: *QuicConnection, space: PacketNumberSpace) void {
+        const packet_space = self.packetNumberSpace(space);
+        if (packet_space.congestion_probe_count.* == 0) {
+            packet_space.congestion_probe_count.* = 1;
+        }
+    }
+
     fn recordAckElicitingSendInSpace(self: *QuicConnection, space: PacketNumberSpace, bytes: usize) void {
         const packet_space = self.packetNumberSpace(space);
         packet_space.recovery_state.onPacketSent(bytes);
         if (packet_space.pto_probe_count.* != 0) {
             packet_space.pto_probe_count.* -= 1;
+        }
+        if (packet_space.congestion_probe_count.* != 0) {
+            packet_space.congestion_probe_count.* -= 1;
         }
     }
 
@@ -6621,6 +6641,7 @@ pub const QuicConnection = struct {
         const largest_acknowledged_snapshot = packet_space.largest_acknowledged.*;
         const first_rtt_sample_sent_time_snapshot = packet_space.first_rtt_sample_sent_time_millis.*;
         const loss_deadline_millis_snapshot = packet_space.loss_deadline_millis.*;
+        const congestion_probe_count_snapshot = packet_space.congestion_probe_count.*;
         const ecn_sent_ect0_snapshot = packet_space.ecn_sent_ect0.*;
         const ecn_sent_ect1_snapshot = packet_space.ecn_sent_ect1.*;
         const ecn_largest_acknowledged_snapshot = packet_space.ecn_largest_acknowledged.*;
@@ -6767,6 +6788,7 @@ pub const QuicConnection = struct {
             packet_space.largest_acknowledged.* = largest_acknowledged_snapshot;
             packet_space.first_rtt_sample_sent_time_millis.* = first_rtt_sample_sent_time_snapshot;
             packet_space.loss_deadline_millis.* = loss_deadline_millis_snapshot;
+            packet_space.congestion_probe_count.* = congestion_probe_count_snapshot;
             packet_space.ecn_sent_ect0.* = ecn_sent_ect0_snapshot;
             packet_space.ecn_sent_ect1.* = ecn_sent_ect1_snapshot;
             packet_space.ecn_largest_acknowledged.* = ecn_largest_acknowledged_snapshot;
@@ -8243,18 +8265,25 @@ pub const QuicConnection = struct {
             latest_rtt_sample,
             now_millis,
         );
+        var congestion_probe_needed = false;
         if (ecn_result.ce_congestion_event) {
             if (largest_acked_packet) |acked_packet| {
+                congestion_probe_needed = packet_space.recovery_state.wouldStartCongestionRecovery(acked_packet.sent_time_millis);
                 packet_space.recovery_state.onCongestionEvent(acked_packet.sent_time_millis, now_millis);
             }
         }
         const persistent_congestion_established = loss_result.persistentCongestionEstablished(packet_space.recovery_state.*);
         if (loss_result.lost_bytes != 0) {
+            congestion_probe_needed = congestion_probe_needed or
+                packet_space.recovery_state.wouldStartCongestionRecovery(loss_result.largest_lost_sent_time_millis.?);
             packet_space.recovery_state.onPacketLost(
                 loss_result.lost_bytes,
                 loss_result.largest_lost_sent_time_millis.?,
                 now_millis,
             );
+        }
+        if (congestion_probe_needed) {
+            self.armCongestionProbeIfPendingData(space);
         }
 
         if (acked_bytes == 0) {
@@ -8460,18 +8489,23 @@ pub const QuicConnection = struct {
         };
         const loss_result = try self.removeAckDrivenLosses(packet_space, largest_acknowledged, null, now_millis);
         if (loss_result.lost_bytes != 0) {
+            const congestion_probe_needed =
+                packet_space.recovery_state.wouldStartCongestionRecovery(loss_result.largest_lost_sent_time_millis.?);
             packet_space.recovery_state.onPacketLost(
                 loss_result.lost_bytes,
                 loss_result.largest_lost_sent_time_millis.?,
                 now_millis,
             );
+            if (congestion_probe_needed) {
+                self.armCongestionProbeIfPendingData(space);
+            }
             if (loss_result.persistentCongestionEstablished(packet_space.recovery_state.*)) {
                 packet_space.recovery_state.onPersistentCongestion();
             }
         }
     }
 
-    fn hasPendingPtoProbeDataInSpace(self: *QuicConnection, space: PacketNumberSpace) bool {
+    fn hasPendingAckElicitingDataInSpace(self: *QuicConnection, space: PacketNumberSpace) bool {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.crypto_send_queue.items.len != 0 or packet_space.pending_ping_count.* != 0) return true;
         if (space != .application) return false;
@@ -8495,6 +8529,34 @@ pub const QuicConnection = struct {
         if (self.pending_blocked_frames.items.len != 0) return true;
         self.dropResetClosedStreamFrames();
         return self.send_queue.items.len != 0;
+    }
+
+    fn hasQueuedAckElicitingDataInSpace(self: *QuicConnection, space: PacketNumberSpace) bool {
+        const packet_space = self.packetNumberSpace(space);
+        if (packet_space.crypto_send_queue.items.len != 0 or packet_space.pending_ping_count.* != 0) return true;
+        if (space != .application) return false;
+
+        return self.pending_path_responses.items.len != 0 or
+            self.pending_reset_streams.items.len != 0 or
+            self.pending_retire_connection_ids.items.len != 0 or
+            self.pending_handshake_done or
+            self.pendingNewConnectionIdCount() != 0 or
+            self.pending_new_tokens.items.len != 0 or
+            self.pending_path_challenges.items.len != 0 or
+            self.pending_stop_sending.items.len != 0 or
+            self.pending_max_frames.items.len != 0 or
+            self.pending_blocked_frames.items.len != 0 or
+            self.send_queue.items.len != 0;
+    }
+
+    fn hasPendingPtoProbeDataInSpace(self: *QuicConnection, space: PacketNumberSpace) bool {
+        return self.hasPendingAckElicitingDataInSpace(space);
+    }
+
+    fn armCongestionProbeIfPendingData(self: *QuicConnection, space: PacketNumberSpace) void {
+        if (self.hasQueuedAckElicitingDataInSpace(space)) {
+            self.armCongestionProbeInSpace(space);
+        }
     }
 
     fn queuePtoProbeInSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
@@ -20260,6 +20322,50 @@ test "ACK-driven loss requeues STREAM frame for retransmission" {
     }
 }
 
+test "new congestion event allows one STREAM retransmission probe despite full cwnd" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    var chunk: [1200]u8 = undefined;
+    @memset(&chunk, 'x');
+
+    var out_buf: [1400]u8 = undefined;
+    var sent: usize = 0;
+    while (sent < 8) : (sent += 1) {
+        try conn.sendOnStream(stream_id, &chunk, false);
+        _ = (try conn.pollTx(@as(i64, @intCast(sent + 1)) * 10, &out_buf)).?;
+    }
+    try std.testing.expectEqual(@as(usize, 8), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.send_queue.items.len);
+
+    conn.recovery_state.congestion_window = recovery.minimumCongestionWindow(conn.recovery_state.max_datagram_size);
+    try conn.receiveAckInSpace(.application, 90, .{
+        .largest_acknowledged = 5,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expect(conn.bytesInFlight(.application) >= conn.congestionWindow(.application));
+    try std.testing.expect(!conn.recovery_state.canSend(1));
+    try std.testing.expectEqual(@as(usize, 1), conn.congestion_probe_count);
+    try std.testing.expect(conn.send_queue.items.len >= 1);
+
+    const retransmit_payload = (try conn.pollTx(100, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(retransmit_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .stream => |stream| {
+            try std.testing.expectEqual(stream_id, stream.stream_id);
+            try std.testing.expectEqual(@as(u64, 0), stream.offset);
+            try std.testing.expectEqualStrings(&chunk, stream.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), conn.congestion_probe_count);
+    try std.testing.expect(conn.bytesInFlight(.application) > conn.congestionWindow(.application));
+}
+
 test "processDatagram rolls back STREAM retransmission requeue when payload is invalid" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
@@ -20291,6 +20397,7 @@ test "processDatagram rolls back STREAM retransmission requeue when payload is i
     try std.testing.expectEqual(@as(usize, 0), conn.send_queue.items.len);
     try std.testing.expectEqual(bytes_in_flight, conn.recovery_state.bytes_in_flight);
     try std.testing.expectEqual(@as(?u64, null), conn.recovery_state.latest_rtt_ms);
+    try std.testing.expectEqual(@as(usize, 0), conn.congestion_probe_count);
 }
 
 test "ACK-driven loss requeues CRYPTO frame for retransmission" {

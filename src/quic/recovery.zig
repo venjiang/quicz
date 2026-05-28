@@ -117,6 +117,12 @@ pub const Recovery = struct {
         self.congestion_window = @max(self.ssthresh, minimumCongestionWindow(self.max_datagram_size));
     }
 
+    /// Return whether a congestion signal for `sent_time_millis` would start a
+    /// new recovery period rather than being suppressed by the current one.
+    pub fn wouldStartCongestionRecovery(self: Recovery, sent_time_millis: i64) bool {
+        return !self.inCongestionRecovery(sent_time_millis);
+    }
+
     /// Mark one PTO expiration and apply exponential backoff to future PTOs.
     pub fn onPtoExpired(self: *Recovery) void {
         if (self.pto_count != std.math.maxInt(u8)) {
@@ -296,10 +302,13 @@ test "congestion recovery period avoids repeated loss reduction and ACK growth" 
     const initial_window = recovery.congestion_window;
 
     recovery.onPacketSent(3600);
+    try std.testing.expect(recovery.wouldStartCongestionRecovery(10));
     recovery.onPacketLost(1200, 10, 100);
     const recovery_window = recovery.congestion_window;
     try std.testing.expect(recovery_window < initial_window);
     try std.testing.expectEqual(@as(?i64, 100), recovery.congestion_recovery_start_time_millis);
+    try std.testing.expect(!recovery.wouldStartCongestionRecovery(10));
+    try std.testing.expect(!recovery.wouldStartCongestionRecovery(20));
 
     recovery.onPacketLost(1200, 20, 110);
     try std.testing.expectEqual(recovery_window, recovery.congestion_window);

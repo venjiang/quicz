@@ -170,6 +170,40 @@ pub fn main() !void {
         .{recovery_window},
     );
 
+    var congestion_probe = try quicz.QuicConnection.init(allocator, .client, .{
+        .max_datagram_size = 1350,
+        .initial_rtt_ms = 100,
+    });
+    defer congestion_probe.deinit();
+    const probe_stream_id = try congestion_probe.openStream();
+    var probe_chunk: [1200]u8 = undefined;
+    @memset(&probe_chunk, 'p');
+    var probe_buf: [1400]u8 = undefined;
+    var probe_sent: usize = 0;
+    while (probe_sent < 8) : (probe_sent += 1) {
+        try congestion_probe.sendOnStream(probe_stream_id, &probe_chunk, false);
+        _ = (try congestion_probe.pollTx(@as(i64, @intCast(probe_sent + 1)) * 10, &probe_buf)) orelse return error.LossRecoveryExampleFailed;
+    }
+    const minimum_probe_cwnd = quicz.recovery.minimumCongestionWindow(congestion_probe.recovery_state.max_datagram_size);
+    congestion_probe.recovery_state.congestion_window = minimum_probe_cwnd;
+    try congestion_probe.receiveAckInSpace(.application, 90, .{
+        .largest_acknowledged = 5,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    if (congestion_probe.bytesInFlight(.application) < congestion_probe.congestionWindow(.application)) {
+        return error.LossRecoveryExampleFailed;
+    }
+    if (congestion_probe.recovery_state.canSend(1)) return error.LossRecoveryExampleFailed;
+    const probe_payload = (try congestion_probe.pollTx(100, &probe_buf)) orelse return error.LossRecoveryExampleFailed;
+    if (congestion_probe.bytesInFlight(.application) <= congestion_probe.congestionWindow(.application)) {
+        return error.LossRecoveryExampleFailed;
+    }
+    std.debug.print(
+        "[loss] congestion probe retransmit bytes={d} cwnd={d} inflight={d}\n",
+        .{ probe_payload.len, congestion_probe.congestionWindow(.application), congestion_probe.bytesInFlight(.application) },
+    );
+
     var ack_delay = try quicz.QuicConnection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });
