@@ -56,14 +56,18 @@ pub fn main() !void {
     try require(server_local.port != 0);
     try require(client_local.port != server_local.port);
 
-    var router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer router.deinit();
+    var lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer lifecycle.deinit();
 
     const cid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     const path = try udp4Tuple(server_socket.address, client_socket.address);
-    try router.registerConnectionId(7, &cid, path, .{ .stateless_reset_token = token });
-    try require(try router.retireConnectionId(&cid));
+    try lifecycle.registerConnectionId(7, &cid, path, .{ .stateless_reset_token = token });
+    const retired = lifecycle.retireConnection(7);
+    try require(retired.routes_retired == 1);
+    try require(!retired.recovery_timer_disarmed);
+    try require(lifecycle.routeCount() == 0);
+    try require(lifecycle.statelessResetTokenCount() == 1);
 
     const trigger = [_]u8{
         0x40, 0xaa, 0xbb, 0xcc, 0xdd, 0x01, 0x02, 0x03,
@@ -77,7 +81,7 @@ pub fn main() !void {
     const received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const received_path = try udp4Tuple(server_socket.address, received.from);
     var reset_out: [64]u8 = undefined;
-    const action = try router.handleDatagram(
+    const action = try lifecycle.handleDatagram(
         &reset_out,
         received_path,
         received.data,

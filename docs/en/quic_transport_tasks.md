@@ -1436,9 +1436,10 @@ produce or consume TLS-owned QUIC packets over UDP.
   `zig build run-udp-stateless-reset-loopback`. The example binds two loopback
   UDP sockets, retires a registered CID while retaining its stateless reset
   token, delivers a trigger datagram to the server socket, lets
-  `EndpointRouter.handleDatagram()` classify it as a reset response, sends the
-  reset datagram back, and verifies the client can match the retained token.
-  Full socket-owned connection lifecycle integration remains pending.
+  `EndpointConnectionLifecycle.handleDatagram()` classify it as a reset
+  response through the lifecycle-owned route state, sends the reset datagram
+  back, and verifies the client can match the retained token. Full TLS-owned
+  connection lifecycle integration remains pending.
 - 2026-05-22: Added per-packet-number-space ECN validation state to
   `QuicConnection`. `recordEcnPacketSentInSpace()` records modeled ECT(0) or
   ECT(1) sent packets for deterministic tests, ACK_ECN counters are validated
@@ -1724,7 +1725,7 @@ run from `build.zig`.
 | `udp_path_validation_loopback` | Socket-backed loopback UDP path-validation exercise: protected PATH_CHALLENGE delivery to a new peer port, PATH_RESPONSE routing with `path_changed`, `EndpointConnectionLifecycle` route path update after validation, and confirmed routing on the new path. | Present |
 | `udp_retry_loopback` | Socket-backed loopback UDP lifecycle Retry/address-validation exercise: lifecycle-owned server Retry delivery, Retry Source CID route switching, address-bound token validation with replay rejection, follow-up protected Initial routing, and Retry CID transport-parameter validation. | Present |
 | `udp_close_lifecycle_loopback` | Socket-backed loopback UDP close lifecycle exercise: protected CONNECTION_CLOSE delivery, `EndpointConnectionLifecycle` connection-handle route retirement, retained inactive-CID stateless reset token lookup, reset emission, and client token match. | Present |
-| `udp_stateless_reset_loopback` | Socket-backed loopback UDP stateless reset exercise: trigger datagram for a retired CID, endpoint reset classification, server reset datagram send, and client token match. | Present |
+| `udp_stateless_reset_loopback` | Socket-backed loopback UDP stateless reset exercise: lifecycle-owned retired-CID route retirement, trigger datagram classification, server reset datagram send, and client token match. | Present |
 | `udp_echo_client` / `udp_echo_server` | Real QUIC-over-UDP/TLS stream echo. | Planned |
 | `uni_stream` | Current in-memory unidirectional stream send/receive, direction validation, duplicate STREAM retransmission discard, and FIN completion observability. | Present |
 | `stream_reset` | Current local RESET_STREAM emission, final-size observability, unsent STREAM drop behavior, and late STREAM ignore after reset. | Present |
