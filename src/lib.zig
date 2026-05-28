@@ -501,6 +501,11 @@ pub const EndpointConnectionLifecycle = struct {
         return self.router.routeCount();
     }
 
+    /// Return the number of destination CIDs with retained stateless reset tokens.
+    pub fn statelessResetTokenCount(self: *const EndpointConnectionLifecycle) usize {
+        return self.router.statelessResetTokenCount();
+    }
+
     /// Return the number of armed recovery timers.
     pub fn recoveryTimerCount(self: *const EndpointConnectionLifecycle) usize {
         return self.recovery_timers.count();
@@ -524,6 +529,38 @@ pub const EndpointConnectionLifecycle = struct {
         datagram: []const u8,
     ) endpoint.RouteError!endpoint.RouteResult {
         return self.router.routeDatagram(path, datagram);
+    }
+
+    /// Classify one received datagram using lifecycle-owned routing state.
+    ///
+    /// Active routes are returned for connection delivery. Retired CIDs with
+    /// retained reset tokens can produce a stateless reset datagram, while
+    /// unknown packets are dropped. This keeps socket receive classification on
+    /// the same endpoint state owner that retires routes and recovery timers.
+    pub fn handleDatagram(
+        self: *const EndpointConnectionLifecycle,
+        out: []u8,
+        path: endpoint.Udp4Tuple,
+        datagram: []const u8,
+        unpredictable_prefix: []const u8,
+    ) endpoint.RouteError!endpoint.DatagramAction {
+        return self.router.handleDatagram(out, path, datagram, unpredictable_prefix);
+    }
+
+    /// Classify one received datagram, including Version Negotiation responses.
+    ///
+    /// Unsupported-version long headers can produce a Version Negotiation
+    /// datagram before normal route/reset/drop handling. Supported Initials
+    /// without an existing route can be surfaced as accept candidates.
+    pub fn handleDatagramWithVersionNegotiation(
+        self: *const EndpointConnectionLifecycle,
+        out: []u8,
+        path: endpoint.Udp4Tuple,
+        datagram: []const u8,
+        unpredictable_prefix: []const u8,
+        supported_versions: []const packet.Version,
+    ) endpoint.RouteError!endpoint.DatagramAction {
+        return self.router.handleDatagramWithVersionNegotiation(out, path, datagram, unpredictable_prefix, supported_versions);
     }
 
     /// Mirror one connection's current aggregate loss/PTO timer.
@@ -12674,15 +12711,33 @@ test "EndpointConnectionLifecycle retires routes with recovery timer" {
     };
     const cid0 = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const cid1 = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
-    const short_datagram = [_]u8{ 0x40, 0x10, 0x20, 0x30, 0x40, 0x00 };
+    const reset_token = [_]u8{ 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f };
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const short_datagram = [_]u8{
+        0x40, 0x10, 0x20, 0x30, 0x40, 0x00, 0x01, 0x02,
+        0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x11, 0x12, 0x13,
+        0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+    };
 
-    try lifecycle.registerConnectionId(41, &cid0, path, .{ .sequence_number = 0 });
+    try lifecycle.registerConnectionId(41, &cid0, path, .{
+        .sequence_number = 0,
+        .stateless_reset_token = reset_token,
+    });
     try lifecycle.registerConnectionId(41, &cid1, path, .{ .sequence_number = 1 });
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.statelessResetTokenCount());
 
     const routed = try lifecycle.routeDatagram(path, &short_datagram);
     try std.testing.expectEqual(@as(u64, 41), routed.connection_id);
     try std.testing.expectEqualSlices(u8, &cid0, routed.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(usize, 2), lifecycle.routeCount());
+
+    var reset_out: [64]u8 = undefined;
+    const active_action = try lifecycle.handleDatagram(&reset_out, path, &short_datagram, &reset_prefix);
+    switch (active_action) {
+        .routed => |active_route| try std.testing.expectEqual(@as(u64, 41), active_route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
 
     _ = try conn.recordPacketSentInSpace(.application, 10, 100);
     try lifecycle.armRecoveryTimerFromConnection(41, &conn);
@@ -12698,6 +12753,15 @@ test "EndpointConnectionLifecycle retires routes with recovery timer" {
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
     try std.testing.expectError(error.UnknownConnectionId, lifecycle.routeDatagram(path, &short_datagram));
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.statelessResetTokenCount());
+
+    const reset_action = try lifecycle.handleDatagram(&reset_out, path, &short_datagram, &reset_prefix);
+    const reset = switch (reset_action) {
+        .stateless_reset => |datagram| datagram,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(reset.len < short_datagram.len);
+    try std.testing.expect(packet.matchesStatelessReset(reset, reset_token));
 
     const retired_again = lifecycle.retireConnection(41);
     try std.testing.expectEqual(@as(usize, 0), retired_again.routes_retired);

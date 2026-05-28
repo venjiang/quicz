@@ -72,17 +72,17 @@ pub fn main() !void {
 
     var client_router = quicz.endpoint.EndpointRouter.init(allocator);
     defer client_router.deinit();
-    var server_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer server_router.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
 
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
     const server_path = try udp4Tuple(server_socket.address, client_socket.address);
     try client_router.registerConnectionId(connection_handle, &client_dcid, client_path, .{});
-    try server_router.registerConnectionId(connection_handle, &server_dcid, server_path, .{
+    try server_lifecycle.registerConnectionId(connection_handle, &server_dcid, server_path, .{
         .stateless_reset_token = reset_token,
     });
-    try require(server_router.routeCount() == 1);
-    try require(server_router.statelessResetTokenCount() == 1);
+    try require(server_lifecycle.routeCount() == 1);
+    try require(server_lifecycle.statelessResetTokenCount() == 1);
 
     try client.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "udp close");
     const close_packet = (try client.pollProtectedShortDatagram(1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
@@ -92,7 +92,7 @@ pub fn main() !void {
     var server_receive_buf: [1500]u8 = undefined;
     const close_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const close_path = try udp4Tuple(server_socket.address, close_received.from);
-    const close_route = try server_router.routeDatagram(close_path, close_received.data);
+    const close_route = try server_lifecycle.routeDatagram(close_path, close_received.data);
     try require(close_route.connection_id == connection_handle);
     try require(std.mem.eql(u8, close_route.destination_connection_id.asSlice(), &server_dcid));
 
@@ -106,10 +106,11 @@ pub fn main() !void {
         else => return error.UnexpectedState,
     }
 
-    const retired_count = server_router.retireConnectionRoutes(connection_handle);
-    try require(retired_count == 1);
-    try require(server_router.routeCount() == 0);
-    try require(server_router.statelessResetTokenCount() == 1);
+    const retired = server_lifecycle.retireConnection(connection_handle);
+    try require(retired.routes_retired == 1);
+    try require(!retired.recovery_timer_disarmed);
+    try require(server_lifecycle.routeCount() == 0);
+    try require(server_lifecycle.statelessResetTokenCount() == 1);
 
     const stray_packet = [_]u8{
         0x40, 0xaa, 0xbb, 0xcc, 0xdd, 0x01, 0x02, 0x03,
@@ -122,7 +123,7 @@ pub fn main() !void {
     const stray_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const stray_path = try udp4Tuple(server_socket.address, stray_received.from);
     var reset_out: [64]u8 = undefined;
-    const action = try server_router.handleDatagram(
+    const action = try server_lifecycle.handleDatagram(
         &reset_out,
         stray_path,
         stray_received.data,
@@ -143,7 +144,7 @@ pub fn main() !void {
         client_local.port,
         server_local.port,
         close_packet.len,
-        retired_count,
+        retired.routes_retired,
         reset_received.data.len,
         @tagName(server.connectionState()),
     });
