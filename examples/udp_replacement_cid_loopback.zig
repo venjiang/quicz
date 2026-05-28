@@ -40,7 +40,7 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
 
 fn receiveRoute(
     io: std.Io,
-    router: *const quicz.endpoint.EndpointRouter,
+    lifecycle: *const quicz.EndpointConnectionLifecycle,
     server_socket: *std.Io.net.Socket,
     receive_buf: []u8,
 ) !struct { path: quicz.endpoint.Udp4Tuple, route: quicz.endpoint.RouteResult } {
@@ -48,29 +48,29 @@ fn receiveRoute(
     const received_path = try udp4Tuple(server_socket.address, received.from);
     return .{
         .path = received_path,
-        .route = try router.routeDatagram(received_path, received.data),
+        .route = try lifecycle.routeDatagram(received_path, received.data),
     };
 }
 
 fn receiveRetiredToken(
     io: std.Io,
-    router: *const quicz.endpoint.EndpointRouter,
+    lifecycle: *const quicz.EndpointConnectionLifecycle,
     server_socket: *std.Io.net.Socket,
     receive_buf: []u8,
 ) ![quicz.packet.stateless_reset_token_len]u8 {
     const received = try server_socket.receiveTimeout(io, receive_buf, receiveTimeout());
     const received_path = try udp4Tuple(server_socket.address, received.from);
-    if (router.routeDatagram(received_path, received.data)) |_| {
+    if (lifecycle.routeDatagram(received_path, received.data)) |_| {
         return error.UnexpectedState;
     } else |err| switch (err) {
         error.UnknownConnectionId => {},
         else => return err,
     }
-    return (try router.statelessResetTokenForDatagram(received_path, received.data)) orelse error.UnexpectedState;
+    return (try lifecycle.statelessResetTokenForDatagram(received_path, received.data)) orelse error.UnexpectedState;
 }
 
-fn expectActiveMigrationDisabled(router: *const quicz.endpoint.EndpointRouter, path: quicz.endpoint.Udp4Tuple, datagram: []const u8) !void {
-    if (router.routeDatagram(path, datagram)) |_| {
+fn expectActiveMigrationDisabled(lifecycle: *const quicz.EndpointConnectionLifecycle, path: quicz.endpoint.Udp4Tuple, datagram: []const u8) !void {
+    if (lifecycle.routeDatagram(path, datagram)) |_| {
         return error.UnexpectedState;
     } else |err| switch (err) {
         error.ActiveMigrationDisabled => {},
@@ -102,8 +102,8 @@ pub fn main() !void {
     try require(client_local.port != server_local.port);
     try require(other_client_local.port != server_local.port);
 
-    var router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer router.deinit();
+    var lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer lifecycle.deinit();
 
     const connection_handle: u64 = 111;
     const cid0 = [_]u8{ 0x60, 0x61, 0x62, 0x63 };
@@ -118,7 +118,7 @@ pub fn main() !void {
     const datagram1 = [_]u8{ 0x40, 0x70, 0x71, 0x72, 0x73, 0x01 };
     const datagram2 = [_]u8{ 0x40, 0x80, 0x81, 0x82, 0x83, 0x01 };
 
-    try router.registerConnectionId(connection_handle, &cid0, path, .{
+    try lifecycle.registerConnectionId(connection_handle, &cid0, path, .{
         .sequence_number = 0,
         .active_migration_disabled = true,
         .stateless_reset_token = token0,
@@ -126,12 +126,12 @@ pub fn main() !void {
 
     try client_socket.send(io, &server_socket.address, &datagram0);
     var server_receive_buf: [1500]u8 = undefined;
-    const initial = try receiveRoute(io, &router, &server_socket, &server_receive_buf);
+    const initial = try receiveRoute(io, &lifecycle, &server_socket, &server_receive_buf);
     try require(initial.route.connection_id == connection_handle);
     try require(initial.route.sequence_number.? == 0);
     try require(std.mem.eql(u8, initial.route.destination_connection_id.asSlice(), &cid0));
 
-    const replacement1 = try router.registerReplacementConnectionId(connection_handle, &cid1, path, 1, 1, .{
+    const replacement1 = try lifecycle.registerReplacementConnectionId(connection_handle, &cid1, path, 1, 1, .{
         .active_migration_disabled = true,
         .stateless_reset_token = token1,
     });
@@ -140,24 +140,24 @@ pub fn main() !void {
     try require(replacement1.retired_count == 1);
 
     try client_socket.send(io, &server_socket.address, &datagram0);
-    const retired0_token = try receiveRetiredToken(io, &router, &server_socket, &server_receive_buf);
+    const retired0_token = try receiveRetiredToken(io, &lifecycle, &server_socket, &server_receive_buf);
     try require(std.mem.eql(u8, &retired0_token, &token0));
 
     try client_socket.send(io, &server_socket.address, &datagram1);
-    const route1 = try receiveRoute(io, &router, &server_socket, &server_receive_buf);
+    const route1 = try receiveRoute(io, &lifecycle, &server_socket, &server_receive_buf);
     try require(route1.route.connection_id == connection_handle);
     try require(route1.route.sequence_number.? == 1);
     try require(std.mem.eql(u8, route1.route.destination_connection_id.asSlice(), &cid1));
-    try require((try router.statelessResetTokenForDatagram(route1.path, &datagram1)) == null);
+    try require((try lifecycle.statelessResetTokenForDatagram(route1.path, &datagram1)) == null);
 
-    if (router.registerReplacementConnectionId(connection_handle, &cid2, path, 1, 2, .{ .stateless_reset_token = token2 })) |_| {
+    if (lifecycle.registerReplacementConnectionId(connection_handle, &cid2, path, 1, 2, .{ .stateless_reset_token = token2 })) |_| {
         return error.UnexpectedState;
     } else |err| switch (err) {
         error.InvalidConnectionIdSequence => {},
         else => return err,
     }
 
-    const replacement2 = try router.registerReplacementConnectionId(connection_handle, &cid2, path, 2, 2, .{
+    const replacement2 = try lifecycle.registerReplacementConnectionId(connection_handle, &cid2, path, 2, 2, .{
         .active_migration_disabled = true,
         .stateless_reset_token = token2,
     });
@@ -166,17 +166,17 @@ pub fn main() !void {
     try require(replacement2.retired_count == 1);
 
     try client_socket.send(io, &server_socket.address, &datagram1);
-    const retired1_token = try receiveRetiredToken(io, &router, &server_socket, &server_receive_buf);
+    const retired1_token = try receiveRetiredToken(io, &lifecycle, &server_socket, &server_receive_buf);
     try require(std.mem.eql(u8, &retired1_token, &token1));
 
     try client_socket.send(io, &server_socket.address, &datagram2);
-    const route2 = try receiveRoute(io, &router, &server_socket, &server_receive_buf);
+    const route2 = try receiveRoute(io, &lifecycle, &server_socket, &server_receive_buf);
     try require(route2.route.connection_id == connection_handle);
     try require(route2.route.sequence_number.? == 2);
     try require(std.mem.eql(u8, route2.route.destination_connection_id.asSlice(), &cid2));
 
     const other_path = try udp4Tuple(server_socket.address, other_client_socket.address);
-    try expectActiveMigrationDisabled(&router, other_path, &datagram2);
+    try expectActiveMigrationDisabled(&lifecycle, other_path, &datagram2);
 
     std.debug.print("[udp-replacement-cid] client_port={} other_client_port={} server_port={} initial_seq={} replacement1_retired={} replacement2_retired={} active_seq={} retired0_token=true retired1_token=true migration_disabled=true\n", .{
         client_local.port,
