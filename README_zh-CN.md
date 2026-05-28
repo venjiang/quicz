@@ -68,6 +68,7 @@ zig build
   - `zig-out/bin/quicz-echo-server`
   - `zig-out/bin/quicz-echo-client`
   - `zig-out/bin/quicz-codec-roundtrip`
+  - `zig-out/bin/quicz-transport-parameters`
   - `zig-out/bin/quicz-flow-control`
   - `zig-out/bin/quicz-uni-stream`
   - `zig-out/bin/quicz-stream-reset`
@@ -307,6 +308,7 @@ pub fn main() !void {
 - [`examples/echo_server.zig`](examples/echo_server.zig)
 - [`examples/echo_client.zig`](examples/echo_client.zig)
 - [`examples/codec_roundtrip.zig`](examples/codec_roundtrip.zig)
+- [`examples/transport_parameters.zig`](examples/transport_parameters.zig)
 - [`examples/flow_control.zig`](examples/flow_control.zig)
 - [`examples/uni_stream.zig`](examples/uni_stream.zig)
 - [`examples/stream_reset.zig`](examples/stream_reset.zig)

@@ -669,6 +669,13 @@ produce or consume TLS-owned QUIC packets over UDP.
   token exposure, automatic preferred-address socket migration, and UDP
   migration enforcement remain pending; later endpoint bullets cover
   caller-validated preferred-address route commit.
+- 2026-05-28: Added `examples/transport_parameters.zig` and
+  `zig build run-transport-parameters`. The example exercises local TLS
+  extension byte export, peer extension parse/apply, client omission of
+  server-only `stateless_reset_token` and `preferred_address`, client storage of
+  server preferred-address/reset-token policy, effective idle-timeout selection,
+  peer stream-data limit enforcement, and server rejection of client-sent
+  server-only parameters.
 - 2026-05-22: Added `QuicConnection.sendPathChallenge()` with outbound
   PATH_CHALLENGE queuing, matching PATH_RESPONSE validation, duplicate or
   mismatched response rejection, and rollback tests for invalid multi-frame
@@ -1737,6 +1744,7 @@ run from `build.zig`.
 | --- | --- | --- |
 | `echo_client` / `echo_server` | Current in-memory frame-payload echo baseline. | Present |
 | `codec_roundtrip` | Varint, packet header, RFC 9369 QUIC v2 long-header type-bit mapping, short-header spin-bit preservation, long/short-packet envelope, header packet number truncation/reconstruction, packet number encoding, RFC 8999 Version Negotiation packet codec plus client-side VN selection and RFC 9368 downgrade-check state, frame, transport parameter including RFC 9368 `version_information`, connection parameter exposure including TLS extension bytes and server preferred_address, and transport error codec usage including `VERSION_NEGOTIATION_ERROR`. | Present |
+| `transport_parameters` | Dedicated transport-parameter usage: local TLS extension byte export, peer byte parse/apply, server-only parameter role filtering, preferred-address/reset-token storage, effective idle timeout, and peer stream limit enforcement. | Present |
 | `crypto_stream` | Current out-of-order Handshake CRYPTO reassembly, ACK-driven frame-payload Handshake CRYPTO loss requeue/retransmission, mock `CryptoBackend` bridge delivery/output queuing/local-peer-TP handoff/Handshake, 0-RTT, and 1-RTT secret handoff/confirmation, backend-confirmed no-output Handshake discard, explicit handshake-state observability, protected Initial and Handshake CRYPTO transmit/receive bridge with valid first-client-Initial DCID and 1200-byte Initial datagram flows, installed-key Handshake and explicitly accepted 0-RTT long-packet exchanges, no-Retry Original DCID export/validation, local Initial SCID export through `localTransportParameters()`, coalesced server Initial+Handshake transmit/receive, peer Initial SCID capture with `initial_source_connection_id` validation, protected client Initial ACK-only plus Handshake PING/ACK probe, modeled handshake confirmation, caller-keyed protected 1-RTT PING/ACK, CRYPTO/ACK, STREAM/ACK, RESET_STREAM/ACK, STOP_SENDING/RESET_STREAM exchanges, ACK-gated installed-key 1-RTT key-update PING, caller-owned key-phase-state key-update PING, and configurable short-header spin-bit state. | Present |
 | `initial_keys` | RFC 9001 QUIC v1 and RFC 9369 QUIC v2 Initial secret/key/IV/header-protection key derivation, RFC 9001 `quic ku` key-update derivation, protected Initial long-packet seal/open, and AES header-protection masking from a client Initial DCID. | Present |
 | `endpoint_routing` | Current in-memory endpoint DCID/IPv4 UDP tuple routing, long-header DCID peeking, unsupported-version RFC 8999 Version Negotiation response generation, client Initial Source CID route registration, supported-version unknown-DCID Initial accept classification, accepted Initial Original DCID/server Initial SCID route registration, short-header registered-CID matching, zero-length CID tuple routing, Retry Source CID route switching, caller-validated preferred-address migration commit, sequence/retire-prior-to/connection-handle route retirement, stateless reset token reuse rejection, caller-validated path update, active-migration-disabled rejection, route retirement, stateless reset token lookup for inactive CIDs, reset datagram construction with caller-supplied unpredictable bytes, and route/version-negotiation/reset/drop/accept receive action classification. | Present |
@@ -1793,6 +1801,7 @@ zig build
 zig build run-server
 zig build run-client
 zig build run-codec
+zig build run-transport-parameters
 zig build run-flow-control
 zig build run-uni-stream
 zig build run-stream-reset

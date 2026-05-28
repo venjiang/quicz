@@ -72,6 +72,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_codec);
 
+    // Transport parameters executable
+    const exe_transport_parameters = b.addExecutable(.{
+        .name = "quicz-transport-parameters",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/transport_parameters.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_transport_parameters);
+
     // Flow-control executable
     const exe_flow_control = b.addExecutable(.{
         .name = "quicz-flow-control",
@@ -615,6 +629,15 @@ pub fn build(b: *std.Build) void {
     run_codec_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_codec_cmd.addArgs(args);
+    }
+
+    // zig build run-transport-parameters
+    const run_transport_parameters = b.step("run-transport-parameters", "Run quicz transport parameters example");
+    const run_transport_parameters_cmd = b.addRunArtifact(exe_transport_parameters);
+    run_transport_parameters.dependOn(&run_transport_parameters_cmd.step);
+    run_transport_parameters_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_transport_parameters_cmd.addArgs(args);
     }
 
     // zig build run-flow-control
