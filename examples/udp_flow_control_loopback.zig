@@ -53,7 +53,7 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
 
 fn receiveRoute(
     io: std.Io,
-    router: *const quicz.endpoint.EndpointRouter,
+    lifecycle: *const quicz.EndpointConnectionLifecycle,
     socket: *std.Io.net.Socket,
     receive_buf: []u8,
 ) !ReceivedRoute {
@@ -61,7 +61,7 @@ fn receiveRoute(
     const path = try udp4Tuple(socket.address, received.from);
     return .{
         .data = received.data,
-        .route = try router.routeDatagram(path, received.data),
+        .route = try lifecycle.routeDatagram(path, received.data),
     };
 }
 
@@ -69,7 +69,7 @@ fn sendClientPacket(
     io: std.Io,
     allocator: std.mem.Allocator,
     client: *quicz.QuicConnection,
-    server_router: *const quicz.endpoint.EndpointRouter,
+    server_lifecycle: *const quicz.EndpointConnectionLifecycle,
     client_socket: *std.Io.net.Socket,
     server_socket: *std.Io.net.Socket,
     now_millis: i64,
@@ -81,7 +81,7 @@ fn sendClientPacket(
     defer allocator.free(packet);
     try client_socket.send(io, &server_socket.address, packet);
 
-    const received = try receiveRoute(io, server_router, server_socket, receive_buf);
+    const received = try receiveRoute(io, server_lifecycle, server_socket, receive_buf);
     try require(std.mem.eql(u8, received.route.destination_connection_id.asSlice(), server_dcid));
     return received.data;
 }
@@ -90,7 +90,7 @@ fn sendServerPacket(
     io: std.Io,
     allocator: std.mem.Allocator,
     server: *quicz.QuicConnection,
-    client_router: *const quicz.endpoint.EndpointRouter,
+    client_lifecycle: *const quicz.EndpointConnectionLifecycle,
     server_socket: *std.Io.net.Socket,
     client_socket: *std.Io.net.Socket,
     now_millis: i64,
@@ -102,7 +102,7 @@ fn sendServerPacket(
     defer allocator.free(packet);
     try server_socket.send(io, &client_socket.address, packet);
 
-    const received = try receiveRoute(io, client_router, client_socket, receive_buf);
+    const received = try receiveRoute(io, client_lifecycle, client_socket, receive_buf);
     try require(std.mem.eql(u8, received.route.destination_connection_id.asSlice(), client_dcid));
     return received.data;
 }
@@ -144,17 +144,17 @@ pub fn main() !void {
     try client.confirmHandshake();
     try server.confirmHandshake();
 
-    var client_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer client_router.deinit();
-    var server_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer server_router.deinit();
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
 
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
     const server_path = try udp4Tuple(server_socket.address, client_socket.address);
-    try client_router.registerConnectionId(41, &client_dcid, client_path, .{
+    try client_lifecycle.registerConnectionId(41, &client_dcid, client_path, .{
         .active_migration_disabled = true,
     });
-    try server_router.registerConnectionId(51, &server_dcid, server_path, .{
+    try server_lifecycle.registerConnectionId(51, &server_dcid, server_path, .{
         .active_migration_disabled = true,
     });
 
@@ -168,7 +168,7 @@ pub fn main() !void {
         io,
         allocator,
         &client,
-        &server_router,
+        &server_lifecycle,
         &client_socket,
         &server_socket,
         0,
@@ -183,7 +183,7 @@ pub fn main() !void {
         io,
         allocator,
         &client,
-        &server_router,
+        &server_lifecycle,
         &client_socket,
         &server_socket,
         2,
@@ -201,7 +201,7 @@ pub fn main() !void {
         io,
         allocator,
         &server,
-        &client_router,
+        &client_lifecycle,
         &server_socket,
         &client_socket,
         4,
@@ -215,7 +215,7 @@ pub fn main() !void {
         io,
         allocator,
         &server,
-        &client_router,
+        &client_lifecycle,
         &server_socket,
         &client_socket,
         6,
@@ -230,7 +230,7 @@ pub fn main() !void {
         io,
         allocator,
         &client,
-        &server_router,
+        &server_lifecycle,
         &client_socket,
         &server_socket,
         8,
@@ -247,7 +247,7 @@ pub fn main() !void {
         io,
         allocator,
         &server,
-        &client_router,
+        &client_lifecycle,
         &server_socket,
         &client_socket,
         10,
