@@ -3,6 +3,35 @@ const quicz = @import("quicz");
 
 const ExampleError = error{UnexpectedState};
 
+const FixedWriter = struct {
+    buffer: []u8,
+    pos: usize = 0,
+
+    pub fn writer(self: *FixedWriter) *FixedWriter {
+        return self;
+    }
+
+    pub fn writeByte(self: *FixedWriter, byte: u8) !void {
+        if (self.pos >= self.buffer.len) return error.NoSpaceLeft;
+        self.buffer[self.pos] = byte;
+        self.pos += 1;
+    }
+
+    pub fn writeAll(self: *FixedWriter, bytes: []const u8) !void {
+        if (self.buffer.len - self.pos < bytes.len) return error.NoSpaceLeft;
+        @memcpy(self.buffer[self.pos..][0..bytes.len], bytes);
+        self.pos += bytes.len;
+    }
+
+    pub fn getWritten(self: FixedWriter) []const u8 {
+        return self.buffer[0..self.pos];
+    }
+};
+
+fn fixedWriter(buffer: []u8) FixedWriter {
+    return .{ .buffer = buffer };
+}
+
 fn pollRequired(conn: *quicz.QuicConnection, out: []u8) ![]const u8 {
     return (try conn.pollTx(0, out)) orelse error.UnexpectedState;
 }
@@ -23,6 +52,33 @@ fn expectAckOnly(allocator: std.mem.Allocator, payload: []const u8) !void {
         else => return error.UnexpectedState,
     }
     if (decoded.len != payload.len) return error.UnexpectedState;
+}
+
+fn expectAckThenReset(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    stream_id: u64,
+    application_error_code: u64,
+    final_size: u64,
+) !void {
+    var ack = try quicz.frame.decodeFrameSlice(payload, allocator);
+    defer quicz.frame.deinitFrame(&ack.frame, allocator);
+    switch (ack.frame) {
+        .ack => {},
+        else => return error.UnexpectedState,
+    }
+
+    var reset = try quicz.frame.decodeFrameSlice(payload[ack.len..], allocator);
+    defer quicz.frame.deinitFrame(&reset.frame, allocator);
+    switch (reset.frame) {
+        .reset_stream => |reset_frame| {
+            if (reset_frame.stream_id != stream_id) return error.UnexpectedState;
+            if (reset_frame.application_error_code != application_error_code) return error.UnexpectedState;
+            if (reset_frame.final_size != final_size) return error.UnexpectedState;
+        },
+        else => return error.UnexpectedState,
+    }
+    if (payload.len != ack.len + reset.len) return error.UnexpectedState;
 }
 
 pub fn main() !void {
@@ -101,4 +157,34 @@ pub fn main() !void {
     const early_len = (try early_server.recvOnStream(early_stream, &recv_buf)) orelse return error.UnexpectedState;
     if (!std.mem.eql(u8, recv_buf[0..early_len], "still open")) return error.UnexpectedState;
     std.debug.print("[stop] STOP_SENDING before STREAM opened stream={} and lower streams, reset reply side, and left receive side open\n", .{early_stream});
+
+    var lost_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    defer lost_client.deinit();
+
+    const lost_stream = try lost_client.openStream();
+    try lost_client.sendOnStream(lost_stream, "lost", false);
+    _ = try pollRequired(&lost_client, &datagram);
+    try lost_client.sendPing();
+    _ = try pollRequired(&lost_client, &datagram);
+    try lost_client.sendPing();
+    _ = try pollRequired(&lost_client, &datagram);
+    try lost_client.sendPing();
+    _ = try pollRequired(&lost_client, &datagram);
+
+    var stop_buf: [16]u8 = undefined;
+    var stop_out = fixedWriter(&stop_buf);
+    try quicz.frame.encodeFrame(stop_out.writer(), .{ .stop_sending = .{
+        .stream_id = lost_stream,
+        .application_error_code = 27,
+    } });
+    try lost_client.processDatagram(9, stop_out.getWritten());
+    try lost_client.receiveAckInSpace(.application, 10, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const suppressed_reset = try pollRequired(&lost_client, &datagram);
+    try expectAckThenReset(gpa, suppressed_reset, lost_stream, 27, 4);
+    if ((try lost_client.pollTx(11, &datagram)) != null) return error.UnexpectedState;
+    std.debug.print("[stop] RESET_STREAM suppressed ACK-loss STREAM retransmission stream={}\n", .{lost_stream});
 }

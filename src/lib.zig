@@ -8406,6 +8406,10 @@ pub const QuicConnection = struct {
             }
 
             if (sent_packet.stream_frame) |pending| {
+                if (self.findSendStream(pending.stream_id)) |stream_state| {
+                    if (stream_state.reset_sent) continue;
+                }
+
                 const cloned = try self.clonePendingStreamFrame(pending);
                 errdefer self.allocator.free(cloned.data);
                 retransmit_frames.append(self.allocator, cloned) catch return error.OutOfMemory;
@@ -20320,6 +20324,65 @@ test "ACK-driven loss requeues STREAM frame for retransmission" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "ACK-driven loss skips STREAM retransmission after RESET_STREAM" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "lost", false);
+
+    var out_buf: [128]u8 = undefined;
+    _ = (try conn.pollTx(10, &out_buf)).?;
+    try conn.sendPing();
+    _ = (try conn.pollTx(20, &out_buf)).?;
+    try conn.sendPing();
+    _ = (try conn.pollTx(30, &out_buf)).?;
+    try conn.sendPing();
+    _ = (try conn.pollTx(40, &out_buf)).?;
+    try std.testing.expectEqual(@as(usize, 4), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.send_queue.items.len);
+
+    var stop_buf: [16]u8 = undefined;
+    var stop_out = buffer.fixedWriter(&stop_buf);
+    try frame.encodeFrame(stop_out.writer(), .{ .stop_sending = .{
+        .stream_id = stream_id,
+        .application_error_code = 7,
+    } });
+    try conn.processDatagram(50, stop_out.getWritten());
+    try std.testing.expect(conn.findSendStream(stream_id).?.reset_sent);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_reset_streams.items.len);
+
+    try conn.receiveAckInSpace(.application, 70, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.send_queue.items.len);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_reset_streams.items.len);
+
+    const reset_payload = (try conn.pollTx(80, &out_buf)).?;
+    var ack = try frame.decodeFrameSlice(reset_payload, std.testing.allocator);
+    defer frame.deinitFrame(&ack.frame, std.testing.allocator);
+    switch (ack.frame) {
+        .ack => |ack_frame| try std.testing.expectEqual(@as(u64, 0), ack_frame.largest_acknowledged),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var reset = try frame.decodeFrameSlice(reset_payload[ack.len..], std.testing.allocator);
+    defer frame.deinitFrame(&reset.frame, std.testing.allocator);
+    switch (reset.frame) {
+        .reset_stream => |reset_frame| {
+            try std.testing.expectEqual(stream_id, reset_frame.stream_id);
+            try std.testing.expectEqual(@as(u64, 7), reset_frame.application_error_code);
+            try std.testing.expectEqual(@as(u64, 4), reset_frame.final_size);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(reset_payload.len, ack.len + reset.len);
 }
 
 test "new congestion event allows one STREAM retransmission probe despite full cwnd" {

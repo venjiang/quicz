@@ -258,10 +258,11 @@ pub fn main() !void {
     // localTransportParameters() exports initial_source_connection_id after this
     // endpoint sends its first protected Initial packet, and server connections
     // export original_destination_connection_id after opening the first client Initial.
-    // resetStream() and inbound STOP_SENDING close the matching send side and
-    // queue RESET_STREAM; on peer-initiated bidirectional streams, inbound
-    // STOP_SENDING can open receive state before any STREAM data while leaving
-    // that receive side open. RESET_STREAM marks the receive side closed unless
+    // resetStream() and inbound STOP_SENDING close the matching send side,
+    // suppress later ACK-loss STREAM retransmission for that stream, and queue
+    // RESET_STREAM; on peer-initiated bidirectional streams, inbound STOP_SENDING
+    // can open receive state before any STREAM data while leaving that receive
+    // side open. RESET_STREAM marks the receive side closed unless
     // the stream already finished with the same final size. NEW_CONNECTION_ID tracks
     // peer-issued connection IDs and retire_prior_to queues RETIRE_CONNECTION_ID;
     // issueConnectionId() queues local NEW_CONNECTION_ID frames and peer

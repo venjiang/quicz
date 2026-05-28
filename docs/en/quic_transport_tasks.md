@@ -839,6 +839,13 @@ produce or consume TLS-owned QUIC packets over UDP.
   STOP_SENDING for opened local bidirectional receive sides and observed
   peer-initiated receive streams, rejects send-only and unobserved streams,
   deduplicates local stop requests, and exercises the peer RESET_STREAM response.
+- 2026-05-28: Suppressed ACK-loss STREAM retransmission after the matching send
+  side has been reset. `removeAckDrivenLosses()` now skips requeueing lost
+  STREAM data once `STOP_SENDING` or local reset has marked the send stream
+  `reset_sent`, while preserving RESET_STREAM delivery and ordinary lost STREAM
+  retransmission. Tests cover the reset boundary, and
+  `examples/stop_sending.zig` demonstrates that the reset response leaves no
+  stray STREAM retransmission queued.
 - 2026-05-23: Constrained local STOP_SENDING emission to Recv and Size Known
   receive states. `stopSending()` now returns `StreamClosed` once final data has
   already arrived, while streams with a known final size and missing gaps can
@@ -1755,7 +1762,7 @@ run from `build.zig`.
 | `udp_echo_client` / `udp_echo_server` | Real QUIC-over-UDP/TLS stream echo. | Planned |
 | `uni_stream` | Current in-memory unidirectional stream send/receive, direction validation, duplicate STREAM retransmission discard, and FIN completion observability. | Present |
 | `stream_reset` | Current local RESET_STREAM emission, final-size observability, unsent STREAM drop behavior, and late STREAM ignore after reset. | Present |
-| `stop_sending` | Current local STOP_SENDING emission, peer RESET_STREAM response, Data Recvd suppression, pre-STREAM STOP_SENDING on peer-initiated bidirectional streams, and implicit lower-numbered receive stream creation. | Present |
+| `stop_sending` | Current local STOP_SENDING emission, peer RESET_STREAM response, Data Recvd suppression, pre-STREAM STOP_SENDING on peer-initiated bidirectional streams, implicit lower-numbered receive stream creation, and ACK-loss STREAM suppression after reset. | Present |
 | `flow_control` | Connection, stream, stream-count, receive-side MAX, configurable target receive windows, completed-stream MAX_STREAMS, peer-BLOCKED MAX retransmission/growth, pre-STREAM MAX_STREAM_DATA on peer-initiated bidirectional streams with implicit lower-numbered receive stream creation, final-size MAX_STREAM_DATA suppression, stale STREAM_DATA_BLOCKED suppression, and caller-keyed protected short MAX/BLOCKED exchange behavior. | Present |
 | `graceful_close` | Current in-memory and caller-keyed protected short CONNECTION_CLOSE/APPLICATION_CLOSE send/receive, peer close diagnostics, retransmission, and closing/draining state behavior. | Present |
 | `idle_timeout` | Current max_idle_timeout transport parameter application, activity deadline refresh, and active-to-closed expiry. | Present |
