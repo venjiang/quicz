@@ -97,7 +97,7 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
 
 fn receiveRoute(
     io: std.Io,
-    router: *const quicz.endpoint.EndpointRouter,
+    lifecycle: *const quicz.EndpointConnectionLifecycle,
     socket: *std.Io.net.Socket,
     receive_buf: []u8,
 ) !ReceivedRoute {
@@ -105,7 +105,7 @@ fn receiveRoute(
     const path = try udp4Tuple(socket.address, received.from);
     return .{
         .data = received.data,
-        .route = try router.routeDatagram(path, received.data),
+        .route = try lifecycle.routeDatagram(path, received.data),
     };
 }
 
@@ -134,15 +134,15 @@ fn protectShortPacket(
 fn prepareLoopbackPair(
     client_socket: *std.Io.net.Socket,
     server_socket: *std.Io.net.Socket,
-    client_router: *quicz.endpoint.EndpointRouter,
-    server_router: *quicz.endpoint.EndpointRouter,
+    client_lifecycle: *quicz.EndpointConnectionLifecycle,
+    server_lifecycle: *quicz.EndpointConnectionLifecycle,
 ) !void {
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
     const server_path = try udp4Tuple(server_socket.address, client_socket.address);
-    try client_router.registerConnectionId(41, &client_dcid, client_path, .{
+    try client_lifecycle.registerConnectionId(41, &client_dcid, client_path, .{
         .active_migration_disabled = true,
     });
-    try server_router.registerConnectionId(51, &server_dcid, server_path, .{
+    try server_lifecycle.registerConnectionId(51, &server_dcid, server_path, .{
         .active_migration_disabled = true,
     });
 }
@@ -152,7 +152,7 @@ fn sendClientPing(
     io: std.Io,
     client_socket: *std.Io.net.Socket,
     server_socket: *std.Io.net.Socket,
-    server_router: *const quicz.endpoint.EndpointRouter,
+    server_lifecycle: *const quicz.EndpointConnectionLifecycle,
     client: *quicz.QuicConnection,
     server: *quicz.QuicConnection,
     now_millis: i64,
@@ -164,7 +164,7 @@ fn sendClientPing(
     defer allocator.free(packet);
 
     try client_socket.send(io, &server_socket.address, packet);
-    const received = try receiveRoute(io, server_router, server_socket, receive_buf);
+    const received = try receiveRoute(io, server_lifecycle, server_socket, receive_buf);
     try require(received.route.connection_id == 51);
     try require(std.mem.eql(u8, received.route.destination_connection_id.asSlice(), &server_dcid));
     try server.processProtectedShortDatagram(now_millis + 1, keys, server_dcid.len, received.data);
@@ -176,7 +176,7 @@ fn sendServerAck(
     io: std.Io,
     server_socket: *std.Io.net.Socket,
     client_socket: *std.Io.net.Socket,
-    client_router: *const quicz.endpoint.EndpointRouter,
+    client_lifecycle: *const quicz.EndpointConnectionLifecycle,
     client: *quicz.QuicConnection,
     now_millis: i64,
     server_packet_number: u64,
@@ -198,7 +198,7 @@ fn sendServerAck(
     defer allocator.free(packet);
 
     try server_socket.send(io, &client_socket.address, packet);
-    const received = try receiveRoute(io, client_router, client_socket, receive_buf);
+    const received = try receiveRoute(io, client_lifecycle, client_socket, receive_buf);
     try require(received.route.connection_id == 41);
     try require(std.mem.eql(u8, received.route.destination_connection_id.asSlice(), &client_dcid));
     try client.processProtectedShortDatagram(now_millis, keys, client_dcid.len, received.data);
@@ -227,24 +227,24 @@ fn runPacketThresholdPhase(allocator: std.mem.Allocator, io: std.Io) !PacketThre
     try client.confirmHandshake();
     try server.confirmHandshake();
 
-    var client_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer client_router.deinit();
-    var server_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer server_router.deinit();
-    try prepareLoopbackPair(&client_socket, &server_socket, &client_router, &server_router);
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+    try prepareLoopbackPair(&client_socket, &server_socket, &client_lifecycle, &server_lifecycle);
 
     var server_receive_buf: [1500]u8 = undefined;
     var client_receive_buf: [1500]u8 = undefined;
 
     var packet_lengths: [4]usize = undefined;
-    packet_lengths[0] = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_router, &client, &server, 10, &server_receive_buf, secrets.client);
-    packet_lengths[1] = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_router, &client, &server, 11, &server_receive_buf, secrets.client);
-    packet_lengths[2] = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_router, &client, &server, 12, &server_receive_buf, secrets.client);
-    packet_lengths[3] = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_router, &client, &server, 13, &server_receive_buf, secrets.client);
+    packet_lengths[0] = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_lifecycle, &client, &server, 10, &server_receive_buf, secrets.client);
+    packet_lengths[1] = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_lifecycle, &client, &server, 11, &server_receive_buf, secrets.client);
+    packet_lengths[2] = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_lifecycle, &client, &server, 12, &server_receive_buf, secrets.client);
+    packet_lengths[3] = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_lifecycle, &client, &server, 13, &server_receive_buf, secrets.client);
     try require(client.sentPacketCount(.application) == 4);
     try require(server.pendingAckLargest(.application) == 3);
 
-    const ack_bytes = try sendServerAck(allocator, io, &server_socket, &client_socket, &client_router, &client, 70, 0, .{
+    const ack_bytes = try sendServerAck(allocator, io, &server_socket, &client_socket, &client_lifecycle, &client, 70, 0, .{
         .largest_acknowledged = 3,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -287,30 +287,28 @@ fn runTimeThresholdPhase(allocator: std.mem.Allocator, io: std.Io) !TimeThreshol
     try client.confirmHandshake();
     try server.confirmHandshake();
 
-    var client_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer client_router.deinit();
-    var server_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer server_router.deinit();
-    var timers = quicz.EndpointLossDetectionTimers.init(allocator);
-    defer timers.deinit();
-    try prepareLoopbackPair(&client_socket, &server_socket, &client_router, &server_router);
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+    try prepareLoopbackPair(&client_socket, &server_socket, &client_lifecycle, &server_lifecycle);
 
     var server_receive_buf: [1500]u8 = undefined;
     var client_receive_buf: [1500]u8 = undefined;
 
-    const first_packet_len = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_router, &client, &server, 300, &server_receive_buf, secrets.client);
-    _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_router, &client, &server, 500, &server_receive_buf, secrets.client);
+    const first_packet_len = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_lifecycle, &client, &server, 300, &server_receive_buf, secrets.client);
+    _ = try sendClientPing(allocator, io, &client_socket, &server_socket, &server_lifecycle, &client, &server, 500, &server_receive_buf, secrets.client);
     try require(client.sentPacketCount(.application) == 2);
     try require(server.pendingAckLargest(.application) == 1);
 
-    const ack_bytes = try sendServerAck(allocator, io, &server_socket, &client_socket, &client_router, &client, 600, 0, .{
+    const ack_bytes = try sendServerAck(allocator, io, &server_socket, &client_socket, &client_lifecycle, &client, 600, 0, .{
         .largest_acknowledged = 1,
         .ack_delay = 0,
         .first_ack_range = 0,
     }, &client_receive_buf, secrets.server);
 
-    try timers.armFromConnection(client_connection_id, &client);
-    const timer = timers.earliestDeadline() orelse return error.UnexpectedState;
+    try client_lifecycle.armRecoveryTimerFromConnection(client_connection_id, &client);
+    const timer = client_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
     try require(timer.connection_id == client_connection_id);
     try require(timer.timer.space == .application);
     try require(timer.timer.kind == .loss_time);
@@ -318,19 +316,19 @@ fn runTimeThresholdPhase(allocator: std.mem.Allocator, io: std.Io) !TimeThreshol
     try require(client.sentPacketCount(.application) == 1);
     try require(client.bytesInFlight(.application) == first_packet_len);
 
-    try require((try timers.serviceConnection(client_connection_id, &client, deadline - 1)) == null);
+    try require((try client_lifecycle.serviceRecoveryTimer(client_connection_id, &client, deadline - 1)) == null);
     const remaining_before_deadline = client.sentPacketCount(.application);
     try require(remaining_before_deadline == 1);
     try require(client.bytesInFlight(.application) == first_packet_len);
-    try require(timers.count() == 1);
+    try require(client_lifecycle.recoveryTimerCount() == 1);
 
-    const serviced = (try timers.serviceConnection(client_connection_id, &client, deadline)) orelse return error.UnexpectedState;
+    const serviced = (try client_lifecycle.serviceRecoveryTimer(client_connection_id, &client, deadline)) orelse return error.UnexpectedState;
     try require(serviced.connection_id == client_connection_id);
     try require(serviced.timer.space == .application);
     try require(serviced.timer.kind == .loss_time);
     try require(client.sentPacketCount(.application) == 0);
     try require(client.bytesInFlight(.application) == 0);
-    try require(timers.count() == 0);
+    try require(client_lifecycle.recoveryTimerCount() == 0);
 
     return .{
         .client_port = client_local.port,
@@ -340,7 +338,7 @@ fn runTimeThresholdPhase(allocator: std.mem.Allocator, io: std.Io) !TimeThreshol
         .remaining_after_deadline = client.sentPacketCount(.application),
         .bytes_after_deadline = client.bytesInFlight(.application),
         .ack_bytes = ack_bytes,
-        .timers_after_deadline = timers.count(),
+        .timers_after_deadline = client_lifecycle.recoveryTimerCount(),
     };
 }
 
