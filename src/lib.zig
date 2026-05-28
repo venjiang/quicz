@@ -561,6 +561,31 @@ pub const EndpointConnectionLifecycle = struct {
         return self.router.registerConnectionId(connection_id, destination_connection_id, path, options);
     }
 
+    /// Register a replacement destination CID and retire older sequence routes.
+    ///
+    /// This is the lifecycle-owned endpoint route update for
+    /// NEW_CONNECTION_ID-style replacement policy. The connection still owns
+    /// issuing and validating CID sequence numbers; the lifecycle owner commits
+    /// the resulting endpoint route and retained reset-token state.
+    pub fn registerReplacementConnectionId(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        destination_connection_id: []const u8,
+        path: endpoint.Udp4Tuple,
+        sequence_number: u64,
+        retire_prior_to: u64,
+        options: endpoint.ReplacementRouteOptions,
+    ) endpoint.RouteError!endpoint.ReplacementResult {
+        return self.router.registerReplacementConnectionId(
+            connection_id,
+            destination_connection_id,
+            path,
+            sequence_number,
+            retire_prior_to,
+            options,
+        );
+    }
+
     /// Move a route to a caller-validated UDP tuple.
     ///
     /// The connection still owns PATH_CHALLENGE/PATH_RESPONSE validation and
@@ -601,6 +626,19 @@ pub const EndpointConnectionLifecycle = struct {
         datagram: []const u8,
     ) endpoint.RouteError!endpoint.RouteResult {
         return self.router.routeDatagram(path, datagram);
+    }
+
+    /// Return a retained stateless reset token for an inactive destination CID.
+    ///
+    /// Active routes suppress their reset token. This read-only lookup lets
+    /// socket loops keep retired-CID reset handling on the same lifecycle owner
+    /// that installed replacement routes and applied `retire_prior_to`.
+    pub fn statelessResetTokenForDatagram(
+        self: *const EndpointConnectionLifecycle,
+        path: endpoint.Udp4Tuple,
+        datagram: []const u8,
+    ) endpoint.RouteError!?[packet.stateless_reset_token_len]u8 {
+        return self.router.statelessResetTokenForDatagram(path, datagram);
     }
 
     /// Classify one received datagram using lifecycle-owned routing state.
@@ -12874,6 +12912,47 @@ test "EndpointConnectionLifecycle updates caller-validated route path" {
     try std.testing.expectEqual(@as(u64, 77), confirmed_route.connection_id);
     try std.testing.expect(!confirmed_route.path_changed);
     try std.testing.expectError(error.PathMismatch, lifecycle.updateRoutePath(&dcid, old_path, new_path));
+}
+
+test "EndpointConnectionLifecycle registers replacement connection IDs" {
+    const cid0 = [_]u8{ 0xc0, 0xff, 0xee, 0x00 };
+    const cid1 = [_]u8{ 0xc0, 0xff, 0xee, 0x01 };
+    const token0 = [_]u8{0x42} ** packet.stateless_reset_token_len;
+    const token1 = [_]u8{0x24} ** packet.stateless_reset_token_len;
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const datagram0 = [_]u8{ 0x40, 0xc0, 0xff, 0xee, 0x00, 0x01 };
+    const datagram1 = [_]u8{ 0x40, 0xc0, 0xff, 0xee, 0x01, 0x01 };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    try lifecycle.registerConnectionId(51, &cid0, path, .{
+        .sequence_number = 0,
+        .stateless_reset_token = token0,
+    });
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.statelessResetTokenCount());
+
+    const replacement = try lifecycle.registerReplacementConnectionId(51, &cid1, path, 1, 1, .{
+        .stateless_reset_token = token1,
+    });
+    try std.testing.expectEqual(@as(u64, 1), replacement.sequence_number);
+    try std.testing.expectEqual(@as(u64, 1), replacement.retire_prior_to);
+    try std.testing.expectEqual(@as(usize, 1), replacement.retired_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 2), lifecycle.statelessResetTokenCount());
+
+    try std.testing.expectError(error.UnknownConnectionId, lifecycle.routeDatagram(path, &datagram0));
+    const retired_token0 = (try lifecycle.statelessResetTokenForDatagram(path, &datagram0)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &token0, &retired_token0);
+
+    const active_route = try lifecycle.routeDatagram(path, &datagram1);
+    try std.testing.expectEqual(@as(u64, 51), active_route.connection_id);
+    try std.testing.expectEqual(@as(?u64, 1), active_route.sequence_number);
+    try std.testing.expectEqual(@as(?[packet.stateless_reset_token_len]u8, null), try lifecycle.statelessResetTokenForDatagram(path, &datagram1));
 }
 
 test "EndpointConnectionLifecycle mirrors ECN validation by UDP path" {

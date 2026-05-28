@@ -46,7 +46,7 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
 
 fn receiveRoute(
     io: std.Io,
-    router: *const quicz.endpoint.EndpointRouter,
+    lifecycle: *const quicz.EndpointConnectionLifecycle,
     socket: *std.Io.net.Socket,
     receive_buf: []u8,
 ) !ReceivedRoute {
@@ -55,25 +55,25 @@ fn receiveRoute(
     return .{
         .path = path,
         .data = received.data,
-        .route = try router.routeDatagram(path, received.data),
+        .route = try lifecycle.routeDatagram(path, received.data),
     };
 }
 
 fn receiveRetiredToken(
     io: std.Io,
-    router: *const quicz.endpoint.EndpointRouter,
+    lifecycle: *const quicz.EndpointConnectionLifecycle,
     socket: *std.Io.net.Socket,
     receive_buf: []u8,
 ) ![quicz.packet.stateless_reset_token_len]u8 {
     const received = try socket.receiveTimeout(io, receive_buf, receiveTimeout());
     const path = try udp4Tuple(socket.address, received.from);
-    if (router.routeDatagram(path, received.data)) |_| {
+    if (lifecycle.routeDatagram(path, received.data)) |_| {
         return error.UnexpectedState;
     } else |err| switch (err) {
         error.UnknownConnectionId => {},
         else => return err,
     }
-    return (try router.statelessResetTokenForDatagram(path, received.data)) orelse error.UnexpectedState;
+    return (try lifecycle.statelessResetTokenForDatagram(path, received.data)) orelse error.UnexpectedState;
 }
 
 pub fn main() !void {
@@ -109,22 +109,22 @@ pub fn main() !void {
     defer server.deinit();
     try server.validatePeerAddress();
 
-    var client_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer client_router.deinit();
-    var server_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer server_router.deinit();
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
 
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
     const server_path = try udp4Tuple(server_socket.address, client_socket.address);
-    try client_router.registerConnectionId(41, &client_dcid, client_path, .{
+    try client_lifecycle.registerConnectionId(41, &client_dcid, client_path, .{
         .active_migration_disabled = true,
     });
-    try server_router.registerConnectionId(51, &server_dcid, server_path, .{
+    try server_lifecycle.registerConnectionId(51, &server_dcid, server_path, .{
         .active_migration_disabled = true,
     });
 
     const sequence0 = try server.issueConnectionId(&cid0, token0, 0);
-    try server_router.registerConnectionId(51, &cid0, server_path, .{
+    try server_lifecycle.registerConnectionId(51, &cid0, server_path, .{
         .sequence_number = sequence0,
         .active_migration_disabled = true,
         .stateless_reset_token = token0,
@@ -136,7 +136,7 @@ pub fn main() !void {
 
     var client_receive_buf: [1500]u8 = undefined;
     var server_receive_buf: [1500]u8 = undefined;
-    const new0_received = try receiveRoute(io, &client_router, &client_socket, &client_receive_buf);
+    const new0_received = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
     try require(new0_received.route.connection_id == 41);
     try require(std.mem.eql(u8, new0_received.route.destination_connection_id.asSlice(), &client_dcid));
     try client.processProtectedShortDatagram(1, secrets.server, client_dcid.len, new0_received.data);
@@ -146,7 +146,7 @@ pub fn main() !void {
     defer allocator.free(ack0);
     try client_socket.send(io, &server_socket.address, ack0);
 
-    const ack0_received = try receiveRoute(io, &server_router, &server_socket, &server_receive_buf);
+    const ack0_received = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
     try require(ack0_received.route.connection_id == 51);
     try require(std.mem.eql(u8, ack0_received.route.destination_connection_id.asSlice(), &server_dcid));
     try server.processProtectedShortDatagram(3, secrets.client, server_dcid.len, ack0_received.data);
@@ -154,12 +154,12 @@ pub fn main() !void {
 
     const cid0_probe = [_]u8{ 0x40, 0xc0, 0xff, 0xee, 0x00, 0x01 };
     try client_socket.send(io, &server_socket.address, &cid0_probe);
-    const cid0_probe_received = try receiveRoute(io, &server_router, &server_socket, &server_receive_buf);
+    const cid0_probe_received = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
     try require(cid0_probe_received.route.connection_id == 51);
     try require(cid0_probe_received.route.sequence_number.? == sequence0);
 
     const sequence1 = try server.issueConnectionId(&cid1, token1, 1);
-    const replacement = try server_router.registerReplacementConnectionId(51, &cid1, server_path, sequence1, 1, .{
+    const replacement = try server_lifecycle.registerReplacementConnectionId(51, &cid1, server_path, sequence1, 1, .{
         .active_migration_disabled = true,
         .stateless_reset_token = token1,
     });
@@ -171,13 +171,13 @@ pub fn main() !void {
     defer allocator.free(new1);
     try server_socket.send(io, &client_socket.address, new1);
 
-    const new1_received = try receiveRoute(io, &client_router, &client_socket, &client_receive_buf);
+    const new1_received = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
     try require(new1_received.route.connection_id == 41);
     try client.processProtectedShortDatagram(5, secrets.server, client_dcid.len, new1_received.data);
     try require(client.pendingAckLargest(.application) == 1);
 
     try client_socket.send(io, &server_socket.address, &cid0_probe);
-    const retired_token0 = try receiveRetiredToken(io, &server_router, &server_socket, &server_receive_buf);
+    const retired_token0 = try receiveRetiredToken(io, &server_lifecycle, &server_socket, &server_receive_buf);
     try require(std.mem.eql(u8, &retired_token0, &token0));
 
     const retire = (try client.pollProtectedShortDatagram(6, &cid1, secrets.client)) orelse return error.UnexpectedState;
@@ -185,7 +185,7 @@ pub fn main() !void {
     try require(client.pendingAckLargest(.application) == null);
     try client_socket.send(io, &server_socket.address, retire);
 
-    const retire_received = try receiveRoute(io, &server_router, &server_socket, &server_receive_buf);
+    const retire_received = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
     try require(retire_received.route.connection_id == 51);
     try require(retire_received.route.sequence_number.? == sequence1);
     try require(std.mem.eql(u8, retire_received.route.destination_connection_id.asSlice(), &cid1));
@@ -194,13 +194,13 @@ pub fn main() !void {
     try require(server.pendingAckLargest(.application) == 1);
 
     const cid1_probe = [_]u8{ 0x40, 0xc0, 0xff, 0xee, 0x01, 0x01 };
-    try require((try server_router.statelessResetTokenForDatagram(server_path, &cid1_probe)) == null);
+    try require((try server_lifecycle.statelessResetTokenForDatagram(server_path, &cid1_probe)) == null);
 
     const ack1 = (try server.pollProtectedShortDatagram(8, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
     defer allocator.free(ack1);
     try server_socket.send(io, &client_socket.address, ack1);
 
-    const ack1_received = try receiveRoute(io, &client_router, &client_socket, &client_receive_buf);
+    const ack1_received = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
     try require(ack1_received.route.connection_id == 41);
     try client.processProtectedShortDatagram(9, secrets.server, client_dcid.len, ack1_received.data);
     try require(client.bytesInFlight(.application) == 0);
