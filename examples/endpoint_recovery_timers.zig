@@ -365,6 +365,59 @@ pub fn main() !void {
         ack,
     );
     try require(protected_client.bytesInFlight(.application) == 0);
+
+    var key_phase_client_send_state = quicz.protection.Aes128KeyPhaseState.init(secrets.client, false);
+    var key_phase_server_recv_state = quicz.protection.Aes128KeyPhaseState.init(secrets.client, false);
+    var key_phase_server_send_state = quicz.protection.Aes128KeyPhaseState.init(secrets.server, false);
+    var key_phase_client_recv_state = quicz.protection.Aes128KeyPhaseState.init(secrets.server, false);
+    key_phase_client_send_state.initiateKeyUpdate();
+
+    try protected_client.sendPing();
+    const key_phase_ping = (try protected_client_lifecycle.pollProtectedShortDatagramWithKeyPhaseState(
+        protected_client_id,
+        &protected_client,
+        26,
+        &server_dcid,
+        &key_phase_client_send_state,
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(key_phase_ping);
+    try require(protected_client_lifecycle.recoveryTimerCount() == 1);
+
+    const key_phase_ping_route = try protected_server_lifecycle.routeDatagram(server_receive_path, key_phase_ping);
+    try require(key_phase_ping_route.connection_id == protected_server_id);
+    try protected_server_lifecycle.processProtectedShortDatagramWithKeyPhaseState(
+        key_phase_ping_route.connection_id,
+        &protected_server,
+        27,
+        &key_phase_server_recv_state,
+        server_dcid.len,
+        key_phase_ping,
+    );
+    try require(key_phase_server_recv_state.currentKeyPhase());
+    try require(protected_server.pendingAckLargest(.application) == 3);
+
+    const key_phase_ack = (try protected_server_lifecycle.pollProtectedShortDatagramWithKeyPhaseState(
+        protected_server_id,
+        &protected_server,
+        28,
+        &client_dcid,
+        &key_phase_server_send_state,
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(key_phase_ack);
+    try require(protected_server_lifecycle.recoveryTimerCount() == 0);
+
+    const key_phase_ack_route = try protected_client_lifecycle.routeDatagram(client_receive_path, key_phase_ack);
+    try require(key_phase_ack_route.connection_id == protected_client_id);
+    try protected_client_lifecycle.processProtectedShortDatagramWithKeyPhaseState(
+        key_phase_ack_route.connection_id,
+        &protected_client,
+        29,
+        &key_phase_client_recv_state,
+        client_dcid.len,
+        key_phase_ack,
+    );
+    try require(!key_phase_client_recv_state.currentKeyPhase());
+    try require(protected_client.bytesInFlight(.application) == 0);
     const protected_timers_remaining = protected_client_lifecycle.recoveryTimerCount() + protected_server_lifecycle.recoveryTimerCount();
 
     std.debug.print("[endpoint-timers] first_connection={} first_kind={s} first_deadline={} second_connection={} second_kind={s} second_deadline={} pto_ping={} loss_remaining={} timers_remaining={} routes_remaining={} protected_bytes={} protected_timers={}\n", .{
@@ -378,7 +431,7 @@ pub fn main() !void {
         loss_conn.sentPacketCount(.application),
         endpoint_lifecycle.recoveryTimerCount(),
         endpoint_lifecycle.routeCount(),
-        long_initial.len + long_ack.len + installed_handshake.len + installed_handshake_ack.len + installed_zero.len + caller_short.len + caller_short_ack.len + ping.len + ack.len,
+        long_initial.len + long_ack.len + installed_handshake.len + installed_handshake_ack.len + installed_zero.len + caller_short.len + caller_short_ack.len + ping.len + ack.len + key_phase_ping.len + key_phase_ack.len,
         protected_timers_remaining,
     });
 }

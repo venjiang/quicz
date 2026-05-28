@@ -633,6 +633,46 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Poll one caller-owned key-phase protected 1-RTT datagram and refresh timers.
+    ///
+    /// This bridge keeps deterministic key-update tests and external
+    /// key-phase owners on the same endpoint route/timer lifecycle as other
+    /// protected short-packet paths. The returned datagram remains allocated
+    /// by `connection` and must be freed by the caller. If endpoint timer
+    /// refresh fails after a datagram is produced, the helper frees that
+    /// datagram before returning.
+    pub fn pollProtectedShortDatagramWithKeyPhaseState(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *QuicConnection,
+        now_millis: i64,
+        dcid: []const u8,
+        key_phase_state: *const protection.Aes128KeyPhaseState,
+    ) Error!?[]u8 {
+        const datagram = try connection.pollProtectedShortDatagramWithKeyPhaseState(now_millis, dcid, key_phase_state);
+        errdefer if (datagram) |bytes| connection.allocator.free(bytes);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return datagram;
+    }
+
+    /// Process one caller-owned key-phase protected 1-RTT datagram and refresh timers.
+    ///
+    /// The key-phase state advances only after packet authentication and frame
+    /// processing succeed inside `QuicConnection`. The endpoint lifecycle then
+    /// mirrors the resulting aggregate recovery timer.
+    pub fn processProtectedShortDatagramWithKeyPhaseState(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *QuicConnection,
+        now_millis: i64,
+        key_phase_state: *protection.Aes128KeyPhaseState,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        try connection.processProtectedShortDatagramWithKeyPhaseState(now_millis, key_phase_state, dcid_len, datagram);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
     /// Poll one installed-key protected Handshake datagram and refresh timers.
     ///
     /// This is the TLS-owned long-packet bridge for endpoint event loops after
@@ -12959,6 +12999,108 @@ test "EndpointConnectionLifecycle refreshes caller-keyed protected short timer l
         client_dcid.len,
         ack,
     );
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), client_lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle refreshes caller-owned key phase short timer lifecycle" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var client_send_state = protection.Aes128KeyPhaseState.init(secrets.client, false);
+    var server_recv_state = protection.Aes128KeyPhaseState.init(secrets.client, false);
+    var server_send_state = protection.Aes128KeyPhaseState.init(secrets.server, false);
+    var client_recv_state = protection.Aes128KeyPhaseState.init(secrets.server, false);
+    client_send_state.initiateKeyUpdate();
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 10;
+    const server_connection_id: u64 = 20;
+
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendPing();
+    const ping = (try client_lifecycle.pollProtectedShortDatagramWithKeyPhaseState(
+        client_connection_id,
+        &client,
+        10,
+        &server_dcid,
+        &client_send_state,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping);
+    try std.testing.expect(try protection.peekShortPacketKeyPhaseAes128(secrets.client.hp, ping, server_dcid.len));
+    try std.testing.expect(client_send_state.currentKeyPhase());
+    try std.testing.expectEqual(@as(usize, 1), client_lifecycle.recoveryTimerCount());
+
+    const server_route = try server_lifecycle.routeDatagram(server_receive_path, ping);
+    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
+    try server_lifecycle.processProtectedShortDatagramWithKeyPhaseState(
+        server_route.connection_id,
+        &server,
+        11,
+        &server_recv_state,
+        server_dcid.len,
+        ping,
+    );
+    try std.testing.expect(server_recv_state.currentKeyPhase());
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+
+    const ack = (try server_lifecycle.pollProtectedShortDatagramWithKeyPhaseState(
+        server_connection_id,
+        &server,
+        12,
+        &client_dcid,
+        &server_send_state,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+
+    const client_route = try client_lifecycle.routeDatagram(client_receive_path, ack);
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try client_lifecycle.processProtectedShortDatagramWithKeyPhaseState(
+        client_route.connection_id,
+        &client,
+        13,
+        &client_recv_state,
+        client_dcid.len,
+        ack,
+    );
+    try std.testing.expect(!client_recv_state.currentKeyPhase());
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
