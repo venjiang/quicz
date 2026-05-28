@@ -100,7 +100,96 @@ pub fn main() !void {
     try require(!loss_retired.recovery_timer_disarmed);
     try require(endpoint_lifecycle.routeCount() == 0);
 
-    std.debug.print("[endpoint-timers] first_connection={} first_kind={s} first_deadline={} second_connection={} second_kind={s} second_deadline={} pto_ping={} loss_remaining={} timers_remaining={} routes_remaining={}\n", .{
+    var protected_client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer protected_client_lifecycle.deinit();
+    var protected_server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer protected_server_lifecycle.deinit();
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const server_dcid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_addr = quicz.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000);
+    const server_addr = quicz.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = quicz.endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = quicz.endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const protected_client_id: u64 = 3003;
+    const protected_server_id: u64 = 4004;
+
+    var protected_client = try quicz.QuicConnection.init(allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer protected_client.deinit();
+    var protected_server = try quicz.QuicConnection.init(allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer protected_server.deinit();
+    try protected_server.validatePeerAddress();
+    try protected_client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try protected_server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try protected_client_lifecycle.registerConnectionId(protected_client_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try protected_server_lifecycle.registerConnectionId(protected_server_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try protected_client.sendPing();
+    const ping = (try protected_client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        protected_client_id,
+        &protected_client,
+        10,
+        &server_dcid,
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(ping);
+    try require(protected_client_lifecycle.recoveryTimerCount() == 1);
+
+    const ping_route = try protected_server_lifecycle.routeDatagram(server_receive_path, ping);
+    try require(ping_route.connection_id == protected_server_id);
+    try protected_server_lifecycle.processProtectedShortDatagramWithInstalledKeys(
+        ping_route.connection_id,
+        &protected_server,
+        11,
+        server_dcid.len,
+        ping,
+    );
+    try require(protected_server.pendingAckLargest(.application) == 0);
+
+    const ack = (try protected_server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        protected_server_id,
+        &protected_server,
+        12,
+        &client_dcid,
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(ack);
+    try require(protected_server_lifecycle.recoveryTimerCount() == 0);
+
+    const ack_route = try protected_client_lifecycle.routeDatagram(client_receive_path, ack);
+    try require(ack_route.connection_id == protected_client_id);
+    try protected_client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
+        ack_route.connection_id,
+        &protected_client,
+        13,
+        client_dcid.len,
+        ack,
+    );
+    try require(protected_client.bytesInFlight(.application) == 0);
+    const protected_timers_remaining = protected_client_lifecycle.recoveryTimerCount() + protected_server_lifecycle.recoveryTimerCount();
+
+    std.debug.print("[endpoint-timers] first_connection={} first_kind={s} first_deadline={} second_connection={} second_kind={s} second_deadline={} pto_ping={} loss_remaining={} timers_remaining={} routes_remaining={} protected_bytes={} protected_timers={}\n", .{
         first.connection_id,
         @tagName(first.timer.kind),
         first.timer.deadline_millis,
@@ -111,5 +200,7 @@ pub fn main() !void {
         loss_conn.sentPacketCount(.application),
         endpoint_lifecycle.recoveryTimerCount(),
         endpoint_lifecycle.routeCount(),
+        ping.len + ack.len,
+        protected_timers_remaining,
     });
 }
