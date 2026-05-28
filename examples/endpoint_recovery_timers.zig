@@ -146,6 +146,57 @@ pub fn main() !void {
     try protected_server_lifecycle.registerConnectionId(protected_server_id, &server_dcid, server_receive_path, .{
         .sequence_number = 0,
     });
+    try protected_server_lifecycle.registerConnectionId(protected_server_id, &original_dcid, server_receive_path, .{
+        .sequence_number = 1,
+    });
+
+    try protected_client.sendCryptoInSpace(.initial, "lifecycle initial");
+    const long_initial = (try protected_client_lifecycle.pollProtectedLongDatagram(
+        protected_client_id,
+        &protected_client,
+        8,
+        &original_dcid,
+        &client_dcid,
+        &[_]u8{},
+        .{ .initial = secrets.client },
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(long_initial);
+    try require(protected_client_lifecycle.recoveryTimerCount() == 1);
+
+    const long_initial_route = try protected_server_lifecycle.routeDatagram(server_receive_path, long_initial);
+    try require(long_initial_route.connection_id == protected_server_id);
+    try require(try protected_server_lifecycle.processProtectedLongDatagram(
+        long_initial_route.connection_id,
+        &protected_server,
+        9,
+        .{ .initial = secrets.client },
+        long_initial,
+    ) == 1);
+    try require(protected_server.pendingAckLargest(.initial) == 0);
+
+    const long_ack = (try protected_server_lifecycle.pollProtectedLongDatagram(
+        protected_server_id,
+        &protected_server,
+        10,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(long_ack);
+    try require(protected_server_lifecycle.recoveryTimerCount() == 0);
+
+    const long_ack_route = try protected_client_lifecycle.routeDatagram(client_receive_path, long_ack);
+    try require(long_ack_route.connection_id == protected_client_id);
+    try require(try protected_client_lifecycle.processProtectedLongDatagram(
+        long_ack_route.connection_id,
+        &protected_client,
+        11,
+        .{ .initial = secrets.server },
+        long_ack,
+    ) == 1);
+    try require(protected_client.bytesInFlight(.initial) == 0);
+    try require(protected_client_lifecycle.recoveryTimerCount() == 0);
 
     try protected_client.sendPing();
     const ping = (try protected_client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
@@ -200,7 +251,7 @@ pub fn main() !void {
         loss_conn.sentPacketCount(.application),
         endpoint_lifecycle.recoveryTimerCount(),
         endpoint_lifecycle.routeCount(),
-        ping.len + ack.len,
+        long_initial.len + long_ack.len + ping.len + ack.len,
         protected_timers_remaining,
     });
 }
