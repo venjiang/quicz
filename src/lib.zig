@@ -592,6 +592,51 @@ pub const EndpointConnectionLifecycle = struct {
         return count;
     }
 
+    /// Poll one caller-keyed Initial/Handshake CRYPTO datagram and refresh timers.
+    ///
+    /// This direct single-space bridge is for endpoint loops that already hold
+    /// caller-supplied Initial or Handshake packet-protection keys and want to
+    /// emit exactly one CRYPTO packet-number-space datagram without the
+    /// coalescing behavior of `pollProtectedLongDatagram()`. The returned
+    /// datagram remains allocated by `connection` and must be freed by the
+    /// caller. If endpoint timer refresh fails after a datagram is produced,
+    /// the helper frees that datagram before returning.
+    pub fn pollProtectedLongCryptoDatagramInSpace(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *QuicConnection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+    ) Error!?[]u8 {
+        const datagram = try connection.pollProtectedLongCryptoDatagramInSpace(space, now_millis, dcid, scid, initial_token, keys);
+        errdefer if (datagram) |bytes| connection.allocator.free(bytes);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return datagram;
+    }
+
+    /// Process one caller-keyed Initial/Handshake datagram and refresh timers.
+    ///
+    /// Packet-number-space selection, packet authentication, ACK generation,
+    /// and CRYPTO reassembly stay inside `QuicConnection`; the endpoint
+    /// lifecycle mirrors the resulting aggregate recovery timer after
+    /// successful processing.
+    pub fn processProtectedLongDatagramInSpace(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *QuicConnection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) Error!void {
+        try connection.processProtectedLongDatagramInSpace(space, now_millis, keys, datagram);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
     /// Poll one caller-keyed protected 0-RTT datagram and refresh timers.
     ///
     /// This direct early-data bridge is for endpoint loops that already hold
@@ -12756,6 +12801,108 @@ test "EndpointConnectionLifecycle refreshes protected long timer lifecycle" {
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.initial));
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), client_lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle refreshes protected long CRYPTO space timer lifecycle" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 10;
+    const server_connection_id: u64 = 20;
+
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_scid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_scid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try server.sendCryptoInSpace(.handshake, "caller handshake");
+    const handshake = (try server_lifecycle.pollProtectedLongCryptoDatagramInSpace(
+        server_connection_id,
+        &server,
+        .handshake,
+        10,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(handshake);
+    try std.testing.expectEqual(@as(usize, 1), server_lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 1), server.sentPacketCount(.handshake));
+
+    const client_route = try client_lifecycle.routeDatagram(client_receive_path, handshake);
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try client_lifecycle.processProtectedLongDatagramInSpace(
+        client_route.connection_id,
+        &client,
+        .handshake,
+        11,
+        secrets.server,
+        handshake,
+    );
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
+
+    var crypto_buf: [32]u8 = undefined;
+    const recv_len = (try client.recvCryptoInSpace(.handshake, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("caller handshake", crypto_buf[0..recv_len]);
+
+    const ack = (try client_lifecycle.pollProtectedLongDatagram(
+        client_connection_id,
+        &client,
+        12,
+        &server_scid,
+        &client_scid,
+        &[_]u8{},
+        .{ .handshake = secrets.client },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack);
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
+
+    const server_route = try server_lifecycle.routeDatagram(server_receive_path, ack);
+    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
+    try server_lifecycle.processProtectedLongDatagramInSpace(
+        server_route.connection_id,
+        &server,
+        .handshake,
+        13,
+        secrets.client,
+        ack,
+    );
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), server_lifecycle.earliestRecoveryDeadline());
 }
 
 test "EndpointConnectionLifecycle refreshes caller-keyed zero RTT timer lifecycle" {
