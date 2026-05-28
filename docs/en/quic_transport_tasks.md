@@ -482,8 +482,8 @@ produce or consume TLS-owned QUIC packets over UDP.
 - 2026-05-25: Extended `examples/udp_endpoint_loopback.zig` so the real
   loopback UDP Version Negotiation response is passed into
   `QuicConnection.processVersionNegotiationDatagram()`. The example now proves
-  endpoint VN response delivery and client-side mutual-version selection in the
-  same socket-backed flow.
+  lifecycle-owned endpoint VN response delivery and client-side mutual-version
+  selection in the same socket-backed flow.
 - 2026-05-25: Added `examples/udp_close_lifecycle_loopback.zig` and the
   `run-udp-close-lifecycle-loopback` build step. The example delivers a
   protected CONNECTION_CLOSE over loopback UDP, routes it through the active
@@ -1424,9 +1424,10 @@ produce or consume TLS-owned QUIC packets over UDP.
   sockets, sends a QUIC-like unsupported-version Initial through the endpoint
   Version Negotiation path, sends a supported Initial through the server accept
   classification path, registers the accepted server Initial Source CID and
-  client Initial Source CID routes, and verifies a short-header follow-up over
-  the same real UDP sockets. It deliberately stops at endpoint routing; real
-  protected-packet/TLS socket ownership remains pending.
+  client Initial Source CID routes through `EndpointConnectionLifecycle`, and
+  verifies a short-header follow-up over the same real UDP sockets. It
+  deliberately stops at endpoint routing; real protected-packet/TLS socket
+  ownership remains pending.
 - 2026-05-25: Added `examples/udp_protected_loopback.zig` and
   `zig build run-udp-protected-loopback`. The example sends caller-keyed
   protected client Initial and server Initial datagrams over real loopback UDP
@@ -1711,7 +1712,7 @@ run from `build.zig`.
 | `initial_keys` | RFC 9001 QUIC v1 and RFC 9369 QUIC v2 Initial secret/key/IV/header-protection key derivation, RFC 9001 `quic ku` key-update derivation, protected Initial long-packet seal/open, and AES header-protection masking from a client Initial DCID. | Present |
 | `endpoint_routing` | Current in-memory endpoint DCID/IPv4 UDP tuple routing, long-header DCID peeking, unsupported-version RFC 8999 Version Negotiation response generation, client Initial Source CID route registration, supported-version unknown-DCID Initial accept classification, accepted Initial Original DCID/server Initial SCID route registration, short-header registered-CID matching, zero-length CID tuple routing, Retry Source CID route switching, caller-validated preferred-address migration commit, sequence/retire-prior-to/connection-handle route retirement, stateless reset token reuse rejection, caller-validated path update, active-migration-disabled rejection, route retirement, stateless reset token lookup for inactive CIDs, reset datagram construction with caller-supplied unpredictable bytes, and route/version-negotiation/reset/drop/accept receive action classification. | Present |
 | `endpoint_recovery_timers` | Endpoint-owned recovery timer scheduling across caller-owned connection handles: endpoint lifecycle route ownership, earliest aggregate timer selection, before-deadline no-op refresh, PTO service/re-arm, ACK-driven disarm, loss-time service, final timer disarm, connection-handle route retirement, protected long-header send/receive timer refresh, caller-keyed Initial/Handshake CRYPTO-space long-packet send/receive timer refresh, caller-keyed 0-RTT long-packet send/receive timer refresh, caller-keyed protected 1-RTT short-packet send/receive timer refresh, explicit key-phase/key-update short-packet timer refresh, caller-owned key-phase-state short-packet send/receive timer refresh, installed-key Handshake/0-RTT long-packet send/receive timer refresh, and installed-key protected 1-RTT short-packet send/receive timer refresh. | Present |
-| `udp_endpoint_loopback` | Socket-backed loopback UDP exercise for endpoint routing: unsupported-version Initial to Version Negotiation response delivery, client-side VN selection, supported Initial accept classification, client Initial Source CID response routing, accepted server Initial Source CID registration, and short-header registered-CID routing. | Present |
+| `udp_endpoint_loopback` | Socket-backed loopback UDP exercise for endpoint routing: lifecycle-owned unsupported-version Initial to Version Negotiation response delivery, client-side VN selection, supported Initial accept classification, client Initial Source CID response routing, accepted server Initial Source CID registration, and short-header registered-CID routing. | Present |
 | `udp_zero_cid_loopback` | Socket-backed loopback UDP zero-length CID exercise: lifecycle-owned short and long datagram routing by UDP tuple identity, path-specific zero-CID retirement, and route path update to a new tuple. | Present |
 | `udp_preferred_address_loopback` | Socket-backed loopback UDP preferred-address exercise: lifecycle-owned caller-validated preferred route commit, old-route retirement, preferred CID routing on the preferred server address, active-migration-disabled rejection on a stray path, and retained reset-token lookup after retirement. | Present |
 | `udp_replacement_cid_loopback` | Socket-backed loopback UDP replacement CID exercise: lifecycle-owned NEW_CONNECTION_ID-style replacement route registration, retire_prior_to route retirement, inactive old-CID reset-token lookup, active replacement token suppression, invalid retire_prior_to rejection, and active-migration-disabled stray-path rejection. | Present |

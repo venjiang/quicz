@@ -107,10 +107,10 @@ pub fn main() !void {
     try require(server_local.port != 0);
     try require(client_local.port != server_local.port);
 
-    var client_router = quicz.endpoint.EndpointRouter.init(std.heap.page_allocator);
-    defer client_router.deinit();
-    var server_router = quicz.endpoint.EndpointRouter.init(std.heap.page_allocator);
-    defer server_router.deinit();
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(std.heap.page_allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(std.heap.page_allocator);
+    defer server_lifecycle.deinit();
 
     const supported_versions = [_]quicz.packet.Version{ .v1, .v2 };
     const reset_prefix = [_]u8{ 0x40, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00, 0x99 };
@@ -137,7 +137,7 @@ pub fn main() !void {
     const unsupported_path = try udp4Tuple(server_socket.address, unsupported_received.from);
 
     var response_out: [256]u8 = undefined;
-    const version_negotiation_action = try server_router.handleDatagramWithVersionNegotiation(
+    const version_negotiation_action = try server_lifecycle.handleDatagramWithVersionNegotiation(
         &response_out,
         unsupported_path,
         unsupported_received.data,
@@ -176,9 +176,10 @@ pub fn main() !void {
     try require(version_negotiation_client.versionNegotiationSelectedVersion() == .v2);
 
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
-    _ = try client_router.registerClientInitialSourceConnectionId(31, &client_initial_scid, client_path, .{
+    _ = try client_lifecycle.registerClientInitialSourceConnectionId(31, &client_initial_scid, client_path, .{
         .active_migration_disabled = true,
     });
+    try require(client_lifecycle.routeCount() == 1);
 
     const initial_token = [_]u8{ 0xa1, 0xa2 };
     var supported_initial_raw: [64]u8 = undefined;
@@ -194,7 +195,7 @@ pub fn main() !void {
 
     const supported_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const supported_path = try udp4Tuple(server_socket.address, supported_received.from);
-    const accept_action = try server_router.handleDatagramWithVersionNegotiation(
+    const accept_action = try server_lifecycle.handleDatagramWithVersionNegotiation(
         &response_out,
         supported_path,
         supported_received.data,
@@ -210,7 +211,7 @@ pub fn main() !void {
             try require(std.mem.eql(u8, accept.original_destination_connection_id, &original_dcid));
             try require(std.mem.eql(u8, accept.source_connection_id, &client_initial_scid));
             try require(std.mem.eql(u8, accept.token, &initial_token));
-            break :blk try server_router.registerAcceptedInitialConnectionIds(21, accept, &server_initial_scid, .{
+            break :blk try server_lifecycle.registerAcceptedInitialConnectionIds(21, accept, &server_initial_scid, .{
                 .active_migration_disabled = true,
                 .stateless_reset_token = server_reset_token,
             });
@@ -219,6 +220,7 @@ pub fn main() !void {
     };
     try require(accepted_route.original_destination_route.connection_id == 21);
     try require(accepted_route.server_source_route.connection_id == 21);
+    try require(server_lifecycle.routeCount() == 2);
 
     var server_initial_raw: [64]u8 = undefined;
     const server_initial = try buildInitialDatagram(
@@ -233,7 +235,7 @@ pub fn main() !void {
 
     const server_initial_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     const server_initial_path = try udp4Tuple(client_socket.address, server_initial_received.from);
-    const client_route = try client_router.routeDatagram(server_initial_path, server_initial_received.data);
+    const client_route = try client_lifecycle.routeDatagram(server_initial_path, server_initial_received.data);
     try require(client_route.connection_id == 31);
     try require(std.mem.eql(u8, client_route.destination_connection_id.asSlice(), &client_initial_scid));
 
@@ -241,7 +243,7 @@ pub fn main() !void {
     try client_socket.send(io, &server_socket.address, &short_followup);
     const short_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const short_path = try udp4Tuple(server_socket.address, short_received.from);
-    const server_route = try server_router.routeDatagram(short_path, short_received.data);
+    const server_route = try server_lifecycle.routeDatagram(short_path, short_received.data);
     try require(server_route.connection_id == 21);
     try require(std.mem.eql(u8, server_route.destination_connection_id.asSlice(), &server_initial_scid));
 
