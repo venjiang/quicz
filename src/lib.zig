@@ -591,6 +591,24 @@ pub const EndpointConnectionLifecycle = struct {
         return self.router.registerAcceptedInitialConnectionIds(connection_id, initial_accept, server_source_connection_id, options);
     }
 
+    /// Replace an Initial route's DCID with the Retry Source CID.
+    ///
+    /// This is the lifecycle-owned endpoint route switch after server Retry.
+    /// The connection still owns Retry integrity and token validation; the
+    /// endpoint lifecycle owns the route mutation used by the follow-up Initial.
+    pub fn switchInitialDestinationConnectionIdAfterRetry(
+        self: *EndpointConnectionLifecycle,
+        original_destination_connection_id: []const u8,
+        retry_source_connection_id: []const u8,
+        path: endpoint.Udp4Tuple,
+    ) endpoint.RouteError!endpoint.RouteResult {
+        return self.router.switchInitialDestinationConnectionIdAfterRetry(
+            original_destination_connection_id,
+            retry_source_connection_id,
+            path,
+        );
+    }
+
     /// Register a replacement destination CID and retire older sequence routes.
     ///
     /// This is the lifecycle-owned endpoint route update for

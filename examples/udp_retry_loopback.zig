@@ -122,10 +122,10 @@ pub fn main() !void {
     var server = try quicz.QuicConnection.init(allocator, .server, .{});
     defer server.deinit();
 
-    var client_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer client_router.deinit();
-    var server_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer server_router.deinit();
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
 
     const token_secret: quicz.address_validation_token.Secret = [_]u8{0x5d} ** quicz.address_validation_token.secret_len;
     const token_nonce: quicz.address_validation_token.Nonce = [_]u8{0xa7} ** quicz.address_validation_token.nonce_len;
@@ -144,7 +144,7 @@ pub fn main() !void {
     const connection_handle: u64 = 61;
 
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
-    _ = try client_router.registerClientInitialSourceConnectionId(connection_handle, &client_initial_scid, client_path, .{
+    _ = try client_lifecycle.registerClientInitialSourceConnectionId(connection_handle, &client_initial_scid, client_path, .{
         .active_migration_disabled = true,
     });
 
@@ -164,7 +164,7 @@ pub fn main() !void {
     const first_path = try udp4Tuple(server_socket.address, first_received.from);
 
     var action_buf: [256]u8 = undefined;
-    const first_action = try server_router.handleDatagramWithVersionNegotiation(
+    const first_action = try server_lifecycle.handleDatagramWithVersionNegotiation(
         &action_buf,
         first_path,
         first_received.data,
@@ -200,10 +200,10 @@ pub fn main() !void {
     defer allocator.free(retry_datagram);
     try require(server.pendingRetryTokenCount() == 1);
 
-    try server_router.registerConnectionId(connection_handle, first_accept.original_destination_connection_id, first_path, .{
+    try server_lifecycle.registerConnectionId(connection_handle, first_accept.original_destination_connection_id, first_path, .{
         .active_migration_disabled = true,
     });
-    const switched = try server_router.switchInitialDestinationConnectionIdAfterRetry(
+    const switched = try server_lifecycle.switchInitialDestinationConnectionIdAfterRetry(
         first_accept.original_destination_connection_id,
         &retry_scid,
         first_path,
@@ -214,7 +214,7 @@ pub fn main() !void {
     try server_socket.send(io, &first_received.from, retry_datagram);
     const retry_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     const retry_path = try udp4Tuple(client_socket.address, retry_received.from);
-    const retry_route = try client_router.routeDatagram(retry_path, retry_received.data);
+    const retry_route = try client_lifecycle.routeDatagram(retry_path, retry_received.data);
     try require(retry_route.connection_id == connection_handle);
     try require(std.mem.eql(u8, retry_route.destination_connection_id.asSlice(), &client_initial_scid));
 
@@ -237,7 +237,7 @@ pub fn main() !void {
 
     const retry_initial_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const retry_initial_path = try udp4Tuple(server_socket.address, retry_initial_received.from);
-    const routed_retry_action = try server_router.handleDatagramWithVersionNegotiation(
+    const routed_retry_action = try server_lifecycle.handleDatagramWithVersionNegotiation(
         &action_buf,
         retry_initial_path,
         retry_initial_received.data,
@@ -284,7 +284,7 @@ pub fn main() !void {
     const server_received_crypto = try readCryptoRequired(&server, .initial, &server_crypto_buf);
     try require(std.mem.eql(u8, server_received_crypto, "client after retry"));
 
-    try server_router.registerConnectionId(connection_handle, &server_scid, retry_initial_path, .{
+    try server_lifecycle.registerConnectionId(connection_handle, &server_scid, retry_initial_path, .{
         .sequence_number = 0,
         .active_migration_disabled = true,
     });
@@ -301,7 +301,7 @@ pub fn main() !void {
 
     const server_initial_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     const server_initial_path = try udp4Tuple(client_socket.address, server_initial_received.from);
-    const client_initial_route = try client_router.routeDatagram(server_initial_path, server_initial_received.data);
+    const client_initial_route = try client_lifecycle.routeDatagram(server_initial_path, server_initial_received.data);
     try require(client_initial_route.connection_id == connection_handle);
     try require(std.mem.eql(u8, client_initial_route.destination_connection_id.asSlice(), &client_initial_scid));
 
