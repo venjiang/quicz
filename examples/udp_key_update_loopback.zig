@@ -45,7 +45,7 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
 
 fn receiveRoute(
     io: std.Io,
-    router: *const quicz.endpoint.EndpointRouter,
+    lifecycle: *const quicz.EndpointConnectionLifecycle,
     socket: *std.Io.net.Socket,
     receive_buf: []u8,
 ) !ReceivedRoute {
@@ -53,7 +53,7 @@ fn receiveRoute(
     const path = try udp4Tuple(socket.address, received.from);
     return .{
         .data = received.data,
-        .route = try router.routeDatagram(path, received.data),
+        .route = try lifecycle.routeDatagram(path, received.data),
     };
 }
 
@@ -106,17 +106,17 @@ pub fn main() !void {
     try client.confirmHandshake();
     try server.confirmHandshake();
 
-    var client_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer client_router.deinit();
-    var server_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer server_router.deinit();
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
 
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
     const server_path = try udp4Tuple(server_socket.address, client_socket.address);
-    try client_router.registerConnectionId(41, &client_dcid, client_path, .{
+    try client_lifecycle.registerConnectionId(41, &client_dcid, client_path, .{
         .active_migration_disabled = true,
     });
-    try server_router.registerConnectionId(51, &server_dcid, server_path, .{
+    try server_lifecycle.registerConnectionId(51, &server_dcid, server_path, .{
         .active_migration_disabled = true,
     });
 
@@ -134,7 +134,7 @@ pub fn main() !void {
     var server_receive_buf: [1500]u8 = undefined;
     var client_receive_buf: [1500]u8 = undefined;
 
-    const ping_received = try receiveRoute(io, &server_router, &server_socket, &server_receive_buf);
+    const ping_received = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
     try require(ping_received.route.connection_id == 51);
     try require(std.mem.eql(u8, ping_received.route.destination_connection_id.asSlice(), &server_dcid));
     try server.processProtectedShortDatagramWithInstalledKeys(1, server_dcid.len, ping_received.data);
@@ -147,7 +147,7 @@ pub fn main() !void {
     try require(!ack_key_phase);
     try server_socket.send(io, &client_socket.address, ack);
 
-    const ack_received = try receiveRoute(io, &client_router, &client_socket, &client_receive_buf);
+    const ack_received = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
     try require(ack_received.route.connection_id == 41);
     try require(std.mem.eql(u8, ack_received.route.destination_connection_id.asSlice(), &client_dcid));
     try client.processProtectedShortDatagramWithInstalledKeys(3, client_dcid.len, ack_received.data);
