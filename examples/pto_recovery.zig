@@ -164,6 +164,27 @@ pub fn main() !void {
         .{crypto_payload.len},
     );
 
+    var handshake_rtt = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer handshake_rtt.deinit();
+    _ = try handshake_rtt.recordPacketSentInSpace(.handshake, 0, 100);
+    try handshake_rtt.receiveAckInSpace(.handshake, 100, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 1,
+        .first_ack_range = 0,
+    });
+    _ = try handshake_rtt.recordPacketSentInSpace(.handshake, 100, 100);
+    try handshake_rtt.receiveAckInSpace(.handshake, 220, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 1,
+        .first_ack_range = 0,
+    });
+    if (handshake_rtt.smoothedRttMillis(.handshake) != 102) return error.PtoRecoveryExampleFailed;
+
+    std.debug.print(
+        "[pto] handshake ACK delay ignored for RTT smoothed={d}\n",
+        .{handshake_rtt.smoothedRttMillis(.handshake)},
+    );
+
     var spaces = try quicz.QuicConnection.init(allocator, .server, .{ .initial_rtt_ms = 100 });
     defer spaces.deinit();
     try spaces.validatePeerAddress();

@@ -3981,7 +3981,7 @@ pub const QuicConnection = struct {
     }
 
     fn ackDelayForRtt(self: QuicConnection, space: PacketNumberSpace, ack_delay: u64) u64 {
-        if (space == .initial) return 0;
+        if (space == .initial or space == .handshake) return 0;
         const scaled_ack_delay = self.scaledPeerAckDelay(ack_delay);
         if (!self.handshake_confirmed) return scaled_ack_delay;
         return @min(scaled_ack_delay, self.recovery_state.max_ack_delay_ms);
@@ -12539,7 +12539,7 @@ test "processDatagram ACK updates recovery and removes sent packets" {
     try std.testing.expectEqual(@as(?u64, 50), conn.recovery_state.latest_rtt_ms);
 }
 
-test "ACK delay is ignored for Initial RTT samples" {
+test "ACK delay is ignored for Initial and Handshake RTT samples" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
@@ -12554,12 +12554,28 @@ test "ACK delay is ignored for Initial RTT samples" {
     try std.testing.expectEqual(@as(u64, 100), conn.smoothedRttMillis(.initial));
 
     _ = try conn.recordPacketSentInSpace(.initial, 100, 100);
-    try conn.receiveAckInSpace(.initial, 200, .{
+    try conn.receiveAckInSpace(.initial, 220, .{
         .largest_acknowledged = 1,
         .ack_delay = 1,
         .first_ack_range = 0,
     });
-    try std.testing.expectEqual(@as(u64, 100), conn.smoothedRttMillis(.initial));
+    try std.testing.expectEqual(@as(u64, 102), conn.smoothedRttMillis(.initial));
+
+    _ = try conn.recordPacketSentInSpace(.handshake, 0, 100);
+    try conn.receiveAckInSpace(.handshake, 100, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 1,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 100), conn.smoothedRttMillis(.handshake));
+
+    _ = try conn.recordPacketSentInSpace(.handshake, 100, 100);
+    try conn.receiveAckInSpace(.handshake, 220, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 1,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 102), conn.smoothedRttMillis(.handshake));
 }
 
 test "ACK delay is capped by peer max_ack_delay after handshake confirmation" {
@@ -12572,6 +12588,7 @@ test "ACK delay is capped by peer max_ack_delay after handshake confirmation" {
         .ack_delay_exponent = 3,
     });
     try std.testing.expectEqual(@as(u64, 0), conn.ackDelayForRtt(.initial, 20));
+    try std.testing.expectEqual(@as(u64, 0), conn.ackDelayForRtt(.handshake, 20));
     try std.testing.expectEqual(@as(u64, 160), conn.ackDelayForRtt(.application, 20));
 
     _ = try conn.recordPacketSentInSpace(.application, 0, 100);
