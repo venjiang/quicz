@@ -522,6 +522,21 @@ pub const EndpointConnectionLifecycle = struct {
         return self.router.registerConnectionId(connection_id, destination_connection_id, path, options);
     }
 
+    /// Move a route to a caller-validated UDP tuple.
+    ///
+    /// The connection still owns PATH_CHALLENGE/PATH_RESPONSE validation and
+    /// packet-number ordering. The lifecycle owner only commits the resulting
+    /// path update to the same routing state used for receive classification,
+    /// protected datagram delivery, and timer/route retirement.
+    pub fn updateRoutePath(
+        self: *EndpointConnectionLifecycle,
+        destination_connection_id: []const u8,
+        current_path: endpoint.Udp4Tuple,
+        new_path: endpoint.Udp4Tuple,
+    ) endpoint.RouteError!endpoint.RouteResult {
+        return self.router.updateRoutePath(destination_connection_id, current_path, new_path);
+    }
+
     /// Route one received datagram using the owned endpoint routing table.
     pub fn routeDatagram(
         self: *const EndpointConnectionLifecycle,
@@ -12766,6 +12781,42 @@ test "EndpointConnectionLifecycle retires routes with recovery timer" {
     const retired_again = lifecycle.retireConnection(41);
     try std.testing.expectEqual(@as(usize, 0), retired_again.routes_retired);
     try std.testing.expect(!retired_again.recovery_timer_disarmed);
+}
+
+test "EndpointConnectionLifecycle updates caller-validated route path" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    };
+    const dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const short_datagram = [_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd, 0x00 };
+
+    try lifecycle.registerConnectionId(77, &dcid, old_path, .{ .sequence_number = 3 });
+    const old_route = try lifecycle.routeDatagram(old_path, &short_datagram);
+    try std.testing.expectEqual(@as(u64, 77), old_route.connection_id);
+    try std.testing.expectEqual(@as(?u64, 3), old_route.sequence_number);
+    try std.testing.expect(!old_route.path_changed);
+
+    const migration_route = try lifecycle.routeDatagram(new_path, &short_datagram);
+    try std.testing.expectEqual(@as(u64, 77), migration_route.connection_id);
+    try std.testing.expect(migration_route.path_changed);
+
+    const updated_route = try lifecycle.updateRoutePath(&dcid, old_path, new_path);
+    try std.testing.expectEqual(@as(u64, 77), updated_route.connection_id);
+    try std.testing.expectEqual(@as(?u64, 3), updated_route.sequence_number);
+    try std.testing.expect(!updated_route.path_changed);
+
+    const confirmed_route = try lifecycle.routeDatagram(new_path, &short_datagram);
+    try std.testing.expectEqual(@as(u64, 77), confirmed_route.connection_id);
+    try std.testing.expect(!confirmed_route.path_changed);
+    try std.testing.expectError(error.PathMismatch, lifecycle.updateRoutePath(&dcid, old_path, new_path));
 }
 
 test "EndpointConnectionLifecycle refreshes protected long timer lifecycle" {

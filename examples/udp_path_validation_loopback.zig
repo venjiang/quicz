@@ -75,11 +75,11 @@ pub fn main() !void {
     defer client.deinit();
     try server.validatePeerAddress();
 
-    var server_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer server_router.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
 
     const old_path = try udp4Tuple(server_socket.address, old_client_socket.address);
-    try server_router.registerConnectionId(connection_handle, &server_dcid, old_path, .{});
+    try server_lifecycle.registerConnectionId(connection_handle, &server_dcid, old_path, .{});
 
     try server.sendPathChallenge(challenge_data);
     const challenge_packet = (try server.pollProtectedShortDatagram(
@@ -108,7 +108,7 @@ pub fn main() !void {
     var server_receive_buf: [1500]u8 = undefined;
     const response_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const response_path = try udp4Tuple(server_socket.address, response_received.from);
-    const migrated_route = try server_router.routeDatagram(response_path, response_received.data);
+    const migrated_route = try server_lifecycle.routeDatagram(response_path, response_received.data);
     try require(migrated_route.connection_id == connection_handle);
     try require(migrated_route.path_changed);
     try require(std.mem.eql(u8, migrated_route.destination_connection_id.asSlice(), &server_dcid));
@@ -118,11 +118,11 @@ pub fn main() !void {
     try require(server.bytesInFlight(.application) == 0);
     try require(server.pendingAckLargest(.application) == 0);
 
-    const updated_route = try server_router.updateRoutePath(&server_dcid, old_path, response_path);
+    const updated_route = try server_lifecycle.updateRoutePath(&server_dcid, old_path, response_path);
     try require(updated_route.connection_id == connection_handle);
     try require(!updated_route.path_changed);
 
-    const confirmed_route = try server_router.routeDatagram(response_path, response_received.data);
+    const confirmed_route = try server_lifecycle.routeDatagram(response_path, response_received.data);
     try require(confirmed_route.connection_id == connection_handle);
     try require(!confirmed_route.path_changed);
 
