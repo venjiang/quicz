@@ -931,8 +931,8 @@ produce or consume TLS-owned QUIC packets over UDP.
   tokens while ignoring retired CIDs.
 - 2026-05-22: Added `examples/stateless_reset.zig` and
   `zig build run-stateless-reset`. The example demonstrates matching a peer
-  stateless reset token, rejecting a false token, and endpoint-level inactive-CID
-  reset action construction.
+  stateless reset token, rejecting a false token, and lifecycle-owned
+  endpoint-level inactive-CID reset action construction.
 - 2026-05-22: Added `quicz.protection.deriveInitialSecrets()` for RFC 9001
   QUIC v1 Initial secrets. It derives the Initial PRK, client/server Initial
   secrets, AEAD_AES_128_GCM keys, IVs, and AES header-protection keys from the
@@ -1742,7 +1742,7 @@ run from `build.zig`.
 | `packet_spaces` | Current frame-payload Initial/Handshake/Application ACK/recovery isolation, RFC 9001 Initial discard, Initial/Handshake discard cleanup, 0-RTT packet-type filtering, and caller-keyed protected 0-RTT STREAM/RESET_STREAM/STOP_SENDING delivery plus ACK-loss retransmission. | Present |
 | `path_validation` | Current frame-payload PATH_CHALLENGE timeout retry, success, retry exhaustion, caller-keyed protected 1-RTT PATH_CHALLENGE/PATH_RESPONSE exchange, and `EndpointConnectionLifecycle` route path update after protected PATH_RESPONSE validation. | Present |
 | `connection_ids` | Current local NEW_CONNECTION_ID issuing with stateless-reset-token uniqueness checks, peer RETIRE_CONNECTION_ID handling, lifecycle-owned endpoint replacement-CID registration with retire_prior_to route retirement, and caller-keyed protected 1-RTT NEW_CONNECTION_ID/RETIRE_CONNECTION_ID exchange. | Present |
-| `stateless_reset` | Current constant-time stateless reset token match, false-positive rejection, and endpoint inactive-CID reset action construction. | Present |
+| `stateless_reset` | Current constant-time stateless reset token match, false-positive rejection, and lifecycle-owned endpoint inactive-CID reset action construction. | Present |
 | `ecn_validation` | Current frame-payload ECT send modeling, ACK_ECN counter validation, and endpoint path-identity ECN state isolation. | Present |
 | `loss_recovery` | Current frame-payload packet-threshold loss, time-threshold loss, aggregate loss-time timer service, NewReno slow-start/congestion-avoidance growth, recovery period, minimum-window ssthresh clamp, PTO-backoff-independent persistent congestion, and ACK-delay handling. | Present |
 | `pto_recovery` | Current frame-payload Initial/Handshake/Application PTO hooks, including aggregate PTO timer service, Initial/Handshake max_ack_delay suppression, congestion-window bypass for one armed PTO probe, PING fallback probes, cross-space peer probes for other in-flight packet number spaces, queued STREAM data probe selection, in-flight STREAM retransmission probe selection, and protected 1-RTT CRYPTO PTO probe selection. | Present |
