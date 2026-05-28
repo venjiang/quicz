@@ -74,7 +74,7 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
 
 fn receiveRoute(
     io: std.Io,
-    router: *const quicz.endpoint.EndpointRouter,
+    lifecycle: *const quicz.EndpointConnectionLifecycle,
     socket: *std.Io.net.Socket,
     receive_buf: []u8,
 ) !ReceivedRoute {
@@ -82,15 +82,7 @@ fn receiveRoute(
     const path = try udp4Tuple(socket.address, received.from);
     return .{
         .data = received.data,
-        .route = try router.routeDatagram(path, received.data),
-    };
-}
-
-fn mapEcnState(state: quicz.EcnValidationState) quicz.endpoint.EcnPathValidationState {
-    return switch (state) {
-        .unknown => .unknown,
-        .capable => .capable,
-        .failed => .failed,
+        .route = try lifecycle.routeDatagram(path, received.data),
     };
 }
 
@@ -152,20 +144,18 @@ pub fn main() !void {
     try client.confirmHandshake();
     try server.confirmHandshake();
 
-    var client_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer client_router.deinit();
-    var server_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer server_router.deinit();
-    var ecn_policy = quicz.endpoint.EcnPathPolicy.init(allocator);
-    defer ecn_policy.deinit();
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
 
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
     const server_path = try udp4Tuple(server_socket.address, client_socket.address);
     const migrated_path = try udp4Tuple(client_socket.address, migrated_server_socket.address);
-    try client_router.registerConnectionId(41, &client_dcid, client_path, .{
+    try client_lifecycle.registerConnectionId(41, &client_dcid, client_path, .{
         .active_migration_disabled = true,
     });
-    try server_router.registerConnectionId(51, &server_dcid, server_path, .{
+    try server_lifecycle.registerConnectionId(51, &server_dcid, server_path, .{
         .active_migration_disabled = true,
     });
 
@@ -182,7 +172,7 @@ pub fn main() !void {
     try require(try client.recordEcnPacketSentInSpace(.application, 0, ecn_ping.len, .ect0) == 0);
     try client_socket.send(io, &server_socket.address, ecn_ping);
 
-    const received_ping = try receiveRoute(io, &server_router, &server_socket, &server_receive_buf);
+    const received_ping = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
     try require(received_ping.route.connection_id == 51);
     try require(std.mem.eql(u8, received_ping.route.destination_connection_id.asSlice(), &server_dcid));
     try server.processProtectedShortDatagram(1, secrets.client, server_dcid.len, received_ping.data);
@@ -206,7 +196,7 @@ pub fn main() !void {
     defer allocator.free(ack_ecn);
     try server_socket.send(io, &client_socket.address, ack_ecn);
 
-    const received_ack_ecn = try receiveRoute(io, &client_router, &client_socket, &client_receive_buf);
+    const received_ack_ecn = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
     try require(received_ack_ecn.route.connection_id == 41);
     try require(std.mem.eql(u8, received_ack_ecn.route.destination_connection_id.asSlice(), &client_dcid));
     try client.processProtectedShortDatagram(2, secrets.server, client_dcid.len, received_ack_ecn.data);
@@ -222,7 +212,7 @@ pub fn main() !void {
     try require(try client.recordEcnPacketSentInSpace(.application, 10, ce_ping.len, .ect0) == 1);
     try client_socket.send(io, &server_socket.address, ce_ping);
 
-    const received_ce_ping = try receiveRoute(io, &server_router, &server_socket, &server_receive_buf);
+    const received_ce_ping = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
     try require(received_ce_ping.route.connection_id == 51);
     try require(std.mem.eql(u8, received_ce_ping.route.destination_connection_id.asSlice(), &server_dcid));
     try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, received_ce_ping.data);
@@ -246,7 +236,7 @@ pub fn main() !void {
     defer allocator.free(ce_ack);
     try server_socket.send(io, &client_socket.address, ce_ack);
 
-    const received_ce_ack = try receiveRoute(io, &client_router, &client_socket, &client_receive_buf);
+    const received_ce_ack = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
     try require(received_ce_ack.route.connection_id == 41);
     try require(std.mem.eql(u8, received_ce_ack.route.destination_connection_id.asSlice(), &client_dcid));
     try client.processProtectedShortDatagram(12, secrets.server, client_dcid.len, received_ce_ack.data);
@@ -258,10 +248,11 @@ pub fn main() !void {
     try require(client.ecnCounts(.application).ecn_ce_count == 1);
     try require(ce_cwnd == @max(no_ce_cwnd / 2, quicz.recovery.minimumCongestionWindow(1350)));
 
-    try ecn_policy.setStateForPath(client_path, mapEcnState(client.ecnValidationState(.application)));
-    try require(ecn_policy.stateForPath(client_path) == .capable);
-    try require(ecn_policy.stateForPath(migrated_path) == .unknown);
-    try require(ecn_policy.mayUseEct(migrated_path));
+    const refreshed_ecn_state = try client_lifecycle.refreshEcnPathStateFromConnection(client_path, &client, .application);
+    try require(refreshed_ecn_state == .capable);
+    try require(client_lifecycle.ecnPathState(client_path) == .capable);
+    try require(client_lifecycle.ecnPathState(migrated_path) == .unknown);
+    try require(client_lifecycle.mayUseEctOnPath(migrated_path));
 
     std.debug.print("[udp-ecn] client_port={} server_port={} migrated_port={} ping_bytes={} ack_ecn_bytes={} ce_ping_bytes={} ce_ack_bytes={} client_ecn={s} path_ecn={s} migrated_ecn={s} ect0_count={} ce_count={} no_ce_cwnd={} ce_cwnd={} client_inflight={}\n", .{
         client_local.port,
@@ -272,8 +263,8 @@ pub fn main() !void {
         ce_ping.len,
         ce_ack.len,
         @tagName(client.ecnValidationState(.application)),
-        @tagName(ecn_policy.stateForPath(client_path)),
-        @tagName(ecn_policy.stateForPath(migrated_path)),
+        @tagName(client_lifecycle.ecnPathState(client_path)),
+        @tagName(client_lifecycle.ecnPathState(migrated_path)),
         client.ecnCounts(.application).ect0_count,
         client.ecnCounts(.application).ecn_ce_count,
         no_ce_cwnd,

@@ -470,28 +470,41 @@ pub const EndpointConnectionRetireResult = struct {
     recovery_timer_disarmed: bool,
 };
 
+fn endpointEcnPathState(state: EcnValidationState) endpoint.EcnPathValidationState {
+    return switch (state) {
+        .unknown => .unknown,
+        .capable => .capable,
+        .failed => .failed,
+    };
+}
+
 /// Endpoint-owned routing and recovery-timer lifecycle for connection handles.
 ///
-/// This helper owns the endpoint router and aggregate loss/PTO timer table for
-/// a socket event loop. It still does not own `QuicConnection` instances or
-/// perform socket I/O; callers pass the selected connection into the timer
-/// service path and use `router` for datagram routing.
+/// This helper owns the endpoint router, aggregate loss/PTO timer table, and
+/// ECN path policy for a socket event loop. It still does not own
+/// `QuicConnection` instances or perform socket I/O; callers pass the selected
+/// connection into the timer/service paths and use this owner for datagram
+/// routing and UDP-path policy decisions.
 pub const EndpointConnectionLifecycle = struct {
     /// Destination-CID router owned by this endpoint lifecycle.
     router: endpoint.EndpointRouter,
     /// Aggregate loss/PTO timers keyed by caller-owned connection handle.
     recovery_timers: EndpointLossDetectionTimers,
+    /// Per-UDP-path ECN validation state owned by this endpoint lifecycle.
+    ecn_paths: endpoint.EcnPathPolicy,
 
     /// Create an endpoint lifecycle owner with empty routes and timers.
     pub fn init(allocator: std.mem.Allocator) EndpointConnectionLifecycle {
         return .{
             .router = endpoint.EndpointRouter.init(allocator),
             .recovery_timers = EndpointLossDetectionTimers.init(allocator),
+            .ecn_paths = endpoint.EcnPathPolicy.init(allocator),
         };
     }
 
     /// Release route and timer storage owned by this endpoint lifecycle.
     pub fn deinit(self: *EndpointConnectionLifecycle) void {
+        self.ecn_paths.deinit();
         self.recovery_timers.deinit();
         self.router.deinit();
     }
@@ -509,6 +522,32 @@ pub const EndpointConnectionLifecycle = struct {
     /// Return the number of armed recovery timers.
     pub fn recoveryTimerCount(self: *const EndpointConnectionLifecycle) usize {
         return self.recovery_timers.count();
+    }
+
+    /// Return the stored ECN validation state for one UDP path.
+    pub fn ecnPathState(self: *const EndpointConnectionLifecycle, path: endpoint.Udp4Tuple) endpoint.EcnPathValidationState {
+        return self.ecn_paths.stateForPath(path);
+    }
+
+    /// Return whether endpoint packetization may set ECT on this UDP path.
+    pub fn mayUseEctOnPath(self: *const EndpointConnectionLifecycle, path: endpoint.Udp4Tuple) bool {
+        return self.ecn_paths.mayUseEct(path);
+    }
+
+    /// Mirror a connection packet-space ECN result onto one UDP path.
+    ///
+    /// `QuicConnection` validates ACK_ECN counters in packet-number space
+    /// state. The endpoint lifecycle stores that result under the concrete UDP
+    /// tuple so migration starts from an independent ECN validation state.
+    pub fn refreshEcnPathStateFromConnection(
+        self: *EndpointConnectionLifecycle,
+        path: endpoint.Udp4Tuple,
+        connection: *const QuicConnection,
+        space: PacketNumberSpace,
+    ) endpoint.RouteError!endpoint.EcnPathValidationState {
+        const state = endpointEcnPathState(connection.ecnValidationState(space));
+        try self.ecn_paths.setStateForPath(path, state);
+        return state;
     }
 
     /// Register a destination connection ID for a caller-owned connection.
@@ -12817,6 +12856,64 @@ test "EndpointConnectionLifecycle updates caller-validated route path" {
     try std.testing.expectEqual(@as(u64, 77), confirmed_route.connection_id);
     try std.testing.expect(!confirmed_route.path_changed);
     try std.testing.expectError(error.PathMismatch, lifecycle.updateRoutePath(&dcid, old_path, new_path));
+}
+
+test "EndpointConnectionLifecycle mirrors ECN validation by UDP path" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const migrated_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    };
+
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.unknown, lifecycle.ecnPathState(old_path));
+    try std.testing.expect(lifecycle.mayUseEctOnPath(old_path));
+
+    var validated = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer validated.deinit();
+
+    _ = try validated.recordEcnPacketSentInSpace(.application, 10, 100, .ect0);
+    try validated.receiveAckEcnInSpace(.application, 60, .{
+        .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 1,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
+    });
+    try std.testing.expectEqual(
+        endpoint.EcnPathValidationState.capable,
+        try lifecycle.refreshEcnPathStateFromConnection(old_path, &validated, .application),
+    );
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.capable, lifecycle.ecnPathState(old_path));
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.unknown, lifecycle.ecnPathState(migrated_path));
+    try std.testing.expect(lifecycle.mayUseEctOnPath(migrated_path));
+
+    var failed = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer failed.deinit();
+
+    _ = try failed.recordEcnPacketSentInSpace(.application, 10, 100, .ect0);
+    try failed.receiveAckInSpace(.application, 60, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(
+        endpoint.EcnPathValidationState.failed,
+        try lifecycle.refreshEcnPathStateFromConnection(migrated_path, &failed, .application),
+    );
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.capable, lifecycle.ecnPathState(old_path));
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.failed, lifecycle.ecnPathState(migrated_path));
+    try std.testing.expect(!lifecycle.mayUseEctOnPath(migrated_path));
 }
 
 test "EndpointConnectionLifecycle refreshes protected long timer lifecycle" {
