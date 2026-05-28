@@ -458,10 +458,11 @@ produce or consume TLS-owned QUIC packets over UDP.
   preferred-address reset token remains available after retirement.
 - 2026-05-25: Added `examples/udp_zero_cid_loopback.zig` and the
   `run-udp-zero-cid-loopback` build step. The example registers two
-  zero-length destination CID routes on separate UDP tuples, proves short and
-  long datagrams are routed by tuple identity over loopback sockets, retires
-  one zero-CID route by path, then updates the remaining route to a new peer
-  port and verifies routing there.
+  zero-length destination CID routes through `EndpointConnectionLifecycle` on
+  separate UDP tuples, proves short and long datagrams are routed by tuple
+  identity over loopback sockets, retires one zero-CID route by path through
+  the lifecycle owner, then updates the remaining route to a new peer port and
+  verifies routing there.
 - 2026-05-25: Added `examples/udp_path_validation_loopback.zig` and the
   `run-udp-path-validation-loopback` build step. The example sends a protected
   PATH_CHALLENGE over loopback UDP to a new client port, routes the protected
@@ -1709,7 +1710,7 @@ run from `build.zig`.
 | `endpoint_routing` | Current in-memory endpoint DCID/IPv4 UDP tuple routing, long-header DCID peeking, unsupported-version RFC 8999 Version Negotiation response generation, client Initial Source CID route registration, supported-version unknown-DCID Initial accept classification, accepted Initial Original DCID/server Initial SCID route registration, short-header registered-CID matching, zero-length CID tuple routing, Retry Source CID route switching, caller-validated preferred-address migration commit, sequence/retire-prior-to/connection-handle route retirement, stateless reset token reuse rejection, caller-validated path update, active-migration-disabled rejection, route retirement, stateless reset token lookup for inactive CIDs, reset datagram construction with caller-supplied unpredictable bytes, and route/version-negotiation/reset/drop/accept receive action classification. | Present |
 | `endpoint_recovery_timers` | Endpoint-owned recovery timer scheduling across caller-owned connection handles: endpoint lifecycle route ownership, earliest aggregate timer selection, before-deadline no-op refresh, PTO service/re-arm, ACK-driven disarm, loss-time service, final timer disarm, connection-handle route retirement, protected long-header send/receive timer refresh, caller-keyed Initial/Handshake CRYPTO-space long-packet send/receive timer refresh, caller-keyed 0-RTT long-packet send/receive timer refresh, caller-keyed protected 1-RTT short-packet send/receive timer refresh, explicit key-phase/key-update short-packet timer refresh, caller-owned key-phase-state short-packet send/receive timer refresh, installed-key Handshake/0-RTT long-packet send/receive timer refresh, and installed-key protected 1-RTT short-packet send/receive timer refresh. | Present |
 | `udp_endpoint_loopback` | Socket-backed loopback UDP exercise for endpoint routing: unsupported-version Initial to Version Negotiation response delivery, client-side VN selection, supported Initial accept classification, client Initial Source CID response routing, accepted server Initial Source CID registration, and short-header registered-CID routing. | Present |
-| `udp_zero_cid_loopback` | Socket-backed loopback UDP zero-length CID exercise: short and long datagram routing by UDP tuple identity, path-specific zero-CID retirement, and route path update to a new tuple. | Present |
+| `udp_zero_cid_loopback` | Socket-backed loopback UDP zero-length CID exercise: lifecycle-owned short and long datagram routing by UDP tuple identity, path-specific zero-CID retirement, and route path update to a new tuple. | Present |
 | `udp_preferred_address_loopback` | Socket-backed loopback UDP preferred-address exercise: caller-validated preferred route commit, old-route retirement, preferred CID routing on the preferred server address, active-migration-disabled rejection on a stray path, and retained reset-token lookup after retirement. | Present |
 | `udp_replacement_cid_loopback` | Socket-backed loopback UDP replacement CID exercise: NEW_CONNECTION_ID-style replacement route registration, retire_prior_to route retirement, inactive old-CID reset-token lookup, active replacement token suppression, invalid retire_prior_to rejection, and active-migration-disabled stray-path rejection. | Present |
 | `udp_connection_ids_loopback` | Socket-backed loopback UDP connection ID exercise: protected NEW_CONNECTION_ID delivery, lifecycle-owned endpoint replacement route update, inactive old-CID reset-token lookup, protected RETIRE_CONNECTION_ID routed through the active replacement CID, server-side local CID retirement, and ACK cleanup. | Present |

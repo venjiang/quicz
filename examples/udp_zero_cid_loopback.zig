@@ -38,8 +38,8 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
     };
 }
 
-fn expectUnknownRoute(router: *const quicz.endpoint.EndpointRouter, path: quicz.endpoint.Udp4Tuple, datagram: []const u8) !void {
-    if (router.routeDatagram(path, datagram)) |_| {
+fn expectUnknownRoute(lifecycle: *const quicz.EndpointConnectionLifecycle, path: quicz.endpoint.Udp4Tuple, datagram: []const u8) !void {
+    if (lifecycle.routeDatagram(path, datagram)) |_| {
         return error.UnexpectedState;
     } else |err| switch (err) {
         error.UnknownConnectionId => {},
@@ -75,22 +75,23 @@ pub fn main() !void {
     try require(client0_local.port != client2_local.port);
     try require(client1_local.port != client2_local.port);
 
-    var router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer router.deinit();
+    var lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer lifecycle.deinit();
 
     const empty_cid = [_]u8{};
     const path0 = try udp4Tuple(server_socket.address, client0_socket.address);
     const path1 = try udp4Tuple(server_socket.address, client1_socket.address);
     const path2 = try udp4Tuple(server_socket.address, client2_socket.address);
-    try router.registerConnectionId(101, &empty_cid, path0, .{});
-    try router.registerConnectionId(102, &empty_cid, path1, .{});
+    try lifecycle.registerConnectionId(101, &empty_cid, path0, .{});
+    try lifecycle.registerConnectionId(102, &empty_cid, path1, .{});
+    try require(lifecycle.routeCount() == 2);
 
     const short_datagram = [_]u8{ 0x40, 0x01, 0x02, 0x03 };
     try client0_socket.send(io, &server_socket.address, &short_datagram);
     var server_receive_buf: [1500]u8 = undefined;
     const first_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const first_path = try udp4Tuple(server_socket.address, first_received.from);
-    const first_route = try router.routeDatagram(first_path, first_received.data);
+    const first_route = try lifecycle.routeDatagram(first_path, first_received.data);
     try require(first_route.connection_id == 101);
     try require(first_route.destination_connection_id.asSlice().len == 0);
     try require(!first_route.path_changed);
@@ -98,7 +99,7 @@ pub fn main() !void {
     try client1_socket.send(io, &server_socket.address, &short_datagram);
     const second_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const second_path = try udp4Tuple(server_socket.address, second_received.from);
-    const second_route = try router.routeDatagram(second_path, second_received.data);
+    const second_route = try lifecycle.routeDatagram(second_path, second_received.data);
     try require(second_route.connection_id == 102);
     try require(second_route.destination_connection_id.asSlice().len == 0);
     try require(!second_route.path_changed);
@@ -107,23 +108,24 @@ pub fn main() !void {
     try client0_socket.send(io, &server_socket.address, &long_zero_dcid);
     const long_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const long_path = try udp4Tuple(server_socket.address, long_received.from);
-    const long_route = try router.routeDatagram(long_path, long_received.data);
+    const long_route = try lifecycle.routeDatagram(long_path, long_received.data);
     try require(long_route.connection_id == 101);
     try require(long_route.destination_connection_id.asSlice().len == 0);
 
-    try require(try router.retireConnectionIdOnPath(&empty_cid, path0));
-    try expectUnknownRoute(&router, path0, &short_datagram);
-    try require((try router.routeDatagram(path1, &short_datagram)).connection_id == 102);
+    try require(try lifecycle.retireConnectionIdOnPath(&empty_cid, path0));
+    try require(lifecycle.routeCount() == 1);
+    try expectUnknownRoute(&lifecycle, path0, &short_datagram);
+    try require((try lifecycle.routeDatagram(path1, &short_datagram)).connection_id == 102);
 
-    const updated_route = try router.updateRoutePath(&empty_cid, path1, path2);
+    const updated_route = try lifecycle.updateRoutePath(&empty_cid, path1, path2);
     try require(updated_route.connection_id == 102);
     try require(!updated_route.path_changed);
-    try expectUnknownRoute(&router, path1, &short_datagram);
+    try expectUnknownRoute(&lifecycle, path1, &short_datagram);
 
     try client2_socket.send(io, &server_socket.address, &short_datagram);
     const updated_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const updated_path = try udp4Tuple(server_socket.address, updated_received.from);
-    const confirmed_route = try router.routeDatagram(updated_path, updated_received.data);
+    const confirmed_route = try lifecycle.routeDatagram(updated_path, updated_received.data);
     try require(confirmed_route.connection_id == 102);
     try require(!confirmed_route.path_changed);
 

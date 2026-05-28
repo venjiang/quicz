@@ -561,6 +561,19 @@ pub const EndpointConnectionLifecycle = struct {
         return self.router.registerConnectionId(connection_id, destination_connection_id, path, options);
     }
 
+    /// Retire a destination CID route on a specific UDP tuple.
+    ///
+    /// This keeps zero-length CID route retirement on the lifecycle owner,
+    /// where the tuple is required to disambiguate otherwise identical empty
+    /// destination CIDs.
+    pub fn retireConnectionIdOnPath(
+        self: *EndpointConnectionLifecycle,
+        destination_connection_id: []const u8,
+        path: endpoint.Udp4Tuple,
+    ) endpoint.RouteError!bool {
+        return self.router.retireConnectionIdOnPath(destination_connection_id, path);
+    }
+
     /// Register the client Initial Source CID on the lifecycle-owned router.
     ///
     /// This keeps client-side Initial response routing on the same endpoint
@@ -12960,6 +12973,34 @@ test "EndpointConnectionLifecycle updates caller-validated route path" {
     try std.testing.expectEqual(@as(u64, 77), confirmed_route.connection_id);
     try std.testing.expect(!confirmed_route.path_changed);
     try std.testing.expectError(error.PathMismatch, lifecycle.updateRoutePath(&dcid, old_path, new_path));
+}
+
+test "EndpointConnectionLifecycle retires zero-length CID routes by path" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const path0 = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const path1 = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    };
+    const empty_cid = [_]u8{};
+    const short_datagram = [_]u8{ 0x40, 0x01, 0x02, 0x03 };
+
+    try lifecycle.registerConnectionId(71, &empty_cid, path0, .{});
+    try lifecycle.registerConnectionId(72, &empty_cid, path1, .{});
+    try std.testing.expectEqual(@as(usize, 2), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(u64, 71), (try lifecycle.routeDatagram(path0, &short_datagram)).connection_id);
+    try std.testing.expectEqual(@as(u64, 72), (try lifecycle.routeDatagram(path1, &short_datagram)).connection_id);
+
+    try std.testing.expect(try lifecycle.retireConnectionIdOnPath(&empty_cid, path0));
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectError(error.UnknownConnectionId, lifecycle.routeDatagram(path0, &short_datagram));
+    try std.testing.expectEqual(@as(u64, 72), (try lifecycle.routeDatagram(path1, &short_datagram)).connection_id);
+    try std.testing.expect(!try lifecycle.retireConnectionIdOnPath(&empty_cid, path0));
 }
 
 test "EndpointConnectionLifecycle registers replacement connection IDs" {
