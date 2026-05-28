@@ -131,6 +131,14 @@ pub fn main() !void {
     });
     defer protected_server.deinit();
     try protected_server.validatePeerAddress();
+    try protected_client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try protected_server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
     try protected_client.installOneRttTrafficSecrets(.{
         .local = secrets.client.secret,
         .peer = secrets.server.secret,
@@ -198,11 +206,53 @@ pub fn main() !void {
     try require(protected_client.bytesInFlight(.initial) == 0);
     try require(protected_client_lifecycle.recoveryTimerCount() == 0);
 
+    try protected_server.sendCryptoInSpace(.handshake, "installed handshake");
+    const installed_handshake = (try protected_server_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        protected_server_id,
+        &protected_server,
+        12,
+        &client_dcid,
+        &server_dcid,
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(installed_handshake);
+    try require(protected_server_lifecycle.recoveryTimerCount() == 1);
+
+    const installed_handshake_route = try protected_client_lifecycle.routeDatagram(client_receive_path, installed_handshake);
+    try require(installed_handshake_route.connection_id == protected_client_id);
+    try protected_client_lifecycle.processProtectedHandshakeDatagramWithInstalledKeys(
+        installed_handshake_route.connection_id,
+        &protected_client,
+        13,
+        installed_handshake,
+    );
+    try require(protected_client.pendingAckLargest(.handshake) == 0);
+
+    const installed_handshake_ack = (try protected_client_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        protected_client_id,
+        &protected_client,
+        14,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(installed_handshake_ack);
+    try require(protected_client_lifecycle.recoveryTimerCount() == 0);
+
+    const installed_handshake_ack_route = try protected_server_lifecycle.routeDatagram(server_receive_path, installed_handshake_ack);
+    try require(installed_handshake_ack_route.connection_id == protected_server_id);
+    try protected_server_lifecycle.processProtectedHandshakeDatagramWithInstalledKeys(
+        installed_handshake_ack_route.connection_id,
+        &protected_server,
+        15,
+        installed_handshake_ack,
+    );
+    try require(protected_server.bytesInFlight(.handshake) == 0);
+    try require(protected_server_lifecycle.recoveryTimerCount() == 0);
+
     try protected_client.sendPing();
     const ping = (try protected_client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         protected_client_id,
         &protected_client,
-        10,
+        16,
         &server_dcid,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
     defer allocator.free(ping);
@@ -213,7 +263,7 @@ pub fn main() !void {
     try protected_server_lifecycle.processProtectedShortDatagramWithInstalledKeys(
         ping_route.connection_id,
         &protected_server,
-        11,
+        17,
         server_dcid.len,
         ping,
     );
@@ -222,7 +272,7 @@ pub fn main() !void {
     const ack = (try protected_server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         protected_server_id,
         &protected_server,
-        12,
+        18,
         &client_dcid,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
     defer allocator.free(ack);
@@ -233,7 +283,7 @@ pub fn main() !void {
     try protected_client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
         ack_route.connection_id,
         &protected_client,
-        13,
+        19,
         client_dcid.len,
         ack,
     );
@@ -251,7 +301,7 @@ pub fn main() !void {
         loss_conn.sentPacketCount(.application),
         endpoint_lifecycle.recoveryTimerCount(),
         endpoint_lifecycle.routeCount(),
-        long_initial.len + long_ack.len + ping.len + ack.len,
+        long_initial.len + long_ack.len + installed_handshake.len + installed_handshake_ack.len + ping.len + ack.len,
         protected_timers_remaining,
     });
 }
