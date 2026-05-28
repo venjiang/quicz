@@ -576,6 +576,24 @@ pub const EndpointConnectionLifecycle = struct {
         return self.router.updateRoutePath(destination_connection_id, current_path, new_path);
     }
 
+    /// Move a route to a caller-validated UDP tuple and reset spin-bit state.
+    ///
+    /// QUIC spin-bit state is scoped to the current network path. The
+    /// connection still owns the actual spin value, but the lifecycle owner
+    /// commits the endpoint path update and resets the connection's next spin
+    /// bit only after that route update succeeds.
+    pub fn updateRoutePathAndResetSpinBit(
+        self: *EndpointConnectionLifecycle,
+        destination_connection_id: []const u8,
+        current_path: endpoint.Udp4Tuple,
+        new_path: endpoint.Udp4Tuple,
+        connection: *QuicConnection,
+    ) endpoint.RouteError!endpoint.RouteResult {
+        const updated = try self.updateRoutePath(destination_connection_id, current_path, new_path);
+        connection.resetSpinBitForPath();
+        return updated;
+    }
+
     /// Route one received datagram using the owned endpoint routing table.
     pub fn routeDatagram(
         self: *const EndpointConnectionLifecycle,
@@ -12914,6 +12932,62 @@ test "EndpointConnectionLifecycle mirrors ECN validation by UDP path" {
     try std.testing.expectEqual(endpoint.EcnPathValidationState.capable, lifecycle.ecnPathState(old_path));
     try std.testing.expectEqual(endpoint.EcnPathValidationState.failed, lifecycle.ecnPathState(migrated_path));
     try std.testing.expect(!lifecycle.mayUseEctOnPath(migrated_path));
+}
+
+test "EndpointConnectionLifecycle resets spin bit after route path update" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(51, &server_dcid, old_path, .{});
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{ .enable_spin_bit = true });
+    defer client.deinit();
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{ .enable_spin_bit = true });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try client.sendPing();
+    const first_ping = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first_ping);
+    try std.testing.expect(!try protection.peekShortPacketSpinBit(first_ping));
+    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, first_ping);
+
+    const first_ack = (try server.pollProtectedShortDatagram(12, &original_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first_ack);
+    try client.processProtectedShortDatagram(13, secrets.server, original_dcid.len, first_ack);
+    try std.testing.expect(client.nextOutgoingSpinBit());
+
+    try client.sendPing();
+    const second_ping = (try client.pollProtectedShortDatagram(14, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_ping);
+    try std.testing.expect(try protection.peekShortPacketSpinBit(second_ping));
+
+    const migrated_route = try lifecycle.routeDatagram(new_path, second_ping);
+    try std.testing.expectEqual(@as(u64, 51), migrated_route.connection_id);
+    try std.testing.expect(migrated_route.path_changed);
+    try server.processProtectedShortDatagram(15, secrets.client, server_dcid.len, second_ping);
+    try std.testing.expect(server.nextOutgoingSpinBit());
+
+    const updated_route = try lifecycle.updateRoutePathAndResetSpinBit(&server_dcid, old_path, new_path, &server);
+    try std.testing.expectEqual(@as(u64, 51), updated_route.connection_id);
+    try std.testing.expect(!updated_route.path_changed);
+    try std.testing.expect(!server.nextOutgoingSpinBit());
+
+    const confirmed_route = try lifecycle.routeDatagram(new_path, second_ping);
+    try std.testing.expectEqual(@as(u64, 51), confirmed_route.connection_id);
+    try std.testing.expect(!confirmed_route.path_changed);
 }
 
 test "EndpointConnectionLifecycle refreshes protected long timer lifecycle" {
