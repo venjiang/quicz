@@ -67,24 +67,38 @@ pub fn main() !void {
         .ack_delay = 0,
         .first_ack_range = 0,
     });
+    const underutilized_cwnd = newreno.congestionWindow(.application);
+    if (underutilized_cwnd != initial_cwnd) return error.LossRecoveryExampleFailed;
+
+    var slow_start_sent: usize = 0;
+    while (slow_start_sent < 10) : (slow_start_sent += 1) {
+        _ = try newreno.recordPacketSentInSpace(.application, @as(i64, @intCast(slow_start_sent + 1)), 1200);
+    }
+    try newreno.receiveAckInSpace(.application, 110, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
     const slow_start_cwnd = newreno.congestionWindow(.application);
     if (slow_start_cwnd != initial_cwnd + 1200) return error.LossRecoveryExampleFailed;
 
     newreno.recovery_state.ssthresh = slow_start_cwnd;
-    _ = try newreno.recordPacketSentInSpace(.application, 120, 1200);
+    while (newreno.bytesInFlight(.application) < newreno.congestionWindow(.application)) {
+        _ = try newreno.recordPacketSentInSpace(.application, 120, 1200);
+    }
     const avoidance_before = newreno.congestionWindow(.application);
     const avoidance_increase = @max(@as(usize, 1), (1200 * 1200) / avoidance_before);
     try newreno.receiveAckInSpace(.application, 220, .{
-        .largest_acknowledged = 1,
+        .largest_acknowledged = 2,
         .ack_delay = 0,
         .first_ack_range = 0,
     });
     const avoidance_cwnd = newreno.congestionWindow(.application);
     if (avoidance_cwnd != avoidance_before + avoidance_increase) return error.LossRecoveryExampleFailed;
-    if (newreno.bytesInFlight(.application) != 0) return error.LossRecoveryExampleFailed;
+    if (newreno.bytesInFlight(.application) != avoidance_before - 1200) return error.LossRecoveryExampleFailed;
     std.debug.print(
-        "[loss] NewReno slow_start_cwnd={d} congestion_avoidance_cwnd={d} avoidance_increase={d}\n",
-        .{ slow_start_cwnd, avoidance_cwnd, avoidance_increase },
+        "[loss] NewReno underutilized_cwnd={d} slow_start_cwnd={d} congestion_avoidance_cwnd={d} avoidance_increase={d}\n",
+        .{ underutilized_cwnd, slow_start_cwnd, avoidance_cwnd, avoidance_increase },
     );
 
     var newreno_clamp = try quicz.QuicConnection.init(allocator, .client, .{

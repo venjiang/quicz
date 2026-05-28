@@ -8203,6 +8203,8 @@ pub const QuicConnection = struct {
         var newly_acked_ect0: u64 = 0;
         var newly_acked_ect1: u64 = 0;
         var local_key_update_acked = false;
+        const congestion_window_utilized =
+            packet_space.recovery_state.bytes_in_flight >= packet_space.recovery_state.congestion_window;
 
         var i: usize = 0;
         while (i < packet_space.sent_packets.items.len) {
@@ -8296,11 +8298,12 @@ pub const QuicConnection = struct {
             self.local_one_rtt_key_update_ack_threshold = null;
         }
 
-        packet_space.recovery_state.onPacketAcked(
+        packet_space.recovery_state.onPacketAckedWithUtilization(
             acked_bytes,
             largest_acked_packet.?.sent_time_millis,
             latest_rtt_sample.?,
             self.ackDelayForRtt(space, ack.ack_delay),
+            congestion_window_utilized,
         );
         if (persistent_congestion_established) {
             packet_space.recovery_state.onPersistentCongestion();
@@ -14652,7 +14655,11 @@ test "ACK growth follows NewReno slow start then congestion avoidance" {
     const initial_window = conn.congestionWindow(.application);
     try std.testing.expectEqual(recovery.initialCongestionWindow(1200), initial_window);
 
-    _ = try conn.recordPacketSentInSpace(.application, 0, 1200);
+    var sent_packet: usize = 0;
+    while (sent_packet < 10) : (sent_packet += 1) {
+        _ = try conn.recordPacketSentInSpace(.application, @as(i64, @intCast(sent_packet)), 1200);
+    }
+    try std.testing.expectEqual(initial_window, conn.bytesInFlight(.application));
     try conn.receiveAckInSpace(.application, 100, .{
         .largest_acknowledged = 0,
         .ack_delay = 0,
@@ -14661,10 +14668,12 @@ test "ACK growth follows NewReno slow start then congestion avoidance" {
 
     const slow_start_window = conn.congestionWindow(.application);
     try std.testing.expectEqual(initial_window + 1200, slow_start_window);
-    try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(initial_window - 1200, conn.bytesInFlight(.application));
 
     conn.recovery_state.ssthresh = slow_start_window;
-    _ = try conn.recordPacketSentInSpace(.application, 120, 1200);
+    while (conn.bytesInFlight(.application) < conn.congestionWindow(.application)) {
+        _ = try conn.recordPacketSentInSpace(.application, 120, 1200);
+    }
     const avoidance_before = conn.congestionWindow(.application);
     const expected_increase = @max(@as(usize, 1), (1200 * 1200) / avoidance_before);
     try conn.receiveAckInSpace(.application, 220, .{
@@ -14674,7 +14683,29 @@ test "ACK growth follows NewReno slow start then congestion avoidance" {
     });
 
     try std.testing.expectEqual(avoidance_before + expected_increase, conn.congestionWindow(.application));
+    try std.testing.expectEqual(avoidance_before - 1200, conn.bytesInFlight(.application));
+}
+
+test "ACK growth is suppressed when congestion window was underutilized" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    const initial_window = conn.congestionWindow(.application);
+    conn.recovery_state.onPtoExpired();
+    _ = try conn.recordPacketSentInSpace(.application, 0, 1200);
+    try conn.receiveAckInSpace(.application, 100, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
     try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u64, 100), conn.smoothedRttMillis(.application));
+    try std.testing.expectEqual(initial_window, conn.congestionWindow(.application));
 }
 
 test "processDatagram rolls back packet-threshold losses when later frame is invalid" {

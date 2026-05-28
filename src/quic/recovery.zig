@@ -81,9 +81,27 @@ pub const Recovery = struct {
         latest_rtt_ms: u64,
         ack_delay_ms: u64,
     ) void {
+        self.onPacketAckedWithUtilization(bytes, sent_time_millis, latest_rtt_ms, ack_delay_ms, true);
+    }
+
+    /// Record an acknowledged packet, with explicit congestion-window utilization.
+    ///
+    /// RFC 9002 does not grow `congestion_window` when the sender is
+    /// application- or flow-control-limited. Callers that can observe whether
+    /// the window was utilized before processing the ACK pass that fact here;
+    /// RTT, PTO, and bytes-in-flight accounting still update either way.
+    pub fn onPacketAckedWithUtilization(
+        self: *Recovery,
+        bytes: usize,
+        sent_time_millis: i64,
+        latest_rtt_ms: u64,
+        ack_delay_ms: u64,
+        congestion_window_utilized: bool,
+    ) void {
         self.removeBytesInFlight(bytes);
         self.updateRtt(latest_rtt_ms, ack_delay_ms);
         self.pto_count = 0;
+        if (!congestion_window_utilized) return;
         if (self.inCongestionRecovery(sent_time_millis)) return;
 
         if (self.congestion_window < self.ssthresh) {
@@ -281,6 +299,21 @@ test "NewReno congestion avoidance grows by max datagram scaled by bytes acked" 
 
     try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
     try std.testing.expectEqual(@as(usize, 12_120), recovery.congestion_window);
+}
+
+test "underutilized ACK updates recovery accounting without growing congestion window" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    const initial_window = recovery.congestion_window;
+
+    recovery.onPacketSent(1200);
+    recovery.onPtoExpired();
+    recovery.onPacketAckedWithUtilization(1200, 0, 80, 0, false);
+
+    try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
+    try std.testing.expectEqual(@as(u8, 0), recovery.pto_count);
+    try std.testing.expectEqual(@as(?u64, 80), recovery.latest_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 80), recovery.smoothed_rtt_ms);
+    try std.testing.expectEqual(initial_window, recovery.congestion_window);
 }
 
 test "pto uses rtt variance and exponential backoff" {
