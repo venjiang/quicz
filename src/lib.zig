@@ -561,6 +561,36 @@ pub const EndpointConnectionLifecycle = struct {
         return self.router.registerConnectionId(connection_id, destination_connection_id, path, options);
     }
 
+    /// Register the client Initial Source CID on the lifecycle-owned router.
+    ///
+    /// This keeps client-side Initial response routing on the same endpoint
+    /// state owner used for later protected datagram delivery and recovery
+    /// timer scheduling.
+    pub fn registerClientInitialSourceConnectionId(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        client_source_connection_id: []const u8,
+        path: endpoint.Udp4Tuple,
+        options: endpoint.ClientInitialRouteOptions,
+    ) endpoint.RouteError!endpoint.RouteResult {
+        return self.router.registerClientInitialSourceConnectionId(connection_id, client_source_connection_id, path, options);
+    }
+
+    /// Register server routes after accepting a client Initial.
+    ///
+    /// The accepted Original DCID and server Source CID remain owned by the
+    /// endpoint lifecycle so Initial retransmissions and follow-up short-header
+    /// packets use one route owner.
+    pub fn registerAcceptedInitialConnectionIds(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        initial_accept: endpoint.InitialAcceptResult,
+        server_source_connection_id: []const u8,
+        options: endpoint.AcceptedInitialRouteOptions,
+    ) endpoint.RouteError!endpoint.AcceptedInitialRouteResult {
+        return self.router.registerAcceptedInitialConnectionIds(connection_id, initial_accept, server_source_connection_id, options);
+    }
+
     /// Register a replacement destination CID and retire older sequence routes.
     ///
     /// This is the lifecycle-owned endpoint route update for

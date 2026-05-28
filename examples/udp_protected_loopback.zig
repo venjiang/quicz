@@ -77,13 +77,13 @@ pub fn main() !void {
     var server = try quicz.QuicConnection.init(allocator, .server, .{});
     defer server.deinit();
 
-    var client_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer client_router.deinit();
-    var server_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer server_router.deinit();
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
 
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
-    _ = try client_router.registerClientInitialSourceConnectionId(41, &client_scid, client_path, .{
+    _ = try client_lifecycle.registerClientInitialSourceConnectionId(41, &client_scid, client_path, .{
         .active_migration_disabled = true,
     });
 
@@ -105,7 +105,7 @@ pub fn main() !void {
     const client_initial_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const server_path = try udp4Tuple(server_socket.address, client_initial_received.from);
     var action_buf: [256]u8 = undefined;
-    const accept_action = try server_router.handleDatagramWithVersionNegotiation(
+    const accept_action = try server_lifecycle.handleDatagramWithVersionNegotiation(
         &action_buf,
         server_path,
         client_initial_received.data,
@@ -116,7 +116,7 @@ pub fn main() !void {
         .accept_initial => |accept| blk: {
             try require(std.mem.eql(u8, accept.original_destination_connection_id, &original_dcid));
             try require(std.mem.eql(u8, accept.source_connection_id, &client_scid));
-            break :blk try server_router.registerAcceptedInitialConnectionIds(51, accept, &server_scid, .{
+            break :blk try server_lifecycle.registerAcceptedInitialConnectionIds(51, accept, &server_scid, .{
                 .active_migration_disabled = true,
             });
         },
@@ -143,7 +143,7 @@ pub fn main() !void {
 
     const server_initial_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     const server_initial_path = try udp4Tuple(client_socket.address, server_initial_received.from);
-    const client_initial_route = try client_router.routeDatagram(server_initial_path, server_initial_received.data);
+    const client_initial_route = try client_lifecycle.routeDatagram(server_initial_path, server_initial_received.data);
     try require(client_initial_route.connection_id == 41);
     try require(std.mem.eql(u8, client_initial_route.destination_connection_id.asSlice(), &client_scid));
 
@@ -166,7 +166,7 @@ pub fn main() !void {
 
     const one_rtt_ping_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const ping_path = try udp4Tuple(server_socket.address, one_rtt_ping_received.from);
-    const server_short_route = try server_router.routeDatagram(ping_path, one_rtt_ping_received.data);
+    const server_short_route = try server_lifecycle.routeDatagram(ping_path, one_rtt_ping_received.data);
     try require(server_short_route.connection_id == 51);
     try require(std.mem.eql(u8, server_short_route.destination_connection_id.asSlice(), &server_scid));
     try server.processProtectedShortDatagram(5, secrets.client, server_scid.len, one_rtt_ping_received.data);
@@ -182,7 +182,7 @@ pub fn main() !void {
 
     const one_rtt_ack_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     const ack_path = try udp4Tuple(client_socket.address, one_rtt_ack_received.from);
-    const client_short_route = try client_router.routeDatagram(ack_path, one_rtt_ack_received.data);
+    const client_short_route = try client_lifecycle.routeDatagram(ack_path, one_rtt_ack_received.data);
     try require(client_short_route.connection_id == 41);
     try require(std.mem.eql(u8, client_short_route.destination_connection_id.asSlice(), &client_scid));
     try client.processProtectedShortDatagram(7, secrets.server, client_scid.len, one_rtt_ack_received.data);
