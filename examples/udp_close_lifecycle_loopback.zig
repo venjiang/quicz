@@ -70,14 +70,15 @@ pub fn main() !void {
     defer server.deinit();
     try server.validatePeerAddress();
 
-    var client_router = quicz.endpoint.EndpointRouter.init(allocator);
-    defer client_router.deinit();
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
     var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
     defer server_lifecycle.deinit();
 
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
     const server_path = try udp4Tuple(server_socket.address, client_socket.address);
-    try client_router.registerConnectionId(connection_handle, &client_dcid, client_path, .{});
+    try client_lifecycle.registerConnectionId(connection_handle, &client_dcid, client_path, .{});
+    try require(client_lifecycle.routeCount() == 1);
     try server_lifecycle.registerConnectionId(connection_handle, &server_dcid, server_path, .{
         .stateless_reset_token = reset_token,
     });
