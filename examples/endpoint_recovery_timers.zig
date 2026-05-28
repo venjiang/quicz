@@ -240,6 +240,54 @@ pub fn main() !void {
     try require(protected_server.bytesInFlight(.handshake) == 0);
     try require(protected_server_lifecycle.recoveryTimerCount() == 0);
 
+    const caller_early_stream_id = try protected_client.openStream();
+    try protected_client.sendOnStream(caller_early_stream_id, "caller early", true);
+    const caller_zero = (try protected_client_lifecycle.pollProtectedZeroRttDatagram(
+        protected_client_id,
+        &protected_client,
+        16,
+        &server_dcid,
+        &client_dcid,
+        secrets.client,
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(caller_zero);
+    try require(protected_client_lifecycle.recoveryTimerCount() == 1);
+
+    const caller_zero_route = try protected_server_lifecycle.routeDatagram(server_receive_path, caller_zero);
+    try require(caller_zero_route.connection_id == protected_server_id);
+    try protected_server_lifecycle.processProtectedZeroRttDatagram(
+        caller_zero_route.connection_id,
+        &protected_server,
+        17,
+        secrets.client,
+        caller_zero,
+    );
+    try require(protected_server.pendingAckLargest(.application) == 0);
+    try require(protected_server_lifecycle.recoveryTimerCount() == 0);
+
+    const caller_zero_ack = (try protected_server_lifecycle.pollProtectedShortDatagram(
+        protected_server_id,
+        &protected_server,
+        18,
+        &client_dcid,
+        secrets.server,
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(caller_zero_ack);
+    try require(protected_server_lifecycle.recoveryTimerCount() == 0);
+
+    const caller_zero_ack_route = try protected_client_lifecycle.routeDatagram(client_receive_path, caller_zero_ack);
+    try require(caller_zero_ack_route.connection_id == protected_client_id);
+    try protected_client_lifecycle.processProtectedShortDatagram(
+        caller_zero_ack_route.connection_id,
+        &protected_client,
+        19,
+        secrets.server,
+        client_dcid.len,
+        caller_zero_ack,
+    );
+    try require(protected_client.bytesInFlight(.application) == 0);
+    try require(protected_client_lifecycle.recoveryTimerCount() == 0);
+
     try protected_client.installZeroRttTrafficSecrets(.{
         .local = secrets.client.secret,
     });
@@ -252,7 +300,7 @@ pub fn main() !void {
     const installed_zero = (try protected_client_lifecycle.pollProtectedZeroRttDatagramWithInstalledKeys(
         protected_client_id,
         &protected_client,
-        16,
+        20,
         &server_dcid,
         &client_dcid,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
@@ -264,17 +312,17 @@ pub fn main() !void {
     try protected_server_lifecycle.processProtectedZeroRttDatagramWithInstalledKeys(
         installed_zero_route.connection_id,
         &protected_server,
-        17,
+        21,
         installed_zero,
     );
-    try require(protected_server.pendingAckLargest(.application) == 0);
+    try require(protected_server.pendingAckLargest(.application) == 1);
     try require(protected_server_lifecycle.recoveryTimerCount() == 0);
 
     try protected_client.sendPing();
     const caller_short = (try protected_client_lifecycle.pollProtectedShortDatagram(
         protected_client_id,
         &protected_client,
-        18,
+        22,
         &server_dcid,
         secrets.client,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
@@ -286,17 +334,17 @@ pub fn main() !void {
     try protected_server_lifecycle.processProtectedShortDatagram(
         caller_short_route.connection_id,
         &protected_server,
-        19,
+        23,
         secrets.client,
         server_dcid.len,
         caller_short,
     );
-    try require(protected_server.pendingAckLargest(.application) == 1);
+    try require(protected_server.pendingAckLargest(.application) == 2);
 
     const caller_short_ack = (try protected_server_lifecycle.pollProtectedShortDatagram(
         protected_server_id,
         &protected_server,
-        20,
+        24,
         &client_dcid,
         secrets.server,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
@@ -308,7 +356,7 @@ pub fn main() !void {
     try protected_client_lifecycle.processProtectedShortDatagram(
         caller_short_ack_route.connection_id,
         &protected_client,
-        21,
+        25,
         secrets.server,
         client_dcid.len,
         caller_short_ack,
@@ -329,7 +377,7 @@ pub fn main() !void {
     const ping = (try protected_client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         protected_client_id,
         &protected_client,
-        22,
+        26,
         &server_dcid,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
     defer allocator.free(ping);
@@ -340,16 +388,16 @@ pub fn main() !void {
     try protected_server_lifecycle.processProtectedShortDatagramWithInstalledKeys(
         ping_route.connection_id,
         &protected_server,
-        23,
+        27,
         server_dcid.len,
         ping,
     );
-    try require(protected_server.pendingAckLargest(.application) == 2);
+    try require(protected_server.pendingAckLargest(.application) == 3);
 
     const ack = (try protected_server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         protected_server_id,
         &protected_server,
-        24,
+        28,
         &client_dcid,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
     defer allocator.free(ack);
@@ -360,7 +408,7 @@ pub fn main() !void {
     try protected_client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
         ack_route.connection_id,
         &protected_client,
-        25,
+        29,
         client_dcid.len,
         ack,
     );
@@ -372,7 +420,7 @@ pub fn main() !void {
     const explicit_key_phase_ping = (try protected_client_lifecycle.pollProtectedShortDatagramWithKeyPhase(
         protected_client_id,
         &protected_client,
-        26,
+        30,
         &server_dcid,
         explicit_next_client_keys,
         true,
@@ -385,7 +433,7 @@ pub fn main() !void {
     try protected_server_lifecycle.processProtectedShortDatagramWithKeyUpdate(
         explicit_key_phase_ping_route.connection_id,
         &protected_server,
-        27,
+        31,
         .{
             .current = secrets.client,
             .next = explicit_next_client_keys,
@@ -394,12 +442,12 @@ pub fn main() !void {
         server_dcid.len,
         explicit_key_phase_ping,
     );
-    try require(protected_server.pendingAckLargest(.application) == 3);
+    try require(protected_server.pendingAckLargest(.application) == 4);
 
     const explicit_key_phase_ack = (try protected_server_lifecycle.pollProtectedShortDatagramWithKeyPhase(
         protected_server_id,
         &protected_server,
-        28,
+        32,
         &client_dcid,
         secrets.server,
         false,
@@ -412,7 +460,7 @@ pub fn main() !void {
     try protected_client_lifecycle.processProtectedShortDatagramWithKeyUpdate(
         explicit_key_phase_ack_route.connection_id,
         &protected_client,
-        29,
+        33,
         .{
             .current = secrets.server,
             .next = explicit_next_server_keys,
@@ -433,7 +481,7 @@ pub fn main() !void {
     const key_phase_ping = (try protected_client_lifecycle.pollProtectedShortDatagramWithKeyPhaseState(
         protected_client_id,
         &protected_client,
-        30,
+        34,
         &server_dcid,
         &key_phase_client_send_state,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
@@ -445,18 +493,18 @@ pub fn main() !void {
     try protected_server_lifecycle.processProtectedShortDatagramWithKeyPhaseState(
         key_phase_ping_route.connection_id,
         &protected_server,
-        31,
+        35,
         &key_phase_server_recv_state,
         server_dcid.len,
         key_phase_ping,
     );
     try require(key_phase_server_recv_state.currentKeyPhase());
-    try require(protected_server.pendingAckLargest(.application) == 4);
+    try require(protected_server.pendingAckLargest(.application) == 5);
 
     const key_phase_ack = (try protected_server_lifecycle.pollProtectedShortDatagramWithKeyPhaseState(
         protected_server_id,
         &protected_server,
-        32,
+        36,
         &client_dcid,
         &key_phase_server_send_state,
     )) orelse return error.EndpointRecoveryTimerExampleFailed;
@@ -468,7 +516,7 @@ pub fn main() !void {
     try protected_client_lifecycle.processProtectedShortDatagramWithKeyPhaseState(
         key_phase_ack_route.connection_id,
         &protected_client,
-        33,
+        37,
         &key_phase_client_recv_state,
         client_dcid.len,
         key_phase_ack,
@@ -488,7 +536,7 @@ pub fn main() !void {
         loss_conn.sentPacketCount(.application),
         endpoint_lifecycle.recoveryTimerCount(),
         endpoint_lifecycle.routeCount(),
-        long_initial.len + long_ack.len + installed_handshake.len + installed_handshake_ack.len + installed_zero.len + caller_short.len + caller_short_ack.len + ping.len + ack.len + explicit_key_phase_ping.len + explicit_key_phase_ack.len + key_phase_ping.len + key_phase_ack.len,
+        long_initial.len + long_ack.len + installed_handshake.len + installed_handshake_ack.len + caller_zero.len + caller_zero_ack.len + installed_zero.len + caller_short.len + caller_short_ack.len + ping.len + ack.len + explicit_key_phase_ping.len + explicit_key_phase_ack.len + key_phase_ping.len + key_phase_ack.len,
         protected_timers_remaining,
     });
 }
