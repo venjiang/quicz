@@ -451,11 +451,12 @@ produce or consume TLS-owned QUIC packets over UDP.
   metadata, and rejects a stray path under active-migration-disabled policy.
 - 2026-05-26: Added `examples/udp_preferred_address_loopback.zig` and the
   `run-udp-preferred-address-loopback` build step. The example registers a
-  current server route on one loopback UDP address, commits a caller-validated
-  preferred-address CID on a second server address, proves the old route is
-  retired, routes the preferred CID on the preferred path, rejects the same CID
-  on a stray path under active-migration-disabled policy, and verifies the
-  preferred-address reset token remains available after retirement.
+  current server route through `EndpointConnectionLifecycle` on one loopback UDP
+  address, commits a caller-validated preferred-address CID on a second server
+  address through the lifecycle owner, proves the old route is retired, routes
+  the preferred CID on the preferred path, rejects the same CID on a stray path
+  under active-migration-disabled policy, and verifies the preferred-address
+  reset token remains available after retirement.
 - 2026-05-25: Added `examples/udp_zero_cid_loopback.zig` and the
   `run-udp-zero-cid-loopback` build step. The example registers two
   zero-length destination CID routes through `EndpointConnectionLifecycle` on
@@ -1711,7 +1712,7 @@ run from `build.zig`.
 | `endpoint_recovery_timers` | Endpoint-owned recovery timer scheduling across caller-owned connection handles: endpoint lifecycle route ownership, earliest aggregate timer selection, before-deadline no-op refresh, PTO service/re-arm, ACK-driven disarm, loss-time service, final timer disarm, connection-handle route retirement, protected long-header send/receive timer refresh, caller-keyed Initial/Handshake CRYPTO-space long-packet send/receive timer refresh, caller-keyed 0-RTT long-packet send/receive timer refresh, caller-keyed protected 1-RTT short-packet send/receive timer refresh, explicit key-phase/key-update short-packet timer refresh, caller-owned key-phase-state short-packet send/receive timer refresh, installed-key Handshake/0-RTT long-packet send/receive timer refresh, and installed-key protected 1-RTT short-packet send/receive timer refresh. | Present |
 | `udp_endpoint_loopback` | Socket-backed loopback UDP exercise for endpoint routing: unsupported-version Initial to Version Negotiation response delivery, client-side VN selection, supported Initial accept classification, client Initial Source CID response routing, accepted server Initial Source CID registration, and short-header registered-CID routing. | Present |
 | `udp_zero_cid_loopback` | Socket-backed loopback UDP zero-length CID exercise: lifecycle-owned short and long datagram routing by UDP tuple identity, path-specific zero-CID retirement, and route path update to a new tuple. | Present |
-| `udp_preferred_address_loopback` | Socket-backed loopback UDP preferred-address exercise: caller-validated preferred route commit, old-route retirement, preferred CID routing on the preferred server address, active-migration-disabled rejection on a stray path, and retained reset-token lookup after retirement. | Present |
+| `udp_preferred_address_loopback` | Socket-backed loopback UDP preferred-address exercise: lifecycle-owned caller-validated preferred route commit, old-route retirement, preferred CID routing on the preferred server address, active-migration-disabled rejection on a stray path, and retained reset-token lookup after retirement. | Present |
 | `udp_replacement_cid_loopback` | Socket-backed loopback UDP replacement CID exercise: NEW_CONNECTION_ID-style replacement route registration, retire_prior_to route retirement, inactive old-CID reset-token lookup, active replacement token suppression, invalid retire_prior_to rejection, and active-migration-disabled stray-path rejection. | Present |
 | `udp_connection_ids_loopback` | Socket-backed loopback UDP connection ID exercise: protected NEW_CONNECTION_ID delivery, lifecycle-owned endpoint replacement route update, inactive old-CID reset-token lookup, protected RETIRE_CONNECTION_ID routed through the active replacement CID, server-side local CID retirement, and ACK cleanup. | Present |
 | `udp_protected_loopback` | Socket-backed loopback UDP lifecycle protected packet exercise: lifecycle-owned caller-keyed protected client Initial route registration, server accept route registration, protected server Initial response routing, routed 1-RTT PING, and routed 1-RTT ACK. | Present |

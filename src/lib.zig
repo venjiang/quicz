@@ -622,6 +622,29 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Commit a caller-validated migration to a server preferred address.
+    ///
+    /// The connection still owns preferred-address transport-parameter
+    /// validation and path validation. The lifecycle owner commits the route
+    /// replacement and retained reset-token state used by the socket event
+    /// loop after validation succeeds.
+    pub fn commitPreferredAddressMigration(
+        self: *EndpointConnectionLifecycle,
+        current_destination_connection_id: []const u8,
+        current_path: endpoint.Udp4Tuple,
+        preferred_destination_connection_id: []const u8,
+        preferred_path: endpoint.Udp4Tuple,
+        preferred_stateless_reset_token: [packet.stateless_reset_token_len]u8,
+    ) endpoint.RouteError!endpoint.RouteResult {
+        return self.router.commitPreferredAddressMigration(
+            current_destination_connection_id,
+            current_path,
+            preferred_destination_connection_id,
+            preferred_path,
+            preferred_stateless_reset_token,
+        );
+    }
+
     /// Register a replacement destination CID and retire older sequence routes.
     ///
     /// This is the lifecycle-owned endpoint route update for
@@ -13001,6 +13024,54 @@ test "EndpointConnectionLifecycle retires zero-length CID routes by path" {
     try std.testing.expectError(error.UnknownConnectionId, lifecycle.routeDatagram(path0, &short_datagram));
     try std.testing.expectEqual(@as(u64, 72), (try lifecycle.routeDatagram(path1, &short_datagram)).connection_id);
     try std.testing.expect(!try lifecycle.retireConnectionIdOnPath(&empty_cid, path0));
+}
+
+test "EndpointConnectionLifecycle commits preferred address migration" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const current_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const preferred_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
+    };
+    const stray_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4435),
+    };
+    const current_cid = [_]u8{ 0x30, 0x31, 0x32, 0x33 };
+    const preferred_cid = [_]u8{ 0x34, 0x35, 0x36, 0x37 };
+    const preferred_token = [_]u8{ 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53 };
+    const current_datagram = [_]u8{ 0x40, 0x30, 0x31, 0x32, 0x33, 0x01 };
+    const preferred_datagram = [_]u8{ 0x40, 0x34, 0x35, 0x36, 0x37, 0x01 };
+
+    try lifecycle.registerConnectionId(81, &current_cid, current_path, .{
+        .active_migration_disabled = true,
+    });
+    try std.testing.expectEqual(@as(u64, 81), (try lifecycle.routeDatagram(current_path, &current_datagram)).connection_id);
+
+    const migrated = try lifecycle.commitPreferredAddressMigration(
+        &current_cid,
+        current_path,
+        &preferred_cid,
+        preferred_path,
+        preferred_token,
+    );
+    try std.testing.expectEqual(@as(u64, 81), migrated.connection_id);
+    try std.testing.expectEqualSlices(u8, &preferred_cid, migrated.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectError(error.UnknownConnectionId, lifecycle.routeDatagram(current_path, &current_datagram));
+    try std.testing.expectEqual(@as(u64, 81), (try lifecycle.routeDatagram(preferred_path, &preferred_datagram)).connection_id);
+    try std.testing.expectError(error.ActiveMigrationDisabled, lifecycle.routeDatagram(stray_path, &preferred_datagram));
+    try std.testing.expectEqual(@as(?[packet.stateless_reset_token_len]u8, null), try lifecycle.statelessResetTokenForDatagram(preferred_path, &preferred_datagram));
+
+    const retired = lifecycle.retireConnection(81);
+    try std.testing.expectEqual(@as(usize, 1), retired.routes_retired);
+    const retained = (try lifecycle.statelessResetTokenForDatagram(preferred_path, &preferred_datagram)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualSlices(u8, &preferred_token, &retained);
 }
 
 test "EndpointConnectionLifecycle registers replacement connection IDs" {
