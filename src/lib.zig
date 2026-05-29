@@ -488,6 +488,9 @@ pub const EndpointVersionNegotiationResult = struct {
 /// Errors returned while coordinating endpoint-owned Version Negotiation follow-up state.
 pub const EndpointVersionNegotiationError = Error || endpoint.RouteError;
 
+/// Errors returned while coordinating endpoint-owned protected Initial accept state.
+pub const EndpointProtectedInitialError = Error || endpoint.RouteError;
+
 /// Endpoint result after accepting Version Negotiation and registering follow-up routing.
 pub const EndpointVersionNegotiationFollowupResult = struct {
     /// Version Negotiation processing result, including selected version and old route cleanup.
@@ -515,6 +518,16 @@ pub const EndpointVersionNegotiationProtectedInitialResult = struct {
     /// The caller owns these bytes and must free them with the same allocator
     /// used by `handoff.followup_connection`.
     initial_datagram: []u8,
+};
+
+/// Endpoint result after accepting and processing a protected client Initial.
+pub const EndpointAcceptedProtectedInitialResult = struct {
+    /// Endpoint accept metadata borrowed from the triggering datagram.
+    initial_accept: endpoint.InitialAcceptResult,
+    /// Routes installed after packet authentication succeeds.
+    accepted_routes: endpoint.AcceptedInitialRouteResult,
+    /// Number of protected long packets processed from the datagram.
+    processed_packets: usize,
 };
 
 fn endpointEcnPathState(state: EcnValidationState) endpoint.EcnPathValidationState {
@@ -649,6 +662,50 @@ pub const EndpointConnectionLifecycle = struct {
         options: endpoint.AcceptedInitialRouteOptions,
     ) endpoint.RouteError!endpoint.AcceptedInitialRouteResult {
         return self.router.registerAcceptedInitialConnectionIds(connection_id, initial_accept, server_source_connection_id, options);
+    }
+
+    /// Process one accepted client Initial and install server endpoint routes.
+    ///
+    /// `initial_accept` must come from `handleDatagramWithVersionNegotiation()`
+    /// for the same datagram. The connection validates and decrypts the
+    /// protected Initial before endpoint routes are installed, so malformed
+    /// Initial packets do not leave active routes behind. After successful
+    /// packet processing, the lifecycle owner registers the Original DCID and
+    /// server Source CID routes, then mirrors the connection recovery timer.
+    /// TLS transcript ownership and address-token policy remain caller-owned.
+    pub fn processAcceptedProtectedInitialDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        initial_accept: endpoint.InitialAcceptResult,
+        server_source_connection_id: []const u8,
+        datagram: []const u8,
+        options: endpoint.AcceptedInitialRouteOptions,
+    ) EndpointProtectedInitialError!EndpointAcceptedProtectedInitialResult {
+        const initial_secrets = protection.deriveInitialSecrets(
+            initial_accept.version,
+            initial_accept.original_destination_connection_id,
+        ) catch return error.InvalidPacket;
+
+        const processed_packets = try connection.processProtectedLongDatagram(
+            now_millis,
+            .{ .initial = initial_secrets.client },
+            datagram,
+        );
+        const accepted_routes = try self.registerAcceptedInitialConnectionIds(
+            connection_id,
+            initial_accept,
+            server_source_connection_id,
+            options,
+        );
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+
+        return .{
+            .initial_accept = initial_accept,
+            .accepted_routes = accepted_routes,
+            .processed_packets = processed_packets,
+        };
     }
 
     /// Replace an Initial route's DCID with the Retry Source CID.
@@ -14538,6 +14595,154 @@ test "EndpointConnectionLifecycle emits protected Version Negotiation follow-up 
     var crypto_buf: [64]u8 = undefined;
     const recv_len = (try server.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(initial_crypto, crypto_buf[0..recv_len]);
+}
+
+test "EndpointConnectionLifecycle processes accepted protected Initial after authentication" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const reset_token = [_]u8{ 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f };
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const supported_versions = [_]packet.Version{ .v1, .v2 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.sendCryptoInSpace(.initial, "accepted protected initial");
+    const initial = (try client.pollInitialProtectedDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(initial);
+
+    var action_buf: [256]u8 = undefined;
+    const action = try lifecycle.handleDatagramWithVersionNegotiation(
+        &action_buf,
+        path,
+        initial,
+        &reset_prefix,
+        &supported_versions,
+    );
+    const accept = switch (action) {
+        .accept_initial => |initial_accept| initial_accept,
+        else => return error.TestUnexpectedResult,
+    };
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    const result = try lifecycle.processAcceptedProtectedInitialDatagram(
+        201,
+        &server,
+        11,
+        accept,
+        &server_scid,
+        initial,
+        .{
+            .active_migration_disabled = true,
+            .stateless_reset_token = reset_token,
+        },
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), result.processed_packets);
+    try std.testing.expectEqual(packet.Version.v1, result.initial_accept.version);
+    try std.testing.expectEqual(@as(u64, 201), result.accepted_routes.original_destination_route.connection_id);
+    try std.testing.expectEqual(@as(u64, 201), result.accepted_routes.server_source_route.connection_id);
+    try std.testing.expectEqual(@as(usize, 2), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.statelessResetTokenCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+
+    const retransmit_route = try lifecycle.routeDatagram(path, initial);
+    try std.testing.expectEqual(@as(u64, 201), retransmit_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &original_dcid, retransmit_route.destination_connection_id.asSlice());
+    const short_to_server = [_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd, 0x00 };
+    const short_route = try lifecycle.routeDatagram(path, &short_to_server);
+    try std.testing.expectEqual(@as(u64, 201), short_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_scid, short_route.destination_connection_id.asSlice());
+
+    try std.testing.expectEqualStrings(&original_dcid, server.originalDestinationConnectionId().?);
+    try std.testing.expectEqualStrings(&client_scid, server.peerInitialSourceConnectionId().?);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
+    var crypto_buf: [64]u8 = undefined;
+    const recv_len = (try server.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("accepted protected initial", crypto_buf[0..recv_len]);
+}
+
+test "EndpointConnectionLifecycle rejects accepted Initial without installing routes" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const reset_token = [_]u8{ 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f };
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const supported_versions = [_]packet.Version{ .v1, .v2 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.sendCryptoInSpace(.initial, "tampered protected initial");
+    const initial = (try client.pollInitialProtectedDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(initial);
+
+    const tampered = try std.testing.allocator.dupe(u8, initial);
+    defer std.testing.allocator.free(tampered);
+    tampered[tampered.len - 1] ^= 0x01;
+
+    var action_buf: [256]u8 = undefined;
+    const action = try lifecycle.handleDatagramWithVersionNegotiation(
+        &action_buf,
+        path,
+        tampered,
+        &reset_prefix,
+        &supported_versions,
+    );
+    const accept = switch (action) {
+        .accept_initial => |initial_accept| initial_accept,
+        else => return error.TestUnexpectedResult,
+    };
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processAcceptedProtectedInitialDatagram(
+        202,
+        &server,
+        11,
+        accept,
+        &server_scid,
+        tampered,
+        .{
+            .active_migration_disabled = true,
+            .stateless_reset_token = reset_token,
+        },
+    ));
+
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.statelessResetTokenCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?[]const u8, null), server.originalDestinationConnectionId());
 }
 
 test "EndpointConnectionLifecycle does not hand off connection for ignored Version Negotiation" {

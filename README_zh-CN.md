@@ -7,9 +7,9 @@
 > 状态：**实验性 / 开发中（WIP）**  
 > 目标：从一个最小但语义正确的子集开始，逐步实现一个完整的 QUIC 传输协议（覆盖 RFC 9000 系列以及 QUIC v2 RFC 9369）。
 
-## 特性与路线图
+## Features and Roadmap（特性与路线图）
 
-### 已实现 / 正在进行
+### Implemented / In Progress（已实现 / 正在进行）
 
 - [x] 可构建的 Zig package，包含 `Connection`、frame-payload 示例和可运行 loopback 示例。
 - [x] varint、packet header、packet number、frame、transport parameter、transport error、Version Negotiation、Retry、stateless reset、QUIC v2 packet/key/token primitive 的核心 codec 覆盖。
@@ -22,7 +22,7 @@
 - [ ] TLS 1.3 集成（RFC 9001）。
 - [ ] QUIC v2（RFC 9369）完整版本行为支持。
 
-### 规划的里程碑
+### Planned Milestones（规划的里程碑）
 
 1. **最小 QUIC v1 子集**
    - 单路径、仅 IPv4
@@ -41,7 +41,7 @@
 可验证 transport 实现任务计划见 [`docs/zh-CN/quic_transport_tasks.md`](docs/zh-CN/quic_transport_tasks.md)。
 更详细的设计和逐功能说明见 [`docs/zh-CN/`](docs/zh-CN/) 目录。
 
-## 快速开始
+## Quick Start（快速开始）
 
 需要安装 Zig **0.16.0**。当前构建会强制校验这个精确测试版本，避免 Zig 标准库变化静默改变行为。
 
@@ -95,7 +95,7 @@ pub fn main() !void {
 
 `Connection` 是当前推荐的公开连接句柄；`QuicConnection` 作为兼容别名保留，便于旧调用方在实验性 API 继续演进期间平滑迁移。
 
-## 示例
+## Examples（示例）
 
 - [Echo server](examples/echo_server.zig)：最小 frame-payload echo server 骨架。
   运行：`zig build run-server`。
@@ -143,7 +143,7 @@ pub fn main() !void {
   运行：`zig build run-initial-keys`。
 - [Endpoint routing](examples/endpoint_routing.zig)：内存态 DCID、tuple、Version Negotiation、Retry 和 reset routing。
   运行：`zig build run-endpoint-routing`。
-- [UDP endpoint loopback](examples/udp_endpoint_loopback.zig)：socket-backed endpoint routing，覆盖 Version Negotiation 和 Initial classification。
+- [UDP endpoint loopback](examples/udp_endpoint_loopback.zig)：socket-backed endpoint routing，覆盖 Version Negotiation、protected follow-up Initial、accepted protected Initial processing 和 Initial/short-header classification。
   运行：`zig build run-udp-endpoint-loopback`。
 - [UDP zero-CID loopback](examples/udp_zero_cid_loopback.zig)：基于 loopback UDP 的 zero-length CID tuple routing。
   运行：`zig build run-udp-zero-cid-loopback`。
@@ -153,7 +153,7 @@ pub fn main() !void {
   运行：`zig build run-udp-replacement-cid-loopback`。
 - [UDP connection IDs loopback](examples/udp_connection_ids_loopback.zig)：通过 lifecycle route 交换 protected NEW_CONNECTION_ID/RETIRE_CONNECTION_ID。
   运行：`zig build run-udp-connection-ids-loopback`。
-- [UDP protected loopback](examples/udp_protected_loopback.zig)：caller-keyed protected Initial 和 1-RTT loopback UDP routing。
+- [UDP protected loopback](examples/udp_protected_loopback.zig)：lifecycle-owned accepted protected Initial processing，以及 caller-keyed protected Initial 和 1-RTT loopback UDP routing。
   运行：`zig build run-udp-protected-loopback`。
 - [UDP flow control loopback](examples/udp_flow_control_loopback.zig)：protected STREAM/BLOCKED/MAX flow-control loopback UDP 交换。
   运行：`zig build run-udp-flow-control-loopback`。
@@ -180,7 +180,7 @@ pub fn main() !void {
 - [UDP stateless reset loopback](examples/udp_stateless_reset_loopback.zig)：socket-backed reset trigger delivery、reset emission 和 client token match。
   运行：`zig build run-udp-stateless-reset-loopback`。
 
-## 高级主题
+## Advanced Topics（高级主题）
 
 - [Transport task matrix](docs/zh-CN/quic_transport_tasks.md)：当前 RFC 覆盖、剩余工作和验证证据。
 - [Design notes](docs/zh-CN/spec.md)：当前架构、协议范围和未支持区域。

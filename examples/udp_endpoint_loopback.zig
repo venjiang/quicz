@@ -219,30 +219,38 @@ pub fn main() !void {
 
     const server_initial_scid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
     const server_reset_token = [_]u8{ 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f };
-    const accepted_route = switch (accept_action) {
-        .accept_initial => |accept| blk: {
-            try require(accept.version == selected_version);
-            try require(std.mem.eql(u8, accept.original_destination_connection_id, &original_dcid));
-            try require(std.mem.eql(u8, accept.source_connection_id, &followup_client_initial_scid));
-            try require(std.mem.eql(u8, accept.token, &initial_token));
-            break :blk try server_lifecycle.registerAcceptedInitialConnectionIds(21, accept, &server_initial_scid, .{
-                .active_migration_disabled = true,
-                .stateless_reset_token = server_reset_token,
-            });
-        },
+    const initial_accept = switch (accept_action) {
+        .accept_initial => |accept| accept,
         else => return error.UnexpectedState,
     };
-    try require(accepted_route.original_destination_route.connection_id == 21);
-    try require(accepted_route.server_source_route.connection_id == 21);
-    try require(server_lifecycle.routeCount() == 2);
+    try require(initial_accept.version == selected_version);
+    try require(std.mem.eql(u8, initial_accept.original_destination_connection_id, &original_dcid));
+    try require(std.mem.eql(u8, initial_accept.source_connection_id, &followup_client_initial_scid));
+    try require(std.mem.eql(u8, initial_accept.token, &initial_token));
 
-    const followup_secrets = try quicz.protection.deriveInitialSecrets(selected_version, &original_dcid);
     var version_negotiation_server = try quicz.Connection.init(std.heap.page_allocator, .server, .{
         .chosen_version = selected_version,
         .available_versions = &supported_versions,
     });
     defer version_negotiation_server.deinit();
-    try version_negotiation_server.processInitialProtectedDatagram(1, followup_secrets.client, supported_received.data);
+    const accepted_initial = try server_lifecycle.processAcceptedProtectedInitialDatagram(
+        21,
+        &version_negotiation_server,
+        1,
+        initial_accept,
+        &server_initial_scid,
+        supported_received.data,
+        .{
+            .active_migration_disabled = true,
+            .stateless_reset_token = server_reset_token,
+        },
+    );
+    const accepted_route = accepted_initial.accepted_routes;
+    try require(accepted_initial.processed_packets == 1);
+    try require(accepted_route.original_destination_route.connection_id == 21);
+    try require(accepted_route.server_source_route.connection_id == 21);
+    try require(server_lifecycle.routeCount() == 2);
+
     var followup_crypto_buf: [64]u8 = undefined;
     const followup_crypto_len = (try version_negotiation_server.recvCryptoInSpace(.initial, &followup_crypto_buf)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, followup_crypto_buf[0..followup_crypto_len], followup_initial_crypto));

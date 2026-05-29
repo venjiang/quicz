@@ -112,19 +112,25 @@ pub fn main() !void {
         &reset_prefix,
         &supported_versions,
     );
-    const accepted = switch (accept_action) {
-        .accept_initial => |accept| blk: {
-            try require(std.mem.eql(u8, accept.original_destination_connection_id, &original_dcid));
-            try require(std.mem.eql(u8, accept.source_connection_id, &client_scid));
-            break :blk try server_lifecycle.registerAcceptedInitialConnectionIds(51, accept, &server_scid, .{
-                .active_migration_disabled = true,
-            });
-        },
+    const initial_accept = switch (accept_action) {
+        .accept_initial => |accept| accept,
         else => return error.UnexpectedState,
     };
+    try require(std.mem.eql(u8, initial_accept.original_destination_connection_id, &original_dcid));
+    try require(std.mem.eql(u8, initial_accept.source_connection_id, &client_scid));
+    const accepted_initial = try server_lifecycle.processAcceptedProtectedInitialDatagram(
+        51,
+        &server,
+        1,
+        initial_accept,
+        &server_scid,
+        client_initial_received.data,
+        .{ .active_migration_disabled = true },
+    );
+    const accepted = accepted_initial.accepted_routes;
+    try require(accepted_initial.processed_packets == 1);
     try require(accepted.server_source_route.connection_id == 51);
 
-    try server.processInitialProtectedDatagram(1, secrets.client, client_initial_received.data);
     try server.validatePeerAddress();
     var server_initial_crypto_buf: [128]u8 = undefined;
     const server_received_initial = try readCryptoRequired(&server, .initial, &server_initial_crypto_buf);

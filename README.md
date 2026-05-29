@@ -160,8 +160,9 @@ experimental.
   Version Negotiation, Retry, and reset routing. Run with
   `zig build run-endpoint-routing`.
 - [UDP endpoint loopback](examples/udp_endpoint_loopback.zig): Socket-backed
-  endpoint routing with Version Negotiation and Initial classification. Run with
-  `zig build run-udp-endpoint-loopback`.
+  endpoint routing with Version Negotiation, protected follow-up Initial,
+  accepted protected Initial processing, and Initial/short-header classification.
+  Run with `zig build run-udp-endpoint-loopback`.
 - [UDP zero-CID loopback](examples/udp_zero_cid_loopback.zig): Zero-length CID
   tuple routing over loopback UDP. Run with `zig build run-udp-zero-cid-loopback`.
 - [UDP preferred address loopback](examples/udp_preferred_address_loopback.zig):
@@ -174,7 +175,8 @@ experimental.
   Protected NEW_CONNECTION_ID/RETIRE_CONNECTION_ID exchange through lifecycle
   routes. Run with `zig build run-udp-connection-ids-loopback`.
 - [UDP protected loopback](examples/udp_protected_loopback.zig):
-  Caller-keyed protected Initial and 1-RTT routing over loopback UDP. Run with
+  Lifecycle-owned accepted protected Initial processing plus caller-keyed
+  protected Initial and 1-RTT routing over loopback UDP. Run with
   `zig build run-udp-protected-loopback`.
 - [UDP flow control loopback](examples/udp_flow_control_loopback.zig):
   Protected STREAM/BLOCKED/MAX flow-control exchange over loopback UDP. Run with
