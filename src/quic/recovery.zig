@@ -103,6 +103,31 @@ pub const Recovery = struct {
     ) void {
         self.removeBytesInFlight(bytes);
         self.updateRtt(latest_rtt_ms, ack_delay_ms);
+        self.onAckedBytesForCongestion(bytes, sent_time_millis, congestion_window_utilized);
+    }
+
+    /// Record acknowledged bytes without taking an RTT sample.
+    ///
+    /// RFC 9002 only permits an RTT sample when the largest acknowledged packet
+    /// carried by the ACK frame is newly acknowledged. ACKs that only newly
+    /// acknowledge lower ranges still clear bytes in flight, reset PTO backoff,
+    /// and feed congestion control, but must not update RTT estimates.
+    pub fn onPacketAckedWithoutRttSample(
+        self: *Recovery,
+        bytes: usize,
+        sent_time_millis: i64,
+        congestion_window_utilized: bool,
+    ) void {
+        self.removeBytesInFlight(bytes);
+        self.onAckedBytesForCongestion(bytes, sent_time_millis, congestion_window_utilized);
+    }
+
+    fn onAckedBytesForCongestion(
+        self: *Recovery,
+        bytes: usize,
+        sent_time_millis: i64,
+        congestion_window_utilized: bool,
+    ) void {
         self.pto_count = 0;
         if (!congestion_window_utilized) return;
         if (self.inCongestionRecovery(sent_time_millis)) return;
@@ -358,6 +383,21 @@ test "underutilized ACK updates recovery accounting without growing congestion w
     try std.testing.expectEqual(@as(u8, 0), recovery.pto_count);
     try std.testing.expectEqual(@as(?u64, 80), recovery.latest_rtt_ms);
     try std.testing.expectEqual(@as(u64, 80), recovery.smoothed_rtt_ms);
+    try std.testing.expectEqual(initial_window, recovery.congestion_window);
+}
+
+test "ACK accounting can skip RTT sample while resetting PTO" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    const initial_window = recovery.congestion_window;
+
+    recovery.onPacketSent(1200);
+    recovery.onPtoExpired();
+    recovery.onPacketAckedWithoutRttSample(1200, 0, false);
+
+    try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
+    try std.testing.expectEqual(@as(u8, 0), recovery.pto_count);
+    try std.testing.expectEqual(@as(?u64, null), recovery.latest_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 100), recovery.smoothed_rtt_ms);
     try std.testing.expectEqual(initial_window, recovery.congestion_window);
 }
 

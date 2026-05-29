@@ -267,6 +267,41 @@ pub fn main() !void {
         .{ probe_payload.len, congestion_probe.congestionWindow(.application), congestion_probe.bytesInFlight(.application) },
     );
 
+    var rtt_sampling = try quicz.QuicConnection.init(allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer rtt_sampling.deinit();
+    _ = try rtt_sampling.recordPacketSentInSpace(.application, 90, 100);
+    _ = try rtt_sampling.recordPacketSentInSpace(.application, 100, 100);
+    _ = try rtt_sampling.recordPacketSentInSpace(.application, 110, 100);
+    try rtt_sampling.receiveAckInSpace(.application, 200, .{
+        .largest_acknowledged = 2,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const baseline_latest_rtt = rtt_sampling.recovery_state.latest_rtt_ms orelse return error.LossRecoveryExampleFailed;
+    const baseline_smoothed_rtt = rtt_sampling.smoothedRttMillis(.application);
+    const lower_ack_ranges = [_]quicz.frame.AckRange{
+        .{ .gap = 0, .ack_range = 0 },
+    };
+    rtt_sampling.recovery_state.onPtoExpired();
+    try rtt_sampling.receiveAckInSpace(.application, 201, .{
+        .largest_acknowledged = 2,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &lower_ack_ranges,
+    });
+    if (rtt_sampling.sentPacketCount(.application) != 1) return error.LossRecoveryExampleFailed;
+    if (rtt_sampling.bytesInFlight(.application) != 100) return error.LossRecoveryExampleFailed;
+    if (rtt_sampling.recovery_state.pto_count != 0) return error.LossRecoveryExampleFailed;
+    const lower_ack_latest_rtt = rtt_sampling.recovery_state.latest_rtt_ms orelse return error.LossRecoveryExampleFailed;
+    if (lower_ack_latest_rtt != baseline_latest_rtt) return error.LossRecoveryExampleFailed;
+    if (rtt_sampling.smoothedRttMillis(.application) != baseline_smoothed_rtt) return error.LossRecoveryExampleFailed;
+    std.debug.print(
+        "[loss] old-largest ACK preserved RTT latest={d} smoothed={d} remaining={d}\n",
+        .{ baseline_latest_rtt, baseline_smoothed_rtt, rtt_sampling.sentPacketCount(.application) },
+    );
+
     var ack_delay = try quicz.QuicConnection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });

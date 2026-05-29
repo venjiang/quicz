@@ -8268,8 +8268,9 @@ pub const QuicConnection = struct {
             ecn_counts,
         );
 
-        const latest_rtt_sample = if (largest_acked_packet) |acked_packet|
-            elapsedMillis(acked_packet.sent_time_millis, now_millis)
+        const latest_rtt_sample = if (largest_acked_packet != null and
+            largest_acked_packet.?.packet_number == ack.largest_acknowledged)
+            elapsedMillis(largest_acked_packet.?.sent_time_millis, now_millis)
         else
             null;
         if (latest_rtt_sample != null and packet_space.first_rtt_sample_sent_time_millis.* == null) {
@@ -8320,13 +8321,21 @@ pub const QuicConnection = struct {
             self.local_one_rtt_key_update_ack_threshold = null;
         }
 
-        packet_space.recovery_state.onPacketAckedWithUtilization(
-            acked_bytes,
-            largest_acked_packet.?.sent_time_millis,
-            latest_rtt_sample.?,
-            self.ackDelayForRtt(space, ack.ack_delay),
-            congestion_window_utilized,
-        );
+        if (latest_rtt_sample) |rtt_sample| {
+            packet_space.recovery_state.onPacketAckedWithUtilization(
+                acked_bytes,
+                largest_acked_packet.?.sent_time_millis,
+                rtt_sample,
+                self.ackDelayForRtt(space, ack.ack_delay),
+                congestion_window_utilized,
+            );
+        } else {
+            packet_space.recovery_state.onPacketAckedWithoutRttSample(
+                acked_bytes,
+                largest_acked_packet.?.sent_time_millis,
+                congestion_window_utilized,
+            );
+        }
         if (persistent_congestion_established) {
             packet_space.recovery_state.onPersistentCongestion();
         }
@@ -12762,6 +12771,42 @@ test "ACK delay is capped by peer max_ack_delay after handshake confirmation" {
         .first_ack_range = 0,
     });
     try std.testing.expectEqual(@as(u64, 103), conn.smoothedRttMillis(.application));
+}
+
+test "ACK does not sample RTT when only lower ranges are newly acknowledged" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 90, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 100, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 110, 100);
+
+    try conn.receiveAckInSpace(.application, 200, .{
+        .largest_acknowledged = 2,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(?u64, 90), conn.recovery_state.latest_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 90), conn.smoothedRttMillis(.application));
+
+    const lower_ranges = [_]frame.AckRange{
+        .{ .gap = 0, .ack_range = 0 },
+    };
+    conn.recovery_state.onPtoExpired();
+    try conn.receiveAckInSpace(.application, 201, .{
+        .largest_acknowledged = 2,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &lower_ranges,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 100), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(?u64, 90), conn.recovery_state.latest_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 90), conn.smoothedRttMillis(.application));
 }
 
 test "ACK marks packet-threshold losses in the selected packet number space" {
