@@ -173,27 +173,29 @@ pub fn main() !void {
     try require(std.mem.eql(u8, parsed_version_negotiation.scid, &original_dcid));
     try require(parsed_version_negotiation.versions.len == supported_versions.len);
 
-    const version_negotiation_result = (try client_lifecycle.processVersionNegotiationDatagram(
+    const version_negotiation_followup = (try client_lifecycle.processVersionNegotiationFollowupDatagram(
         31,
+        32,
         &version_negotiation_client,
         0,
         &original_dcid,
         &client_initial_scid,
+        &followup_client_initial_scid,
+        client_path,
         version_negotiation_received.data,
+        .{ .active_migration_disabled = true },
     )) orelse return error.UnexpectedState;
+    const version_negotiation_result = version_negotiation_followup.version_negotiation;
     const selected_version = version_negotiation_result.selected_version;
     try require(selected_version == .v2);
     try require(version_negotiation_client.versionNegotiationSelectedVersion() == .v2);
     try require(version_negotiation_result.followup_config.chosen_version == .v2);
     try require(version_negotiation_result.retired.routes_retired == 1);
-    try require(client_lifecycle.routeCount() == 0);
+    try require(version_negotiation_followup.followup_route.connection_id == 32);
 
     var followup_client = try quicz.Connection.init(std.heap.page_allocator, .client, version_negotiation_result.followup_config);
     defer followup_client.deinit();
     try require(followup_client.versionNegotiationSelectedVersion() == .v2);
-    _ = try client_lifecycle.registerClientInitialSourceConnectionId(32, &followup_client_initial_scid, client_path, .{
-        .active_migration_disabled = true,
-    });
     try require(client_lifecycle.routeCount() == 1);
 
     const initial_token = [_]u8{ 0xa1, 0xa2 };
