@@ -14760,6 +14760,33 @@ test "ACK growth follows NewReno slow start then congestion avoidance" {
     try std.testing.expectEqual(@as(usize, 1200), conn.bytesInFlight(.application));
 }
 
+test "batched ACK growth consumes multiple NewReno congestion avoidance credits" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    conn.recovery_state.congestion_window = 25_200;
+    var sent_packet: usize = 0;
+    while (sent_packet < 21) : (sent_packet += 1) {
+        _ = try conn.recordPacketSentInSpace(.application, @as(i64, @intCast(sent_packet)), 1200);
+    }
+    try std.testing.expectEqual(@as(usize, 25_200), conn.bytesInFlight(.application));
+
+    conn.recovery_state.congestion_window = 12_000;
+    conn.recovery_state.ssthresh = 12_000;
+    try conn.receiveAckInSpace(.application, 100, .{
+        .largest_acknowledged = 20,
+        .ack_delay = 0,
+        .first_ack_range = 20,
+    });
+
+    try std.testing.expectEqual(@as(usize, 14_400), conn.congestionWindow(.application));
+    try std.testing.expectEqual(@as(usize, 0), conn.recovery_state.congestion_avoidance_bytes_acked);
+    try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
+}
+
 test "ACK growth is suppressed when congestion window was underutilized" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,

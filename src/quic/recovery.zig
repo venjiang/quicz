@@ -208,13 +208,15 @@ pub const Recovery = struct {
         self.congestion_avoidance_bytes_acked =
             std.math.add(usize, self.congestion_avoidance_bytes_acked, bytes) catch std.math.maxInt(usize);
 
-        if (self.congestion_avoidance_bytes_acked < self.congestion_window) return;
-
-        self.congestion_avoidance_bytes_acked -= self.congestion_window;
-        self.congestion_window =
-            std.math.add(usize, self.congestion_window, self.max_datagram_size) catch std.math.maxInt(usize);
-        if (self.congestion_window == std.math.maxInt(usize)) {
-            self.congestion_avoidance_bytes_acked = 0;
+        while (self.congestion_avoidance_bytes_acked >= self.congestion_window) {
+            const window_before_growth = self.congestion_window;
+            self.congestion_avoidance_bytes_acked -= window_before_growth;
+            self.congestion_window =
+                std.math.add(usize, self.congestion_window, self.max_datagram_size) catch std.math.maxInt(usize);
+            if (self.congestion_window == std.math.maxInt(usize)) {
+                self.congestion_avoidance_bytes_acked = 0;
+                return;
+            }
         }
     }
 
@@ -329,6 +331,19 @@ test "NewReno congestion avoidance grows by byte-counted cwnd credit" {
 
     try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
     try std.testing.expectEqual(@as(usize, 13_200), recovery.congestion_window);
+}
+
+test "NewReno congestion avoidance consumes multiple cwnd credits from batched ACKs" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    recovery.congestion_window = 12_000;
+    recovery.ssthresh = 12_000;
+
+    recovery.onPacketSent(25_200);
+    recovery.onPacketAcked(25_200, 0, 100, 0);
+
+    try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
+    try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
+    try std.testing.expectEqual(@as(usize, 14_400), recovery.congestion_window);
 }
 
 test "underutilized ACK updates recovery accounting without growing congestion window" {

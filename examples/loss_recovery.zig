@@ -112,6 +112,21 @@ pub fn main() !void {
         .{ underutilized_cwnd, slow_start_cwnd, avoidance_credit_cwnd, avoidance_cwnd, avoidance_cwnd - avoidance_before },
     );
 
+    var batched_avoidance = quicz.recovery.Recovery.init(.{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    batched_avoidance.congestion_window = 12_000;
+    batched_avoidance.ssthresh = 12_000;
+    batched_avoidance.onPacketSent(25_200);
+    batched_avoidance.onPacketAcked(25_200, 0, 100, 0);
+    if (batched_avoidance.congestion_window != 14_400) return error.LossRecoveryExampleFailed;
+    if (batched_avoidance.congestion_avoidance_bytes_acked != 0) return error.LossRecoveryExampleFailed;
+    std.debug.print(
+        "[loss] NewReno batched_avoidance_cwnd={d} batched_credit={d}\n",
+        .{ batched_avoidance.congestion_window, batched_avoidance.congestion_avoidance_bytes_acked },
+    );
+
     var newreno_clamp = try quicz.QuicConnection.init(allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
