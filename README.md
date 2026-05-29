@@ -183,8 +183,8 @@ experimental.
   Lifecycle-routed protected STREAM/BLOCKED/MAX flow-control exchange over
   loopback UDP. Run with `zig build run-udp-flow-control-loopback`.
 - [UDP spin bit loopback](examples/udp_spin_bit_loopback.zig): Configurable
-  single-path spin-bit signaling over protected short packets. Run with
-  `zig build run-udp-spin-bit-loopback`.
+  single-path spin-bit signaling over lifecycle-routed protected short packets.
+  Run with `zig build run-udp-spin-bit-loopback`.
 - [UDP ECN validation loopback](examples/udp_ecn_validation_loopback.zig):
   Modeled ECN state and ACK_ECN validation over loopback UDP. Run with
   `zig build run-udp-ecn-validation-loopback`.

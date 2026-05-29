@@ -3,11 +3,6 @@ const quicz = @import("quicz");
 
 const ExampleError = error{UnexpectedState};
 
-const ReceivedRoute = struct {
-    data: []const u8,
-    route: quicz.endpoint.RouteResult,
-};
-
 fn require(condition: bool) ExampleError!void {
     if (!condition) return error.UnexpectedState;
 }
@@ -43,18 +38,26 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
     };
 }
 
-fn receiveRoute(
+fn receiveProtectedShortDatagram(
     io: std.Io,
-    lifecycle: *const quicz.EndpointConnectionLifecycle,
+    lifecycle: *quicz.EndpointConnectionLifecycle,
+    connection_id: u64,
+    connection: *quicz.Connection,
     socket: *std.Io.net.Socket,
     receive_buf: []u8,
-) !ReceivedRoute {
+    now_millis: i64,
+    keys: quicz.protection.Aes128PacketProtectionKeys,
+) !quicz.endpoint.RouteResult {
     const received = try socket.receiveTimeout(io, receive_buf, receiveTimeout());
     const path = try udp4Tuple(socket.address, received.from);
-    return .{
-        .data = received.data,
-        .route = try lifecycle.routeDatagram(path, received.data),
-    };
+    return try lifecycle.processRoutedProtectedShortDatagram(
+        connection_id,
+        connection,
+        path,
+        now_millis,
+        keys,
+        received.data,
+    );
 }
 
 pub fn main() !void {
@@ -116,10 +119,18 @@ pub fn main() !void {
     try require(!first_spin);
     try client_socket.send(io, &server_socket.address, first_ping);
 
-    const first_received = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
-    try require(first_received.route.connection_id == 51);
-    try require(std.mem.eql(u8, first_received.route.destination_connection_id.asSlice(), &server_dcid));
-    try server.processProtectedShortDatagram(1, secrets.client, server_dcid.len, first_received.data);
+    const first_route = try receiveProtectedShortDatagram(
+        io,
+        &server_lifecycle,
+        51,
+        &server,
+        &server_socket,
+        &server_receive_buf,
+        1,
+        secrets.client,
+    );
+    try require(first_route.connection_id == 51);
+    try require(std.mem.eql(u8, first_route.destination_connection_id.asSlice(), &server_dcid));
     try require(!server.nextOutgoingSpinBit());
 
     const first_ack = (try server.pollProtectedShortDatagram(2, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
@@ -128,10 +139,18 @@ pub fn main() !void {
     try require(!first_ack_spin);
     try server_socket.send(io, &client_socket.address, first_ack);
 
-    const first_ack_received = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
-    try require(first_ack_received.route.connection_id == 41);
-    try require(std.mem.eql(u8, first_ack_received.route.destination_connection_id.asSlice(), &client_dcid));
-    try client.processProtectedShortDatagram(3, secrets.server, client_dcid.len, first_ack_received.data);
+    const first_ack_route = try receiveProtectedShortDatagram(
+        io,
+        &client_lifecycle,
+        41,
+        &client,
+        &client_socket,
+        &client_receive_buf,
+        3,
+        secrets.server,
+    );
+    try require(first_ack_route.connection_id == 41);
+    try require(std.mem.eql(u8, first_ack_route.destination_connection_id.asSlice(), &client_dcid));
     try require(client.nextOutgoingSpinBit());
     try require(client.bytesInFlight(.application) == 0);
 
@@ -142,11 +161,19 @@ pub fn main() !void {
     try require(second_spin);
     try migrated_client_socket.send(io, &server_socket.address, second_ping);
 
-    const second_received = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
-    try require(second_received.route.connection_id == 51);
-    try require(second_received.route.path_changed);
-    try require(std.mem.eql(u8, second_received.route.destination_connection_id.asSlice(), &server_dcid));
-    try server.processProtectedShortDatagram(5, secrets.client, server_dcid.len, second_received.data);
+    const second_route = try receiveProtectedShortDatagram(
+        io,
+        &server_lifecycle,
+        51,
+        &server,
+        &server_socket,
+        &server_receive_buf,
+        5,
+        secrets.client,
+    );
+    try require(second_route.connection_id == 51);
+    try require(second_route.path_changed);
+    try require(std.mem.eql(u8, second_route.destination_connection_id.asSlice(), &server_dcid));
     try require(server.nextOutgoingSpinBit());
     const server_spin_before_reset = server.nextOutgoingSpinBit();
 
@@ -164,11 +191,19 @@ pub fn main() !void {
     try require(!second_ack_spin);
     try server_socket.send(io, &migrated_client_socket.address, second_ack);
 
-    const second_ack_received = try receiveRoute(io, &client_lifecycle, &migrated_client_socket, &client_receive_buf);
-    try require(second_ack_received.route.connection_id == 41);
-    try require(!second_ack_received.route.path_changed);
-    try require(std.mem.eql(u8, second_ack_received.route.destination_connection_id.asSlice(), &client_dcid));
-    try client.processProtectedShortDatagram(7, secrets.server, client_dcid.len, second_ack_received.data);
+    const second_ack_route = try receiveProtectedShortDatagram(
+        io,
+        &client_lifecycle,
+        41,
+        &client,
+        &migrated_client_socket,
+        &client_receive_buf,
+        7,
+        secrets.server,
+    );
+    try require(second_ack_route.connection_id == 41);
+    try require(!second_ack_route.path_changed);
+    try require(std.mem.eql(u8, second_ack_route.destination_connection_id.asSlice(), &client_dcid));
     try require(client.bytesInFlight(.application) == 0);
 
     std.debug.print("[udp-spin] client_port={} migrated_client_port={} server_port={} first_ping={} first_ack={} second_ping={} second_ack={} first_spin={} first_ack_spin={} second_spin={} path_changed={} server_spin_before_reset={} second_ack_spin={} server_reset={} client_inflight={}\n", .{
@@ -182,7 +217,7 @@ pub fn main() !void {
         first_spin,
         first_ack_spin,
         second_spin,
-        second_received.route.path_changed,
+        second_route.path_changed,
         server_spin_before_reset,
         second_ack_spin,
         server.nextOutgoingSpinBit(),
