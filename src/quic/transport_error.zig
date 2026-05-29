@@ -76,6 +76,24 @@ pub fn frameDecodeErrorCode(err: anyerror) ?TransportErrorCode {
     };
 }
 
+/// Map transport-parameter codec failures to their RFC 9000 close code.
+///
+/// This helper only classifies errors emitted by `quic/transport_parameters.zig`
+/// parse and value-validation paths. Local encode-buffer and allocation
+/// failures remain unmapped because they are not peer transport-parameter
+/// violations.
+pub fn transportParameterErrorCode(err: anyerror) ?TransportErrorCode {
+    return switch (err) {
+        error.InvalidParameterValue,
+        error.InvalidParameterLength,
+        error.DuplicateParameter,
+        error.InvalidVarInt,
+        error.EndOfStream,
+        => .transport_parameter_error,
+        else => null,
+    };
+}
+
 /// Compose the CRYPTO_ERROR transport code for a TLS alert value.
 pub fn cryptoErrorCode(tls_alert: u8) u64 {
     return crypto_error_min + @as(u64, tls_alert);
@@ -135,6 +153,18 @@ test "frame decode errors map to FRAME_ENCODING_ERROR" {
     try std.testing.expectEqual(@as(?TransportErrorCode, expected), frameDecodeErrorCode(error.InvalidFrameValue));
     try std.testing.expectEqual(@as(?TransportErrorCode, expected), frameDecodeErrorCode(error.EndOfStream));
     try std.testing.expectEqual(@as(?TransportErrorCode, null), frameDecodeErrorCode(error.OutOfMemory));
+}
+
+test "transport parameter errors map to TRANSPORT_PARAMETER_ERROR" {
+    const expected = TransportErrorCode.transport_parameter_error;
+
+    try std.testing.expectEqual(@as(?TransportErrorCode, expected), transportParameterErrorCode(error.InvalidParameterValue));
+    try std.testing.expectEqual(@as(?TransportErrorCode, expected), transportParameterErrorCode(error.InvalidParameterLength));
+    try std.testing.expectEqual(@as(?TransportErrorCode, expected), transportParameterErrorCode(error.DuplicateParameter));
+    try std.testing.expectEqual(@as(?TransportErrorCode, expected), transportParameterErrorCode(error.InvalidVarInt));
+    try std.testing.expectEqual(@as(?TransportErrorCode, expected), transportParameterErrorCode(error.EndOfStream));
+    try std.testing.expectEqual(@as(?TransportErrorCode, null), transportParameterErrorCode(error.OutOfMemory));
+    try std.testing.expectEqual(@as(?TransportErrorCode, null), transportParameterErrorCode(error.NoSpaceLeft));
 }
 
 test "crypto error helpers map TLS alert values" {
