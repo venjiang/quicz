@@ -1290,6 +1290,36 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Route and process one caller-keyed Initial/Handshake datagram.
+    ///
+    /// Socket loops can use this when the endpoint owns route selection while
+    /// the caller still supplies long-packet protection keys. The route must
+    /// resolve to `connection_id`; the connection then opens the packet in the
+    /// requested packet-number space, and the endpoint lifecycle mirrors the
+    /// resulting recovery timer.
+    pub fn processRoutedProtectedLongDatagramInSpace(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedLongDatagramInSpace(
+            connection_id,
+            connection,
+            space,
+            now_millis,
+            keys,
+            datagram,
+        );
+        return route;
+    }
+
     /// Poll one caller-keyed protected 0-RTT datagram and refresh timers.
     ///
     /// This direct early-data bridge is for endpoint loops that already hold
@@ -1329,6 +1359,34 @@ pub const EndpointConnectionLifecycle = struct {
     ) Error!void {
         try connection.processProtectedZeroRttDatagram(now_millis, keys, datagram);
         try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
+    /// Route and process one caller-keyed protected 0-RTT datagram.
+    ///
+    /// Socket loops can use this when the endpoint owns route selection while
+    /// the caller still supplies early-data packet-protection keys. The route
+    /// must resolve to `connection_id`; the connection then applies 0-RTT
+    /// frame restrictions and Application packet-number state, and the
+    /// endpoint lifecycle mirrors the resulting recovery timer.
+    pub fn processRoutedProtectedZeroRttDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedZeroRttDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            keys,
+            datagram,
+        );
+        return route;
     }
 
     /// Poll one caller-keyed protected 1-RTT datagram and refresh timers.
@@ -15540,16 +15598,26 @@ test "EndpointConnectionLifecycle refreshes protected long CRYPTO space timer li
     try std.testing.expectEqual(@as(usize, 1), server_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(usize, 1), server.sentPacketCount(.handshake));
 
-    const client_route = try client_lifecycle.routeDatagram(client_receive_path, handshake);
-    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
-    try client_lifecycle.processProtectedLongDatagramInSpace(
-        client_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, client_lifecycle.processRoutedProtectedLongDatagramInSpace(
+        server_connection_id,
         &client,
         .handshake,
+        client_receive_path,
+        11,
+        secrets.server,
+        handshake,
+    ));
+    const client_route = try client_lifecycle.processRoutedProtectedLongDatagramInSpace(
+        client_connection_id,
+        &client,
+        .handshake,
+        client_receive_path,
         11,
         secrets.server,
         handshake,
     );
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &client_scid, client_route.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.handshake));
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
 
@@ -15570,16 +15638,26 @@ test "EndpointConnectionLifecycle refreshes protected long CRYPTO space timer li
     try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.handshake));
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
 
-    const server_route = try server_lifecycle.routeDatagram(server_receive_path, ack);
-    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
-    try server_lifecycle.processProtectedLongDatagramInSpace(
-        server_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedLongDatagramInSpace(
+        client_connection_id,
         &server,
         .handshake,
+        server_receive_path,
+        13,
+        secrets.client,
+        ack,
+    ));
+    const server_route = try server_lifecycle.processRoutedProtectedLongDatagramInSpace(
+        server_connection_id,
+        &server,
+        .handshake,
+        server_receive_path,
         13,
         secrets.client,
         ack,
     );
+    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_scid, server_route.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
     try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.handshake));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
@@ -15643,15 +15721,24 @@ test "EndpointConnectionLifecycle refreshes caller-keyed zero RTT timer lifecycl
     try std.testing.expectEqual(@as(usize, 1), client_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
 
-    const server_route = try server_lifecycle.routeDatagram(server_receive_path, early);
-    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
-    try server_lifecycle.processProtectedZeroRttDatagram(
-        server_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedZeroRttDatagram(
+        client_connection_id,
         &server,
+        server_receive_path,
+        11,
+        secrets.client,
+        early,
+    ));
+    const server_route = try server_lifecycle.processRoutedProtectedZeroRttDatagram(
+        server_connection_id,
+        &server,
+        server_receive_path,
         11,
         secrets.client,
         early,
     );
+    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_scid, server_route.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 
