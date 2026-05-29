@@ -173,8 +173,8 @@ experimental.
   Replacement CID registration, retire_prior_to handling, and reset-token
   retention. Run with `zig build run-udp-replacement-cid-loopback`.
 - [UDP connection IDs loopback](examples/udp_connection_ids_loopback.zig):
-  Protected NEW_CONNECTION_ID/RETIRE_CONNECTION_ID exchange through lifecycle
-  routes. Run with `zig build run-udp-connection-ids-loopback`.
+  Lifecycle-routed protected NEW_CONNECTION_ID/RETIRE_CONNECTION_ID and ACK
+  exchange. Run with `zig build run-udp-connection-ids-loopback`.
 - [UDP protected loopback](examples/udp_protected_loopback.zig):
   Lifecycle-owned accepted protected Initial processing and protected server
   Initial response processing plus routed caller-keyed 1-RTT processing over

@@ -59,6 +59,32 @@ fn receiveRoute(
     };
 }
 
+fn receiveProtectedShortDatagram(
+    io: std.Io,
+    lifecycle: *quicz.EndpointConnectionLifecycle,
+    connection_id: u64,
+    connection: *quicz.Connection,
+    socket: *std.Io.net.Socket,
+    receive_buf: []u8,
+    now_millis: i64,
+    keys: quicz.protection.Aes128PacketProtectionKeys,
+) !ReceivedRoute {
+    const received = try socket.receiveTimeout(io, receive_buf, receiveTimeout());
+    const path = try udp4Tuple(socket.address, received.from);
+    return .{
+        .path = path,
+        .data = received.data,
+        .route = try lifecycle.processRoutedProtectedShortDatagram(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            keys,
+            received.data,
+        ),
+    };
+}
+
 fn receiveRetiredToken(
     io: std.Io,
     lifecycle: *const quicz.EndpointConnectionLifecycle,
@@ -136,20 +162,36 @@ pub fn main() !void {
 
     var client_receive_buf: [1500]u8 = undefined;
     var server_receive_buf: [1500]u8 = undefined;
-    const new0_received = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
+    const new0_received = try receiveProtectedShortDatagram(
+        io,
+        &client_lifecycle,
+        41,
+        &client,
+        &client_socket,
+        &client_receive_buf,
+        1,
+        secrets.server,
+    );
     try require(new0_received.route.connection_id == 41);
     try require(std.mem.eql(u8, new0_received.route.destination_connection_id.asSlice(), &client_dcid));
-    try client.processProtectedShortDatagram(1, secrets.server, client_dcid.len, new0_received.data);
     try require(client.pendingAckLargest(.application) == 0);
 
     const ack0 = (try client.pollProtectedShortDatagram(2, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer allocator.free(ack0);
     try client_socket.send(io, &server_socket.address, ack0);
 
-    const ack0_received = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
+    const ack0_received = try receiveProtectedShortDatagram(
+        io,
+        &server_lifecycle,
+        51,
+        &server,
+        &server_socket,
+        &server_receive_buf,
+        3,
+        secrets.client,
+    );
     try require(ack0_received.route.connection_id == 51);
     try require(std.mem.eql(u8, ack0_received.route.destination_connection_id.asSlice(), &server_dcid));
-    try server.processProtectedShortDatagram(3, secrets.client, server_dcid.len, ack0_received.data);
     try require(server.bytesInFlight(.application) == 0);
 
     const cid0_probe = [_]u8{ 0x40, 0xc0, 0xff, 0xee, 0x00, 0x01 };
@@ -171,9 +213,17 @@ pub fn main() !void {
     defer allocator.free(new1);
     try server_socket.send(io, &client_socket.address, new1);
 
-    const new1_received = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
+    const new1_received = try receiveProtectedShortDatagram(
+        io,
+        &client_lifecycle,
+        41,
+        &client,
+        &client_socket,
+        &client_receive_buf,
+        5,
+        secrets.server,
+    );
     try require(new1_received.route.connection_id == 41);
-    try client.processProtectedShortDatagram(5, secrets.server, client_dcid.len, new1_received.data);
     try require(client.pendingAckLargest(.application) == 1);
 
     try client_socket.send(io, &server_socket.address, &cid0_probe);
@@ -185,11 +235,19 @@ pub fn main() !void {
     try require(client.pendingAckLargest(.application) == null);
     try client_socket.send(io, &server_socket.address, retire);
 
-    const retire_received = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
+    const retire_received = try receiveProtectedShortDatagram(
+        io,
+        &server_lifecycle,
+        51,
+        &server,
+        &server_socket,
+        &server_receive_buf,
+        7,
+        secrets.client,
+    );
     try require(retire_received.route.connection_id == 51);
     try require(retire_received.route.sequence_number.? == sequence1);
     try require(std.mem.eql(u8, retire_received.route.destination_connection_id.asSlice(), &cid1));
-    try server.processProtectedShortDatagram(7, secrets.client, cid1.len, retire_received.data);
     try require(server.localConnectionIdCount() == 1);
     try require(server.pendingAckLargest(.application) == 1);
 
@@ -200,9 +258,17 @@ pub fn main() !void {
     defer allocator.free(ack1);
     try server_socket.send(io, &client_socket.address, ack1);
 
-    const ack1_received = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
+    const ack1_received = try receiveProtectedShortDatagram(
+        io,
+        &client_lifecycle,
+        41,
+        &client,
+        &client_socket,
+        &client_receive_buf,
+        9,
+        secrets.server,
+    );
     try require(ack1_received.route.connection_id == 41);
-    try client.processProtectedShortDatagram(9, secrets.server, client_dcid.len, ack1_received.data);
     try require(client.bytesInFlight(.application) == 0);
 
     std.debug.print("[udp-connection-ids] client_port={} server_port={} new0_bytes={} new1_bytes={} retire_bytes={} route0_seq={} active_seq={} local_active={} retired0_token=true client_inflight={}\n", .{
