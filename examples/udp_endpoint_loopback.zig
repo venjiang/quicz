@@ -233,7 +233,8 @@ pub fn main() !void {
         .available_versions = &supported_versions,
     });
     defer version_negotiation_server.deinit();
-    const accepted_initial = try server_lifecycle.processAcceptedProtectedInitialDatagram(
+    const server_followup_crypto = "udp endpoint protected server initial";
+    const accepted_response = try server_lifecycle.processAcceptedProtectedInitialResponseDatagram(
         21,
         &version_negotiation_server,
         1,
@@ -244,9 +245,11 @@ pub fn main() !void {
             .active_migration_disabled = true,
             .stateless_reset_token = server_reset_token,
         },
+        server_followup_crypto,
     );
-    const accepted_route = accepted_initial.accepted_routes;
-    try require(accepted_initial.processed_packets == 1);
+    defer std.heap.page_allocator.free(accepted_response.response_datagram);
+    const accepted_route = accepted_response.accepted_initial.accepted_routes;
+    try require(accepted_response.accepted_initial.processed_packets == 1);
     try require(accepted_route.original_destination_route.connection_id == 21);
     try require(accepted_route.server_source_route.connection_id == 21);
     try require(server_lifecycle.routeCount() == 2);
@@ -255,15 +258,7 @@ pub fn main() !void {
     const followup_crypto_len = (try version_negotiation_server.recvCryptoInSpace(.initial, &followup_crypto_buf)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, followup_crypto_buf[0..followup_crypto_len], followup_initial_crypto));
 
-    var server_initial_raw: [64]u8 = undefined;
-    const server_initial = try buildInitialDatagram(
-        &server_initial_raw,
-        selected_version,
-        &followup_client_initial_scid,
-        &server_initial_scid,
-        &.{},
-        &[_]u8{ 0x06, 0x00 },
-    );
+    const server_initial = accepted_response.response_datagram;
     try server_socket.send(io, &supported_received.from, server_initial);
 
     const server_initial_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
@@ -271,6 +266,15 @@ pub fn main() !void {
     const client_route = try client_lifecycle.routeDatagram(server_initial_path, server_initial_received.data);
     try require(client_route.connection_id == 32);
     try require(std.mem.eql(u8, client_route.destination_connection_id.asSlice(), &followup_client_initial_scid));
+    const followup_secrets = try quicz.protection.deriveInitialSecrets(selected_version, &original_dcid);
+    try version_negotiation_initial.handoff.followup_connection.processInitialProtectedDatagram(
+        2,
+        followup_secrets.server,
+        server_initial_received.data,
+    );
+    var client_initial_crypto_buf: [64]u8 = undefined;
+    const client_crypto_len = (try version_negotiation_initial.handoff.followup_connection.recvCryptoInSpace(.initial, &client_initial_crypto_buf)) orelse return error.UnexpectedState;
+    try require(std.mem.eql(u8, client_initial_crypto_buf[0..client_crypto_len], server_followup_crypto));
 
     const short_followup = [_]u8{ 0x40, 0xb1, 0xb2, 0xb3, 0xb4, 0x01 };
     try client_socket.send(io, &server_socket.address, &short_followup);
@@ -280,7 +284,7 @@ pub fn main() !void {
     try require(server_route.connection_id == 21);
     try require(std.mem.eql(u8, server_route.destination_connection_id.asSlice(), &server_initial_scid));
 
-    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} accepted={} client_route={} server_route={} response_bytes={} followup_initial_bytes={}\n", .{
+    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} accepted={} client_route={} server_route={} vn_response_bytes={} followup_initial_bytes={} server_initial_bytes={}\n", .{
         client_local.port,
         server_local.port,
         parsed_version_negotiation.versions.len,
@@ -290,5 +294,6 @@ pub fn main() !void {
         server_route.connection_id,
         version_negotiation.len,
         version_negotiation_initial.initial_datagram.len,
+        server_initial.len,
     });
 }

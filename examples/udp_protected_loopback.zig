@@ -118,7 +118,7 @@ pub fn main() !void {
     };
     try require(std.mem.eql(u8, initial_accept.original_destination_connection_id, &original_dcid));
     try require(std.mem.eql(u8, initial_accept.source_connection_id, &client_scid));
-    const accepted_initial = try server_lifecycle.processAcceptedProtectedInitialDatagram(
+    const accepted_response = try server_lifecycle.processAcceptedProtectedInitialResponseDatagram(
         51,
         &server,
         1,
@@ -126,25 +126,18 @@ pub fn main() !void {
         &server_scid,
         client_initial_received.data,
         .{ .active_migration_disabled = true },
+        "udp protected server initial",
     );
-    const accepted = accepted_initial.accepted_routes;
-    try require(accepted_initial.processed_packets == 1);
+    defer allocator.free(accepted_response.response_datagram);
+    const accepted = accepted_response.accepted_initial.accepted_routes;
+    try require(accepted_response.accepted_initial.processed_packets == 1);
     try require(accepted.server_source_route.connection_id == 51);
 
     try server.validatePeerAddress();
     var server_initial_crypto_buf: [128]u8 = undefined;
     const server_received_initial = try readCryptoRequired(&server, .initial, &server_initial_crypto_buf);
     try require(std.mem.eql(u8, server_received_initial, "udp protected client initial"));
-
-    try server.sendCryptoInSpace(.initial, "udp protected server initial");
-    const server_initial = (try server.pollInitialProtectedDatagram(
-        2,
-        &client_scid,
-        &server_scid,
-        &[_]u8{},
-        secrets.server,
-    )) orelse return error.UnexpectedState;
-    defer allocator.free(server_initial);
+    const server_initial = accepted_response.response_datagram;
     try server_socket.send(io, &client_initial_received.from, server_initial);
 
     const server_initial_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());

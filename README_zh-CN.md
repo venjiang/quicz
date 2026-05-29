@@ -143,7 +143,7 @@ pub fn main() !void {
   运行：`zig build run-initial-keys`。
 - [Endpoint routing](examples/endpoint_routing.zig)：内存态 DCID、tuple、Version Negotiation、Retry 和 reset routing。
   运行：`zig build run-endpoint-routing`。
-- [UDP endpoint loopback](examples/udp_endpoint_loopback.zig)：socket-backed endpoint routing，覆盖 Version Negotiation、protected follow-up Initial、accepted protected Initial processing 和 Initial/short-header classification。
+- [UDP endpoint loopback](examples/udp_endpoint_loopback.zig)：socket-backed endpoint routing，覆盖 Version Negotiation、protected follow-up Initial、accepted protected Initial processing、protected server Initial response 和 Initial/short-header classification。
   运行：`zig build run-udp-endpoint-loopback`。
 - [UDP zero-CID loopback](examples/udp_zero_cid_loopback.zig)：基于 loopback UDP 的 zero-length CID tuple routing。
   运行：`zig build run-udp-zero-cid-loopback`。
@@ -153,7 +153,7 @@ pub fn main() !void {
   运行：`zig build run-udp-replacement-cid-loopback`。
 - [UDP connection IDs loopback](examples/udp_connection_ids_loopback.zig)：通过 lifecycle route 交换 protected NEW_CONNECTION_ID/RETIRE_CONNECTION_ID。
   运行：`zig build run-udp-connection-ids-loopback`。
-- [UDP protected loopback](examples/udp_protected_loopback.zig)：lifecycle-owned accepted protected Initial processing，以及 caller-keyed protected Initial 和 1-RTT loopback UDP routing。
+- [UDP protected loopback](examples/udp_protected_loopback.zig)：lifecycle-owned accepted protected Initial processing 和 protected server Initial response，以及 caller-keyed 1-RTT loopback UDP routing。
   运行：`zig build run-udp-protected-loopback`。
 - [UDP flow control loopback](examples/udp_flow_control_loopback.zig)：protected STREAM/BLOCKED/MAX flow-control loopback UDP 交换。
   运行：`zig build run-udp-flow-control-loopback`。
