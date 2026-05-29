@@ -263,15 +263,16 @@ pub fn main() !void {
 
     const server_initial_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     const server_initial_path = try udp4Tuple(client_socket.address, server_initial_received.from);
-    const client_route = try client_lifecycle.routeDatagram(server_initial_path, server_initial_received.data);
-    try require(client_route.connection_id == 32);
-    try require(std.mem.eql(u8, client_route.destination_connection_id.asSlice(), &followup_client_initial_scid));
-    const followup_secrets = try quicz.protection.deriveInitialSecrets(selected_version, &original_dcid);
-    try version_negotiation_initial.handoff.followup_connection.processInitialProtectedDatagram(
+    const client_route = try client_lifecycle.processRoutedProtectedInitialDatagram(
+        32,
+        &version_negotiation_initial.handoff.followup_connection,
+        server_initial_path,
         2,
-        followup_secrets.server,
+        &original_dcid,
         server_initial_received.data,
     );
+    try require(client_route.connection_id == 32);
+    try require(std.mem.eql(u8, client_route.destination_connection_id.asSlice(), &followup_client_initial_scid));
     var client_initial_crypto_buf: [64]u8 = undefined;
     const client_crypto_len = (try version_negotiation_initial.handoff.followup_connection.recvCryptoInSpace(.initial, &client_initial_crypto_buf)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, client_initial_crypto_buf[0..client_crypto_len], server_followup_crypto));

@@ -884,6 +884,49 @@ pub const EndpointConnectionLifecycle = struct {
         return self.router.routeDatagram(path, datagram);
     }
 
+    /// Route and process one protected Initial datagram on an existing route.
+    ///
+    /// This is the lifecycle-owned receive bridge for protected Initial
+    /// responses after a route has already been installed. The helper first
+    /// proves the datagram routes to `connection_id`, derives Initial keys from
+    /// the packet version and the caller-provided Original DCID, then processes
+    /// the packet in Initial space and mirrors recovery timers. Server-side
+    /// first-Initial acceptance still uses
+    /// `processAcceptedProtectedInitialDatagram()` because routes are installed
+    /// only after authentication succeeds.
+    pub fn processRoutedProtectedInitialDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        original_destination_connection_id: []const u8,
+        datagram: []const u8,
+    ) EndpointProtectedInitialError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+
+        const info = protection.peekProtectedLongPacketInfo(datagram) catch return error.InvalidPacket;
+        if (info.packet_type != .initial) return error.InvalidPacket;
+        const initial_secrets = protection.deriveInitialSecrets(
+            info.version,
+            original_destination_connection_id,
+        ) catch return error.InvalidPacket;
+        const keys = switch (connection.side) {
+            .client => initial_secrets.server,
+            .server => initial_secrets.client,
+        };
+        try self.processProtectedLongDatagramInSpace(
+            connection_id,
+            connection,
+            .initial,
+            now_millis,
+            keys,
+            datagram,
+        );
+        return route;
+    }
+
     /// Return a retained stateless reset token for an inactive destination CID.
     ///
     /// Active routes suppress their reset token. This read-only lookup lets
@@ -14827,11 +14870,18 @@ test "EndpointConnectionLifecycle emits accepted protected Initial response" {
     const server_recv_len = (try server.recvCryptoInSpace(.initial, &server_crypto_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("client hello for response", server_crypto_buf[0..server_recv_len]);
 
-    const response_route = try client_lifecycle.routeDatagram(client_path, response.response_datagram);
+    const response_route = try client_lifecycle.processRoutedProtectedInitialDatagram(
+        101,
+        &client,
+        client_path,
+        12,
+        &original_dcid,
+        response.response_datagram,
+    );
     try std.testing.expectEqual(@as(u64, 101), response_route.connection_id);
     try std.testing.expectEqualSlices(u8, &client_scid, response_route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 1), client_lifecycle.recoveryTimerCount());
 
-    try client.processInitialProtectedDatagram(12, secrets.server, response.response_datagram);
     var client_crypto_buf: [64]u8 = undefined;
     const client_recv_len = (try client.recvCryptoInSpace(.initial, &client_crypto_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("server hello response", client_crypto_buf[0..client_recv_len]);

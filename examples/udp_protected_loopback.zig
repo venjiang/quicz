@@ -142,11 +142,17 @@ pub fn main() !void {
 
     const server_initial_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     const server_initial_path = try udp4Tuple(client_socket.address, server_initial_received.from);
-    const client_initial_route = try client_lifecycle.routeDatagram(server_initial_path, server_initial_received.data);
+    const client_initial_route = try client_lifecycle.processRoutedProtectedInitialDatagram(
+        41,
+        &client,
+        server_initial_path,
+        3,
+        &original_dcid,
+        server_initial_received.data,
+    );
     try require(client_initial_route.connection_id == 41);
     try require(std.mem.eql(u8, client_initial_route.destination_connection_id.asSlice(), &client_scid));
 
-    try client.processInitialProtectedDatagram(3, secrets.server, server_initial_received.data);
     var client_initial_crypto_buf: [128]u8 = undefined;
     const client_received_initial = try readCryptoRequired(&client, .initial, &client_initial_crypto_buf);
     try require(std.mem.eql(u8, client_received_initial, "udp protected server initial"));
