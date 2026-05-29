@@ -148,6 +148,10 @@ experimental.
   tokens, version binding, secret rotation, replay snapshots, and
   lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery. Run with
   `zig build run-address-validation`.
+- [UDP address validation loopback](examples/udp_address_validation_loopback.zig):
+  Socket-backed lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery, NEW_TOKEN
+  path/version binding, replay rejection, and future address-validation
+  unblocking. Run with `zig build run-udp-address-validation-loopback`.
 - [Retry token](examples/retry_token.zig): Retry datagram processing, token
   reuse, and Retry CID validation. Run with `zig build run-retry-token`.
 - [Connection IDs](examples/connection_ids.zig): NEW_CONNECTION_ID,

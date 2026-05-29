@@ -282,6 +282,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_address_validation);
 
+    // UDP address validation loopback executable
+    const exe_udp_address_validation_loopback = b.addExecutable(.{
+        .name = "quicz-udp-address-validation-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_address_validation_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_address_validation_loopback);
+
     // Retry token executable
     const exe_retry_token = b.addExecutable(.{
         .name = "quicz-retry-token",
@@ -764,6 +778,15 @@ pub fn build(b: *std.Build) void {
     run_address_validation_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_address_validation_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-address-validation-loopback
+    const run_udp_address_validation_loopback = b.step("run-udp-address-validation-loopback", "Run quicz UDP address validation loopback example");
+    const run_udp_address_validation_loopback_cmd = b.addRunArtifact(exe_udp_address_validation_loopback);
+    run_udp_address_validation_loopback.dependOn(&run_udp_address_validation_loopback_cmd.step);
+    run_udp_address_validation_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_address_validation_loopback_cmd.addArgs(args);
     }
 
     // zig build run-retry-token
