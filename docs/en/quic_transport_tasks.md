@@ -732,13 +732,19 @@ produce or consume TLS-owned QUIC packets over UDP.
   `quicz.transport_error`. They cover the fixed transport error values,
   CRYPTO_ERROR range detection, and TLS alert mapping. Connection-close policy
   and error propagation remain part of the later state-machine work.
+- 2026-05-29: Extended `quicz.transport_error` with
+  `frameDecodeErrorCode()`, which classifies inbound frame codec failures
+  such as unknown frame types, invalid frame values, invalid ACK ranges, and
+  truncated frame bodies as `FRAME_ENCODING_ERROR` while leaving local resource
+  errors unmapped. Tests cover every mapped frame decode error and
+  `examples/codec_roundtrip.zig` prints the mapped close code name.
 - 2026-05-22: Added `examples/codec_roundtrip.zig` and `zig build run-codec`.
   The example exercises varint, short-packet envelope, coalesced long-packet envelope,
   short-header spin-bit preservation, header packet number
   truncation/reconstruction, packet number encoding, Version Negotiation,
   STREAM frame, transport parameter, connection transport-parameter exposure
   including TLS extension bytes and local ACK delay policy, and transport error
-  helper roundtrips.
+  helper roundtrips including frame codec error classification.
 - 2026-05-22: Added `QuicConnection.localTransportParameters()` and
   `applyPeerTransportParameters()`. Local parameters expose configured receive
   limits, local `ack_delay_exponent`/`max_ack_delay`,
@@ -1842,7 +1848,7 @@ run from `build.zig`.
 | Example | Purpose | Status |
 | --- | --- | --- |
 | `echo_client` / `echo_server` | Current in-memory frame-payload echo baseline. | Present |
-| `codec_roundtrip` | Varint, packet header, RFC 9369 QUIC v2 long-header type-bit mapping, short-header spin-bit preservation, long/short-packet envelope, header packet number truncation/reconstruction, packet number encoding, RFC 8999 Version Negotiation packet codec plus reserved-version skip, client-side VN selection and RFC 9368 downgrade-check state, frame, transport parameter including RFC 9368 `version_information`, connection parameter exposure including TLS extension bytes and server preferred_address, and transport error codec usage including `VERSION_NEGOTIATION_ERROR`. | Present |
+| `codec_roundtrip` | Varint, packet header, RFC 9369 QUIC v2 long-header type-bit mapping, short-header spin-bit preservation, long/short-packet envelope, header packet number truncation/reconstruction, packet number encoding, RFC 8999 Version Negotiation packet codec plus reserved-version skip, client-side VN selection and RFC 9368 downgrade-check state, frame, transport parameter including RFC 9368 `version_information`, connection parameter exposure including TLS extension bytes and server preferred_address, and transport error codec usage including `VERSION_NEGOTIATION_ERROR` and frame decode `FRAME_ENCODING_ERROR` classification. | Present |
 | `transport_parameters` | Dedicated transport-parameter usage: local TLS extension byte export, reserved-parameter greasing/ignore, peer byte parse/apply, server-only parameter role filtering, preferred-address/reset-token storage, effective idle timeout, peer max_udp_payload_size recovery max_datagram_size/initial-cwnd resync, and peer stream limit enforcement. | Present |
 | `crypto_stream` | Current out-of-order Handshake CRYPTO reassembly, ACK-driven frame-payload Handshake CRYPTO loss requeue/retransmission, mock `CryptoBackend` bridge delivery/output queuing/local-peer-TP handoff/Handshake, 0-RTT, and 1-RTT secret handoff/confirmation, backend-confirmed no-output Handshake discard, explicit handshake-state observability, protected Initial and Handshake CRYPTO transmit/receive bridge with valid first-client-Initial DCID and 1200-byte Initial datagram flows, installed-key Handshake and explicitly accepted 0-RTT long-packet exchanges, no-Retry Original DCID export/validation, local Initial SCID export through `localTransportParameters()`, coalesced server Initial+Handshake transmit/receive, peer Initial SCID capture with `initial_source_connection_id` validation, protected client Initial ACK-only plus Handshake PING/ACK probe, modeled handshake confirmation, caller-keyed protected 1-RTT PING/ACK, CRYPTO/ACK, STREAM/ACK, RESET_STREAM/ACK, STOP_SENDING/RESET_STREAM exchanges, ACK-gated installed-key 1-RTT key-update PING, caller-owned key-phase-state key-update PING, and configurable short-header spin-bit state. | Present |
 | `initial_keys` | RFC 9001 QUIC v1 and RFC 9369 QUIC v2 Initial secret/key/IV/header-protection key derivation, RFC 9001 `quic ku` key-update derivation, protected Initial long-packet seal/open, and AES header-protection masking from a client Initial DCID. | Present |

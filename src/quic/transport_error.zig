@@ -57,6 +57,25 @@ pub fn isConnectionCloseCode(code: TransportErrorCode) bool {
     return isKnownCode(codeValue(code));
 }
 
+/// Map inbound frame codec failures to their RFC 9000 transport close code.
+///
+/// This helper only classifies errors from `quic/frame.zig` decode paths. It
+/// deliberately returns null for local resource failures such as `OutOfMemory`
+/// because those are not peer frame-encoding violations.
+pub fn frameDecodeErrorCode(err: anyerror) ?TransportErrorCode {
+    return switch (err) {
+        error.UnsupportedFrameType,
+        error.InvalidAckRange,
+        error.InvalidPaddingLength,
+        error.InvalidConnectionIdLength,
+        error.InvalidFrameLength,
+        error.InvalidFrameValue,
+        error.EndOfStream,
+        => .frame_encoding_error,
+        else => null,
+    };
+}
+
 /// Compose the CRYPTO_ERROR transport code for a TLS alert value.
 pub fn cryptoErrorCode(tls_alert: u8) u64 {
     return crypto_error_min + @as(u64, tls_alert);
@@ -103,6 +122,19 @@ test "transport error helpers recognize fixed and crypto ranges" {
     try std.testing.expect(isKnownCode(0x0100));
     try std.testing.expect(isKnownCode(0x11));
     try std.testing.expect(!isKnownCode(0x12));
+}
+
+test "frame decode errors map to FRAME_ENCODING_ERROR" {
+    const expected = TransportErrorCode.frame_encoding_error;
+
+    try std.testing.expectEqual(@as(?TransportErrorCode, expected), frameDecodeErrorCode(error.UnsupportedFrameType));
+    try std.testing.expectEqual(@as(?TransportErrorCode, expected), frameDecodeErrorCode(error.InvalidAckRange));
+    try std.testing.expectEqual(@as(?TransportErrorCode, expected), frameDecodeErrorCode(error.InvalidPaddingLength));
+    try std.testing.expectEqual(@as(?TransportErrorCode, expected), frameDecodeErrorCode(error.InvalidConnectionIdLength));
+    try std.testing.expectEqual(@as(?TransportErrorCode, expected), frameDecodeErrorCode(error.InvalidFrameLength));
+    try std.testing.expectEqual(@as(?TransportErrorCode, expected), frameDecodeErrorCode(error.InvalidFrameValue));
+    try std.testing.expectEqual(@as(?TransportErrorCode, expected), frameDecodeErrorCode(error.EndOfStream));
+    try std.testing.expectEqual(@as(?TransportErrorCode, null), frameDecodeErrorCode(error.OutOfMemory));
 }
 
 test "crypto error helpers map TLS alert values" {

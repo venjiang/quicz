@@ -497,14 +497,21 @@ fn transportErrorMapping() !void {
     const tls_alert: u8 = 42;
     const code = quicz.transport_error.cryptoErrorCode(tls_alert);
     const decoded_alert = quicz.transport_error.cryptoErrorAlert(code);
+    const frame_decode_code = quicz.transport_error.frameDecodeErrorCode(error.UnsupportedFrameType) orelse
+        return error.UnexpectedRoundtrip;
 
     try require(quicz.transport_error.isKnownCode(@intFromEnum(quicz.transport_error.TransportErrorCode.protocol_violation)));
     try require(quicz.transport_error.isKnownCode(@intFromEnum(quicz.transport_error.TransportErrorCode.version_negotiation_error)));
     try require(quicz.transport_error.isCryptoErrorCode(code));
     try require(decoded_alert != null);
     try require(decoded_alert.? == tls_alert);
+    try require(frame_decode_code == .frame_encoding_error);
 
-    std.debug.print("[codec] transport error tls_alert={} code=0x{x}\n", .{ tls_alert, code });
+    std.debug.print("[codec] transport error tls_alert={} code=0x{x} frame_decode={s}\n", .{
+        tls_alert,
+        code,
+        @tagName(frame_decode_code),
+    });
 }
 
 pub fn main() !void {
