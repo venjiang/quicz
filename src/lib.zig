@@ -1992,6 +1992,22 @@ fn elapsedMillis(sent_time_millis: i64, now_millis: i64) u64 {
     return @intCast(delta);
 }
 
+fn ackFrameRangesAreValid(ack: frame.AckFrame) bool {
+    if (ack.first_ack_range > ack.largest_acknowledged) return false;
+
+    var range_largest = ack.largest_acknowledged;
+    var range_smallest = range_largest - ack.first_ack_range;
+    for (ack.ranges) |range| {
+        const skipped = std.math.add(u64, range.gap, 2) catch return false;
+        if (range_smallest < skipped) return false;
+        range_largest = range_smallest - skipped;
+        if (range.ack_range > range_largest) return false;
+        range_smallest = range_largest - range.ack_range;
+    }
+
+    return true;
+}
+
 fn ackFrameContains(ack: frame.AckFrame, packet_number: u64) bool {
     if (ack.first_ack_range > ack.largest_acknowledged) return false;
 
@@ -8202,6 +8218,7 @@ pub const QuicConnection = struct {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
         if (ack.largest_acknowledged >= packet_space.next_packet_number.*) return error.InvalidPacket;
+        if (!ackFrameRangesAreValid(ack)) return error.InvalidPacket;
 
         var acked_bytes: usize = 0;
         var largest_acked_packet: ?SentPacket = null;
@@ -12625,6 +12642,45 @@ test "processDatagram ACK updates recovery and removes sent packets" {
     try std.testing.expectEqual(@as(usize, 0), conn.sent_packets.items.len);
     try std.testing.expectEqual(@as(usize, 0), conn.recovery_state.bytes_in_flight);
     try std.testing.expectEqual(@as(?u64, 50), conn.recovery_state.latest_rtt_ms);
+}
+
+test "connection ACK APIs reject ACK ranges that compute negative packet numbers" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 20, 100);
+
+    const ranges = [_]frame.AckRange{
+        .{ .gap = 0, .ack_range = 0 },
+    };
+    const invalid_ack = frame.AckFrame{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ranges,
+    };
+
+    try std.testing.expectError(error.InvalidPacket, conn.receiveAckInSpace(.application, 60, invalid_ack));
+    try std.testing.expectEqual(@as(usize, 2), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 200), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?u64, null), conn.largest_acknowledged);
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), conn.lossDetectionTimerDeadlineMillis());
+
+    var ecn_conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    defer ecn_conn.deinit();
+    _ = try ecn_conn.recordPacketSentInSpace(.application, 10, 100);
+    try std.testing.expectError(error.InvalidPacket, ecn_conn.receiveAckEcnInSpace(.application, 60, .{
+        .ack = invalid_ack,
+        .ecn_counts = .{
+            .ect0_count = 0,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
+    }));
+    try std.testing.expectEqual(@as(usize, 1), ecn_conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 100), ecn_conn.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(?u64, null), ecn_conn.largest_acknowledged);
 }
 
 test "ACK delay is ignored for Initial and Handshake RTT samples" {

@@ -27,6 +27,29 @@ pub fn main() !void {
         .{ packet_threshold.sentPacketCount(.application), packet_threshold.bytesInFlight(.application) },
     );
 
+    var invalid_ack = try quicz.QuicConnection.init(allocator, .client, .{});
+    defer invalid_ack.deinit();
+    _ = try invalid_ack.recordPacketSentInSpace(.application, 10, 100);
+    _ = try invalid_ack.recordPacketSentInSpace(.application, 20, 100);
+    const invalid_ack_ranges = [_]quicz.frame.AckRange{
+        .{ .gap = 0, .ack_range = 0 },
+    };
+    invalid_ack.receiveAckInSpace(.application, 60, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &invalid_ack_ranges,
+    }) catch |err| switch (err) {
+        error.InvalidPacket => {},
+        else => return err,
+    };
+    if (invalid_ack.sentPacketCount(.application) != 2) return error.LossRecoveryExampleFailed;
+    if (invalid_ack.bytesInFlight(.application) != 200) return error.LossRecoveryExampleFailed;
+    std.debug.print(
+        "[loss] invalid ACK range rejected; remaining={d} bytes_in_flight={d}\n",
+        .{ invalid_ack.sentPacketCount(.application), invalid_ack.bytesInFlight(.application) },
+    );
+
     var time_threshold = try quicz.QuicConnection.init(allocator, .client, .{});
     defer time_threshold.deinit();
 
