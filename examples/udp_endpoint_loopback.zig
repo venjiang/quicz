@@ -173,7 +173,9 @@ pub fn main() !void {
     try require(std.mem.eql(u8, parsed_version_negotiation.scid, &original_dcid));
     try require(parsed_version_negotiation.versions.len == supported_versions.len);
 
-    var version_negotiation_handoff = (try client_lifecycle.processVersionNegotiationHandoffDatagram(
+    const initial_token = [_]u8{ 0xa1, 0xa2 };
+    const followup_initial_crypto = "udp vn protected follow-up initial";
+    var version_negotiation_initial = (try client_lifecycle.processVersionNegotiationProtectedInitialDatagram(
         31,
         32,
         &version_negotiation_client,
@@ -184,9 +186,13 @@ pub fn main() !void {
         client_path,
         version_negotiation_received.data,
         .{ .active_migration_disabled = true },
+        &initial_token,
+        followup_initial_crypto,
     )) orelse return error.UnexpectedState;
-    defer version_negotiation_handoff.followup_connection.deinit();
-    const version_negotiation_followup = version_negotiation_handoff.followup;
+    defer version_negotiation_initial.handoff.followup_connection.deinit();
+    defer std.heap.page_allocator.free(version_negotiation_initial.initial_datagram);
+
+    const version_negotiation_followup = version_negotiation_initial.handoff.followup;
     const version_negotiation_result = version_negotiation_followup.version_negotiation;
     const selected_version = version_negotiation_result.selected_version;
     try require(selected_version == .v2);
@@ -194,20 +200,12 @@ pub fn main() !void {
     try require(version_negotiation_result.followup_config.chosen_version == .v2);
     try require(version_negotiation_result.retired.routes_retired == 1);
     try require(version_negotiation_followup.followup_route.connection_id == 32);
-    try require(version_negotiation_handoff.followup_connection.versionNegotiationSelectedVersion() == .v2);
+    try require(version_negotiation_initial.handoff.followup_connection.versionNegotiationSelectedVersion() == .v2);
+    try require(version_negotiation_initial.initial_datagram.len >= 1200);
     try require(client_lifecycle.routeCount() == 1);
+    try require(client_lifecycle.recoveryTimerCount() == 1);
 
-    const initial_token = [_]u8{ 0xa1, 0xa2 };
-    var supported_initial_raw: [64]u8 = undefined;
-    const supported_initial = try buildInitialDatagram(
-        &supported_initial_raw,
-        selected_version,
-        &original_dcid,
-        &followup_client_initial_scid,
-        &initial_token,
-        &[_]u8{ 0x02, 0x00, 0xff },
-    );
-    try client_socket.send(io, &server_socket.address, supported_initial);
+    try client_socket.send(io, &server_socket.address, version_negotiation_initial.initial_datagram);
 
     const supported_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const supported_path = try udp4Tuple(server_socket.address, supported_received.from);
@@ -238,6 +236,17 @@ pub fn main() !void {
     try require(accepted_route.server_source_route.connection_id == 21);
     try require(server_lifecycle.routeCount() == 2);
 
+    const followup_secrets = try quicz.protection.deriveInitialSecrets(selected_version, &original_dcid);
+    var version_negotiation_server = try quicz.Connection.init(std.heap.page_allocator, .server, .{
+        .chosen_version = selected_version,
+        .available_versions = &supported_versions,
+    });
+    defer version_negotiation_server.deinit();
+    try version_negotiation_server.processInitialProtectedDatagram(1, followup_secrets.client, supported_received.data);
+    var followup_crypto_buf: [64]u8 = undefined;
+    const followup_crypto_len = (try version_negotiation_server.recvCryptoInSpace(.initial, &followup_crypto_buf)) orelse return error.UnexpectedState;
+    try require(std.mem.eql(u8, followup_crypto_buf[0..followup_crypto_len], followup_initial_crypto));
+
     var server_initial_raw: [64]u8 = undefined;
     const server_initial = try buildInitialDatagram(
         &server_initial_raw,
@@ -263,7 +272,7 @@ pub fn main() !void {
     try require(server_route.connection_id == 21);
     try require(std.mem.eql(u8, server_route.destination_connection_id.asSlice(), &server_initial_scid));
 
-    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} accepted={} client_route={} server_route={} response_bytes={}\n", .{
+    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} accepted={} client_route={} server_route={} response_bytes={} followup_initial_bytes={}\n", .{
         client_local.port,
         server_local.port,
         parsed_version_negotiation.versions.len,
@@ -272,5 +281,6 @@ pub fn main() !void {
         client_route.connection_id,
         server_route.connection_id,
         version_negotiation.len,
+        version_negotiation_initial.initial_datagram.len,
     });
 }

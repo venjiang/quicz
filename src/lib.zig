@@ -506,6 +506,17 @@ pub const EndpointVersionNegotiationHandoffResult = struct {
     followup_connection: Connection,
 };
 
+/// Endpoint result after accepting Version Negotiation and emitting a follow-up Initial.
+pub const EndpointVersionNegotiationProtectedInitialResult = struct {
+    /// Endpoint-owned follow-up route and initialized client connection.
+    handoff: EndpointVersionNegotiationHandoffResult,
+    /// Caller-keyed protected Initial datagram emitted by `handoff.followup_connection`.
+    ///
+    /// The caller owns these bytes and must free them with the same allocator
+    /// used by `handoff.followup_connection`.
+    initial_datagram: []u8,
+};
+
 fn endpointEcnPathState(state: EcnValidationState) endpoint.EcnPathValidationState {
     return switch (state) {
         .unknown => .unknown,
@@ -926,6 +937,74 @@ pub const EndpointConnectionLifecycle = struct {
                 .client,
                 followup.version_negotiation.followup_config,
             ),
+        };
+    }
+
+    /// Process Version Negotiation and emit the first protected follow-up Initial.
+    ///
+    /// This is the caller-keyed retry-loop bridge for incompatible Version
+    /// Negotiation. It validates the VN packet, retires the superseded attempt,
+    /// registers the follow-up Initial route, initializes the follow-up client
+    /// connection, queues the supplied Initial CRYPTO bytes, emits one
+    /// protected Initial datagram with Initial keys for the selected version,
+    /// and mirrors the follow-up recovery timer onto the endpoint lifecycle.
+    /// Real TLS traffic-secret ownership remains a higher-level integration
+    /// step; Initial keys are derived from the selected version and original
+    /// client Initial Destination CID.
+    ///
+    /// Ignored VN packets return null and do not mutate endpoint state. On
+    /// success, the caller owns both the returned `followup_connection` and
+    /// `initial_datagram`.
+    pub fn processVersionNegotiationProtectedInitialDatagram(
+        self: *EndpointConnectionLifecycle,
+        old_connection_id: u64,
+        followup_connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        original_destination_connection_id: []const u8,
+        old_local_initial_source_connection_id: []const u8,
+        followup_local_initial_source_connection_id: []const u8,
+        path: endpoint.Udp4Tuple,
+        datagram: []const u8,
+        options: endpoint.ClientInitialRouteOptions,
+        initial_token: []const u8,
+        initial_crypto: []const u8,
+    ) EndpointVersionNegotiationError!?EndpointVersionNegotiationProtectedInitialResult {
+        if (initial_crypto.len == 0) return error.InvalidPacket;
+
+        var handoff = (try self.processVersionNegotiationHandoffDatagram(
+            old_connection_id,
+            followup_connection_id,
+            connection,
+            now_millis,
+            original_destination_connection_id,
+            old_local_initial_source_connection_id,
+            followup_local_initial_source_connection_id,
+            path,
+            datagram,
+            options,
+        )) orelse return null;
+        errdefer handoff.followup_connection.deinit();
+
+        try handoff.followup_connection.sendCryptoInSpace(.initial, initial_crypto);
+        const initial_secrets = protection.deriveInitialSecrets(
+            handoff.followup.version_negotiation.selected_version,
+            original_destination_connection_id,
+        ) catch return error.InvalidPacket;
+        const initial_datagram = (try self.pollProtectedLongCryptoDatagramInSpace(
+            followup_connection_id,
+            &handoff.followup_connection,
+            .initial,
+            now_millis,
+            original_destination_connection_id,
+            followup_local_initial_source_connection_id,
+            initial_token,
+            initial_secrets.client,
+        )) orelse return error.Internal;
+
+        return .{
+            .handoff = handoff,
+            .initial_datagram = initial_datagram,
         };
     }
 
@@ -14380,6 +14459,85 @@ test "EndpointConnectionLifecycle hands off Version Negotiation follow-up connec
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
     const route = try lifecycle.routeDatagram(path, &followup_short);
     try std.testing.expectEqual(@as(u64, 108), route.connection_id);
+}
+
+test "EndpointConnectionLifecycle emits protected Version Negotiation follow-up Initial" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const old_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const followup_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const initial_token = [_]u8{ 0xa1, 0xa2 };
+    const initial_crypto = "vn follow-up protected initial";
+    const client_versions = [_]packet.Version{ .v2, .v1 };
+    const server_versions = [_]packet.Version{.v2};
+    const secrets = try protection.deriveInitialSecrets(.v2, &original_dcid);
+
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try packet.encodeVersionNegotiationPacket(out.writer(), .{
+        .dcid = &old_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+
+    var old_client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+        .initial_rtt_ms = 100,
+    });
+    defer old_client.deinit();
+
+    _ = try lifecycle.registerClientInitialSourceConnectionId(111, &old_scid, path, .{});
+    _ = try old_client.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(111, &old_client);
+
+    var result = (try lifecycle.processVersionNegotiationProtectedInitialDatagram(
+        111,
+        112,
+        &old_client,
+        10,
+        &original_dcid,
+        &old_scid,
+        &followup_scid,
+        path,
+        out.getWritten(),
+        .{},
+        &initial_token,
+        initial_crypto,
+    )) orelse return error.TestUnexpectedResult;
+    defer result.handoff.followup_connection.deinit();
+    defer std.testing.allocator.free(result.initial_datagram);
+
+    try std.testing.expectEqual(packet.Version.v2, result.handoff.followup.version_negotiation.selected_version);
+    try std.testing.expectEqual(packet.Version.v2, result.handoff.followup_connection.config.chosen_version);
+    try std.testing.expectEqual(@as(u64, 112), result.handoff.followup.followup_route.connection_id);
+    try std.testing.expectEqual(@as(usize, 1), result.handoff.followup_connection.sentPacketCount(.initial));
+    try std.testing.expectEqual(result.initial_datagram.len, result.handoff.followup_connection.bytesInFlight(.initial));
+    try std.testing.expect(result.initial_datagram.len >= min_initial_udp_datagram_len);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const info = try protection.peekProtectedLongPacketInfo(result.initial_datagram);
+    try std.testing.expectEqual(packet.Version.v2, info.version);
+    try std.testing.expectEqual(packet.PacketType.initial, info.packet_type);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &client_versions,
+    });
+    defer server.deinit();
+    try server.processInitialProtectedDatagram(11, secrets.client, result.initial_datagram);
+    try std.testing.expectEqualStrings(&original_dcid, server.originalDestinationConnectionId().?);
+    try std.testing.expectEqualStrings(&followup_scid, server.peerInitialSourceConnectionId().?);
+    var crypto_buf: [64]u8 = undefined;
+    const recv_len = (try server.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(initial_crypto, crypto_buf[0..recv_len]);
 }
 
 test "EndpointConnectionLifecycle does not hand off connection for ignored Version Negotiation" {
