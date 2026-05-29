@@ -68,7 +68,7 @@ fn receiveRoute(
 fn sendClientPacket(
     io: std.Io,
     allocator: std.mem.Allocator,
-    client: *quicz.QuicConnection,
+    client: *quicz.Connection,
     server_lifecycle: *const quicz.EndpointConnectionLifecycle,
     client_socket: *std.Io.net.Socket,
     server_socket: *std.Io.net.Socket,
@@ -89,7 +89,7 @@ fn sendClientPacket(
 fn sendServerPacket(
     io: std.Io,
     allocator: std.mem.Allocator,
-    server: *quicz.QuicConnection,
+    server: *quicz.Connection,
     client_lifecycle: *const quicz.EndpointConnectionLifecycle,
     server_socket: *std.Io.net.Socket,
     client_socket: *std.Io.net.Socket,
@@ -130,12 +130,12 @@ pub fn main() !void {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{
+    var client = try quicz.Connection.init(allocator, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(allocator, .server, .{
+    var server = try quicz.Connection.init(allocator, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });

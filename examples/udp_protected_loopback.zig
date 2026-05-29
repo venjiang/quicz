@@ -39,7 +39,7 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
 }
 
 fn readCryptoRequired(
-    conn: *quicz.QuicConnection,
+    conn: *quicz.Connection,
     space: quicz.PacketNumberSpace,
     out: []u8,
 ) ![]const u8 {
@@ -72,9 +72,9 @@ pub fn main() !void {
     const supported_versions = [_]quicz.packet.Version{ .v1, .v2 };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{});
+    var client = try quicz.Connection.init(allocator, .client, .{});
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(allocator, .server, .{});
+    var server = try quicz.Connection.init(allocator, .server, .{});
     defer server.deinit();
 
     var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);

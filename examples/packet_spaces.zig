@@ -141,7 +141,7 @@ fn protectedZeroRttHasControl(
 }
 
 pub fn main() !void {
-    var conn = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{});
+    var conn = try quicz.Connection.init(std.heap.page_allocator, .client, .{});
     defer conn.deinit();
 
     const initial_pn = try conn.recordPacketSentInSpace(.initial, 10, 100);
@@ -187,7 +187,7 @@ pub fn main() !void {
     try require(conn.ecnValidationState(.handshake) == .unknown);
     try require(conn.ecnCounts(.handshake).ect0_count == 0);
 
-    var zero_rtt_server = try quicz.QuicConnection.init(std.heap.page_allocator, .server, .{});
+    var zero_rtt_server = try quicz.Connection.init(std.heap.page_allocator, .server, .{});
     defer zero_rtt_server.deinit();
 
     var early_raw: [64]u8 = undefined;
@@ -227,9 +227,9 @@ pub fn main() !void {
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
 
-    var protected_zero_rtt_client = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{});
+    var protected_zero_rtt_client = try quicz.Connection.init(std.heap.page_allocator, .client, .{});
     defer protected_zero_rtt_client.deinit();
-    var protected_zero_rtt_server = try quicz.QuicConnection.init(std.heap.page_allocator, .server, .{});
+    var protected_zero_rtt_server = try quicz.Connection.init(std.heap.page_allocator, .server, .{});
     defer protected_zero_rtt_server.deinit();
 
     const early_stream_id = try protected_zero_rtt_client.openStream();
@@ -252,7 +252,7 @@ pub fn main() !void {
     try require(protected_zero_rtt_server.pendingAckLargest(.application) == 0);
     try require(protected_zero_rtt_server.nextPeerPacketNumber(.application) == 1);
 
-    var zero_rtt_loss_client = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{});
+    var zero_rtt_loss_client = try quicz.Connection.init(std.heap.page_allocator, .client, .{});
     defer zero_rtt_loss_client.deinit();
 
     const loss_stream_id = try zero_rtt_loss_client.openStream();
@@ -298,7 +298,7 @@ pub fn main() !void {
         true,
     ));
 
-    var zero_rtt_reset_client = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{});
+    var zero_rtt_reset_client = try quicz.Connection.init(std.heap.page_allocator, .client, .{});
     defer zero_rtt_reset_client.deinit();
 
     const reset_stream_id = try zero_rtt_reset_client.openStream();
@@ -349,7 +349,7 @@ pub fn main() !void {
         } },
     ));
 
-    var zero_rtt_stop_client = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{});
+    var zero_rtt_stop_client = try quicz.Connection.init(std.heap.page_allocator, .client, .{});
     defer zero_rtt_stop_client.deinit();
 
     const stop_stream_id = try zero_rtt_stop_client.openStream();

@@ -40,20 +40,20 @@ fn requireError(expected: anyerror, result: anyerror!?usize) !void {
     return error.UnexpectedState;
 }
 
-fn pollRequired(conn: *quicz.QuicConnection, out: []u8) ![]const u8 {
+fn pollRequired(conn: *quicz.Connection, out: []u8) ![]const u8 {
     return (try conn.pollTx(0, out)) orelse error.UnexpectedState;
 }
 
-fn expectIdle(conn: *quicz.QuicConnection, out: []u8) !void {
+fn expectIdle(conn: *quicz.Connection, out: []u8) !void {
     if ((try conn.pollTx(1, out)) != null) return error.UnexpectedState;
 }
 
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
 
-    var client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var client = try quicz.Connection.init(gpa, .client, .{});
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var server = try quicz.Connection.init(gpa, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -95,7 +95,7 @@ pub fn main() !void {
     try requireError(error.StreamClosed, server.recvOnStream(stream_id, &recv_buf));
     std.debug.print("[stream-reset] late STREAM within reset final size was ignored\n", .{});
 
-    var gap_server = try quicz.QuicConnection.init(gpa, .server, .{
+    var gap_server = try quicz.Connection.init(gpa, .server, .{
         .initial_max_data = 6,
         .initial_max_stream_data = 10,
     });
@@ -124,11 +124,11 @@ pub fn main() !void {
         try gap_server.recvStreamFinalSize(0),
     });
 
-    var limited_client = try quicz.QuicConnection.init(gpa, .client, .{
+    var limited_client = try quicz.Connection.init(gpa, .client, .{
         .initial_max_streams_bidi = 1,
     });
     defer limited_client.deinit();
-    var limited_server = try quicz.QuicConnection.init(gpa, .server, .{
+    var limited_server = try quicz.Connection.init(gpa, .server, .{
         .initial_max_streams_bidi = 1,
     });
     defer limited_server.deinit();

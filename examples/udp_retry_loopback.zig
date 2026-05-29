@@ -91,7 +91,7 @@ fn buildInitialDatagram(
 }
 
 fn readCryptoRequired(
-    conn: *quicz.QuicConnection,
+    conn: *quicz.Connection,
     space: quicz.PacketNumberSpace,
     out: []u8,
 ) ![]const u8 {
@@ -117,9 +117,9 @@ pub fn main() !void {
     try require(server_local.port != 0);
     try require(client_local.port != server_local.port);
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{});
+    var client = try quicz.Connection.init(allocator, .client, .{});
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(allocator, .server, .{});
+    var server = try quicz.Connection.init(allocator, .server, .{});
     defer server.deinit();
 
     var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);

@@ -16,7 +16,7 @@ pub fn main() !void {
     var path_policy = quicz.endpoint.EcnPathPolicy.init(allocator);
     defer path_policy.deinit();
 
-    var validated = try quicz.QuicConnection.init(allocator, .client, .{});
+    var validated = try quicz.Connection.init(allocator, .client, .{});
     defer validated.deinit();
 
     _ = try validated.recordEcnPacketSentInSpace(.application, 0, 1200, .ect0);
@@ -40,7 +40,7 @@ pub fn main() !void {
     );
     if (path_policy.stateForPath(migrated_path) != .unknown) return error.EcnValidationExampleFailed;
 
-    var failed = try quicz.QuicConnection.init(allocator, .client, .{});
+    var failed = try quicz.Connection.init(allocator, .client, .{});
     defer failed.deinit();
 
     _ = try failed.recordEcnPacketSentInSpace(.application, 0, 1200, .ect0);

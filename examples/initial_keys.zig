@@ -55,7 +55,7 @@ pub fn main() !void {
     defer quicz.protection.deinitProtectedLongPacket(&opened_packet, allocator);
 
     const versions = [_]quicz.packet.Version{ .v2, .v1 };
-    var v2_client = try quicz.QuicConnection.init(allocator, .client, .{
+    var v2_client = try quicz.Connection.init(allocator, .client, .{
         .chosen_version = .v2,
         .available_versions = &versions,
     });

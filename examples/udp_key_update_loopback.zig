@@ -57,7 +57,7 @@ fn receiveRoute(
     };
 }
 
-fn expectInvalidSecondUpdate(conn: *quicz.QuicConnection) !void {
+fn expectInvalidSecondUpdate(conn: *quicz.Connection) !void {
     if (conn.initiateOneRttKeyUpdate()) |_| {
         return error.UnexpectedState;
     } else |err| switch (err) {
@@ -89,9 +89,9 @@ pub fn main() !void {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{});
+    var client = try quicz.Connection.init(allocator, .client, .{});
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(allocator, .server, .{});
+    var server = try quicz.Connection.init(allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 

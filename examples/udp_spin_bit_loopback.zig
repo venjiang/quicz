@@ -85,9 +85,9 @@ pub fn main() !void {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{ .enable_spin_bit = true });
+    var client = try quicz.Connection.init(allocator, .client, .{ .enable_spin_bit = true });
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(allocator, .server, .{ .enable_spin_bit = true });
+    var server = try quicz.Connection.init(allocator, .server, .{ .enable_spin_bit = true });
     defer server.deinit();
     try server.validatePeerAddress();
     try client.confirmHandshake();

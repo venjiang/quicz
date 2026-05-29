@@ -12,10 +12,10 @@
 ### 已实现 / 正在进行
 
 - [x] 项目骨架：Zig 构建集成 + 内存态示例 echo client/server
-- [x] `QuicConnection` 的基础 API 设计（初版）
+- [x] `Connection` 的基础 API 设计（初版）
 - [x] QUIC 变长整数（varint）编解码工具
 - [x] 最小 QUIC 包头（long/short，含 RFC 9369 QUIC v2 long-header packet type bits、short-header spin-bit 保留、protected short-packet spin-bit peeking 与 socket-backed UDP spin-bit loopback）、header-level packet number 截断/重建、RFC 9000 long/short packet envelope 解析/序列化、packet number 编码选择/重建、Retry packet codec、RFC 8999 Version Negotiation packet 解析/序列化，以及带 RFC 9368 downgrade-check handoff 的 client-side Version Negotiation validation/selection state
-- [x] RFC 9000 transport parameter 类型化 codec，含默认值、重复参数拒绝、未知参数忽略、preferred_address 支持、RFC 9368 `version_information`、包含 VN 后 server Version Information downgrade validation 的 `QuicConnection` 导出/应用 helper，以及 TLS extension byte 编码/应用 helper
+- [x] RFC 9000 transport parameter 类型化 codec，含默认值、重复参数拒绝、未知参数忽略、preferred_address 支持、RFC 9368 `version_information`、包含 VN 后 server Version Information downgrade validation 的 `Connection` 导出/应用 helper，以及 TLS extension byte 编码/应用 helper
 - [x] RFC 9000/RFC 9368 transport error code helper，含固定错误码、VERSION_NEGOTIATION_ERROR 与 CRYPTO_ERROR TLS alert 映射
 - [x] RFC 9001 QUIC v1 和 RFC 9369 QUIC v2 Initial secret/key/IV/header-protection key 派生、RFC 9001 `quic ku` key-update 派生、调用方持有和连接已安装的 short-packet key-phase 状态与 selection，并带 ACK-gated installed-key update initiation 和 socket-backed UDP installed-key key-update loopback、mock backend Handshake/0-RTT/1-RTT traffic-secret handoff、显式 installed-key 0-RTT accept/reject 与 discard cleanup、建模 1-RTT 边界的 0-RTT key discard、AEAD_AES_128_GCM payload protection helper、protected long/short-packet seal/open、按配置使用 v2 protected long-packet 与 Retry wire-version 的发出/接收校验、v1/v2 Retry Integrity Tag 校验与 AES header-protection mask 应用，覆盖 Appendix A 向量
 - [x] 基础帧模型（STREAM / CRYPTO / PADDING / PING / ACK/ACK_ECN 多区间与 ACK range 校验 / RESET_STREAM / STOP_SENDING / MAX_* / BLOCKED / NEW_TOKEN / NEW_CONNECTION_ID / RETIRE_CONNECTION_ID / PATH_CHALLENGE / PATH_RESPONSE / HANDSHAKE_DONE / CONNECTION_CLOSE 子集），包含 frame type 最短 varint 编码校验与未知 frame type 拒绝
@@ -52,16 +52,21 @@
 - 英文文档：[`docs/en/`](docs/en/) 目录
 - 中文文档：[`docs/zh-CN/`](docs/zh-CN/) 目录
 
-## 构建（Build）
+## 快速开始（Quick Start）
 
 需要安装 Zig **0.16.0**。当前构建会强制校验这个精确测试版本，避免 Zig
 标准库变化静默改变行为。
 
+### 构建与运行示例
+
 ```bash
 zig build
+zig build test --summary all
+zig build run-codec
+zig build run-initial-keys
 ```
 
-上述命令会构建：
+其中 `zig build` 会构建：
 
 - 静态库：`libquicz.a`
 - 示例程序：
@@ -105,7 +110,7 @@ zig build
   - `zig-out/bin/quicz-udp-close-lifecycle-loopback`
   - `zig-out/bin/quicz-udp-stateless-reset-loopback`
 
-## 作为库使用（Using quicz as a library）
+### 作为库使用
 
 高层 API（仍可能演进）：
 
@@ -116,7 +121,7 @@ const quicz = @import("quicz");
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
 
-    var conn = try quicz.QuicConnection.init(
+    var conn = try quicz.Connection.init(
         gpa,
         .client,
         .{
@@ -302,6 +307,9 @@ pub fn main() !void {
     // 以及 TLS 0-RTT acceptance/replay policy 仍未实现。
 }
 ```
+
+`Connection` 是当前推荐的公开连接句柄；`QuicConnection` 作为兼容别名保留，
+便于旧调用方在实验性 API 继续演进期间平滑迁移。
 
 更多示例用法，请参考：
 

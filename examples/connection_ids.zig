@@ -65,7 +65,7 @@ fn expectNewConnectionId(payload: []const u8, allocator: std.mem.Allocator, expe
     return error.UnexpectedState;
 }
 
-fn retireConnectionId(conn: *quicz.QuicConnection, sequence_number: u64) !void {
+fn retireConnectionId(conn: *quicz.Connection, sequence_number: u64) !void {
     var raw: [16]u8 = undefined;
     var out = fixedWriter(&raw);
     try quicz.frame.encodeFrame(out.writer(), .{ .retire_connection_id = .{ .sequence_number = sequence_number } });
@@ -78,9 +78,9 @@ fn protectedShortRoundtrip(allocator: std.mem.Allocator) !void {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try quicz.QuicConnection.init(allocator, .server, .{});
+    var server = try quicz.Connection.init(allocator, .server, .{});
     defer server.deinit();
-    var client = try quicz.QuicConnection.init(allocator, .client, .{});
+    var client = try quicz.Connection.init(allocator, .client, .{});
     defer client.deinit();
     try server.validatePeerAddress();
 
@@ -125,7 +125,7 @@ fn protectedShortRoundtrip(allocator: std.mem.Allocator) !void {
 
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
-    var conn = try quicz.QuicConnection.init(allocator, .server, .{});
+    var conn = try quicz.Connection.init(allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
     var lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);

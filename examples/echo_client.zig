@@ -4,7 +4,7 @@ const quicz = @import("quicz");
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
 
-    var conn = try quicz.QuicConnection.init(gpa, .client, .{});
+    var conn = try quicz.Connection.init(gpa, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();

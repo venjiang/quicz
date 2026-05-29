@@ -299,7 +299,7 @@ fn versionNegotiationRoundtrip(allocator: std.mem.Allocator) !void {
         .versions = &negotiated_versions,
     });
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{
+    var client = try quicz.Connection.init(allocator, .client, .{
         .chosen_version = .v1,
         .available_versions = &client_versions,
     });
@@ -314,7 +314,7 @@ fn versionNegotiationRoundtrip(allocator: std.mem.Allocator) !void {
     try require(quicz.packet.isReservedVersion(reserved_version));
     try require(client.versionNegotiationSelectedVersion() == .v2);
 
-    var followup = try quicz.QuicConnection.init(allocator, .client, .{
+    var followup = try quicz.Connection.init(allocator, .client, .{
         .chosen_version = .v2,
         .available_versions = &client_versions,
         .version_negotiation_selected_version = .v2,
@@ -419,7 +419,7 @@ fn connectionTransportParameters(allocator: std.mem.Allocator) !void {
         reset_token,
     );
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{
+    var client = try quicz.Connection.init(allocator, .client, .{
         .max_datagram_size = 1400,
         .ack_delay_exponent = 7,
         .max_ack_delay_ms = 15,
@@ -444,7 +444,7 @@ fn connectionTransportParameters(allocator: std.mem.Allocator) !void {
     try require(local.max_ack_delay == 15);
     try require(local_version_information.chosen_version == .v1);
 
-    var server = try quicz.QuicConnection.init(allocator, .server, .{
+    var server = try quicz.Connection.init(allocator, .server, .{
         .ack_delay_exponent = 4,
         .max_ack_delay_ms = 50,
         .disable_active_migration = true,

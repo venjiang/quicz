@@ -38,7 +38,7 @@ pub fn main() !void {
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
 
-    var pre_confirm = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    var pre_confirm = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer pre_confirm.deinit();
     _ = try pre_confirm.recordPacketSentInSpace(.application, 10, 100);
     if (pre_confirm.ptoDeadlineMillis(.application) != null) return error.PtoRecoveryExampleFailed;
@@ -53,7 +53,7 @@ pub fn main() !void {
         .{pre_confirm_deadline},
     );
 
-    var initial_ack_client = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    var initial_ack_client = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer initial_ack_client.deinit();
     _ = try initial_ack_client.recordPacketSentInSpace(.initial, 10, 100);
     initial_ack_client.initial_packet_space.recovery_state.pto_count = 2;
@@ -69,7 +69,7 @@ pub fn main() !void {
     if (initial_ack_client.handshake_packet_space.recovery_state.pto_count != 2) return error.PtoRecoveryExampleFailed;
     if (initial_ack_client.recovery_state.pto_count != 2) return error.PtoRecoveryExampleFailed;
 
-    var handshake_ack_client = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    var handshake_ack_client = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer handshake_ack_client.deinit();
     _ = try handshake_ack_client.recordPacketSentInSpace(.handshake, 20, 100);
     handshake_ack_client.handshake_packet_space.recovery_state.pto_count = 2;
@@ -88,7 +88,7 @@ pub fn main() !void {
         .{ preserved_initial_ack_backoff, reset_handshake_ack_backoff },
     );
 
-    var limited_server = try quicz.QuicConnection.init(allocator, .server, .{ .initial_rtt_ms = 100 });
+    var limited_server = try quicz.Connection.init(allocator, .server, .{ .initial_rtt_ms = 100 });
     defer limited_server.deinit();
     try limited_server.recordPeerAddressBytesReceived(1);
     _ = try limited_server.recordPacketSentInSpace(.initial, 10, 3);
@@ -122,7 +122,7 @@ pub fn main() !void {
         .{ anti_amp_pto_deadline, anti_amp_probe.len },
     );
 
-    var conn = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    var conn = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer conn.deinit();
     try conn.confirmHandshake();
 
@@ -160,7 +160,7 @@ pub fn main() !void {
         .{ deadline, payload.len, conn.congestionWindow(.application), conn.bytesInFlight(.application) },
     );
 
-    var stream_probe = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    var stream_probe = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer stream_probe.deinit();
     try stream_probe.confirmHandshake();
     const stream_id = try stream_probe.openStream();
@@ -187,7 +187,7 @@ pub fn main() !void {
         .{stream_probe_payload.len},
     );
 
-    var retransmit_probe = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    var retransmit_probe = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer retransmit_probe.deinit();
     try retransmit_probe.confirmHandshake();
     const retransmit_stream_id = try retransmit_probe.openStream();
@@ -217,7 +217,7 @@ pub fn main() !void {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var crypto_probe = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    var crypto_probe = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer crypto_probe.deinit();
     try crypto_probe.confirmHandshake();
     try crypto_probe.sendCrypto("pto protected crypto");
@@ -252,7 +252,7 @@ pub fn main() !void {
         .{crypto_payload.len},
     );
 
-    var handshake_rtt = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    var handshake_rtt = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer handshake_rtt.deinit();
     _ = try handshake_rtt.recordPacketSentInSpace(.handshake, 0, 100);
     try handshake_rtt.receiveAckInSpace(.handshake, 100, .{
@@ -273,7 +273,7 @@ pub fn main() !void {
         .{handshake_rtt.smoothedRttMillis(.handshake)},
     );
 
-    var shared_rtt = try quicz.QuicConnection.init(allocator, .server, .{ .initial_rtt_ms = 100 });
+    var shared_rtt = try quicz.Connection.init(allocator, .server, .{ .initial_rtt_ms = 100 });
     defer shared_rtt.deinit();
     try shared_rtt.validatePeerAddress();
 
@@ -298,7 +298,7 @@ pub fn main() !void {
         },
     );
 
-    var spaces = try quicz.QuicConnection.init(allocator, .server, .{ .initial_rtt_ms = 100 });
+    var spaces = try quicz.Connection.init(allocator, .server, .{ .initial_rtt_ms = 100 });
     defer spaces.deinit();
     try spaces.validatePeerAddress();
 

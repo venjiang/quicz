@@ -26,10 +26,10 @@ fn protectedTokenAndHandshakeDoneExample(allocator: std.mem.Allocator) !void {
     });
     defer token_policy.deinit();
 
-    var server = try quicz.QuicConnection.init(allocator, .server, .{});
+    var server = try quicz.Connection.init(allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
-    var client = try quicz.QuicConnection.init(allocator, .client, .{});
+    var client = try quicz.Connection.init(allocator, .client, .{});
     defer client.deinit();
 
     try server.sendHandshakeDone();
@@ -64,7 +64,7 @@ fn protectedTokenAndHandshakeDoneExample(allocator: std.mem.Allocator) !void {
     try client.processProtectedShortDatagram(13, secrets.server, client_dcid.len, new_token);
     const stored_token = client.latestNewToken() orelse return error.AddressValidationExampleFailed;
 
-    var future_server = try quicz.QuicConnection.init(allocator, .server, .{});
+    var future_server = try quicz.Connection.init(allocator, .server, .{});
     defer future_server.deinit();
     try future_server.sendPing();
     var future_out: [16]u8 = undefined;
@@ -149,7 +149,7 @@ pub fn main() !void {
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
 
-    var server = try quicz.QuicConnection.init(allocator, .server, .{});
+    var server = try quicz.Connection.init(allocator, .server, .{});
     defer server.deinit();
 
     try server.sendPing();

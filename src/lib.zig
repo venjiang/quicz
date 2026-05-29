@@ -118,7 +118,7 @@ pub const PreferredAddress = struct {
     }
 };
 
-/// Runtime configuration for a `QuicConnection`.
+/// Runtime configuration for a `Connection`.
 pub const Config = struct {
     /// Maximum frame payload bytes accepted or emitted by the in-memory API.
     max_datagram_size: u16 = 1350,
@@ -358,7 +358,7 @@ pub const EndpointLossDetectionTimerDeadline = struct {
 
 /// Endpoint/event-loop owner for QUIC loss detection timer scheduling.
 ///
-/// This helper does not own `QuicConnection` objects and performs no socket I/O.
+/// This helper does not own `Connection` objects and performs no socket I/O.
 /// Call `armFromConnection()` after packet send, ACK processing, key discard, or
 /// timer service to mirror the connection's current aggregate recovery timer.
 /// `earliestDeadline()` returns the next connection handle to wake, and
@@ -391,7 +391,7 @@ pub const EndpointLossDetectionTimers = struct {
     pub fn armFromConnection(
         self: *EndpointLossDetectionTimers,
         connection_id: u64,
-        connection: *const QuicConnection,
+        connection: *const Connection,
     ) Error!void {
         try self.update(connection_id, connection.lossDetectionTimerDeadlineMillis());
     }
@@ -425,7 +425,7 @@ pub const EndpointLossDetectionTimers = struct {
     pub fn serviceConnection(
         self: *EndpointLossDetectionTimers,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
     ) Error!?EndpointLossDetectionTimerDeadline {
         const serviced = try connection.serviceLossDetectionTimer(now_millis);
@@ -487,7 +487,7 @@ fn endpointEcnPathState(state: EcnValidationState) endpoint.EcnPathValidationSta
 ///
 /// This helper owns the endpoint router, aggregate loss/PTO timer table, and
 /// ECN path policy for a socket event loop. It still does not own
-/// `QuicConnection` instances or perform socket I/O; callers pass the selected
+/// `Connection` instances or perform socket I/O; callers pass the selected
 /// connection into the timer/service paths and use this owner for datagram
 /// routing and UDP-path policy decisions.
 pub const EndpointConnectionLifecycle = struct {
@@ -541,13 +541,13 @@ pub const EndpointConnectionLifecycle = struct {
 
     /// Mirror a connection packet-space ECN result onto one UDP path.
     ///
-    /// `QuicConnection` validates ACK_ECN counters in packet-number space
+    /// `Connection` validates ACK_ECN counters in packet-number space
     /// state. The endpoint lifecycle stores that result under the concrete UDP
     /// tuple so migration starts from an independent ECN validation state.
     pub fn refreshEcnPathStateFromConnection(
         self: *EndpointConnectionLifecycle,
         path: endpoint.Udp4Tuple,
-        connection: *const QuicConnection,
+        connection: *const Connection,
         space: PacketNumberSpace,
     ) endpoint.RouteError!endpoint.EcnPathValidationState {
         const state = endpointEcnPathState(connection.ecnValidationState(space));
@@ -701,7 +701,7 @@ pub const EndpointConnectionLifecycle = struct {
         destination_connection_id: []const u8,
         current_path: endpoint.Udp4Tuple,
         new_path: endpoint.Udp4Tuple,
-        connection: *QuicConnection,
+        connection: *Connection,
     ) endpoint.RouteError!endpoint.RouteResult {
         const updated = try self.updateRoutePath(destination_connection_id, current_path, new_path);
         connection.resetSpinBitForPath();
@@ -766,7 +766,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn armRecoveryTimerFromConnection(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *const QuicConnection,
+        connection: *const Connection,
     ) Error!void {
         try self.recovery_timers.armFromConnection(connection_id, connection);
     }
@@ -780,7 +780,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn serviceRecoveryTimer(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
     ) Error!?EndpointLossDetectionTimerDeadline {
         return self.recovery_timers.serviceConnection(connection_id, connection, now_millis);
@@ -796,7 +796,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn pollProtectedLongDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         dcid: []const u8,
         scid: []const u8,
@@ -818,7 +818,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn processProtectedLongDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         keys: ProtectedLongDatagramKeys,
         datagram: []const u8,
@@ -840,7 +840,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn pollProtectedLongCryptoDatagramInSpace(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         dcid: []const u8,
@@ -857,13 +857,13 @@ pub const EndpointConnectionLifecycle = struct {
     /// Process one caller-keyed Initial/Handshake datagram and refresh timers.
     ///
     /// Packet-number-space selection, packet authentication, ACK generation,
-    /// and CRYPTO reassembly stay inside `QuicConnection`; the endpoint
+    /// and CRYPTO reassembly stay inside `Connection`; the endpoint
     /// lifecycle mirrors the resulting aggregate recovery timer after
     /// successful processing.
     pub fn processProtectedLongDatagramInSpace(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         keys: protection.Aes128PacketProtectionKeys,
@@ -884,7 +884,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn pollProtectedZeroRttDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         dcid: []const u8,
         scid: []const u8,
@@ -905,7 +905,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn processProtectedZeroRttDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         keys: protection.Aes128PacketProtectionKeys,
         datagram: []const u8,
@@ -925,7 +925,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn pollProtectedShortDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
@@ -945,7 +945,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn processProtectedShortDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         keys: protection.Aes128PacketProtectionKeys,
         dcid_len: usize,
@@ -965,7 +965,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn pollProtectedShortDatagramWithKeyPhase(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
@@ -986,7 +986,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn processProtectedShortDatagramWithKeyUpdate(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         keys: protection.ShortPacketKeyUpdateKeys,
         dcid_len: usize,
@@ -1007,7 +1007,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn pollProtectedShortDatagramWithKeyPhaseState(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         dcid: []const u8,
         key_phase_state: *const protection.Aes128KeyPhaseState,
@@ -1021,12 +1021,12 @@ pub const EndpointConnectionLifecycle = struct {
     /// Process one caller-owned key-phase protected 1-RTT datagram and refresh timers.
     ///
     /// The key-phase state advances only after packet authentication and frame
-    /// processing succeed inside `QuicConnection`. The endpoint lifecycle then
+    /// processing succeed inside `Connection`. The endpoint lifecycle then
     /// mirrors the resulting aggregate recovery timer.
     pub fn processProtectedShortDatagramWithKeyPhaseState(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         key_phase_state: *protection.Aes128KeyPhaseState,
         dcid_len: usize,
@@ -1046,7 +1046,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn pollProtectedHandshakeDatagramWithInstalledKeys(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         dcid: []const u8,
         scid: []const u8,
@@ -1065,7 +1065,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn processProtectedHandshakeDatagramWithInstalledKeys(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         datagram: []const u8,
     ) Error!void {
@@ -1083,7 +1083,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn pollProtectedZeroRttDatagramWithInstalledKeys(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         dcid: []const u8,
         scid: []const u8,
@@ -1103,7 +1103,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn processProtectedZeroRttDatagramWithInstalledKeys(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         datagram: []const u8,
     ) Error!void {
@@ -1121,7 +1121,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn pollProtectedShortDatagramWithInstalledKeys(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         dcid: []const u8,
     ) Error!?[]u8 {
@@ -1140,7 +1140,7 @@ pub const EndpointConnectionLifecycle = struct {
     pub fn processProtectedShortDatagramWithInstalledKeys(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
-        connection: *QuicConnection,
+        connection: *Connection,
         now_millis: i64,
         dcid_len: usize,
         datagram: []const u8,
@@ -2294,7 +2294,7 @@ const PeerStreamDataBlockedState = struct {
 /// The current implementation only moves unencrypted frame payload bytes through
 /// the public API. Packet protection, TLS, and network I/O are intentionally
 /// outside this connection skeleton.
-pub const QuicConnection = struct {
+pub const Connection = struct {
     allocator: std.mem.Allocator,
     config: Config,
     side: ConnectionSide,
@@ -2403,7 +2403,7 @@ pub const QuicConnection = struct {
         allocator: std.mem.Allocator,
         side: ConnectionSide,
         config: Config,
-    ) !QuicConnection {
+    ) !Connection {
         if (config.initial_max_streams_bidi > max_stream_count or config.initial_max_streams_uni > max_stream_count) {
             return error.InvalidStream;
         }
@@ -2430,7 +2430,7 @@ pub const QuicConnection = struct {
         }
         try validateLocalVersionInformation(side, config);
 
-        return QuicConnection{
+        return Connection{
             .allocator = allocator,
             .config = config,
             .side = side,
@@ -2547,7 +2547,7 @@ pub const QuicConnection = struct {
     }
 
     /// Release all buffers owned by this connection.
-    pub fn deinit(self: *QuicConnection) void {
+    pub fn deinit(self: *Connection) void {
         self.initial_packet_space.deinit(self.allocator);
         self.handshake_packet_space.deinit(self.allocator);
         for (self.crypto_send_queue.items) |pending| {
@@ -2606,17 +2606,17 @@ pub const QuicConnection = struct {
     }
 
     /// Return the current modeled connection lifecycle state.
-    pub fn connectionState(self: QuicConnection) ConnectionState {
+    pub fn connectionState(self: Connection) ConnectionState {
         return self.state;
     }
 
     /// Return the close/drain deadline in milliseconds, or null when no timer is active.
-    pub fn closeDeadlineMillis(self: QuicConnection) ?i64 {
+    pub fn closeDeadlineMillis(self: Connection) ?i64 {
         return self.close_deadline_millis;
     }
 
     /// Return the peer close frame that moved this connection into draining, if any.
-    pub fn peerClose(self: QuicConnection) ?PeerClose {
+    pub fn peerClose(self: Connection) ?PeerClose {
         return self.peer_close;
     }
 
@@ -2625,7 +2625,7 @@ pub const QuicConnection = struct {
     /// RFC 9000 uses the shorter non-zero timeout advertised by either endpoint.
     /// A zero value from one side means that side has no preference; both zero
     /// disables idle timeout handling in this frame-payload model.
-    pub fn effectiveIdleTimeoutMillis(self: QuicConnection) ?u64 {
+    pub fn effectiveIdleTimeoutMillis(self: Connection) ?u64 {
         const local = self.config.max_idle_timeout_ms;
         const peer = self.peer_max_idle_timeout_ms;
         if (local == 0 and peer == 0) return null;
@@ -2635,7 +2635,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return the current idle timeout deadline, or null when the timer is inactive.
-    pub fn idleTimeoutDeadlineMillis(self: QuicConnection) ?i64 {
+    pub fn idleTimeoutDeadlineMillis(self: Connection) ?i64 {
         const idle_timeout = self.effectiveIdleTimeoutMillis() orelse return null;
         const last_activity = self.last_packet_activity_millis orelse return null;
         return saturatingAddMillis(last_activity, idle_timeout);
@@ -2645,7 +2645,7 @@ pub const QuicConnection = struct {
     ///
     /// Endpoint routing does not exist yet, so this currently records the peer
     /// transport parameter for later migration-policy enforcement.
-    pub fn peerActiveMigrationDisabled(self: QuicConnection) bool {
+    pub fn peerActiveMigrationDisabled(self: Connection) bool {
         return self.peer_disable_active_migration;
     }
 
@@ -2655,7 +2655,7 @@ pub const QuicConnection = struct {
     /// `detectStatelessReset()` API still reports NEW_CONNECTION_ID sequence
     /// numbers only; this getter lets a future packet endpoint bind the
     /// handshake CID token without changing that API's return meaning.
-    pub fn peerStatelessResetToken(self: QuicConnection) ?[packet.stateless_reset_token_len]u8 {
+    pub fn peerStatelessResetToken(self: Connection) ?[packet.stateless_reset_token_len]u8 {
         return self.peer_stateless_reset_token;
     }
 
@@ -2664,7 +2664,7 @@ pub const QuicConnection = struct {
     /// The value is copied into connection-owned fixed storage when peer
     /// parameters are applied. The current skeleton only exposes it for future
     /// endpoint migration policy; it does not automatically migrate sockets.
-    pub fn peerPreferredAddress(self: QuicConnection) ?PreferredAddress {
+    pub fn peerPreferredAddress(self: Connection) ?PreferredAddress {
         return self.peer_preferred_address;
     }
 
@@ -2672,7 +2672,7 @@ pub const QuicConnection = struct {
     ///
     /// Clients are initialized as validated because RFC 9000 anti-amplification
     /// limits apply to servers before they validate the client's address.
-    pub fn peerAddressValidated(self: QuicConnection) bool {
+    pub fn peerAddressValidated(self: Connection) bool {
         return self.peer_address_validated;
     }
 
@@ -2681,7 +2681,7 @@ pub const QuicConnection = struct {
     /// This explicit hook is used until UDP packet I/O exists. It increases the
     /// amount an unvalidated server address may send to three times the recorded
     /// received bytes. Validated peers and clients do not need this budget.
-    pub fn recordPeerAddressBytesReceived(self: *QuicConnection, bytes: usize) Error!void {
+    pub fn recordPeerAddressBytesReceived(self: *Connection, bytes: usize) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (!self.isAntiAmplificationLimited()) return;
         self.peer_address_bytes_received = std.math.add(usize, self.peer_address_bytes_received, bytes) catch std.math.maxInt(usize);
@@ -2691,13 +2691,13 @@ pub const QuicConnection = struct {
     ///
     /// Future TLS, Retry-token, or path-validation integrations can call this
     /// after proving that the peer receives packets at its claimed address.
-    pub fn validatePeerAddress(self: *QuicConnection) Error!void {
+    pub fn validatePeerAddress(self: *Connection) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         self.peer_address_validated = true;
     }
 
     /// Return remaining server anti-amplification bytes, or null when unrestricted.
-    pub fn antiAmplificationLimitRemaining(self: QuicConnection) ?usize {
+    pub fn antiAmplificationLimitRemaining(self: Connection) ?usize {
         if (!self.isAntiAmplificationLimited()) return null;
         const limit = std.math.mul(usize, self.peer_address_bytes_received, anti_amplification_multiplier) catch std.math.maxInt(usize);
         if (self.peer_address_bytes_sent >= limit) return 0;
@@ -2705,7 +2705,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return the next packet number for a packet number space.
-    pub fn nextPacketNumber(self: QuicConnection, space: PacketNumberSpace) u64 {
+    pub fn nextPacketNumber(self: Connection, space: PacketNumberSpace) u64 {
         return switch (space) {
             .initial => self.initial_packet_space.next_packet_number,
             .handshake => self.handshake_packet_space.next_packet_number,
@@ -2714,7 +2714,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return the next peer packet number modeled for receive-side ACK generation.
-    pub fn nextPeerPacketNumber(self: QuicConnection, space: PacketNumberSpace) u64 {
+    pub fn nextPeerPacketNumber(self: Connection, space: PacketNumberSpace) u64 {
         return switch (space) {
             .initial => self.initial_packet_space.next_peer_packet_number,
             .handshake => self.handshake_packet_space.next_peer_packet_number,
@@ -2723,7 +2723,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return the largest packet number awaiting ACK emission in a packet number space.
-    pub fn pendingAckLargest(self: QuicConnection, space: PacketNumberSpace) ?u64 {
+    pub fn pendingAckLargest(self: Connection, space: PacketNumberSpace) ?u64 {
         return switch (space) {
             .initial => self.initial_packet_space.pending_ack_largest,
             .handshake => self.handshake_packet_space.pending_ack_largest,
@@ -2732,7 +2732,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return whether a packet number space has been discarded.
-    pub fn packetNumberSpaceDiscarded(self: QuicConnection, space: PacketNumberSpace) bool {
+    pub fn packetNumberSpaceDiscarded(self: Connection, space: PacketNumberSpace) bool {
         return switch (space) {
             .initial => self.initial_packet_space.discarded,
             .handshake => self.handshake_packet_space.discarded,
@@ -2741,7 +2741,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return the count of sent packets tracked for ACK-driven recovery in one space.
-    pub fn sentPacketCount(self: QuicConnection, space: PacketNumberSpace) usize {
+    pub fn sentPacketCount(self: Connection, space: PacketNumberSpace) usize {
         return switch (space) {
             .initial => self.initial_packet_space.sent_packets.items.len,
             .handshake => self.handshake_packet_space.sent_packets.items.len,
@@ -2750,7 +2750,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return bytes in flight for one packet number space.
-    pub fn bytesInFlight(self: QuicConnection, space: PacketNumberSpace) usize {
+    pub fn bytesInFlight(self: Connection, space: PacketNumberSpace) usize {
         return switch (space) {
             .initial => self.initial_packet_space.recovery_state.bytes_in_flight,
             .handshake => self.handshake_packet_space.recovery_state.bytes_in_flight,
@@ -2759,14 +2759,14 @@ pub const QuicConnection = struct {
     }
 
     /// Return connection-level bytes in flight across all packet number spaces.
-    pub fn totalBytesInFlight(self: QuicConnection) usize {
+    pub fn totalBytesInFlight(self: Connection) usize {
         const initial_and_handshake =
             std.math.add(usize, self.bytesInFlight(.initial), self.bytesInFlight(.handshake)) catch std.math.maxInt(usize);
         return std.math.add(usize, initial_and_handshake, self.bytesInFlight(.application)) catch std.math.maxInt(usize);
     }
 
     /// Return the congestion window for one packet number space's recovery state.
-    pub fn congestionWindow(self: QuicConnection, space: PacketNumberSpace) usize {
+    pub fn congestionWindow(self: Connection, space: PacketNumberSpace) usize {
         return switch (space) {
             .initial => self.initial_packet_space.recovery_state.congestion_window,
             .handshake => self.handshake_packet_space.recovery_state.congestion_window,
@@ -2775,7 +2775,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return the current smoothed RTT estimate for one packet number space.
-    pub fn smoothedRttMillis(self: QuicConnection, space: PacketNumberSpace) u64 {
+    pub fn smoothedRttMillis(self: Connection, space: PacketNumberSpace) u64 {
         return switch (space) {
             .initial => self.initial_packet_space.recovery_state.smoothed_rtt_ms,
             .handshake => self.handshake_packet_space.recovery_state.smoothed_rtt_ms,
@@ -2784,7 +2784,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return the current time-threshold loss deadline for one packet number space.
-    pub fn lossDetectionDeadlineMillis(self: QuicConnection, space: PacketNumberSpace) ?i64 {
+    pub fn lossDetectionDeadlineMillis(self: Connection, space: PacketNumberSpace) ?i64 {
         return switch (space) {
             .initial => self.initial_packet_space.loss_deadline_millis,
             .handshake => self.handshake_packet_space.loss_deadline_millis,
@@ -2799,7 +2799,7 @@ pub const QuicConnection = struct {
     /// tracked in `sent_packets`, so they do not arm PTO. RFC 9002 forbids
     /// arming Application Data PTO before the handshake is confirmed, and
     /// disarms PTO while an unvalidated server has no anti-amplification credit.
-    pub fn ptoDeadlineMillis(self: QuicConnection, space: PacketNumberSpace) ?i64 {
+    pub fn ptoDeadlineMillis(self: Connection, space: PacketNumberSpace) ?i64 {
         if (!self.ptoAllowedInSpace(space)) return null;
         const pto_count = self.connectionPtoBackoffCount();
         return switch (space) {
@@ -2816,7 +2816,7 @@ pub const QuicConnection = struct {
     /// the earliest PTO deadline is returned. The caller can pass the same clock
     /// value to `checkLossDetectionTimeouts()` and `checkPtoTimeouts()` when the
     /// deadline expires.
-    pub fn lossDetectionTimerDeadlineMillis(self: QuicConnection) ?LossDetectionTimerDeadline {
+    pub fn lossDetectionTimerDeadlineMillis(self: Connection) ?LossDetectionTimerDeadline {
         if (self.isClosingOrClosed()) return null;
 
         const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
@@ -2856,7 +2856,7 @@ pub const QuicConnection = struct {
     /// probing. Loss-time service drains due loss deadlines; PTO service handles
     /// one earliest PTO expiration and advances the connection-level backoff.
     /// The returned value is the earliest timer that caused this service call to run.
-    pub fn serviceLossDetectionTimer(self: *QuicConnection, now_millis: i64) Error!?LossDetectionTimerDeadline {
+    pub fn serviceLossDetectionTimer(self: *Connection, now_millis: i64) Error!?LossDetectionTimerDeadline {
         const deadline = self.lossDetectionTimerDeadlineMillis() orelse return null;
         if (deadline.deadline_millis > now_millis) return null;
 
@@ -2868,7 +2868,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return the current ECN validation state for one packet number space.
-    pub fn ecnValidationState(self: QuicConnection, space: PacketNumberSpace) EcnValidationState {
+    pub fn ecnValidationState(self: Connection, space: PacketNumberSpace) EcnValidationState {
         return switch (space) {
             .initial => self.initial_packet_space.ecn_validation_state,
             .handshake => self.handshake_packet_space.ecn_validation_state,
@@ -2877,7 +2877,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return the latest validated ACK_ECN counters for one packet number space.
-    pub fn ecnCounts(self: QuicConnection, space: PacketNumberSpace) frame.EcnCounts {
+    pub fn ecnCounts(self: Connection, space: PacketNumberSpace) frame.EcnCounts {
         return switch (space) {
             .initial => self.initial_packet_space.ecn_counts,
             .handshake => self.handshake_packet_space.ecn_counts,
@@ -2886,27 +2886,27 @@ pub const QuicConnection = struct {
     }
 
     /// Return queued PATH_CHALLENGE frames that have not been transmitted yet.
-    pub fn pendingPathChallengeCount(self: QuicConnection) usize {
+    pub fn pendingPathChallengeCount(self: Connection) usize {
         return self.pending_path_challenges.items.len;
     }
 
     /// Return transmitted PATH_CHALLENGE frames awaiting a matching PATH_RESPONSE.
-    pub fn outstandingPathChallengeCount(self: QuicConnection) usize {
+    pub fn outstandingPathChallengeCount(self: Connection) usize {
         return self.outstanding_path_challenges.items.len;
     }
 
     /// Return PATH_CHALLENGE validations that exhausted the retry budget.
-    pub fn failedPathValidationCount(self: QuicConnection) usize {
+    pub fn failedPathValidationCount(self: Connection) usize {
         return self.failed_path_validations;
     }
 
     /// Return whether the modeled QUIC handshake is confirmed.
-    pub fn handshakeConfirmed(self: QuicConnection) bool {
+    pub fn handshakeConfirmed(self: Connection) bool {
         return self.handshake_confirmed;
     }
 
     /// Return the modeled QUIC handshake progress state.
-    pub fn handshakeState(self: QuicConnection) HandshakeState {
+    pub fn handshakeState(self: Connection) HandshakeState {
         return self.handshake_state;
     }
 
@@ -2914,7 +2914,7 @@ pub const QuicConnection = struct {
     ///
     /// When `Config.enable_spin_bit` is false this remains false so the default
     /// packetization behavior stays unchanged.
-    pub fn nextOutgoingSpinBit(self: QuicConnection) bool {
+    pub fn nextOutgoingSpinBit(self: Connection) bool {
         return self.shortHeaderSpinBit();
     }
 
@@ -2922,7 +2922,7 @@ pub const QuicConnection = struct {
     ///
     /// The current connection skeleton is single-path; endpoint routing can call
     /// this hook when a future socket-backed migration commits to a new path.
-    pub fn resetSpinBitForPath(self: *QuicConnection) void {
+    pub fn resetSpinBitForPath(self: *Connection) void {
         self.spin_bit_value = false;
     }
 
@@ -2933,7 +2933,7 @@ pub const QuicConnection = struct {
     /// received from the remote endpoint. `discardPacketNumberSpace(.handshake)`
     /// discards these installed keys together with Handshake recovery state.
     pub fn installHandshakeTrafficSecrets(
-        self: *QuicConnection,
+        self: *Connection,
         secrets: HandshakeTrafficSecrets,
     ) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
@@ -2943,7 +2943,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return whether both local send and peer receive Handshake keys exist.
-    pub fn hasHandshakeProtectionKeys(self: QuicConnection) bool {
+    pub fn hasHandshakeProtectionKeys(self: Connection) bool {
         return self.local_handshake_keys != null and self.peer_handshake_keys != null;
     }
 
@@ -2955,7 +2955,7 @@ pub const QuicConnection = struct {
     /// `acceptZeroRtt()` after TLS policy accepts early data, or
     /// `rejectZeroRtt()` to discard it.
     pub fn installZeroRttTrafficSecrets(
-        self: *QuicConnection,
+        self: *Connection,
         secrets: ZeroRttTrafficSecrets,
     ) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
@@ -2970,17 +2970,17 @@ pub const QuicConnection = struct {
     }
 
     /// Return whether local 0-RTT send keys are installed.
-    pub fn hasLocalZeroRttProtectionKey(self: QuicConnection) bool {
+    pub fn hasLocalZeroRttProtectionKey(self: Connection) bool {
         return self.local_zero_rtt_keys != null;
     }
 
     /// Return whether peer 0-RTT receive keys are installed.
-    pub fn hasPeerZeroRttProtectionKey(self: QuicConnection) bool {
+    pub fn hasPeerZeroRttProtectionKey(self: Connection) bool {
         return self.peer_zero_rtt_keys != null;
     }
 
     /// Return whether installed peer 0-RTT receive keys are accepted for use.
-    pub fn zeroRttAccepted(self: QuicConnection) bool {
+    pub fn zeroRttAccepted(self: Connection) bool {
         return self.peer_zero_rtt_accepted;
     }
 
@@ -2989,7 +2989,7 @@ pub const QuicConnection = struct {
     /// This only gates the connection-installed receive helper. Callers that
     /// use `processProtectedZeroRttDatagram()` with explicit keys still own
     /// acceptance and replay policy outside the connection.
-    pub fn acceptZeroRtt(self: *QuicConnection) Error!void {
+    pub fn acceptZeroRtt(self: *Connection) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (self.peer_zero_rtt_keys == null) return error.InvalidPacket;
         self.peer_zero_rtt_accepted = true;
@@ -3000,7 +3000,7 @@ pub const QuicConnection = struct {
     /// This models TLS rejecting early data before any installed-key 0-RTT
     /// payload is processed. It does not affect caller-owned explicit-key
     /// packet opening.
-    pub fn rejectZeroRtt(self: *QuicConnection) Error!void {
+    pub fn rejectZeroRtt(self: *Connection) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         self.peer_zero_rtt_keys = null;
         self.peer_zero_rtt_accepted = false;
@@ -3013,12 +3013,12 @@ pub const QuicConnection = struct {
     /// 1-RTT keys are installed; servers discard them after the first accepted
     /// 1-RTT short packet. TLS acceptance/replay policy remains outside this
     /// helper.
-    pub fn discardZeroRttProtectionKeys(self: *QuicConnection) Error!void {
+    pub fn discardZeroRttProtectionKeys(self: *Connection) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         self.discardZeroRttProtectionKeyState();
     }
 
-    fn discardZeroRttProtectionKeyState(self: *QuicConnection) void {
+    fn discardZeroRttProtectionKeyState(self: *Connection) void {
         self.local_zero_rtt_keys = null;
         self.peer_zero_rtt_keys = null;
         self.peer_zero_rtt_accepted = false;
@@ -3033,7 +3033,7 @@ pub const QuicConnection = struct {
     /// peer key-phase bits. Client connections discard installed 0-RTT keys as
     /// soon as 1-RTT keys are installed.
     pub fn installOneRttTrafficSecrets(
-        self: *QuicConnection,
+        self: *Connection,
         secrets: OneRttTrafficSecrets,
     ) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
@@ -3052,18 +3052,18 @@ pub const QuicConnection = struct {
     }
 
     /// Return whether both local send and peer receive 1-RTT key states exist.
-    pub fn hasOneRttProtectionKeys(self: QuicConnection) bool {
+    pub fn hasOneRttProtectionKeys(self: Connection) bool {
         return self.local_one_rtt_key_phase_state != null and self.peer_one_rtt_key_phase_state != null;
     }
 
     /// Return the key phase bit used by the next installed-key 1-RTT send.
-    pub fn localOneRttKeyPhase(self: QuicConnection) ?bool {
+    pub fn localOneRttKeyPhase(self: Connection) ?bool {
         if (self.local_one_rtt_key_phase_state) |state| return state.currentKeyPhase();
         return null;
     }
 
     /// Return the active peer key phase for installed-key 1-RTT receive.
-    pub fn peerOneRttKeyPhase(self: QuicConnection) ?bool {
+    pub fn peerOneRttKeyPhase(self: Connection) ?bool {
         if (self.peer_one_rtt_key_phase_state) |state| return state.currentKeyPhase();
         return null;
     }
@@ -3073,7 +3073,7 @@ pub const QuicConnection = struct {
     /// This models endpoint-owned key update initiation after handshake
     /// confirmation. A second local update is rejected until an Application ACK
     /// covers a packet number sent with the new key phase.
-    pub fn initiateOneRttKeyUpdate(self: *QuicConnection) Error!void {
+    pub fn initiateOneRttKeyUpdate(self: *Connection) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (!self.handshake_confirmed) return error.InvalidPacket;
         if (self.local_one_rtt_key_update_ack_threshold != null) return error.InvalidPacket;
@@ -3085,11 +3085,11 @@ pub const QuicConnection = struct {
         return error.InvalidPacket;
     }
 
-    fn shortHeaderSpinBit(self: QuicConnection) bool {
+    fn shortHeaderSpinBit(self: Connection) bool {
         return self.config.enable_spin_bit and self.spin_bit_value;
     }
 
-    fn updateSpinBitAfterReceivedShortPacket(self: *QuicConnection, peer_spin_bit: bool) void {
+    fn updateSpinBitAfterReceivedShortPacket(self: *Connection, peer_spin_bit: bool) void {
         if (!self.config.enable_spin_bit) return;
         self.spin_bit_value = switch (self.side) {
             .client => !peer_spin_bit,
@@ -3102,7 +3102,7 @@ pub const QuicConnection = struct {
     /// This is a read-only detector for future UDP packet handling. The
     /// frame-payload API does not automatically close the connection because it
     /// does not yet receive protected packets.
-    pub fn detectStatelessReset(self: QuicConnection, datagram: []const u8) ?u64 {
+    pub fn detectStatelessReset(self: Connection, datagram: []const u8) ?u64 {
         for (self.active_connection_ids.items) |active_id| {
             if (active_id.retired) continue;
             if (packet.matchesStatelessReset(datagram, active_id.stateless_reset_token)) {
@@ -3113,7 +3113,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return Retry tokens issued by this server and still accepted once.
-    pub fn pendingRetryTokenCount(self: QuicConnection) usize {
+    pub fn pendingRetryTokenCount(self: Connection) usize {
         return self.retry_tokens.items.len;
     }
 
@@ -3123,7 +3123,7 @@ pub const QuicConnection = struct {
     /// as the Initial token when protected Initial packetization receives no
     /// explicit token argument. Null means no valid Retry packet has been
     /// processed by this client connection.
-    pub fn latestRetryToken(self: QuicConnection) ?[]const u8 {
+    pub fn latestRetryToken(self: Connection) ?[]const u8 {
         return self.retry_token;
     }
 
@@ -3132,7 +3132,7 @@ pub const QuicConnection = struct {
     /// This value is captured only after a protected Initial packet is actually
     /// committed to the send path. `localTransportParameters()` exports it as
     /// `initial_source_connection_id` once available.
-    pub fn localInitialSourceConnectionId(self: *const QuicConnection) ?[]const u8 {
+    pub fn localInitialSourceConnectionId(self: *const Connection) ?[]const u8 {
         const len = self.local_initial_source_connection_id_len orelse return null;
         return self.local_initial_source_connection_id[0..len];
     }
@@ -3142,7 +3142,7 @@ pub const QuicConnection = struct {
     /// The value is captured from a successfully opened protected Initial packet
     /// and later authenticated by the peer's `initial_source_connection_id`
     /// transport parameter.
-    pub fn peerInitialSourceConnectionId(self: QuicConnection) ?[]const u8 {
+    pub fn peerInitialSourceConnectionId(self: Connection) ?[]const u8 {
         return self.peer_initial_source_connection_id;
     }
 
@@ -3152,7 +3152,7 @@ pub const QuicConnection = struct {
     /// validate it against the server's `original_destination_connection_id`.
     /// Server connections record the DCID from the first successfully opened
     /// client Initial and export it through `localTransportParameters()`.
-    pub fn originalDestinationConnectionId(self: *const QuicConnection) ?[]const u8 {
+    pub fn originalDestinationConnectionId(self: *const Connection) ?[]const u8 {
         const len = self.original_destination_connection_id_len orelse return null;
         return self.original_destination_connection_id[0..len];
     }
@@ -3163,7 +3163,7 @@ pub const QuicConnection = struct {
     /// validated Retry packet for later server transport-parameter validation.
     /// Server connections expose the Retry Source Connection ID from a Retry
     /// datagram issued through `issueRetryDatagram()`.
-    pub fn retrySourceConnectionId(self: QuicConnection) ?[]const u8 {
+    pub fn retrySourceConnectionId(self: Connection) ?[]const u8 {
         return self.retry_source_connection_id;
     }
 
@@ -3172,7 +3172,7 @@ pub const QuicConnection = struct {
     /// The current connection object only records the result. The caller still
     /// owns starting the next incompatible-version connection attempt with the
     /// selected version and carrying authenticated RFC 9368 Version Information.
-    pub fn versionNegotiationSelectedVersion(self: QuicConnection) ?packet.Version {
+    pub fn versionNegotiationSelectedVersion(self: Connection) ?packet.Version {
         return self.version_negotiation_selected_version;
     }
 
@@ -3186,7 +3186,7 @@ pub const QuicConnection = struct {
     /// supplied by `issueAddressValidationToken()`. Endpoint DCID switching
     /// remains endpoint policy.
     pub fn issueRetryDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         original_destination_connection_id: []const u8,
         client_source_connection_id: []const u8,
@@ -3243,7 +3243,7 @@ pub const QuicConnection = struct {
     /// packet-routing step only; token encryption, expiration, address binding,
     /// and endpoint DCID switching remain endpoint policy.
     pub fn processRetryDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         original_destination_connection_id: []const u8,
         datagram: []const u8,
@@ -3293,7 +3293,7 @@ pub const QuicConnection = struct {
     /// configured `available_versions`, records that this connection attempt
     /// already reacted to Version Negotiation, and returns the selected version.
     pub fn processVersionNegotiationDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         original_destination_connection_id: []const u8,
         local_initial_source_connection_id: []const u8,
@@ -3333,7 +3333,7 @@ pub const QuicConnection = struct {
     /// tokens to `issueRetryDatagram()` and `.new_token` values to
     /// `issueNewToken()`.
     pub fn issueAddressValidationToken(
-        self: *QuicConnection,
+        self: *Connection,
         secret: address_validation_token.Secret,
         kind: address_validation_token.Kind,
         now_millis: i64,
@@ -3346,7 +3346,7 @@ pub const QuicConnection = struct {
 
     /// Create a server-authenticated token for a specific QUIC version.
     pub fn issueAddressValidationTokenForVersion(
-        self: *QuicConnection,
+        self: *Connection,
         secret: address_validation_token.Secret,
         kind: address_validation_token.Kind,
         originating_version: packet.Version,
@@ -3381,7 +3381,7 @@ pub const QuicConnection = struct {
     /// validates the peer address and lifts the modeled anti-amplification
     /// limit.
     pub fn validateAddressValidationToken(
-        self: *QuicConnection,
+        self: *Connection,
         secret: address_validation_token.Secret,
         expected_kind: address_validation_token.Kind,
         now_millis: i64,
@@ -3393,7 +3393,7 @@ pub const QuicConnection = struct {
 
     /// Validate a server-authenticated token for an expected QUIC version.
     pub fn validateAddressValidationTokenForVersion(
-        self: *QuicConnection,
+        self: *Connection,
         secret: address_validation_token.Secret,
         expected_kind: address_validation_token.Kind,
         expected_originating_version: packet.Version,
@@ -3412,7 +3412,7 @@ pub const QuicConnection = struct {
     /// pending one-time set, NEW_TOKEN values do not require pending state, and
     /// successful validation marks the peer address as validated.
     pub fn validateAddressValidationTokenWithSecrets(
-        self: *QuicConnection,
+        self: *Connection,
         secrets: []const address_validation_token.Secret,
         expected_kind: address_validation_token.Kind,
         now_millis: i64,
@@ -3424,7 +3424,7 @@ pub const QuicConnection = struct {
 
     /// Validate a version-bound server-authenticated token against rotated secrets.
     pub fn validateAddressValidationTokenWithSecretsForVersion(
-        self: *QuicConnection,
+        self: *Connection,
         secrets: []const address_validation_token.Secret,
         expected_kind: address_validation_token.Kind,
         expected_originating_version: packet.Version,
@@ -3450,7 +3450,7 @@ pub const QuicConnection = struct {
     /// The token bytes are copied into connection-owned memory. This is a
     /// deterministic model for tests and examples until endpoint-level token
     /// encryption, expiration, and address binding exist.
-    pub fn issueRetryToken(self: *QuicConnection, token: []const u8) Error!void {
+    pub fn issueRetryToken(self: *Connection, token: []const u8) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (self.side != .server or token.len == 0) return error.InvalidPacket;
         for (self.retry_tokens.items) |existing| {
@@ -3468,7 +3468,7 @@ pub const QuicConnection = struct {
     /// The current frame-payload model treats Retry token validation as an
     /// explicit server-only address-validation hook. A valid token is consumed
     /// exactly once and lifts the server anti-amplification limit.
-    pub fn validateRetryToken(self: *QuicConnection, token: []const u8) Error!void {
+    pub fn validateRetryToken(self: *Connection, token: []const u8) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (self.side != .server or token.len == 0) return error.InvalidPacket;
 
@@ -3481,7 +3481,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return locally issued connection IDs that the peer has not retired.
-    pub fn localConnectionIdCount(self: QuicConnection) u64 {
+    pub fn localConnectionIdCount(self: Connection) u64 {
         var count: u64 = 0;
         for (self.local_connection_ids.items) |local_id| {
             if (!local_id.retired) count += 1;
@@ -3490,7 +3490,7 @@ pub const QuicConnection = struct {
     }
 
     /// Return locally issued NEW_CONNECTION_ID frames still waiting to be sent.
-    pub fn pendingNewConnectionIdCount(self: QuicConnection) usize {
+    pub fn pendingNewConnectionIdCount(self: Connection) usize {
         var count: usize = 0;
         for (self.local_connection_ids.items) |local_id| {
             if (!local_id.sent and !local_id.retired) count += 1;
@@ -3504,7 +3504,7 @@ pub const QuicConnection = struct {
     /// is encoded into the outgoing frame but local retirement is only recorded
     /// after the peer sends RETIRE_CONNECTION_ID.
     pub fn issueConnectionId(
-        self: *QuicConnection,
+        self: *Connection,
         connection_id: []const u8,
         stateless_reset_token: [16]u8,
         retire_prior_to: u64,
@@ -3537,7 +3537,7 @@ pub const QuicConnection = struct {
     /// Timeout uses the current simplified PTO. Endpoint path identity is not
     /// modeled until the UDP routing layer exists, so this only retries the
     /// frame-payload validation data already tracked by the connection.
-    pub fn checkPathValidationTimeouts(self: *QuicConnection, now_millis: i64) Error!void {
+    pub fn checkPathValidationTimeouts(self: *Connection, now_millis: i64) Error!void {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
@@ -3549,7 +3549,7 @@ pub const QuicConnection = struct {
     /// This deterministic timer hook is part of the frame-payload recovery
     /// skeleton. It does not send PTO probes yet; it only removes packets whose
     /// RFC 9002 time-threshold loss deadline has expired.
-    pub fn checkLossDetectionTimeouts(self: *QuicConnection, now_millis: i64) Error!void {
+    pub fn checkLossDetectionTimeouts(self: *Connection, now_millis: i64) Error!void {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
@@ -3564,7 +3564,7 @@ pub const QuicConnection = struct {
     /// falling back to a PING. When one space expires, the connection-level PTO
     /// backoff advances and other packet number spaces that still have
     /// in-flight packets also get peer probes.
-    pub fn checkPtoTimeouts(self: *QuicConnection, now_millis: i64) Error!void {
+    pub fn checkPtoTimeouts(self: *Connection, now_millis: i64) Error!void {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
@@ -3587,7 +3587,7 @@ pub const QuicConnection = struct {
     }
 
     /// Apply the modeled QUIC idle timeout under a controlled clock.
-    pub fn checkIdleTimeouts(self: *QuicConnection, now_millis: i64) Error!void {
+    pub fn checkIdleTimeouts(self: *Connection, now_millis: i64) Error!void {
         self.expireIdleState(now_millis);
         if (self.state == .closed) return error.ConnectionClosed;
     }
@@ -3597,7 +3597,7 @@ pub const QuicConnection = struct {
     /// TLS integration is not wired yet, so this explicit hook lets tests and
     /// future TLS adapters enable post-handshake recovery behavior such as the
     /// RFC 9002 peer `max_ack_delay` cap.
-    pub fn confirmHandshake(self: *QuicConnection) Error!void {
+    pub fn confirmHandshake(self: *Connection) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         self.handshake_state = .confirmed;
         self.handshake_confirmed = true;
@@ -3608,13 +3608,13 @@ pub const QuicConnection = struct {
     /// This models the QUIC key-discard side effect before packet protection is
     /// implemented. Application data shares the 0-RTT/1-RTT packet number space
     /// and is never discarded through this API.
-    pub fn discardPacketNumberSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
+    pub fn discardPacketNumberSpace(self: *Connection, space: PacketNumberSpace) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (space == .application) return error.InvalidPacket;
         self.discardPacketNumberSpaceState(space);
     }
 
-    fn discardPacketNumberSpaceState(self: *QuicConnection, space: PacketNumberSpace) void {
+    fn discardPacketNumberSpaceState(self: *Connection, space: PacketNumberSpace) void {
         std.debug.assert(space != .application);
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return;
@@ -3653,7 +3653,7 @@ pub const QuicConnection = struct {
     /// This low-level helper backs tests and future packetization work until
     /// protected packets are produced by the connection itself.
     pub fn recordPacketSentInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         bytes: usize,
@@ -3668,7 +3668,7 @@ pub const QuicConnection = struct {
     /// API, so callers must only use `ect0` or `ect1` when they have modeled
     /// that send-side marking explicitly.
     pub fn recordEcnPacketSentInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         bytes: usize,
@@ -3681,7 +3681,7 @@ pub const QuicConnection = struct {
     }
 
     fn recordPacketSentInSpaceWithEcn(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         bytes: usize,
@@ -3718,7 +3718,7 @@ pub const QuicConnection = struct {
 
     /// Process one ACK frame in the selected packet number space.
     pub fn receiveAckInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         ack: frame.AckFrame,
@@ -3729,7 +3729,7 @@ pub const QuicConnection = struct {
 
     /// Process one ACK_ECN frame in the selected packet number space.
     pub fn receiveAckEcnInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         ack_ecn: frame.AckEcnFrame,
@@ -3739,13 +3739,13 @@ pub const QuicConnection = struct {
     }
 
     /// Queue an ACK for the next received packet number in the selected space.
-    pub fn queueAckForReceivedPacketInSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
+    pub fn queueAckForReceivedPacketInSpace(self: *Connection, space: PacketNumberSpace) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         try self.queueAckForReceivedPacket(space);
     }
 
     /// Queue one ack-eliciting PING in a selected packet number space.
-    pub fn sendPingInSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
+    pub fn sendPingInSpace(self: *Connection, space: PacketNumberSpace) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         try self.queuePingInSpace(space);
         self.markHandshakeSpaceUsed(space);
@@ -3759,7 +3759,7 @@ pub const QuicConnection = struct {
     /// ID / Retry Source Connection ID when known, RFC 9368 version
     /// information, and optional server stateless reset token into typed
     /// parameters.
-    pub fn localTransportParameters(self: *const QuicConnection) transport_parameters.TransportParameters {
+    pub fn localTransportParameters(self: *const Connection) transport_parameters.TransportParameters {
         var params = transport_parameters.TransportParameters{
             .max_idle_timeout = self.config.max_idle_timeout_ms,
             .initial_max_data = self.recv_max_data,
@@ -3797,7 +3797,7 @@ pub const QuicConnection = struct {
     /// TLS backends carry these bytes in the QUIC transport_parameters
     /// extension. The returned slice aliases `out_buf` and remains valid until
     /// the caller reuses that buffer.
-    pub fn encodeLocalTransportParameters(self: *const QuicConnection, out_buf: []u8) Error![]const u8 {
+    pub fn encodeLocalTransportParameters(self: *const Connection, out_buf: []u8) Error![]const u8 {
         var out = buffer.fixedWriter(out_buf);
         transport_parameters.encode(out.writer(), self.localTransportParameters()) catch |err| switch (err) {
             error.NoSpaceLeft => return error.BufferTooSmall,
@@ -3813,7 +3813,7 @@ pub const QuicConnection = struct {
     /// connection model. It should be called before application writes for the
     /// connection; later MAX_* frames can still increase limits.
     pub fn applyPeerTransportParameters(
-        self: *QuicConnection,
+        self: *Connection,
         params: transport_parameters.TransportParameters,
     ) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
@@ -3851,7 +3851,7 @@ pub const QuicConnection = struct {
     /// `InvalidPacket`. The connection mutates only after the extension parses
     /// and passes the same validation used by `applyPeerTransportParameters()`.
     pub fn applyPeerTransportParameterBytes(
-        self: *QuicConnection,
+        self: *Connection,
         data: []const u8,
     ) Error!void {
         var params = transport_parameters.parse(data, self.allocator) catch |err| switch (err) {
@@ -3870,7 +3870,7 @@ pub const QuicConnection = struct {
     /// with `TRANSPORT_PARAMETER_ERROR` and the CRYPTO frame type before
     /// returning `InvalidPacket`.
     pub fn applyPeerTransportParameterBytesOrClose(
-        self: *QuicConnection,
+        self: *Connection,
         data: []const u8,
     ) Error!void {
         if (self.isClosingOrClosed()) return self.applyPeerTransportParameterBytes(data);
@@ -3911,7 +3911,7 @@ pub const QuicConnection = struct {
     }
 
     fn validatePeerVersionInformation(
-        self: QuicConnection,
+        self: Connection,
         version_information: transport_parameters.VersionInformation,
     ) Error!void {
         if (isZeroVersion(version_information.chosen_version)) return error.InvalidPacket;
@@ -3954,7 +3954,7 @@ pub const QuicConnection = struct {
     }
 
     fn validatePeerTransportParameters(
-        self: QuicConnection,
+        self: Connection,
         params: transport_parameters.TransportParameters,
     ) Error!void {
         if (self.side == .server) {
@@ -3992,7 +3992,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn validateOriginalDestinationConnectionIdParameter(self: QuicConnection, original_destination_connection_id: ?[]const u8) Error!void {
+    fn validateOriginalDestinationConnectionIdParameter(self: Connection, original_destination_connection_id: ?[]const u8) Error!void {
         if (self.side != .client) return;
         if (self.originalDestinationConnectionId()) |expected| {
             const actual = original_destination_connection_id orelse return error.InvalidPacket;
@@ -4002,14 +4002,14 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn validateInitialSourceConnectionIdParameter(self: QuicConnection, initial_source_connection_id: ?[]const u8) Error!void {
+    fn validateInitialSourceConnectionIdParameter(self: Connection, initial_source_connection_id: ?[]const u8) Error!void {
         if (self.peer_initial_source_connection_id) |expected| {
             const actual = initial_source_connection_id orelse return error.InvalidPacket;
             if (!std.mem.eql(u8, expected, actual)) return error.InvalidPacket;
         }
     }
 
-    fn validateRetrySourceConnectionIdParameter(self: QuicConnection, retry_source_connection_id: ?[]const u8) Error!void {
+    fn validateRetrySourceConnectionIdParameter(self: Connection, retry_source_connection_id: ?[]const u8) Error!void {
         if (self.side != .client) return;
         if (self.retry_source_connection_id) |expected| {
             const actual = retry_source_connection_id orelse return error.InvalidPacket;
@@ -4019,41 +4019,41 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn closeStateTimeoutMillis(self: QuicConnection) u64 {
+    fn closeStateTimeoutMillis(self: Connection) u64 {
         return saturatingMulU64(close_state_pto_multiplier, self.recovery_state.ptoMs());
     }
 
-    fn closeStateDeadlineMillis(self: QuicConnection, now_millis: i64) i64 {
+    fn closeStateDeadlineMillis(self: Connection, now_millis: i64) i64 {
         return saturatingAddMillis(now_millis, self.closeStateTimeoutMillis());
     }
 
-    fn clearPendingCloseFrame(self: *QuicConnection) void {
+    fn clearPendingCloseFrame(self: *Connection) void {
         if (self.pending_close) |*pending_close| {
             deinitPendingCloseFrame(pending_close, self.allocator);
             self.pending_close = null;
         }
     }
 
-    fn clearPeerClose(self: *QuicConnection) void {
+    fn clearPeerClose(self: *Connection) void {
         if (self.peer_close) |*peer_close| {
             deinitPeerClose(peer_close, self.allocator);
             self.peer_close = null;
         }
     }
 
-    fn enterClosingState(self: *QuicConnection, now_millis: i64) void {
+    fn enterClosingState(self: *Connection, now_millis: i64) void {
         self.state = .closing;
         self.close_deadline_millis = self.closeStateDeadlineMillis(now_millis);
         self.closed = true;
     }
 
-    fn enterDrainingState(self: *QuicConnection, now_millis: i64) void {
+    fn enterDrainingState(self: *Connection, now_millis: i64) void {
         self.state = .draining;
         self.close_deadline_millis = self.closeStateDeadlineMillis(now_millis);
         self.closed = true;
     }
 
-    fn receiveConnectionCloseFrame(self: *QuicConnection, now_millis: i64, close: frame.ConnectionCloseFrame) Error!void {
+    fn receiveConnectionCloseFrame(self: *Connection, now_millis: i64, close: frame.ConnectionCloseFrame) Error!void {
         if (self.peer_close == null) {
             const owned_reason = self.allocator.alloc(u8, close.reason_phrase.len) catch return error.OutOfMemory;
             errdefer self.allocator.free(owned_reason);
@@ -4067,7 +4067,7 @@ pub const QuicConnection = struct {
         self.enterDrainingState(now_millis);
     }
 
-    fn receiveApplicationCloseFrame(self: *QuicConnection, now_millis: i64, close: frame.ApplicationCloseFrame) Error!void {
+    fn receiveApplicationCloseFrame(self: *Connection, now_millis: i64, close: frame.ApplicationCloseFrame) Error!void {
         if (self.peer_close == null) {
             const owned_reason = self.allocator.alloc(u8, close.reason_phrase.len) catch return error.OutOfMemory;
             errdefer self.allocator.free(owned_reason);
@@ -4080,7 +4080,7 @@ pub const QuicConnection = struct {
         self.enterDrainingState(now_millis);
     }
 
-    fn expireCloseState(self: *QuicConnection, now_millis: i64) void {
+    fn expireCloseState(self: *Connection, now_millis: i64) void {
         if (self.state != .closing and self.state != .draining) return;
         const deadline = self.close_deadline_millis orelse return;
         if (now_millis < deadline) return;
@@ -4091,7 +4091,7 @@ pub const QuicConnection = struct {
         self.clearPendingCloseFrame();
     }
 
-    fn expireIdleState(self: *QuicConnection, now_millis: i64) void {
+    fn expireIdleState(self: *Connection, now_millis: i64) void {
         if (self.state != .active) return;
         if (self.pending_close != null) return;
         const deadline = self.idleTimeoutDeadlineMillis() orelse return;
@@ -4103,16 +4103,16 @@ pub const QuicConnection = struct {
         self.clearPendingCloseFrame();
     }
 
-    fn recordPacketActivity(self: *QuicConnection, now_millis: i64) void {
+    fn recordPacketActivity(self: *Connection, now_millis: i64) void {
         if (self.effectiveIdleTimeoutMillis() == null) return;
         self.last_packet_activity_millis = now_millis;
     }
 
-    fn isClosingOrClosed(self: QuicConnection) bool {
+    fn isClosingOrClosed(self: Connection) bool {
         return self.state != .active or self.pending_close != null or self.closed;
     }
 
-    fn prepareInboundDatagramProcessing(self: *QuicConnection, now_millis: i64) Error!bool {
+    fn prepareInboundDatagramProcessing(self: *Connection, now_millis: i64) Error!bool {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
         if (self.state == .closing or self.state == .draining) return false;
@@ -4120,42 +4120,42 @@ pub const QuicConnection = struct {
         return true;
     }
 
-    fn maxTxDatagramSize(self: QuicConnection) usize {
+    fn maxTxDatagramSize(self: Connection) usize {
         return @min(@as(usize, self.config.max_datagram_size), self.peer_max_udp_payload_size);
     }
 
-    fn syncRecoveryMaxDatagramSize(self: *QuicConnection) void {
+    fn syncRecoveryMaxDatagramSize(self: *Connection) void {
         const max_datagram_size = self.maxTxDatagramSize();
         self.initial_packet_space.recovery_state.updateMaxDatagramSize(max_datagram_size);
         self.handshake_packet_space.recovery_state.updateMaxDatagramSize(max_datagram_size);
         self.recovery_state.updateMaxDatagramSize(max_datagram_size);
     }
 
-    fn isAntiAmplificationLimited(self: QuicConnection) bool {
+    fn isAntiAmplificationLimited(self: Connection) bool {
         return self.side == .server and !self.peer_address_validated;
     }
 
-    fn canSendToPeerAddress(self: QuicConnection, bytes: usize) bool {
+    fn canSendToPeerAddress(self: Connection, bytes: usize) bool {
         const remaining = self.antiAmplificationLimitRemaining() orelse return true;
         return bytes <= remaining;
     }
 
-    fn serverAtAntiAmplificationLimit(self: QuicConnection) bool {
+    fn serverAtAntiAmplificationLimit(self: Connection) bool {
         const remaining = self.antiAmplificationLimitRemaining() orelse return false;
         return remaining == 0;
     }
 
-    fn initialTokenForPacket(self: QuicConnection, space: PacketNumberSpace, token: []const u8) []const u8 {
+    fn initialTokenForPacket(self: Connection, space: PacketNumberSpace, token: []const u8) []const u8 {
         if (space != .initial or token.len != 0) return token;
         return self.retry_token orelse &[_]u8{};
     }
 
-    fn recordPeerAddressBytesSent(self: *QuicConnection, bytes: usize) void {
+    fn recordPeerAddressBytesSent(self: *Connection, bytes: usize) void {
         if (!self.isAntiAmplificationLimited()) return;
         self.peer_address_bytes_sent = std.math.add(usize, self.peer_address_bytes_sent, bytes) catch std.math.maxInt(usize);
     }
 
-    fn consumePendingRetryToken(self: *QuicConnection, token: []const u8) bool {
+    fn consumePendingRetryToken(self: *Connection, token: []const u8) bool {
         for (self.retry_tokens.items, 0..) |existing, i| {
             if (!std.mem.eql(u8, existing, token)) continue;
             const removed = self.retry_tokens.orderedRemove(i);
@@ -4165,25 +4165,25 @@ pub const QuicConnection = struct {
         return false;
     }
 
-    fn initialPeerStreamDataLimit(self: QuicConnection, stream_id: u64) u64 {
+    fn initialPeerStreamDataLimit(self: Connection, stream_id: u64) u64 {
         if (!isBidirectionalStream(stream_id)) return self.peer_initial_max_stream_data_uni;
         if (isLocalStreamInitiator(self.side, stream_id)) return self.peer_initial_max_stream_data_bidi_remote;
         return self.peer_initial_max_stream_data_bidi_local;
     }
 
-    fn scaledPeerAckDelay(self: QuicConnection, ack_delay: u64) u64 {
+    fn scaledPeerAckDelay(self: Connection, ack_delay: u64) u64 {
         const multiplier = std.math.shl(u64, 1, self.peer_ack_delay_exponent);
         return saturatingMulU64(ack_delay, multiplier);
     }
 
-    fn ackDelayForRtt(self: QuicConnection, space: PacketNumberSpace, ack_delay: u64) u64 {
+    fn ackDelayForRtt(self: Connection, space: PacketNumberSpace, ack_delay: u64) u64 {
         if (space == .initial or space == .handshake) return 0;
         const scaled_ack_delay = self.scaledPeerAckDelay(ack_delay);
         if (!self.handshake_confirmed) return scaled_ack_delay;
         return @min(scaled_ack_delay, self.recovery_state.max_ack_delay_ms);
     }
 
-    fn rttEstimateSnapshot(self: *QuicConnection, space: PacketNumberSpace) RttEstimateSnapshot {
+    fn rttEstimateSnapshot(self: *Connection, space: PacketNumberSpace) RttEstimateSnapshot {
         const packet_space = self.packetNumberSpace(space);
         return .{
             .first_rtt_sample_sent_time_millis = packet_space.first_rtt_sample_sent_time_millis.*,
@@ -4195,7 +4195,7 @@ pub const QuicConnection = struct {
     }
 
     fn restoreRttEstimateSnapshot(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         snapshot: RttEstimateSnapshot,
     ) void {
@@ -4207,7 +4207,7 @@ pub const QuicConnection = struct {
         packet_space.recovery_state.rttvar_ms = snapshot.rttvar_ms;
     }
 
-    fn ptoBackoffSnapshot(self: QuicConnection) PtoBackoffSnapshot {
+    fn ptoBackoffSnapshot(self: Connection) PtoBackoffSnapshot {
         return .{
             .initial = self.initial_packet_space.recovery_state.pto_count,
             .handshake = self.handshake_packet_space.recovery_state.pto_count,
@@ -4215,13 +4215,13 @@ pub const QuicConnection = struct {
         };
     }
 
-    fn restorePtoBackoffSnapshot(self: *QuicConnection, snapshot: PtoBackoffSnapshot) void {
+    fn restorePtoBackoffSnapshot(self: *Connection, snapshot: PtoBackoffSnapshot) void {
         self.initial_packet_space.recovery_state.pto_count = snapshot.initial;
         self.handshake_packet_space.recovery_state.pto_count = snapshot.handshake;
         self.recovery_state.pto_count = snapshot.application;
     }
 
-    fn connectionPtoBackoffCount(self: QuicConnection) u8 {
+    fn connectionPtoBackoffCount(self: Connection) u8 {
         var count: u8 = 0;
         if (!self.initial_packet_space.discarded) {
             count = @max(count, self.initial_packet_space.recovery_state.pto_count);
@@ -4235,7 +4235,7 @@ pub const QuicConnection = struct {
         return count;
     }
 
-    fn setConnectionPtoBackoffCount(self: *QuicConnection, count: u8) void {
+    fn setConnectionPtoBackoffCount(self: *Connection, count: u8) void {
         if (!self.initial_packet_space.discarded) {
             self.initial_packet_space.recovery_state.pto_count = count;
         }
@@ -4247,24 +4247,24 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn resetConnectionPtoBackoff(self: *QuicConnection) void {
+    fn resetConnectionPtoBackoff(self: *Connection) void {
         self.setConnectionPtoBackoffCount(0);
     }
 
-    fn ackShouldResetPtoBackoff(self: QuicConnection, space: PacketNumberSpace) bool {
+    fn ackShouldResetPtoBackoff(self: Connection, space: PacketNumberSpace) bool {
         // RFC 9002 keeps the PTO backoff armed for client Initial ACKs because
         // the client cannot treat those ACKs as proof that the server has
         // validated the client's address.
         return !(self.side == .client and space == .initial);
     }
 
-    fn increaseConnectionPtoBackoff(self: *QuicConnection) void {
+    fn increaseConnectionPtoBackoff(self: *Connection) void {
         const current = self.connectionPtoBackoffCount();
         const next = if (current == std.math.maxInt(u8)) current else current + 1;
         self.setConnectionPtoBackoffCount(next);
     }
 
-    fn rememberFirstRttSampleSentTime(self: *QuicConnection, sent_time_millis: i64) void {
+    fn rememberFirstRttSampleSentTime(self: *Connection, sent_time_millis: i64) void {
         const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
         for (spaces) |sample_space| {
             const packet_space = self.packetNumberSpace(sample_space);
@@ -4275,7 +4275,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn syncRttEstimatesFromSpace(self: *QuicConnection, source_space: PacketNumberSpace) void {
+    fn syncRttEstimatesFromSpace(self: *Connection, source_space: PacketNumberSpace) void {
         const source_packet_space = self.packetNumberSpace(source_space);
         const source_recovery = source_packet_space.recovery_state.*;
         const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
@@ -4290,23 +4290,23 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn markHandshakeSpaceUsed(self: *QuicConnection, space: PacketNumberSpace) void {
+    fn markHandshakeSpaceUsed(self: *Connection, space: PacketNumberSpace) void {
         if (space == .handshake and self.handshake_state == .initial) {
             self.handshake_state = .handshake;
         }
     }
 
-    fn maybeDiscardInitialAfterHandshakePacketSent(self: *QuicConnection, space: PacketNumberSpace) void {
+    fn maybeDiscardInitialAfterHandshakePacketSent(self: *Connection, space: PacketNumberSpace) void {
         if (self.side != .client or space != .handshake or self.isClosingOrClosed()) return;
         self.discardPacketNumberSpaceState(.initial);
     }
 
-    fn maybeDiscardInitialAfterHandshakePacketReceived(self: *QuicConnection, space: PacketNumberSpace) void {
+    fn maybeDiscardInitialAfterHandshakePacketReceived(self: *Connection, space: PacketNumberSpace) void {
         if (self.side != .server or space != .handshake or self.isClosingOrClosed()) return;
         self.discardPacketNumberSpaceState(.initial);
     }
 
-    fn packetNumberSpace(self: *QuicConnection, space: PacketNumberSpace) PacketNumberSpaceView {
+    fn packetNumberSpace(self: *Connection, space: PacketNumberSpace) PacketNumberSpaceView {
         return switch (space) {
             .initial => .{
                 .discarded = &self.initial_packet_space.discarded,
@@ -4383,7 +4383,7 @@ pub const QuicConnection = struct {
         };
     }
 
-    fn canSendAckElicitingInSpace(self: *QuicConnection, space: PacketNumberSpace, bytes: usize) bool {
+    fn canSendAckElicitingInSpace(self: *Connection, space: PacketNumberSpace, bytes: usize) bool {
         const packet_space = self.packetNumberSpace(space);
         const total_in_flight = self.totalBytesInFlight();
         const after_send = std.math.add(usize, total_in_flight, bytes) catch return false;
@@ -4392,21 +4392,21 @@ pub const QuicConnection = struct {
             after_send <= packet_space.recovery_state.congestion_window;
     }
 
-    fn armPtoProbeInSpace(self: *QuicConnection, space: PacketNumberSpace) void {
+    fn armPtoProbeInSpace(self: *Connection, space: PacketNumberSpace) void {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.pto_probe_count.* == 0) {
             packet_space.pto_probe_count.* = 1;
         }
     }
 
-    fn armCongestionProbeInSpace(self: *QuicConnection, space: PacketNumberSpace) void {
+    fn armCongestionProbeInSpace(self: *Connection, space: PacketNumberSpace) void {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.congestion_probe_count.* == 0) {
             packet_space.congestion_probe_count.* = 1;
         }
     }
 
-    fn recordAckElicitingSendInSpace(self: *QuicConnection, space: PacketNumberSpace, bytes: usize) void {
+    fn recordAckElicitingSendInSpace(self: *Connection, space: PacketNumberSpace, bytes: usize) void {
         const packet_space = self.packetNumberSpace(space);
         packet_space.recovery_state.onPacketSent(bytes);
         if (packet_space.pto_probe_count.* != 0) {
@@ -4421,7 +4421,7 @@ pub const QuicConnection = struct {
     ///
     /// Closing or draining connections discard the datagram before parsing.
     pub fn processDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         datagram: []const u8,
     ) Error!void {
@@ -4434,7 +4434,7 @@ pub const QuicConnection = struct {
     /// `processDatagramForPacketTypeOrClose()`. Existing callers that need
     /// pure rollback behavior can continue using `processDatagram()`.
     pub fn processDatagramOrClose(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         datagram: []const u8,
     ) Error!void {
@@ -4448,7 +4448,7 @@ pub const QuicConnection = struct {
     /// protected QUIC packetization. Closing or draining connections discard
     /// the datagram before parsing.
     pub fn processDatagramInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         datagram: []const u8,
@@ -4467,7 +4467,7 @@ pub const QuicConnection = struct {
     /// Application space uses 1-RTT frame rules. Existing callers that need pure
     /// rollback behavior can continue using `processDatagramInSpace()`.
     pub fn processDatagramInSpaceOrClose(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         datagram: []const u8,
@@ -4492,7 +4492,7 @@ pub const QuicConnection = struct {
     /// by `processRetryDatagram()`. Real TLS transcript ownership and key
     /// discard remain future endpoint/TLS work.
     pub fn processProtectedLongDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         keys: ProtectedLongDatagramKeys,
         datagram: []const u8,
@@ -4543,7 +4543,7 @@ pub const QuicConnection = struct {
     /// ownership, key discard, and key update remain endpoint/TLS integration
     /// work.
     pub fn processProtectedLongDatagramInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         keys: protection.Aes128PacketProtectionKeys,
@@ -4570,7 +4570,7 @@ pub const QuicConnection = struct {
     /// packets keep the Handshake packet-number space unchanged through the
     /// same rollback boundary as the caller-keyed helper.
     pub fn processProtectedHandshakeDatagramWithInstalledKeys(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         datagram: []const u8,
     ) Error!void {
@@ -4579,7 +4579,7 @@ pub const QuicConnection = struct {
     }
 
     fn processProtectedLongDatagramWithRoute(
-        self: *QuicConnection,
+        self: *Connection,
         route: ProtectedLongPacketRoute,
         now_millis: i64,
         udp_datagram_len: usize,
@@ -4649,7 +4649,7 @@ pub const QuicConnection = struct {
     /// caller supplies the 0-RTT traffic keys; TLS secret production, rejection
     /// policy, and replay defenses remain endpoint/TLS integration work.
     pub fn processProtectedZeroRttDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         keys: protection.Aes128PacketProtectionKeys,
         datagram: []const u8,
@@ -4671,7 +4671,7 @@ pub const QuicConnection = struct {
     /// accepts early data. Replay defense remains caller-owned endpoint/TLS
     /// work.
     pub fn processProtectedZeroRttDatagramWithInstalledKeys(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         datagram: []const u8,
     ) Error!void {
@@ -4685,7 +4685,7 @@ pub const QuicConnection = struct {
     /// This compatibility wrapper routes one protected Initial long packet
     /// through `processProtectedLongDatagramInSpace(.initial, ...)`.
     pub fn processInitialProtectedDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         keys: protection.Aes128PacketProtectionKeys,
         datagram: []const u8,
@@ -4707,7 +4707,7 @@ pub const QuicConnection = struct {
     /// TLS transcript ownership, remaining key discard, and endpoint DCID lookup
     /// remain future endpoint/TLS integration work.
     pub fn processProtectedShortDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         keys: protection.Aes128PacketProtectionKeys,
         dcid_len: usize,
@@ -4745,7 +4745,7 @@ pub const QuicConnection = struct {
     /// installed 0-RTT receive keys. Real TLS traffic-secret production remains
     /// future integration work.
     pub fn processProtectedShortDatagramWithKeyUpdate(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         keys: protection.ShortPacketKeyUpdateKeys,
         dcid_len: usize,
@@ -4781,7 +4781,7 @@ pub const QuicConnection = struct {
     /// discard remain future endpoint/TLS integration work. Successful
     /// server-side receive also discards installed 0-RTT receive keys.
     pub fn processProtectedShortDatagramWithKeyPhaseState(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         key_phase_state: *protection.Aes128KeyPhaseState,
         dcid_len: usize,
@@ -4817,7 +4817,7 @@ pub const QuicConnection = struct {
     /// handoff before calling this helper. Server-side successful receive
     /// discards installed 0-RTT receive keys.
     pub fn processProtectedShortDatagramWithInstalledKeys(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         dcid_len: usize,
         datagram: []const u8,
@@ -4828,7 +4828,7 @@ pub const QuicConnection = struct {
     }
 
     fn processDecodedProtectedShortDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         decoded: *const protection.DecodedProtectedShortPacket,
         datagram_len: usize,
@@ -4866,7 +4866,7 @@ pub const QuicConnection = struct {
     /// production, automatic key-phase transitions, and remaining key discard
     /// remain endpoint/TLS integration work.
     pub fn pollProtectedShortDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
@@ -4880,7 +4880,7 @@ pub const QuicConnection = struct {
     /// caller-keyed bridge usable for deterministic key-update tests while a
     /// future endpoint/TLS state machine owns key-phase transitions.
     pub fn pollProtectedShortDatagramWithKeyPhase(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
@@ -4926,7 +4926,7 @@ pub const QuicConnection = struct {
     /// This uses the state's current send keys and current key-phase bit. The
     /// caller explicitly initiates updates on the state before polling.
     pub fn pollProtectedShortDatagramWithKeyPhaseState(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         dcid: []const u8,
         key_phase_state: *const protection.Aes128KeyPhaseState,
@@ -4945,7 +4945,7 @@ pub const QuicConnection = struct {
     /// `installOneRttTrafficSecrets()` or drive a `CryptoBackend` that returns
     /// 1-RTT traffic secrets before using this helper.
     pub fn pollProtectedShortDatagramWithInstalledKeys(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         dcid: []const u8,
     ) Error!?[]u8 {
@@ -4954,7 +4954,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollProtectedShortCloseDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
@@ -4987,7 +4987,7 @@ pub const QuicConnection = struct {
     /// production, replay defense, and server acceptance policy remain
     /// endpoint/TLS integration work.
     pub fn pollProtectedZeroRttDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         dcid: []const u8,
         scid: []const u8,
@@ -5021,7 +5021,7 @@ pub const QuicConnection = struct {
     /// data with the connection's installed local 0-RTT keys. TLS 0-RTT
     /// acceptance and replay policy remain endpoint/TLS work.
     pub fn pollProtectedZeroRttDatagramWithInstalledKeys(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         dcid: []const u8,
         scid: []const u8,
@@ -5044,7 +5044,7 @@ pub const QuicConnection = struct {
     /// state. Endpoint DCID switching, real TLS transcript ownership, key
     /// discard, and key update remain endpoint/TLS integration work.
     pub fn pollProtectedLongDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         dcid: []const u8,
         scid: []const u8,
@@ -5231,7 +5231,7 @@ pub const QuicConnection = struct {
     /// `pollProtectedLongDatagram()` when coalescing Initial and Handshake
     /// packets is required.
     pub fn pollProtectedHandshakeDatagramWithInstalledKeys(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         dcid: []const u8,
         scid: []const u8,
@@ -5277,7 +5277,7 @@ pub const QuicConnection = struct {
     /// used when `token` is empty. Real TLS transcript ownership, key discard,
     /// and key update remain endpoint/TLS integration work.
     pub fn pollProtectedLongCryptoDatagramInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         dcid: []const u8,
@@ -5308,7 +5308,7 @@ pub const QuicConnection = struct {
     /// This compatibility wrapper routes Initial CRYPTO through
     /// `pollProtectedLongCryptoDatagramInSpace(.initial, ...)`.
     pub fn pollInitialProtectedDatagram(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         dcid: []const u8,
         scid: []const u8,
@@ -5319,7 +5319,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedLongCryptoPacketInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         dcid: []const u8,
         scid: []const u8,
@@ -5397,7 +5397,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildNextProtectedLongPacketInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         dcid: []const u8,
         scid: []const u8,
@@ -5420,7 +5420,7 @@ pub const QuicConnection = struct {
         return null;
     }
 
-    fn hasPendingProtectedZeroRttFrames(self: *QuicConnection) bool {
+    fn hasPendingProtectedZeroRttFrames(self: *Connection) bool {
         self.dropObsoleteStopSendingFrames();
         return self.pending_reset_streams.items.len != 0 or
             self.pending_stop_sending.items.len != 0 or
@@ -5428,7 +5428,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildNextProtectedZeroRttPacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         scid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
@@ -5486,7 +5486,7 @@ pub const QuicConnection = struct {
     };
 
     fn buildProtectedZeroRttFramePacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         scid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
@@ -5582,7 +5582,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedLongPingPacketInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         dcid: []const u8,
         scid: []const u8,
@@ -5607,7 +5607,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedLongAckOnlyPacketInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         dcid: []const u8,
         scid: []const u8,
@@ -5630,7 +5630,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedLongControlPacketInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         dcid: []const u8,
         scid: []const u8,
@@ -5714,7 +5714,7 @@ pub const QuicConnection = struct {
     }
 
     fn localOriginalDestinationConnectionIdForPacket(
-        self: QuicConnection,
+        self: Connection,
         space: PacketNumberSpace,
         dcid: []const u8,
     ) ?[]const u8 {
@@ -5723,7 +5723,7 @@ pub const QuicConnection = struct {
     }
 
     fn localInitialSourceConnectionIdForPacket(
-        self: QuicConnection,
+        self: Connection,
         space: PacketNumberSpace,
         scid: []const u8,
     ) ?[]const u8 {
@@ -5732,7 +5732,7 @@ pub const QuicConnection = struct {
     }
 
     fn validateOutgoingInitialPacketFields(
-        self: QuicConnection,
+        self: Connection,
         space: PacketNumberSpace,
         dcid: []const u8,
         token: []const u8,
@@ -5752,33 +5752,33 @@ pub const QuicConnection = struct {
         try validateInitialDestinationConnectionIdLength(dcid);
     }
 
-    fn minimumOutgoingInitialDatagramLen(self: QuicConnection, space: PacketNumberSpace, ack_eliciting: bool) usize {
+    fn minimumOutgoingInitialDatagramLen(self: Connection, space: PacketNumberSpace, ack_eliciting: bool) usize {
         if (space != .initial) return 0;
         if (self.side == .client or ack_eliciting) return min_initial_udp_datagram_len;
         return 0;
     }
 
-    fn validateIncomingInitialDatagramLen(self: QuicConnection, space: PacketNumberSpace, udp_datagram_len: usize) Error!void {
+    fn validateIncomingInitialDatagramLen(self: Connection, space: PacketNumberSpace, udp_datagram_len: usize) Error!void {
         if (space == .initial and self.side == .server and udp_datagram_len < min_initial_udp_datagram_len) {
             return error.InvalidPacket;
         }
     }
 
-    fn validateOriginalDestinationConnectionIdForRecord(self: QuicConnection, dcid: []const u8) Error!void {
+    fn validateOriginalDestinationConnectionIdForRecord(self: Connection, dcid: []const u8) Error!void {
         if (dcid.len > max_connection_id_len) return error.InvalidPacket;
         if (self.originalDestinationConnectionId()) |existing| {
             if (!std.mem.eql(u8, existing, dcid)) return error.InvalidPacket;
         }
     }
 
-    fn recordOriginalDestinationConnectionId(self: *QuicConnection, dcid: []const u8) void {
+    fn recordOriginalDestinationConnectionId(self: *Connection, dcid: []const u8) void {
         if (self.original_destination_connection_id_len != null) return;
         std.debug.assert(dcid.len <= max_connection_id_len);
         @memcpy(self.original_destination_connection_id[0..dcid.len], dcid);
         self.original_destination_connection_id_len = @intCast(dcid.len);
     }
 
-    fn recordLocalInitialSourceConnectionId(self: *QuicConnection, scid: []const u8) void {
+    fn recordLocalInitialSourceConnectionId(self: *Connection, scid: []const u8) void {
         if (self.local_initial_source_connection_id_len != null) return;
         std.debug.assert(scid.len <= max_connection_id_len);
         @memcpy(self.local_initial_source_connection_id[0..scid.len], scid);
@@ -5786,7 +5786,7 @@ pub const QuicConnection = struct {
     }
 
     fn ensureProtectedLongCommitCapacity(
-        self: *QuicConnection,
+        self: *Connection,
         built: BuiltProtectedLongPacket,
     ) Error!void {
         if (!built.ack_eliciting) return;
@@ -5794,14 +5794,14 @@ pub const QuicConnection = struct {
         packet_space.sent_packets.ensureUnusedCapacity(self.allocator, 1) catch return error.OutOfMemory;
     }
 
-    fn deinitBuiltProtectedLongPacket(self: *QuicConnection, built: BuiltProtectedLongPacket) void {
+    fn deinitBuiltProtectedLongPacket(self: *Connection, built: BuiltProtectedLongPacket) void {
         var owned = built;
         owned.deinitSidecars(self.allocator);
         self.allocator.free(owned.datagram);
     }
 
     fn deinitBuiltProtectedLongPacketIfPresent(
-        self: *QuicConnection,
+        self: *Connection,
         built: *?BuiltProtectedLongPacket,
     ) void {
         if (built.*) |packet_to_free| {
@@ -5811,7 +5811,7 @@ pub const QuicConnection = struct {
     }
 
     fn commitBuiltProtectedLongPacket(
-        self: *QuicConnection,
+        self: *Connection,
         built: BuiltProtectedLongPacket,
         now_millis: i64,
     ) void {
@@ -5868,7 +5868,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildNextProtectedShortPacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -5934,7 +5934,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortClosePacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -5992,7 +5992,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortPathResponsePacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6056,7 +6056,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortResetStreamPacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6120,7 +6120,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortStopSendingPacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6184,7 +6184,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortRetireConnectionIdPacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6248,7 +6248,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortNewConnectionIdPacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6318,7 +6318,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortHandshakeDonePacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6381,7 +6381,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortNewTokenPacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6445,7 +6445,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortPathChallengePacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6509,7 +6509,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortMaxFramePacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6587,7 +6587,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortBlockedFramePacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6665,7 +6665,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortCryptoPacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6732,7 +6732,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortStreamPacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6804,7 +6804,7 @@ pub const QuicConnection = struct {
     }
 
     fn buildProtectedShortControlPacket(
-        self: *QuicConnection,
+        self: *Connection,
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
         key_phase: bool,
@@ -6865,7 +6865,7 @@ pub const QuicConnection = struct {
     }
 
     fn commitBuiltProtectedShortPacket(
-        self: *QuicConnection,
+        self: *Connection,
         built: BuiltProtectedShortPacket,
         now_millis: i64,
     ) void {
@@ -6931,7 +6931,7 @@ pub const QuicConnection = struct {
     /// rejects frames that are only valid after the handshake has progressed.
     /// Closing or draining connections discard the datagram before parsing.
     pub fn processDatagramForPacketType(
-        self: *QuicConnection,
+        self: *Connection,
         packet_type: FramePacketType,
         now_millis: i64,
         datagram: []const u8,
@@ -6953,7 +6953,7 @@ pub const QuicConnection = struct {
     /// callers that need pure rollback behavior can continue using
     /// `processDatagramForPacketType()`.
     pub fn processDatagramForPacketTypeOrClose(
-        self: *QuicConnection,
+        self: *Connection,
         packet_type: FramePacketType,
         now_millis: i64,
         datagram: []const u8,
@@ -6975,7 +6975,7 @@ pub const QuicConnection = struct {
     }
 
     fn processDatagramInSpaceWithPacketType(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         packet_type: FramePacketType,
         now_millis: i64,
@@ -7229,7 +7229,7 @@ pub const QuicConnection = struct {
     /// Application space delegates to `pollTx()` and can emit the broader
     /// frame-payload skeleton used by the examples.
     pub fn pollTxInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         out_buf: []u8,
@@ -7258,7 +7258,7 @@ pub const QuicConnection = struct {
 
     /// Return the next unencrypted packet payload to send, or null if idle.
     pub fn pollTx(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         out_buf: []u8,
     ) Error!?[]u8 {
@@ -7402,7 +7402,7 @@ pub const QuicConnection = struct {
     /// regular public send/receive APIs return `ConnectionClosed`; `pollTx()`
     /// remains available to emit the close frame and then mark the connection closed.
     pub fn closeConnection(
-        self: *QuicConnection,
+        self: *Connection,
         error_code: u64,
         frame_type: u64,
         reason_phrase: []const u8,
@@ -7436,7 +7436,7 @@ pub const QuicConnection = struct {
     /// same public API surface as transport close; only the emitted frame type
     /// and error-code namespace differ.
     pub fn closeApplication(
-        self: *QuicConnection,
+        self: *Connection,
         error_code: u64,
         reason_phrase: []const u8,
     ) Error!void {
@@ -7462,7 +7462,7 @@ pub const QuicConnection = struct {
     }
 
     /// Open a locally initiated bidirectional stream and return its QUIC stream ID.
-    pub fn openStream(self: *QuicConnection) Error!u64 {
+    pub fn openStream(self: *Connection) Error!u64 {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
 
         const stream_id = self.next_stream_id;
@@ -7484,7 +7484,7 @@ pub const QuicConnection = struct {
     }
 
     /// Open a locally initiated unidirectional stream and return its QUIC stream ID.
-    pub fn openUniStream(self: *QuicConnection) Error!u64 {
+    pub fn openUniStream(self: *Connection) Error!u64 {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
 
         const stream_id = self.next_uni_stream_id;
@@ -7510,7 +7510,7 @@ pub const QuicConnection = struct {
     /// The data is copied, split to fit `max_datagram_size`, and emitted as
     /// CRYPTO frames by `pollTx`. Empty inputs are ignored because CRYPTO has no
     /// FIN signal and carries only byte-stream progress in this skeleton.
-    pub fn sendCrypto(self: *QuicConnection, data: []const u8) Error!void {
+    pub fn sendCrypto(self: *Connection, data: []const u8) Error!void {
         try self.sendCryptoInSpace(.application, data);
     }
 
@@ -7520,7 +7520,7 @@ pub const QuicConnection = struct {
     /// frame-payload hook lets tests and future TLS adapters exercise that
     /// separation before protected packet handling exists.
     pub fn sendCryptoInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         data: []const u8,
     ) Error!void {
@@ -7558,7 +7558,7 @@ pub const QuicConnection = struct {
 
     /// Queue data for a stream. The data is copied and emitted by `pollTx`.
     pub fn sendOnStream(
-        self: *QuicConnection,
+        self: *Connection,
         stream_id: u64,
         data: []const u8,
         fin: bool,
@@ -7648,7 +7648,7 @@ pub const QuicConnection = struct {
     /// bidirectional/unidirectional streams and observed peer bidirectional
     /// streams. Peer-initiated unidirectional streams are receive-only here.
     pub fn resetStream(
-        self: *QuicConnection,
+        self: *Connection,
         stream_id: u64,
         application_error_code: u64,
     ) Error!void {
@@ -7689,7 +7689,7 @@ pub const QuicConnection = struct {
     /// stream or an observed peer-initiated receive stream. Locally initiated
     /// unidirectional streams are send-only here and are rejected.
     pub fn stopSending(
-        self: *QuicConnection,
+        self: *Connection,
         stream_id: u64,
         application_error_code: u64,
     ) Error!void {
@@ -7725,12 +7725,12 @@ pub const QuicConnection = struct {
     ///
     /// The PING has no payload and does not consume stream or connection flow
     /// control credit. It is still congestion controlled once emitted.
-    pub fn sendPing(self: *QuicConnection) Error!void {
+    pub fn sendPing(self: *Connection) Error!void {
         try self.sendPingInSpace(.application);
     }
 
     /// Queue one PATH_CHALLENGE frame and track it until a matching PATH_RESPONSE arrives.
-    pub fn sendPathChallenge(self: *QuicConnection, data: [8]u8) Error!void {
+    pub fn sendPathChallenge(self: *Connection, data: [8]u8) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         self.pending_path_challenges.append(self.allocator, .{ .data = data }) catch return error.OutOfMemory;
     }
@@ -7741,7 +7741,7 @@ pub const QuicConnection = struct {
     /// packet-number-space state and installed Handshake keys, and queues at
     /// most one HANDSHAKE_DONE frame. The frame is consumed only after a
     /// successful `pollTx()` or `pollProtectedShortDatagram()` send commit.
-    pub fn sendHandshakeDone(self: *QuicConnection) Error!void {
+    pub fn sendHandshakeDone(self: *Connection) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (self.side != .server) return error.InvalidPacket;
 
@@ -7757,7 +7757,7 @@ pub const QuicConnection = struct {
     /// The opaque token is copied into connection-owned memory. It is consumed
     /// only after a successful `pollTx()` or `pollProtectedShortDatagram()` send
     /// commit; anti-amplification or congestion blocking leaves it queued.
-    pub fn issueNewToken(self: *QuicConnection, token: []const u8) Error!void {
+    pub fn issueNewToken(self: *Connection, token: []const u8) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (self.side != .server) return error.InvalidPacket;
 
@@ -7775,18 +7775,18 @@ pub const QuicConnection = struct {
     /// Tokens are opaque address-validation data owned by the connection. The
     /// returned slice remains valid until `deinit()` or until the connection
     /// state is otherwise mutated by future token-storage changes.
-    pub fn latestNewToken(self: QuicConnection) ?[]const u8 {
+    pub fn latestNewToken(self: Connection) ?[]const u8 {
         if (self.stored_new_tokens.items.len == 0) return null;
         return self.stored_new_tokens.items[self.stored_new_tokens.items.len - 1];
     }
 
     /// Return the largest DATA_BLOCKED limit reported by the peer.
-    pub fn peerDataBlockedLimit(self: QuicConnection) ?u64 {
+    pub fn peerDataBlockedLimit(self: Connection) ?u64 {
         return self.peer_data_blocked_limit;
     }
 
     /// Return the largest STREAM_DATA_BLOCKED limit reported by the peer for one stream.
-    pub fn peerStreamDataBlockedLimit(self: QuicConnection, stream_id: u64) ?u64 {
+    pub fn peerStreamDataBlockedLimit(self: Connection, stream_id: u64) ?u64 {
         for (self.peer_stream_data_blocked_limits.items) |blocked| {
             if (blocked.stream_id == stream_id) return blocked.maximum_stream_data;
         }
@@ -7794,12 +7794,12 @@ pub const QuicConnection = struct {
     }
 
     /// Return the largest STREAMS_BLOCKED_BIDI limit reported by the peer.
-    pub fn peerStreamsBlockedBidiLimit(self: QuicConnection) ?u64 {
+    pub fn peerStreamsBlockedBidiLimit(self: Connection) ?u64 {
         return self.peer_streams_blocked_bidi_limit;
     }
 
     /// Return the largest STREAMS_BLOCKED_UNI limit reported by the peer.
-    pub fn peerStreamsBlockedUniLimit(self: QuicConnection) ?u64 {
+    pub fn peerStreamsBlockedUniLimit(self: Connection) ?u64 {
         return self.peer_streams_blocked_uni_limit;
     }
 
@@ -7807,7 +7807,7 @@ pub const QuicConnection = struct {
     ///
     /// Returns null when no unread CRYPTO bytes are available. This wrapper
     /// keeps the original default Application-space behavior.
-    pub fn recvCrypto(self: *QuicConnection, buf: []u8) Error!?usize {
+    pub fn recvCrypto(self: *Connection, buf: []u8) Error!?usize {
         return self.recvCryptoInSpace(.application, buf);
     }
 
@@ -7816,7 +7816,7 @@ pub const QuicConnection = struct {
     /// Returns null when no unread bytes are available in that space. Initial,
     /// Handshake, and Application CRYPTO offsets are intentionally independent.
     pub fn recvCryptoInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         buf: []u8,
     ) Error!?usize {
@@ -7845,7 +7845,7 @@ pub const QuicConnection = struct {
     /// Handshake keys are discarded in the same call. `scratch` must be
     /// non-empty and is only used during this call.
     pub fn driveCryptoBackendInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         backend: CryptoBackend,
         scratch: []u8,
@@ -7910,7 +7910,7 @@ pub const QuicConnection = struct {
     /// Read queued data for a stream. Returns null when no data is available,
     /// or `StreamClosed` when the peer reset the receive side.
     pub fn recvOnStream(
-        self: *QuicConnection,
+        self: *Connection,
         stream_id: u64,
         buf: []u8,
     ) Error!?usize {
@@ -7942,7 +7942,7 @@ pub const QuicConnection = struct {
     ///
     /// Null means the receive side has not observed a final size yet. Locally
     /// initiated unidirectional stream IDs are invalid on the receive API.
-    pub fn recvStreamFinalSize(self: QuicConnection, stream_id: u64) Error!?u64 {
+    pub fn recvStreamFinalSize(self: Connection, stream_id: u64) Error!?u64 {
         if (stream_id > max_quic_varint) return error.InvalidStream;
         if (!isBidirectionalStream(stream_id) and isLocalStreamInitiator(self.side, stream_id)) {
             return error.InvalidStream;
@@ -7958,7 +7958,7 @@ pub const QuicConnection = struct {
     ///
     /// A RESET_STREAM final size is intentionally not treated as successful FIN
     /// completion; callers still receive `StreamClosed` from `recvOnStream()`.
-    pub fn recvStreamFinished(self: QuicConnection, stream_id: u64) Error!bool {
+    pub fn recvStreamFinished(self: Connection, stream_id: u64) Error!bool {
         if (stream_id > max_quic_varint) return error.InvalidStream;
         if (!isBidirectionalStream(stream_id) and isLocalStreamInitiator(self.side, stream_id)) {
             return error.InvalidStream;
@@ -7975,21 +7975,21 @@ pub const QuicConnection = struct {
         return false;
     }
 
-    fn findSendStream(self: *QuicConnection, stream_id: u64) ?*SendStreamState {
+    fn findSendStream(self: *Connection, stream_id: u64) ?*SendStreamState {
         for (self.send_streams.items) |*stream| {
             if (stream.stream_id == stream_id) return stream;
         }
         return null;
     }
 
-    fn findRecvStream(self: *QuicConnection, stream_id: u64) ?*RecvStreamState {
+    fn findRecvStream(self: *Connection, stream_id: u64) ?*RecvStreamState {
         for (self.recv_streams.items) |*stream| {
             if (stream.stream_id == stream_id) return stream;
         }
         return null;
     }
 
-    fn appendRecvStreamState(self: *QuicConnection, stream_id: u64) Error!*RecvStreamState {
+    fn appendRecvStreamState(self: *Connection, stream_id: u64) Error!*RecvStreamState {
         self.recv_streams.append(self.allocator, .{
             .stream_id = stream_id,
             .max_data = self.recv_max_stream_data,
@@ -7997,7 +7997,7 @@ pub const QuicConnection = struct {
         return &self.recv_streams.items[self.recv_streams.items.len - 1];
     }
 
-    fn ensureRecvStreamState(self: *QuicConnection, stream_id: u64) Error!*RecvStreamState {
+    fn ensureRecvStreamState(self: *Connection, stream_id: u64) Error!*RecvStreamState {
         if (self.findRecvStream(stream_id)) |stream_state| return stream_state;
 
         var next_stream_id = stream_id & 0x03;
@@ -8013,7 +8013,7 @@ pub const QuicConnection = struct {
     }
 
     fn queueStreamFrame(
-        self: *QuicConnection,
+        self: *Connection,
         stream_id: u64,
         offset: u64,
         data: []const u8,
@@ -8032,7 +8032,7 @@ pub const QuicConnection = struct {
     }
 
     fn queueCryptoFrame(
-        self: *QuicConnection,
+        self: *Connection,
         queue: *std.ArrayList(PendingCryptoFrame),
         offset: u64,
         data: []const u8,
@@ -8047,7 +8047,7 @@ pub const QuicConnection = struct {
         }) catch return error.OutOfMemory;
     }
 
-    fn queueDataBlockedFrame(self: *QuicConnection, maximum_data: u64) Error!void {
+    fn queueDataBlockedFrame(self: *Connection, maximum_data: u64) Error!void {
         for (self.pending_blocked_frames.items) |pending| {
             switch (pending) {
                 .data => |data| if (data.maximum_data == maximum_data) return,
@@ -8057,7 +8057,7 @@ pub const QuicConnection = struct {
         self.pending_blocked_frames.append(self.allocator, .{ .data = .{ .maximum_data = maximum_data } }) catch return error.OutOfMemory;
     }
 
-    fn queueStreamDataBlockedFrame(self: *QuicConnection, stream_id: u64, maximum_stream_data: u64) Error!void {
+    fn queueStreamDataBlockedFrame(self: *Connection, stream_id: u64, maximum_stream_data: u64) Error!void {
         for (self.pending_blocked_frames.items) |pending| {
             switch (pending) {
                 .stream_data => |stream_data| if (stream_data.stream_id == stream_id and stream_data.maximum_stream_data == maximum_stream_data) return,
@@ -8070,7 +8070,7 @@ pub const QuicConnection = struct {
         } }) catch return error.OutOfMemory;
     }
 
-    fn queueStreamsBlockedBidiFrame(self: *QuicConnection, maximum_streams: u64) Error!void {
+    fn queueStreamsBlockedBidiFrame(self: *Connection, maximum_streams: u64) Error!void {
         for (self.pending_blocked_frames.items) |pending| {
             switch (pending) {
                 .streams_bidi => |streams| if (streams.maximum_streams == maximum_streams) return,
@@ -8080,7 +8080,7 @@ pub const QuicConnection = struct {
         self.pending_blocked_frames.append(self.allocator, .{ .streams_bidi = .{ .maximum_streams = maximum_streams } }) catch return error.OutOfMemory;
     }
 
-    fn queueStreamsBlockedUniFrame(self: *QuicConnection, maximum_streams: u64) Error!void {
+    fn queueStreamsBlockedUniFrame(self: *Connection, maximum_streams: u64) Error!void {
         for (self.pending_blocked_frames.items) |pending| {
             switch (pending) {
                 .streams_uni => |streams| if (streams.maximum_streams == maximum_streams) return,
@@ -8090,7 +8090,7 @@ pub const QuicConnection = struct {
         self.pending_blocked_frames.append(self.allocator, .{ .streams_uni = .{ .maximum_streams = maximum_streams } }) catch return error.OutOfMemory;
     }
 
-    fn queueMaxDataFrame(self: *QuicConnection, maximum_data: u64) Error!void {
+    fn queueMaxDataFrame(self: *Connection, maximum_data: u64) Error!void {
         for (self.pending_max_frames.items) |pending| {
             switch (pending) {
                 .data => |data| if (data.maximum_data == maximum_data) return,
@@ -8101,7 +8101,7 @@ pub const QuicConnection = struct {
     }
 
     fn queueMaxStreamDataFrame(
-        self: *QuicConnection,
+        self: *Connection,
         stream_id: u64,
         maximum_stream_data: u64,
     ) Error!void {
@@ -8117,7 +8117,7 @@ pub const QuicConnection = struct {
         } }) catch return error.OutOfMemory;
     }
 
-    fn queueMaxStreamsBidiFrame(self: *QuicConnection, maximum_streams: u64) Error!void {
+    fn queueMaxStreamsBidiFrame(self: *Connection, maximum_streams: u64) Error!void {
         if (maximum_streams > max_stream_count) return error.InvalidStream;
         for (self.pending_max_frames.items) |pending| {
             switch (pending) {
@@ -8128,7 +8128,7 @@ pub const QuicConnection = struct {
         self.pending_max_frames.append(self.allocator, .{ .streams_bidi = .{ .maximum_streams = maximum_streams } }) catch return error.OutOfMemory;
     }
 
-    fn queueMaxStreamsUniFrame(self: *QuicConnection, maximum_streams: u64) Error!void {
+    fn queueMaxStreamsUniFrame(self: *Connection, maximum_streams: u64) Error!void {
         if (maximum_streams > max_stream_count) return error.InvalidStream;
         for (self.pending_max_frames.items) |pending| {
             switch (pending) {
@@ -8140,7 +8140,7 @@ pub const QuicConnection = struct {
     }
 
     fn queueReceiveStreamCountCredit(
-        self: *QuicConnection,
+        self: *Connection,
         stream_state: *RecvStreamState,
         consumed_len: usize,
     ) Error!void {
@@ -8155,7 +8155,7 @@ pub const QuicConnection = struct {
     }
 
     fn queueClosedReceiveStreamCountCredit(
-        self: *QuicConnection,
+        self: *Connection,
         stream_state: *RecvStreamState,
     ) Error!void {
         if (stream_state.stream_count_credit_released) return;
@@ -8177,7 +8177,7 @@ pub const QuicConnection = struct {
         stream_state.stream_count_credit_released = true;
     }
 
-    fn nextReceiveConnectionDataLimit(self: QuicConnection, consumed: u64) Error!u64 {
+    fn nextReceiveConnectionDataLimit(self: Connection, consumed: u64) Error!u64 {
         var next_limit = std.math.add(u64, self.recv_max_data, consumed) catch return error.Internal;
         if (self.config.receive_connection_window) |window| {
             const target_limit = std.math.add(u64, self.recv_data_bytes, window) catch return error.Internal;
@@ -8187,7 +8187,7 @@ pub const QuicConnection = struct {
         return next_limit;
     }
 
-    fn nextReceiveStreamDataLimit(self: QuicConnection, stream_state: RecvStreamState, consumed: u64) Error!u64 {
+    fn nextReceiveStreamDataLimit(self: Connection, stream_state: RecvStreamState, consumed: u64) Error!u64 {
         var next_limit = std.math.add(u64, stream_state.max_data, consumed) catch return error.Internal;
         if (self.config.receive_stream_window) |window| {
             const highest_received = try highestReceivedStreamEndOffset(stream_state);
@@ -8227,7 +8227,7 @@ pub const QuicConnection = struct {
     }
 
     fn queueReceiveFlowControlCredit(
-        self: *QuicConnection,
+        self: *Connection,
         stream_state: *RecvStreamState,
         consumed_len: usize,
     ) Error!void {
@@ -8272,7 +8272,7 @@ pub const QuicConnection = struct {
     }
 
     fn rollbackCryptoSendQueue(
-        self: *QuicConnection,
+        self: *Connection,
         queue: *std.ArrayList(PendingCryptoFrame),
         original_len: usize,
     ) void {
@@ -8280,7 +8280,7 @@ pub const QuicConnection = struct {
     }
 
     fn rollbackCryptoFrameQueue(
-        self: *QuicConnection,
+        self: *Connection,
         queue: *std.ArrayList(PendingCryptoFrame),
         original_len: usize,
     ) void {
@@ -8291,7 +8291,7 @@ pub const QuicConnection = struct {
     }
 
     fn rollbackCryptoFrameQueueFromSnapshots(
-        self: *QuicConnection,
+        self: *Connection,
         queue: *std.ArrayList(PendingCryptoFrame),
         snapshots: []const PendingCryptoFrame,
     ) void {
@@ -8300,7 +8300,7 @@ pub const QuicConnection = struct {
         @memcpy(queue.items[0..snapshots.len], snapshots);
     }
 
-    fn rollbackSendQueue(self: *QuicConnection, original_len: usize) void {
+    fn rollbackSendQueue(self: *Connection, original_len: usize) void {
         while (self.send_queue.items.len > original_len) {
             const removed = self.send_queue.orderedRemove(self.send_queue.items.len - 1);
             self.allocator.free(removed.data);
@@ -8308,7 +8308,7 @@ pub const QuicConnection = struct {
     }
 
     fn rollbackSendQueueFromSnapshots(
-        self: *QuicConnection,
+        self: *Connection,
         snapshots: []const PendingStreamFrame,
     ) void {
         deinitPendingStreamFrameSlice(self.allocator, self.send_queue.items);
@@ -8316,7 +8316,7 @@ pub const QuicConnection = struct {
         @memcpy(self.send_queue.items[0..snapshots.len], snapshots);
     }
 
-    fn clonePendingStreamFrame(self: *QuicConnection, pending: PendingStreamFrame) Error!PendingStreamFrame {
+    fn clonePendingStreamFrame(self: *Connection, pending: PendingStreamFrame) Error!PendingStreamFrame {
         const data = self.allocator.dupe(u8, pending.data) catch return error.OutOfMemory;
         return .{
             .stream_id = pending.stream_id,
@@ -8327,7 +8327,7 @@ pub const QuicConnection = struct {
     }
 
     fn clonePendingStreamFrames(
-        self: *QuicConnection,
+        self: *Connection,
         frames: []const PendingStreamFrame,
     ) Error![]PendingStreamFrame {
         const snapshots = self.allocator.alloc(PendingStreamFrame, frames.len) catch return error.OutOfMemory;
@@ -8344,7 +8344,7 @@ pub const QuicConnection = struct {
         return snapshots;
     }
 
-    fn clonePendingCryptoFrame(self: *QuicConnection, pending: PendingCryptoFrame) Error!PendingCryptoFrame {
+    fn clonePendingCryptoFrame(self: *Connection, pending: PendingCryptoFrame) Error!PendingCryptoFrame {
         const data = self.allocator.dupe(u8, pending.data) catch return error.OutOfMemory;
         return .{
             .offset = pending.offset,
@@ -8353,7 +8353,7 @@ pub const QuicConnection = struct {
     }
 
     fn clonePendingCryptoFrames(
-        self: *QuicConnection,
+        self: *Connection,
         frames: []const PendingCryptoFrame,
     ) Error![]PendingCryptoFrame {
         const snapshots = self.allocator.alloc(PendingCryptoFrame, frames.len) catch return error.OutOfMemory;
@@ -8370,7 +8370,7 @@ pub const QuicConnection = struct {
         return snapshots;
     }
 
-    fn cloneSentPacket(self: *QuicConnection, sent_packet: SentPacket) Error!SentPacket {
+    fn cloneSentPacket(self: *Connection, sent_packet: SentPacket) Error!SentPacket {
         var cloned = sent_packet;
         cloned.stream_frame = null;
         cloned.crypto_frame = null;
@@ -8386,7 +8386,7 @@ pub const QuicConnection = struct {
         return cloned;
     }
 
-    fn cloneSentPackets(self: *QuicConnection, sent_packets: []const SentPacket) Error![]SentPacket {
+    fn cloneSentPackets(self: *Connection, sent_packets: []const SentPacket) Error![]SentPacket {
         const snapshots = self.allocator.alloc(SentPacket, sent_packets.len) catch return error.OutOfMemory;
         var cloned_count: usize = 0;
         errdefer {
@@ -8401,7 +8401,7 @@ pub const QuicConnection = struct {
         return snapshots;
     }
 
-    fn rollbackStoredNewTokens(self: *QuicConnection, original_len: usize) void {
+    fn rollbackStoredNewTokens(self: *Connection, original_len: usize) void {
         while (self.stored_new_tokens.items.len > original_len) {
             const removed = self.stored_new_tokens.orderedRemove(self.stored_new_tokens.items.len - 1);
             self.allocator.free(removed);
@@ -8409,7 +8409,7 @@ pub const QuicConnection = struct {
     }
 
     fn rollbackPeerStreamDataBlockedLimits(
-        self: *QuicConnection,
+        self: *Connection,
         original_len: usize,
         snapshots: []const PeerStreamDataBlockedState,
     ) void {
@@ -8418,7 +8418,7 @@ pub const QuicConnection = struct {
     }
 
     fn rollbackRecvStreams(
-        self: *QuicConnection,
+        self: *Connection,
         original_len: usize,
         snapshots: []const RecvStreamSnapshot,
     ) void {
@@ -8444,7 +8444,7 @@ pub const QuicConnection = struct {
     }
 
     fn rollbackSendStreams(
-        self: *QuicConnection,
+        self: *Connection,
         original_len: usize,
         snapshots: []const SendStreamState,
     ) void {
@@ -8453,7 +8453,7 @@ pub const QuicConnection = struct {
     }
 
     fn rollbackSentPackets(
-        self: *QuicConnection,
+        self: *Connection,
         sent_packets: *std.ArrayList(SentPacket),
         snapshots: []const SentPacket,
     ) void {
@@ -8463,7 +8463,7 @@ pub const QuicConnection = struct {
     }
 
     fn rollbackActiveConnectionIds(
-        self: *QuicConnection,
+        self: *Connection,
         original_len: usize,
         snapshots: []const ActiveConnectionIdSnapshot,
     ) void {
@@ -8477,7 +8477,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn streamDataBlockedFrameIsObsolete(self: *QuicConnection, stream_data: frame.StreamDataBlockedFrame) bool {
+    fn streamDataBlockedFrameIsObsolete(self: *Connection, stream_data: frame.StreamDataBlockedFrame) bool {
         if (self.findSendStream(stream_data.stream_id)) |stream_state| {
             if (stream_state.reset_sent or stream_state.fin_sent) return true;
             return stream_state.max_data > stream_data.maximum_stream_data;
@@ -8485,7 +8485,7 @@ pub const QuicConnection = struct {
         return self.initialPeerStreamDataLimit(stream_data.stream_id) > stream_data.maximum_stream_data;
     }
 
-    fn blockedFrameIsObsolete(self: *QuicConnection, blocked_frame: PendingBlockedFrame) bool {
+    fn blockedFrameIsObsolete(self: *Connection, blocked_frame: PendingBlockedFrame) bool {
         return switch (blocked_frame) {
             .data => |data| self.peer_max_data > data.maximum_data,
             .stream_data => |stream_data| self.streamDataBlockedFrameIsObsolete(stream_data),
@@ -8494,7 +8494,7 @@ pub const QuicConnection = struct {
         };
     }
 
-    fn dropObsoleteBlockedFrames(self: *QuicConnection) void {
+    fn dropObsoleteBlockedFrames(self: *Connection) void {
         var i: usize = 0;
         while (i < self.pending_blocked_frames.items.len) {
             if (self.blockedFrameIsObsolete(self.pending_blocked_frames.items[i])) {
@@ -8505,7 +8505,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn maxStreamDataFrameIsObsolete(self: *QuicConnection, stream_data: frame.MaxStreamDataFrame) bool {
+    fn maxStreamDataFrameIsObsolete(self: *Connection, stream_data: frame.MaxStreamDataFrame) bool {
         const stream_state = self.findRecvStream(stream_data.stream_id) orelse {
             return self.recv_max_stream_data > stream_data.maximum_stream_data;
         };
@@ -8513,7 +8513,7 @@ pub const QuicConnection = struct {
         return stream_state.max_data > stream_data.maximum_stream_data;
     }
 
-    fn maxFrameIsObsolete(self: *QuicConnection, max_frame: PendingMaxFrame) bool {
+    fn maxFrameIsObsolete(self: *Connection, max_frame: PendingMaxFrame) bool {
         return switch (max_frame) {
             .data => |data| self.recv_max_data > data.maximum_data,
             .stream_data => |stream_data| self.maxStreamDataFrameIsObsolete(stream_data),
@@ -8522,7 +8522,7 @@ pub const QuicConnection = struct {
         };
     }
 
-    fn dropObsoleteMaxFrames(self: *QuicConnection) void {
+    fn dropObsoleteMaxFrames(self: *Connection) void {
         var i: usize = 0;
         while (i < self.pending_max_frames.items.len) {
             if (self.maxFrameIsObsolete(self.pending_max_frames.items[i])) {
@@ -8533,7 +8533,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn stopSendingFrameIsObsolete(self: *QuicConnection, stop_sending: frame.StopSendingFrame) bool {
+    fn stopSendingFrameIsObsolete(self: *Connection, stop_sending: frame.StopSendingFrame) bool {
         const stream_state = self.findRecvStream(stop_sending.stream_id) orelse return true;
         if (stream_state.reset_error_code != null) return true;
         const final_size = stream_state.final_size orelse return false;
@@ -8541,7 +8541,7 @@ pub const QuicConnection = struct {
         return stream_state.data.items.len >= final_size_usize;
     }
 
-    fn dropObsoleteStopSendingFrames(self: *QuicConnection) void {
+    fn dropObsoleteStopSendingFrames(self: *Connection) void {
         var i: usize = 0;
         while (i < self.pending_stop_sending.items.len) {
             if (self.stopSendingFrameIsObsolete(self.pending_stop_sending.items[i])) {
@@ -8553,7 +8553,7 @@ pub const QuicConnection = struct {
     }
 
     fn receiveAckFrame(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         now_millis: i64,
         ack: frame.AckFrame,
@@ -8693,7 +8693,7 @@ pub const QuicConnection = struct {
     }
 
     fn validateEcnAck(
-        self: *QuicConnection,
+        self: *Connection,
         packet_space: PacketNumberSpaceView,
         largest_acknowledged: u64,
         newly_acked_ect0: u64,
@@ -8749,7 +8749,7 @@ pub const QuicConnection = struct {
     }
 
     fn removeAckDrivenLosses(
-        self: *QuicConnection,
+        self: *Connection,
         packet_space: PacketNumberSpaceView,
         largest_acknowledged: u64,
         latest_rtt_sample_ms: ?u64,
@@ -8862,13 +8862,13 @@ pub const QuicConnection = struct {
         return result;
     }
 
-    fn expireLossDetectionTimeouts(self: *QuicConnection, now_millis: i64) Error!void {
+    fn expireLossDetectionTimeouts(self: *Connection, now_millis: i64) Error!void {
         try self.expireLossDetectionTimeoutInSpace(.initial, now_millis);
         try self.expireLossDetectionTimeoutInSpace(.handshake, now_millis);
         try self.expireLossDetectionTimeoutInSpace(.application, now_millis);
     }
 
-    fn expireLossDetectionTimeoutInSpace(self: *QuicConnection, space: PacketNumberSpace, now_millis: i64) Error!void {
+    fn expireLossDetectionTimeoutInSpace(self: *Connection, space: PacketNumberSpace, now_millis: i64) Error!void {
         const packet_space = self.packetNumberSpace(space);
         const deadline = packet_space.loss_deadline_millis.* orelse return;
         if (deadline > now_millis) return;
@@ -8894,7 +8894,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn hasPendingAckElicitingDataInSpace(self: *QuicConnection, space: PacketNumberSpace) bool {
+    fn hasPendingAckElicitingDataInSpace(self: *Connection, space: PacketNumberSpace) bool {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.crypto_send_queue.items.len != 0 or packet_space.pending_ping_count.* != 0) return true;
         if (space != .application) return false;
@@ -8920,7 +8920,7 @@ pub const QuicConnection = struct {
         return self.send_queue.items.len != 0;
     }
 
-    fn hasQueuedAckElicitingDataInSpace(self: *QuicConnection, space: PacketNumberSpace) bool {
+    fn hasQueuedAckElicitingDataInSpace(self: *Connection, space: PacketNumberSpace) bool {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.crypto_send_queue.items.len != 0 or packet_space.pending_ping_count.* != 0) return true;
         if (space != .application) return false;
@@ -8938,17 +8938,17 @@ pub const QuicConnection = struct {
             self.send_queue.items.len != 0;
     }
 
-    fn hasPendingPtoProbeDataInSpace(self: *QuicConnection, space: PacketNumberSpace) bool {
+    fn hasPendingPtoProbeDataInSpace(self: *Connection, space: PacketNumberSpace) bool {
         return self.hasPendingAckElicitingDataInSpace(space);
     }
 
-    fn armCongestionProbeIfPendingData(self: *QuicConnection, space: PacketNumberSpace) void {
+    fn armCongestionProbeIfPendingData(self: *Connection, space: PacketNumberSpace) void {
         if (self.hasQueuedAckElicitingDataInSpace(space)) {
             self.armCongestionProbeInSpace(space);
         }
     }
 
-    fn ptoAllowedInSpace(self: QuicConnection, space: PacketNumberSpace) bool {
+    fn ptoAllowedInSpace(self: Connection, space: PacketNumberSpace) bool {
         if (self.serverAtAntiAmplificationLimit()) return false;
         return switch (space) {
             .initial, .handshake => true,
@@ -8956,7 +8956,7 @@ pub const QuicConnection = struct {
         };
     }
 
-    fn queuePtoProbeInSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
+    fn queuePtoProbeInSpace(self: *Connection, space: PacketNumberSpace) Error!void {
         if (!self.ptoAllowedInSpace(space)) return;
         if (self.hasPendingPtoProbeDataInSpace(space)) {
             self.armPtoProbeInSpace(space);
@@ -8978,7 +8978,7 @@ pub const QuicConnection = struct {
         self.armPtoProbeInSpace(space);
     }
 
-    fn queuePtoPeerSpaceProbes(self: *QuicConnection, expired_space: PacketNumberSpace) Error!void {
+    fn queuePtoPeerSpaceProbes(self: *Connection, expired_space: PacketNumberSpace) Error!void {
         const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
         for (spaces) |space| {
             if (space == expired_space) continue;
@@ -8990,14 +8990,14 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn checkPtoTimeoutInSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
+    fn checkPtoTimeoutInSpace(self: *Connection, space: PacketNumberSpace) Error!void {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return;
         try self.queuePtoProbeInSpace(space);
         self.increaseConnectionPtoBackoff();
     }
 
-    fn queuePtoCryptoRetransmission(self: *QuicConnection, space: PacketNumberSpace) Error!bool {
+    fn queuePtoCryptoRetransmission(self: *Connection, space: PacketNumberSpace) Error!bool {
         const packet_space = self.packetNumberSpace(space);
         for (packet_space.sent_packets.items) |sent_packet| {
             const pending = sent_packet.crypto_frame orelse continue;
@@ -9009,7 +9009,7 @@ pub const QuicConnection = struct {
         return false;
     }
 
-    fn queuePtoControlRetransmission(self: *QuicConnection, space: PacketNumberSpace) Error!bool {
+    fn queuePtoControlRetransmission(self: *Connection, space: PacketNumberSpace) Error!bool {
         if (space != .application) return false;
         const packet_space = self.packetNumberSpace(space);
         for (packet_space.sent_packets.items) |sent_packet| {
@@ -9025,7 +9025,7 @@ pub const QuicConnection = struct {
         return false;
     }
 
-    fn queuePtoStreamRetransmission(self: *QuicConnection, space: PacketNumberSpace) Error!bool {
+    fn queuePtoStreamRetransmission(self: *Connection, space: PacketNumberSpace) Error!bool {
         if (space != .application) return false;
         const packet_space = self.packetNumberSpace(space);
         for (packet_space.sent_packets.items) |sent_packet| {
@@ -9038,7 +9038,7 @@ pub const QuicConnection = struct {
         return false;
     }
 
-    fn pendingAckFrame(self: QuicConnection, space: PacketNumberSpace) ?frame.AckFrame {
+    fn pendingAckFrame(self: Connection, space: PacketNumberSpace) ?frame.AckFrame {
         const largest = self.pendingAckLargest(space) orelse return null;
         return .{
             .largest_acknowledged = largest,
@@ -9047,13 +9047,13 @@ pub const QuicConnection = struct {
         };
     }
 
-    fn queuePingInSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
+    fn queuePingInSpace(self: *Connection, space: PacketNumberSpace) Error!void {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
         packet_space.pending_ping_count.* = std.math.add(usize, packet_space.pending_ping_count.*, 1) catch return error.Internal;
     }
 
-    fn expirePathChallenges(self: *QuicConnection, now_millis: i64) Error!void {
+    fn expirePathChallenges(self: *Connection, now_millis: i64) Error!void {
         if (self.outstanding_path_challenges.items.len == 0) return;
 
         const retry_after_ms = self.recovery_state.ptoMs();
@@ -9089,7 +9089,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollCloseFrame(
-        self: *QuicConnection,
+        self: *Connection,
         now_millis: i64,
         out_buf: []u8,
     ) Error!?[]u8 {
@@ -9121,7 +9121,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollAckOnly(
-        self: *QuicConnection,
+        self: *Connection,
         ack: frame.AckFrame,
         now_millis: i64,
         out_buf: []u8,
@@ -9130,7 +9130,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollAckOnlyInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         ack: frame.AckFrame,
         now_millis: i64,
@@ -9157,7 +9157,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollPathResponse(
-        self: *QuicConnection,
+        self: *Connection,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
         out_buf: []u8,
@@ -9226,7 +9226,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollResetStream(
-        self: *QuicConnection,
+        self: *Connection,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
         out_buf: []u8,
@@ -9295,7 +9295,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollStopSending(
-        self: *QuicConnection,
+        self: *Connection,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
         out_buf: []u8,
@@ -9364,7 +9364,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollRetireConnectionId(
-        self: *QuicConnection,
+        self: *Connection,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
         out_buf: []u8,
@@ -9433,7 +9433,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollNewConnectionId(
-        self: *QuicConnection,
+        self: *Connection,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
         out_buf: []u8,
@@ -9508,7 +9508,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollHandshakeDone(
-        self: *QuicConnection,
+        self: *Connection,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
         out_buf: []u8,
@@ -9577,7 +9577,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollNewToken(
-        self: *QuicConnection,
+        self: *Connection,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
         out_buf: []u8,
@@ -9647,7 +9647,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollPingFrame(
-        self: *QuicConnection,
+        self: *Connection,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
         out_buf: []u8,
@@ -9656,7 +9656,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollPingFrameInSpace(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
@@ -9730,7 +9730,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollPathChallenge(
-        self: *QuicConnection,
+        self: *Connection,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
         out_buf: []u8,
@@ -9814,7 +9814,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollBlockedFrame(
-        self: *QuicConnection,
+        self: *Connection,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
         out_buf: []u8,
@@ -9897,7 +9897,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollMaxFrame(
-        self: *QuicConnection,
+        self: *Connection,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
         out_buf: []u8,
@@ -9980,7 +9980,7 @@ pub const QuicConnection = struct {
     }
 
     fn pollCryptoFrame(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         ack_to_send: ?frame.AckFrame,
         now_millis: i64,
@@ -10066,7 +10066,7 @@ pub const QuicConnection = struct {
         return written;
     }
 
-    fn dropResetClosedStreamFrames(self: *QuicConnection) void {
+    fn dropResetClosedStreamFrames(self: *Connection) void {
         var i: usize = 0;
         while (i < self.send_queue.items.len) {
             const pending = self.send_queue.items[i];
@@ -10084,7 +10084,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn queueAckForReceivedPacket(self: *QuicConnection, space: PacketNumberSpace) Error!void {
+    fn queueAckForReceivedPacket(self: *Connection, space: PacketNumberSpace) Error!void {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
         if (packet_space.next_peer_packet_number.* > max_quic_varint) return error.InvalidPacket;
@@ -10094,7 +10094,7 @@ pub const QuicConnection = struct {
         packet_space.next_peer_packet_number.* = std.math.add(u64, packet_number, 1) catch return error.Internal;
     }
 
-    fn activeConnectionIdCount(self: QuicConnection) u64 {
+    fn activeConnectionIdCount(self: Connection) u64 {
         var count: u64 = 0;
         for (self.active_connection_ids.items) |active_id| {
             if (!active_id.retired) count += 1;
@@ -10102,14 +10102,14 @@ pub const QuicConnection = struct {
         return count;
     }
 
-    fn nextUnsentLocalConnectionIdIndex(self: QuicConnection) ?usize {
+    fn nextUnsentLocalConnectionIdIndex(self: Connection) ?usize {
         for (self.local_connection_ids.items, 0..) |local_id, i| {
             if (!local_id.sent and !local_id.retired) return i;
         }
         return null;
     }
 
-    fn localConnectionIdValueExists(self: QuicConnection, connection_id: []const u8) bool {
+    fn localConnectionIdValueExists(self: Connection, connection_id: []const u8) bool {
         for (self.local_connection_ids.items) |local_id| {
             if (std.mem.eql(u8, local_id.connection_id, connection_id)) return true;
         }
@@ -10117,7 +10117,7 @@ pub const QuicConnection = struct {
     }
 
     fn localStatelessResetTokenValueExists(
-        self: QuicConnection,
+        self: Connection,
         stateless_reset_token: [packet.stateless_reset_token_len]u8,
     ) bool {
         for (self.local_connection_ids.items) |local_id| {
@@ -10126,7 +10126,7 @@ pub const QuicConnection = struct {
         return false;
     }
 
-    fn findLocalConnectionId(self: *QuicConnection, sequence_number: u64) ?*LocalConnectionId {
+    fn findLocalConnectionId(self: *Connection, sequence_number: u64) ?*LocalConnectionId {
         for (self.local_connection_ids.items) |*local_id| {
             if (local_id.sequence_number == sequence_number) return local_id;
         }
@@ -10134,7 +10134,7 @@ pub const QuicConnection = struct {
     }
 
     fn rollbackLocalConnectionIds(
-        self: *QuicConnection,
+        self: *Connection,
         original_len: usize,
         snapshots: []const LocalConnectionIdSnapshot,
     ) void {
@@ -10144,7 +10144,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn findActiveConnectionId(self: *QuicConnection, sequence_number: u64) ?*ActiveConnectionId {
+    fn findActiveConnectionId(self: *Connection, sequence_number: u64) ?*ActiveConnectionId {
         for (self.active_connection_ids.items) |*active_id| {
             if (active_id.sequence_number == sequence_number) return active_id;
         }
@@ -10152,7 +10152,7 @@ pub const QuicConnection = struct {
     }
 
     fn activeStatelessResetTokenValueExists(
-        self: QuicConnection,
+        self: Connection,
         stateless_reset_token: [packet.stateless_reset_token_len]u8,
     ) bool {
         for (self.active_connection_ids.items) |active_id| {
@@ -10161,14 +10161,14 @@ pub const QuicConnection = struct {
         return false;
     }
 
-    fn queueRetireConnectionId(self: *QuicConnection, sequence_number: u64) Error!void {
+    fn queueRetireConnectionId(self: *Connection, sequence_number: u64) Error!void {
         for (self.pending_retire_connection_ids.items) |queued_sequence_number| {
             if (queued_sequence_number == sequence_number) return;
         }
         self.pending_retire_connection_ids.append(self.allocator, sequence_number) catch return error.OutOfMemory;
     }
 
-    fn retireConnectionIdsBefore(self: *QuicConnection, retire_prior_to: u64) Error!void {
+    fn retireConnectionIdsBefore(self: *Connection, retire_prior_to: u64) Error!void {
         for (self.active_connection_ids.items) |*active_id| {
             if (active_id.sequence_number >= retire_prior_to or active_id.retired) continue;
             active_id.retired = true;
@@ -10176,7 +10176,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn receiveNewConnectionIdFrame(self: *QuicConnection, new_connection_id: frame.NewConnectionIdFrame) Error!void {
+    fn receiveNewConnectionIdFrame(self: *Connection, new_connection_id: frame.NewConnectionIdFrame) Error!void {
         try self.retireConnectionIdsBefore(new_connection_id.retire_prior_to);
 
         if (self.findActiveConnectionId(new_connection_id.sequence_number)) |existing| {
@@ -10199,13 +10199,13 @@ pub const QuicConnection = struct {
         }) catch return error.OutOfMemory;
     }
 
-    fn receiveRetireConnectionIdFrame(self: *QuicConnection, retire_connection_id: frame.RetireConnectionIdFrame) Error!void {
+    fn receiveRetireConnectionIdFrame(self: *Connection, retire_connection_id: frame.RetireConnectionIdFrame) Error!void {
         const local_id = self.findLocalConnectionId(retire_connection_id.sequence_number) orelse return error.InvalidPacket;
         if (!local_id.sent) return error.InvalidPacket;
         local_id.retired = true;
     }
 
-    fn receiveNewTokenFrame(self: *QuicConnection, new_token: frame.NewTokenFrame) Error!void {
+    fn receiveNewTokenFrame(self: *Connection, new_token: frame.NewTokenFrame) Error!void {
         if (self.side == .server) return error.InvalidPacket;
         if (self.stored_new_tokens.items.len >= self.config.max_stored_new_tokens) return;
 
@@ -10216,13 +10216,13 @@ pub const QuicConnection = struct {
         self.stored_new_tokens.append(self.allocator, owned) catch return error.OutOfMemory;
     }
 
-    fn receiveHandshakeDoneFrame(self: *QuicConnection) Error!void {
+    fn receiveHandshakeDoneFrame(self: *Connection) Error!void {
         if (self.side == .server) return error.InvalidPacket;
         self.handshake_state = .confirmed;
         self.handshake_confirmed = true;
     }
 
-    fn receiveDataBlockedFrame(self: *QuicConnection, data_blocked: frame.DataBlockedFrame) Error!void {
+    fn receiveDataBlockedFrame(self: *Connection, data_blocked: frame.DataBlockedFrame) Error!void {
         self.peer_data_blocked_limit = if (self.peer_data_blocked_limit) |current|
             @max(current, data_blocked.maximum_data)
         else
@@ -10239,7 +10239,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn receiveStreamDataBlockedFrame(self: *QuicConnection, stream_data_blocked: frame.StreamDataBlockedFrame) Error!void {
+    fn receiveStreamDataBlockedFrame(self: *Connection, stream_data_blocked: frame.StreamDataBlockedFrame) Error!void {
         if (stream_data_blocked.stream_id > max_quic_varint) return error.InvalidStream;
         try self.validateIncomingStreamCount(stream_data_blocked.stream_id);
 
@@ -10278,7 +10278,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn receiveStreamsBlockedBidiFrame(self: *QuicConnection, streams_blocked: frame.StreamsBlockedBidiFrame) Error!void {
+    fn receiveStreamsBlockedBidiFrame(self: *Connection, streams_blocked: frame.StreamsBlockedBidiFrame) Error!void {
         self.peer_streams_blocked_bidi_limit = if (self.peer_streams_blocked_bidi_limit) |current|
             @max(current, streams_blocked.maximum_streams)
         else
@@ -10295,7 +10295,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn receiveStreamsBlockedUniFrame(self: *QuicConnection, streams_blocked: frame.StreamsBlockedUniFrame) Error!void {
+    fn receiveStreamsBlockedUniFrame(self: *Connection, streams_blocked: frame.StreamsBlockedUniFrame) Error!void {
         self.peer_streams_blocked_uni_limit = if (self.peer_streams_blocked_uni_limit) |current|
             @max(current, streams_blocked.maximum_streams)
         else
@@ -10312,7 +10312,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn receiveMaxDataFrame(self: *QuicConnection, max_data: frame.MaxDataFrame) void {
+    fn receiveMaxDataFrame(self: *Connection, max_data: frame.MaxDataFrame) void {
         self.peer_max_data = @max(self.peer_max_data, max_data.maximum_data);
     }
 
@@ -10321,7 +10321,7 @@ pub const QuicConnection = struct {
         stream_state.max_data = @max(stream_state.max_data, maximum_stream_data);
     }
 
-    fn receiveMaxStreamDataFrame(self: *QuicConnection, max_stream_data: frame.MaxStreamDataFrame) Error!void {
+    fn receiveMaxStreamDataFrame(self: *Connection, max_stream_data: frame.MaxStreamDataFrame) Error!void {
         if (max_stream_data.stream_id > max_quic_varint) return error.InvalidStream;
 
         if (!isBidirectionalStream(max_stream_data.stream_id)) {
@@ -10357,19 +10357,19 @@ pub const QuicConnection = struct {
         applyMaxStreamDataToSendStream(stream_state, max_stream_data.maximum_stream_data);
     }
 
-    fn receiveMaxStreamsBidiFrame(self: *QuicConnection, max_streams: frame.MaxStreamsBidiFrame) void {
+    fn receiveMaxStreamsBidiFrame(self: *Connection, max_streams: frame.MaxStreamsBidiFrame) void {
         self.peer_max_streams_bidi = @max(self.peer_max_streams_bidi, max_streams.maximum_streams);
     }
 
-    fn receiveMaxStreamsUniFrame(self: *QuicConnection, max_streams: frame.MaxStreamsUniFrame) void {
+    fn receiveMaxStreamsUniFrame(self: *Connection, max_streams: frame.MaxStreamsUniFrame) void {
         self.peer_max_streams_uni = @max(self.peer_max_streams_uni, max_streams.maximum_streams);
     }
 
-    fn receivePathChallengeFrame(self: *QuicConnection, path_challenge: frame.PathChallengeFrame) Error!void {
+    fn receivePathChallengeFrame(self: *Connection, path_challenge: frame.PathChallengeFrame) Error!void {
         self.pending_path_responses.append(self.allocator, path_challenge.data) catch return error.OutOfMemory;
     }
 
-    fn receivePathResponseFrame(self: *QuicConnection, path_response: frame.PathResponseFrame) Error!void {
+    fn receivePathResponseFrame(self: *Connection, path_response: frame.PathResponseFrame) Error!void {
         for (self.outstanding_path_challenges.items, 0..) |challenge, i| {
             if (std.mem.eql(u8, &challenge.data, &path_response.data)) {
                 _ = self.outstanding_path_challenges.orderedRemove(i);
@@ -10380,7 +10380,7 @@ pub const QuicConnection = struct {
         return error.InvalidPacket;
     }
 
-    fn receiveStopSendingFrame(self: *QuicConnection, stop_sending: frame.StopSendingFrame) Error!void {
+    fn receiveStopSendingFrame(self: *Connection, stop_sending: frame.StopSendingFrame) Error!void {
         if (stop_sending.stream_id > max_quic_varint) return error.InvalidStream;
 
         if (!isBidirectionalStream(stop_sending.stream_id)) {
@@ -10418,7 +10418,7 @@ pub const QuicConnection = struct {
     }
 
     fn queueResetStream(
-        self: *QuicConnection,
+        self: *Connection,
         stream_state: *SendStreamState,
         application_error_code: u64,
     ) Error!void {
@@ -10435,7 +10435,7 @@ pub const QuicConnection = struct {
     }
 
     fn queueStopSending(
-        self: *QuicConnection,
+        self: *Connection,
         stream_state: *RecvStreamState,
         application_error_code: u64,
     ) Error!void {
@@ -10454,7 +10454,7 @@ pub const QuicConnection = struct {
         stream_state.stop_sending_sent = true;
     }
 
-    fn validateIncomingStreamCount(self: *QuicConnection, stream_id: u64) Error!void {
+    fn validateIncomingStreamCount(self: *Connection, stream_id: u64) Error!void {
         if (isLocalBidirectionalStream(self.side, stream_id)) {
             if (self.findSendStream(stream_id) == null) return error.InvalidPacket;
             return;
@@ -10527,7 +10527,7 @@ pub const QuicConnection = struct {
     }
 
     fn appendPendingRecvStreamFrame(
-        self: *QuicConnection,
+        self: *Connection,
         stream_state: *RecvStreamState,
         offset: u64,
         data: []const u8,
@@ -10549,7 +10549,7 @@ pub const QuicConnection = struct {
         return null;
     }
 
-    fn drainPendingRecvStreams(self: *QuicConnection) Error!void {
+    fn drainPendingRecvStreams(self: *Connection) Error!void {
         for (self.recv_streams.items) |*stream_state| {
             const start_len = stream_state.data.items.len;
             var expected = std.math.cast(u64, start_len) orelse return error.Internal;
@@ -10575,7 +10575,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn receiveResetStreamFrame(self: *QuicConnection, reset: frame.ResetStreamFrame) Error!void {
+    fn receiveResetStreamFrame(self: *Connection, reset: frame.ResetStreamFrame) Error!void {
         if (reset.stream_id > max_quic_varint) return error.InvalidStream;
         try self.validateIncomingStreamCount(reset.stream_id);
 
@@ -10663,7 +10663,7 @@ pub const QuicConnection = struct {
         return null;
     }
 
-    fn drainPendingCryptoFrames(self: *QuicConnection, space: PacketNumberSpace) Error!void {
+    fn drainPendingCryptoFrames(self: *Connection, space: PacketNumberSpace) Error!void {
         var packet_space = self.packetNumberSpace(space);
         const start_len = packet_space.crypto_recv_buffer.items.len;
         var expected = std.math.cast(u64, start_len) orelse return error.Internal;
@@ -10689,7 +10689,7 @@ pub const QuicConnection = struct {
     }
 
     fn receiveCryptoFrame(
-        self: *QuicConnection,
+        self: *Connection,
         space: PacketNumberSpace,
         crypto: frame.CryptoFrame,
     ) Error!void {
@@ -10708,7 +10708,7 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn receiveStreamFrame(self: *QuicConnection, stream_frame: frame.StreamFrame) Error!void {
+    fn receiveStreamFrame(self: *Connection, stream_frame: frame.StreamFrame) Error!void {
         if (stream_frame.stream_id > max_quic_varint) return error.InvalidStream;
         try self.validateIncomingStreamCount(stream_frame.stream_id);
 
@@ -10752,6 +10752,12 @@ pub const QuicConnection = struct {
         }
     }
 };
+
+/// Compatibility alias for callers using the earlier public name.
+///
+/// New code should use `Connection`; the alias keeps existing examples and
+/// downstream experiments source-compatible while the API remains experimental.
+pub const QuicConnection = Connection;
 
 const TestMaxStreamsKind = enum { bidi, uni };
 
@@ -10889,8 +10895,8 @@ fn payloadContainsExpectedMaxStreams(
 }
 
 fn pollAndProcessUntilMaxStreams(
-    sender: *QuicConnection,
-    receiver: *QuicConnection,
+    sender: *Connection,
+    receiver: *Connection,
     kind: TestMaxStreamsKind,
     expected_max: u64,
 ) !void {
@@ -10911,7 +10917,7 @@ fn expectFramePacketTypeRejected(
     packet_type: FramePacketType,
     frame_value: frame.Frame,
 ) !void {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -10925,6 +10931,17 @@ fn expectFramePacketTypeRejected(
     const space = packetNumberSpaceForFramePacketType(packet_type);
     try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(space));
     try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(space));
+}
+
+test "Connection is the canonical public handle and QuicConnection remains an alias" {
+    var canonical = try Connection.init(std.testing.allocator, .client, .{});
+    defer canonical.deinit();
+
+    var compatibility = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer compatibility.deinit();
+
+    try std.testing.expectEqual(ConnectionSide.client, canonical.side);
+    try std.testing.expectEqual(ConnectionSide.server, compatibility.side);
 }
 
 test "frame packet type violations map to PROTOCOL_VIOLATION" {
@@ -10965,9 +10982,9 @@ test "frame packet type violations map to PROTOCOL_VIOLATION" {
 }
 
 test "openStream allocates client and server bidirectional stream ids" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -10978,32 +10995,32 @@ test "openStream allocates client and server bidirectional stream ids" {
 }
 
 test "init validates initial stream count limits" {
-    var max_bidi = try QuicConnection.init(std.testing.allocator, .client, .{
+    var max_bidi = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_bidi = max_stream_count,
     });
     defer max_bidi.deinit();
 
-    var max_uni = try QuicConnection.init(std.testing.allocator, .client, .{
+    var max_uni = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_uni = max_stream_count,
     });
     defer max_uni.deinit();
 
-    try std.testing.expectError(error.InvalidStream, QuicConnection.init(std.testing.allocator, .client, .{
+    try std.testing.expectError(error.InvalidStream, Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_bidi = max_stream_count + 1,
     }));
-    try std.testing.expectError(error.InvalidStream, QuicConnection.init(std.testing.allocator, .client, .{
+    try std.testing.expectError(error.InvalidStream, Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_uni = max_stream_count + 1,
     }));
-    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
         .active_connection_id_limit = 1,
     }));
-    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
         .ack_delay_exponent = 21,
     }));
-    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
         .max_ack_delay_ms = 1 << 14,
     }));
-    try std.testing.expectError(error.InvalidStream, QuicConnection.init(std.testing.allocator, .client, .{
+    try std.testing.expectError(error.InvalidStream, Connection.init(std.testing.allocator, .client, .{
         .receive_stream_count_window = max_stream_count + 1,
     }));
 }
@@ -11033,7 +11050,7 @@ test "PreferredAddress owns fixed connection ID storage" {
 
 test "localTransportParameters exposes configured receive limits" {
     const available_versions = [_]packet.Version{ .v2, .v1 };
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1400,
         .max_idle_timeout_ms = 30_000,
         .disable_active_migration = true,
@@ -11071,16 +11088,16 @@ test "version_information transport parameter validation follows endpoint role" 
     const reserved_version: packet.Version = @enumFromInt(0x1a2a3a4a);
     const v1_with_reserved = [_]packet.Version{ .v1, reserved_version };
 
-    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
         .chosen_version = @enumFromInt(0),
         .available_versions = &v1_only,
     }));
-    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
         .chosen_version = .v1,
         .available_versions = &[_]packet.Version{.v2},
     }));
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .chosen_version = .v1,
         .available_versions = &v2_first,
     });
@@ -11103,7 +11120,7 @@ test "version_information transport parameter validation follows endpoint role" 
     }));
     try std.testing.expectEqual(@as(u64, 7), server.peer_max_data);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .available_versions = &v1_only,
     });
     defer client.deinit();
@@ -11114,7 +11131,7 @@ test "version_information transport parameter validation follows endpoint role" 
         },
     }));
 
-    var reserved_client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var reserved_client = try Connection.init(std.testing.allocator, .client, .{
         .available_versions = &v1_with_reserved,
     });
     defer reserved_client.deinit();
@@ -11136,16 +11153,16 @@ test "version_information validates downgrade state after Version Negotiation" {
     const v2_first = [_]packet.Version{ .v2, .v1 };
     const v1_first = [_]packet.Version{ .v1, .v2 };
 
-    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .server, .{
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .server, .{
         .version_negotiation_selected_version = .v1,
     }));
-    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
         .chosen_version = .v1,
         .available_versions = &v2_first,
         .version_negotiation_selected_version = .v2,
     }));
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .chosen_version = .v2,
         .available_versions = &v2_first,
         .version_negotiation_selected_version = .v2,
@@ -11182,7 +11199,7 @@ test "version_information rejects downgrade after forged Version Negotiation" {
     const v2_first = [_]packet.Version{ .v2, .v1 };
     const v1_first = [_]packet.Version{ .v1, .v2 };
 
-    var downgraded = try QuicConnection.init(std.testing.allocator, .client, .{
+    var downgraded = try Connection.init(std.testing.allocator, .client, .{
         .chosen_version = .v1,
         .available_versions = &v2_first,
         .version_negotiation_selected_version = .v1,
@@ -11203,7 +11220,7 @@ test "missing version_information after Version Negotiation follows v1 exception
     const v2_first = [_]packet.Version{ .v2, .v1 };
     const v1_only = [_]packet.Version{.v1};
 
-    var selected_v2 = try QuicConnection.init(std.testing.allocator, .client, .{
+    var selected_v2 = try Connection.init(std.testing.allocator, .client, .{
         .chosen_version = .v2,
         .available_versions = &v2_first,
         .version_negotiation_selected_version = .v2,
@@ -11214,7 +11231,7 @@ test "missing version_information after Version Negotiation follows v1 exception
     }));
     try std.testing.expectEqual(@as(u64, 65_536), selected_v2.peer_max_data);
 
-    var selected_v1 = try QuicConnection.init(std.testing.allocator, .client, .{
+    var selected_v1 = try Connection.init(std.testing.allocator, .client, .{
         .chosen_version = .v1,
         .available_versions = &v1_only,
         .version_negotiation_selected_version = .v1,
@@ -11227,7 +11244,7 @@ test "missing version_information after Version Negotiation follows v1 exception
 }
 
 test "localTransportParameters keeps local ACK policy separate from peer recovery policy" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .ack_delay_exponent = 7,
         .max_ack_delay_ms = 15,
     });
@@ -11252,13 +11269,13 @@ test "localTransportParameters keeps local ACK policy separate from peer recover
 test "localTransportParameters advertises server stateless reset token only" {
     const reset_token = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .stateless_reset_token = reset_token,
     });
     defer client.deinit();
     try std.testing.expect(client.localTransportParameters().stateless_reset_token == null);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .stateless_reset_token = reset_token,
     });
     defer server.deinit();
@@ -11280,11 +11297,11 @@ test "localTransportParameters advertises server preferred address only" {
         reset_token,
     );
 
-    try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
         .preferred_address = preferred,
     }));
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .preferred_address = preferred,
     });
     defer server.deinit();
@@ -11308,7 +11325,7 @@ test "transport parameter TLS extension bytes roundtrip through connection API" 
         reset_token,
     );
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .max_datagram_size = 1300,
         .max_idle_timeout_ms = 250,
         .stateless_reset_token = reset_token,
@@ -11331,7 +11348,7 @@ test "transport parameter TLS extension bytes roundtrip through connection API" 
     try std.testing.expect(parsed.stateless_reset_token != null);
     try std.testing.expect(parsed.preferred_address != null);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try client.applyPeerTransportParameterBytes(extension_bytes);
     try std.testing.expectEqual(@as(u64, 4096), client.peer_max_data);
@@ -11347,7 +11364,7 @@ test "transport parameter TLS extension bytes roundtrip through connection API" 
 }
 
 test "applyPeerTransportParameterBytes rejects malformed or invalid extensions without mutation" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     const malformed = [_]u8{0x04};
@@ -11374,7 +11391,7 @@ test "applyPeerTransportParameterBytes rejects malformed or invalid extensions w
 }
 
 test "applyPeerTransportParameterBytesOrClose queues close for malformed extensions" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
@@ -11403,7 +11420,7 @@ test "applyPeerTransportParameterBytesOrClose queues close for malformed extensi
 }
 
 test "applyPeerTransportParameterBytesOrClose queues close for invalid peer parameters" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
@@ -11439,7 +11456,7 @@ test "applyPeerTransportParameterBytesOrClose queues close for invalid peer para
 }
 
 test "applyPeerTransportParameters updates send limits and ACK policy" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_stream_data = 99,
         .initial_max_streams_bidi = 8,
         .initial_max_streams_uni = 8,
@@ -11504,7 +11521,7 @@ test "applyPeerTransportParameters updates send limits and ACK policy" {
 }
 
 test "applyPeerTransportParameters keeps local recovery datagram size when peer limit is larger" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1250,
     });
     defer conn.deinit();
@@ -11522,17 +11539,17 @@ test "applyPeerTransportParameters keeps local recovery datagram size when peer 
 }
 
 test "effectiveIdleTimeoutMillis uses shorter non-zero endpoint value" {
-    var local_only = try QuicConnection.init(std.testing.allocator, .client, .{
+    var local_only = try Connection.init(std.testing.allocator, .client, .{
         .max_idle_timeout_ms = 1000,
     });
     defer local_only.deinit();
     try std.testing.expectEqual(@as(?u64, 1000), local_only.effectiveIdleTimeoutMillis());
 
-    var disabled = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var disabled = try Connection.init(std.testing.allocator, .client, .{});
     defer disabled.deinit();
     try std.testing.expectEqual(@as(?u64, null), disabled.effectiveIdleTimeoutMillis());
 
-    var shorter_peer = try QuicConnection.init(std.testing.allocator, .client, .{
+    var shorter_peer = try Connection.init(std.testing.allocator, .client, .{
         .max_idle_timeout_ms = 1000,
     });
     defer shorter_peer.deinit();
@@ -11541,7 +11558,7 @@ test "effectiveIdleTimeoutMillis uses shorter non-zero endpoint value" {
     });
     try std.testing.expectEqual(@as(?u64, 250), shorter_peer.effectiveIdleTimeoutMillis());
 
-    var shorter_local = try QuicConnection.init(std.testing.allocator, .client, .{
+    var shorter_local = try Connection.init(std.testing.allocator, .client, .{
         .max_idle_timeout_ms = 250,
     });
     defer shorter_local.deinit();
@@ -11552,7 +11569,7 @@ test "effectiveIdleTimeoutMillis uses shorter non-zero endpoint value" {
 }
 
 test "successful send refreshes idle timeout and timeout closes connection" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_idle_timeout_ms = 100,
     });
     defer conn.deinit();
@@ -11572,7 +11589,7 @@ test "successful send refreshes idle timeout and timeout closes connection" {
 }
 
 test "successful receive refreshes idle timeout but invalid payload does not" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_idle_timeout_ms = 50,
     });
     defer conn.deinit();
@@ -11594,7 +11611,7 @@ test "successful receive refreshes idle timeout but invalid payload does not" {
 }
 
 test "applyPeerTransportParameters rejects invalid peer values without mutation" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
@@ -11629,7 +11646,7 @@ test "applyPeerTransportParameters validates retry_source_connection_id" {
     const retry_datagram = try protection.encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
     defer std.testing.allocator.free(retry_datagram);
 
-    var no_retry = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var no_retry = try Connection.init(std.testing.allocator, .client, .{});
     defer no_retry.deinit();
     try std.testing.expectError(error.InvalidPacket, no_retry.applyPeerTransportParameters(.{
         .retry_source_connection_id = &retry_scid,
@@ -11637,7 +11654,7 @@ test "applyPeerTransportParameters validates retry_source_connection_id" {
     }));
     try std.testing.expectEqual(@as(u64, 65_536), no_retry.peer_max_data);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try client.processRetryDatagram(10, &original_dcid, retry_datagram);
 
@@ -11672,9 +11689,9 @@ test "issueRetryDatagram records Retry transport parameters and token" {
     const retry_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const retry_token = "retry-token-for-client-address";
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     const retry_datagram = try server.issueRetryDatagram(
@@ -11707,7 +11724,7 @@ test "issueRetryDatagram rejects invalid Retry issuance without mutation" {
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const retry_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try std.testing.expectError(error.InvalidPacket, client.issueRetryDatagram(
         0,
@@ -11717,7 +11734,7 @@ test "issueRetryDatagram rejects invalid Retry issuance without mutation" {
         "token",
     ));
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try std.testing.expectError(error.InvalidPacket, server.issueRetryDatagram(
         1,
@@ -11758,9 +11775,9 @@ test "address-bound Retry token validation consumes token and validates address"
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const retry_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     const retry_token = try server.issueAddressValidationToken(
@@ -11799,7 +11816,7 @@ test "address-bound Retry token rejects wrong address or expiration without cons
     const nonce: address_validation_token.Nonce = [_]u8{0x84} ** address_validation_token.nonce_len;
     const peer_address = "198.51.100.3:4433";
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     const retry_token = try server.issueAddressValidationToken(
         secret,
@@ -11823,7 +11840,7 @@ test "address-bound Retry token rejects wrong address or expiration without cons
     try std.testing.expect(server.peerAddressValidated());
     try std.testing.expectEqual(@as(usize, 0), server.pendingRetryTokenCount());
 
-    var expired_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var expired_server = try Connection.init(std.testing.allocator, .server, .{});
     defer expired_server.deinit();
     const expired_token = try expired_server.issueAddressValidationToken(
         secret,
@@ -11849,7 +11866,7 @@ test "address-bound NEW_TOKEN validates peer address without one-time Retry stat
     const nonce: address_validation_token.Nonce = [_]u8{0x5a} ** address_validation_token.nonce_len;
     const peer_address = "192.0.2.9:4433";
 
-    var issuer = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var issuer = try Connection.init(std.testing.allocator, .server, .{});
     defer issuer.deinit();
     const new_token = try issuer.issueAddressValidationToken(
         secret,
@@ -11861,7 +11878,7 @@ test "address-bound NEW_TOKEN validates peer address without one-time Retry stat
     );
     defer std.testing.allocator.free(new_token);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.sendPing();
     var out_buf: [16]u8 = undefined;
@@ -11873,7 +11890,7 @@ test "address-bound NEW_TOKEN validates peer address without one-time Retry stat
     const payload = (try server.pollTx(1_021, &out_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), payload.len);
 
-    var other_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var other_server = try Connection.init(std.testing.allocator, .server, .{});
     defer other_server.deinit();
     try std.testing.expectError(
         error.InvalidPacket,
@@ -11887,7 +11904,7 @@ test "address-bound NEW_TOKEN validates only for its originating QUIC version" {
     const nonce: address_validation_token.Nonce = [_]u8{0x7a} ** address_validation_token.nonce_len;
     const peer_address = "192.0.2.29:4433";
 
-    var issuer = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var issuer = try Connection.init(std.testing.allocator, .server, .{});
     defer issuer.deinit();
     const new_token = try issuer.issueAddressValidationTokenForVersion(
         secret,
@@ -11900,7 +11917,7 @@ test "address-bound NEW_TOKEN validates only for its originating QUIC version" {
     );
     defer std.testing.allocator.free(new_token);
 
-    var v1_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var v1_server = try Connection.init(std.testing.allocator, .server, .{});
     defer v1_server.deinit();
     try std.testing.expectError(
         error.InvalidPacket,
@@ -11908,7 +11925,7 @@ test "address-bound NEW_TOKEN validates only for its originating QUIC version" {
     );
     try std.testing.expect(!v1_server.peerAddressValidated());
 
-    var v2_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var v2_server = try Connection.init(std.testing.allocator, .server, .{});
     defer v2_server.deinit();
     try v2_server.validateAddressValidationTokenForVersion(secret, .new_token, .v2, 1_020, peer_address, new_token);
     try std.testing.expect(v2_server.peerAddressValidated());
@@ -11922,7 +11939,7 @@ test "address-bound NEW_TOKEN validates with rotated secrets" {
     const nonce: address_validation_token.Nonce = [_]u8{0x5a} ** address_validation_token.nonce_len;
     const peer_address = "192.0.2.19:4433";
 
-    var issuer = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var issuer = try Connection.init(std.testing.allocator, .server, .{});
     defer issuer.deinit();
     const new_token = try issuer.issueAddressValidationToken(
         previous_secret,
@@ -11934,12 +11951,12 @@ test "address-bound NEW_TOKEN validates with rotated secrets" {
     );
     defer std.testing.allocator.free(new_token);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validateAddressValidationTokenWithSecrets(&secrets, .new_token, 1_020, peer_address, new_token);
     try std.testing.expect(server.peerAddressValidated());
 
-    var current_only_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var current_only_server = try Connection.init(std.testing.allocator, .server, .{});
     defer current_only_server.deinit();
     try std.testing.expectError(
         error.InvalidPacket,
@@ -11954,9 +11971,9 @@ test "applyPeerTransportParameters validates original_destination_connection_id 
     const other_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try client.sendCryptoInSpace(.initial, "client initial");
@@ -11997,9 +12014,9 @@ test "applyPeerTransportParameters validates initial_source_connection_id" {
     const other_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try client.sendCryptoInSpace(.initial, "client initial");
@@ -12033,7 +12050,7 @@ test "applyPeerTransportParameters validates initial_source_connection_id" {
 }
 
 test "openStream enforces peer bidirectional stream limit until MAX_STREAMS_BIDI" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
     defer conn.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), try conn.openStream());
@@ -12051,9 +12068,9 @@ test "openStream enforces peer bidirectional stream limit until MAX_STREAMS_BIDI
 }
 
 test "openUniStream allocates unidirectional stream ids and enforces MAX_STREAMS_UNI" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_uni = 1 });
+    var client = try Connection.init(std.testing.allocator, .client, .{ .initial_max_streams_uni = 1 });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try std.testing.expectEqual(@as(u64, 2), try client.openUniStream());
@@ -12072,7 +12089,7 @@ test "openUniStream allocates unidirectional stream ids and enforces MAX_STREAMS
 }
 
 test "sendCrypto fragments and pollTx emits crypto frame payloads" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 8 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 8 });
     defer conn.deinit();
 
     try conn.sendCrypto("hello world");
@@ -12111,7 +12128,7 @@ test "sendCrypto fragments and pollTx emits crypto frame payloads" {
 }
 
 test "processDatagram and recvCrypto move crypto data" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -12138,7 +12155,7 @@ test "processDatagram and recvCrypto move crypto data" {
 }
 
 test "processDatagram buffers out-of-order CRYPTO and ignores duplicate pending data" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -12173,7 +12190,7 @@ test "processDatagram buffers out-of-order CRYPTO and ignores duplicate pending 
 }
 
 test "processDatagram discards duplicate CRYPTO data without appending bytes" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -12204,7 +12221,7 @@ test "processDatagram discards duplicate CRYPTO data without appending bytes" {
 }
 
 test "processDatagram rejects conflicting CRYPTO overlap and rolls back pending data" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -12237,9 +12254,9 @@ test "processDatagram rejects conflicting CRYPTO overlap and rolls back pending 
 }
 
 test "CRYPTO streams are isolated by packet number space" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -12321,7 +12338,7 @@ test "driveCryptoBackendInSpace delivers reassembled CRYPTO and queues backend o
         }
     };
 
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -12425,7 +12442,7 @@ test "driveCryptoBackendInSpace discards Handshake space when backend confirms w
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -12470,7 +12487,7 @@ test "driveCryptoBackendInSpace requires scratch buffer before consuming crypto"
         }
     };
 
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [32]u8 = undefined;
@@ -12551,7 +12568,7 @@ test "driveCryptoBackendInSpace exchanges transport parameter bytes with backend
         .max_ack_delay = 33,
     });
 
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .max_datagram_size = 1300,
         .ack_delay_exponent = 4,
         .max_ack_delay_ms = 44,
@@ -12622,7 +12639,7 @@ test "driveCryptoBackendInSpace rejects invalid peer transport parameters before
         }
     };
 
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     var backend = BadBackend{};
@@ -12637,9 +12654,9 @@ test "driveCryptoBackendInSpace rejects invalid peer transport parameters before
 }
 
 test "pollTx coalesces pending ACK with queued CRYPTO payload" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -12673,7 +12690,7 @@ test "pollTx coalesces pending ACK with queued CRYPTO payload" {
 }
 
 test "sendPing and pollTx emit ping frame payloads" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try conn.sendPing();
@@ -12706,7 +12723,7 @@ test "sendPing and pollTx emit ping frame payloads" {
 }
 
 test "server anti-amplification blocks sends until peer bytes are recorded" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try std.testing.expect(!server.peerAddressValidated());
@@ -12727,7 +12744,7 @@ test "server anti-amplification blocks sends until peer bytes are recorded" {
 }
 
 test "server anti-amplification budget is shared across packet number spaces" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try server.recordPeerAddressBytesReceived(1);
@@ -12757,7 +12774,7 @@ test "server anti-amplification budget is shared across packet number spaces" {
 }
 
 test "recordPacketSentInSpace respects server anti-amplification budget" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try std.testing.expectError(error.FlowControlBlocked, server.recordPacketSentInSpace(.application, 0, 1));
@@ -12772,7 +12789,7 @@ test "recordPacketSentInSpace respects server anti-amplification budget" {
 }
 
 test "server Retry token validation consumes token and validates address" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try server.issueRetryToken("retry-token");
@@ -12794,7 +12811,7 @@ test "server Retry token validation consumes token and validates address" {
 }
 
 test "Retry token validation rejects invalid tokens without mutation" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try std.testing.expectError(error.InvalidPacket, server.issueRetryToken(""));
@@ -12806,14 +12823,14 @@ test "Retry token validation rejects invalid tokens without mutation" {
     try std.testing.expect(!server.peerAddressValidated());
     try std.testing.expectEqual(@as(usize, 1), server.pendingRetryTokenCount());
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try std.testing.expectError(error.InvalidPacket, client.issueRetryToken("server-only"));
     try std.testing.expectError(error.InvalidPacket, client.validateRetryToken("server-only"));
 }
 
 test "invalid datagram leaves explicit anti-amplification budget unchanged" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try server.recordPeerAddressBytesReceived(2);
@@ -12827,9 +12844,9 @@ test "invalid datagram leaves explicit anti-amplification budget unchanged" {
 }
 
 test "pollTx coalesces pending ACK with queued PING payload" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -12861,7 +12878,7 @@ test "pollTx coalesces pending ACK with queued PING payload" {
 }
 
 test "processDatagram buffers out-of-order crypto data" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [32]u8 = undefined;
@@ -12890,7 +12907,7 @@ test "processDatagram buffers out-of-order crypto data" {
 }
 
 test "processDatagram rolls back crypto data when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [32]u8 = undefined;
@@ -12910,7 +12927,7 @@ test "processDatagram rolls back crypto data when payload is invalid" {
 }
 
 test "sendCrypto rejects unsendable crypto frames before mutating state" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 2 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 2 });
     defer conn.deinit();
 
     try std.testing.expectError(error.BufferTooSmall, conn.sendCrypto("x"));
@@ -12922,7 +12939,7 @@ test "sendCrypto rejects unsendable crypto frames before mutating state" {
 }
 
 test "sendCrypto rolls back partial fragmentation when later offsets cannot fit" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 4 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 4 });
     defer conn.deinit();
 
     const data = [_]u8{'x'} ** 65;
@@ -12932,7 +12949,7 @@ test "sendCrypto rolls back partial fragmentation when later offsets cannot fit"
 }
 
 test "sendOnStream requires openStream for new local bidirectional streams" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try std.testing.expectError(error.InvalidStream, conn.sendOnStream(0, "x", false));
@@ -12946,9 +12963,9 @@ test "sendOnStream requires openStream for new local bidirectional streams" {
 }
 
 test "sendOnStream requires opened local unidirectional streams" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try std.testing.expectError(error.InvalidStream, client.sendOnStream(2, "x", false));
@@ -12960,7 +12977,7 @@ test "sendOnStream requires opened local unidirectional streams" {
 }
 
 test "sendOnStream and pollTx emit opened local unidirectional stream frames" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openUniStream();
@@ -12983,7 +13000,7 @@ test "sendOnStream and pollTx emit opened local unidirectional stream frames" {
 }
 
 test "sendOnStream requires observed peer bidirectional streams" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try std.testing.expectError(error.InvalidStream, conn.sendOnStream(1, "reply", false));
@@ -13003,7 +13020,7 @@ test "sendOnStream requires observed peer bidirectional streams" {
 }
 
 test "processDatagram rolls back MAX_STREAMS_BIDI updates when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
     defer conn.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), try conn.openStream());
@@ -13020,7 +13037,7 @@ test "processDatagram rolls back MAX_STREAMS_BIDI updates when payload is invali
 }
 
 test "processDatagram rolls back MAX_STREAMS_UNI updates when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_uni = 1 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_max_streams_uni = 1 });
     defer conn.deinit();
 
     try std.testing.expectEqual(@as(u64, 2), try conn.openUniStream());
@@ -13037,7 +13054,7 @@ test "processDatagram rolls back MAX_STREAMS_UNI updates when payload is invalid
 }
 
 test "sendOnStream and pollTx emit stream frame payloads" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -13064,7 +13081,7 @@ test "sendOnStream and pollTx emit stream frame payloads" {
 }
 
 test "sendOnStream fragments stream data by max datagram size" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 10 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 10 });
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -13106,7 +13123,7 @@ test "sendOnStream fragments stream data by max datagram size" {
 }
 
 test "pollTx records sent packets for ACK-driven recovery" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -13123,7 +13140,7 @@ test "pollTx records sent packets for ACK-driven recovery" {
 }
 
 test "processDatagram ACK updates recovery and removes sent packets" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -13149,7 +13166,7 @@ test "processDatagram ACK updates recovery and removes sent packets" {
 }
 
 test "connection ACK APIs reject ACK ranges that compute negative packet numbers" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     _ = try conn.recordPacketSentInSpace(.application, 10, 100);
@@ -13171,7 +13188,7 @@ test "connection ACK APIs reject ACK ranges that compute negative packet numbers
     try std.testing.expectEqual(@as(?u64, null), conn.largest_acknowledged);
     try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), conn.lossDetectionTimerDeadlineMillis());
 
-    var ecn_conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var ecn_conn = try Connection.init(std.testing.allocator, .client, .{});
     defer ecn_conn.deinit();
     _ = try ecn_conn.recordPacketSentInSpace(.application, 10, 100);
     try std.testing.expectError(error.InvalidPacket, ecn_conn.receiveAckEcnInSpace(.application, 60, .{
@@ -13188,7 +13205,7 @@ test "connection ACK APIs reject ACK ranges that compute negative packet numbers
 }
 
 test "ACK delay is ignored for Initial and Handshake RTT samples" {
-    var initial_conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var initial_conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer initial_conn.deinit();
@@ -13209,7 +13226,7 @@ test "ACK delay is ignored for Initial and Handshake RTT samples" {
     });
     try std.testing.expectEqual(@as(u64, 102), initial_conn.smoothedRttMillis(.initial));
 
-    var handshake_conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var handshake_conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer handshake_conn.deinit();
@@ -13232,7 +13249,7 @@ test "ACK delay is ignored for Initial and Handshake RTT samples" {
 }
 
 test "RTT estimates are shared across packet number spaces" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -13256,7 +13273,7 @@ test "RTT estimates are shared across packet number spaces" {
 }
 
 test "RTT sharing rolls back when datagram payload is rejected" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -13296,7 +13313,7 @@ test "RTT sharing rolls back when datagram payload is rejected" {
 }
 
 test "ACK delay is capped by peer max_ack_delay after handshake confirmation" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -13336,7 +13353,7 @@ test "ACK delay is capped by peer max_ack_delay after handshake confirmation" {
 }
 
 test "ACK does not sample RTT when only lower ranges are newly acknowledged" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -13372,7 +13389,7 @@ test "ACK does not sample RTT when only lower ranges are newly acknowledged" {
 }
 
 test "ACK marks packet-threshold losses in the selected packet number space" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     _ = try conn.recordPacketSentInSpace(.application, 10, 100);
@@ -13393,7 +13410,7 @@ test "ACK marks packet-threshold losses in the selected packet number space" {
 }
 
 test "ACK marks time-threshold losses in the selected packet number space" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     _ = try conn.recordPacketSentInSpace(.application, 0, 100);
@@ -13412,7 +13429,7 @@ test "ACK marks time-threshold losses in the selected packet number space" {
 }
 
 test "ACK keeps earlier packet while time-threshold delay has not elapsed" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     _ = try conn.recordPacketSentInSpace(.application, 300, 100);
@@ -13440,7 +13457,7 @@ test "ACK keeps earlier packet while time-threshold delay has not elapsed" {
 }
 
 test "loss detection timer reports loss-time before PTO across packet spaces" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     _ = try conn.recordPacketSentInSpace(.application, 300, 100);
@@ -13460,7 +13477,7 @@ test "loss detection timer reports loss-time before PTO across packet spaces" {
 }
 
 test "loss detection timer reports earliest PTO when no loss time is armed" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -13477,7 +13494,7 @@ test "loss detection timer reports earliest PTO when no loss time is armed" {
 }
 
 test "loss detection timer is disarmed in closing and draining states" {
-    var closing = try QuicConnection.init(std.testing.allocator, .client, .{
+    var closing = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer closing.deinit();
@@ -13493,7 +13510,7 @@ test "loss detection timer is disarmed in closing and draining states" {
     try std.testing.expectEqual(@as(usize, 0), closing.pending_ping_count);
     try std.testing.expectEqual(@as(u8, 0), closing.recovery_state.pto_count);
 
-    var draining = try QuicConnection.init(std.testing.allocator, .client, .{
+    var draining = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer draining.deinit();
@@ -13519,7 +13536,7 @@ test "loss detection timer is disarmed in closing and draining states" {
 }
 
 test "Application PTO is gated until handshake confirmation" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -13540,7 +13557,7 @@ test "Application PTO is gated until handshake confirmation" {
 }
 
 test "server anti-amplification limit disarms PTO until more peer bytes arrive" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer server.deinit();
@@ -13577,7 +13594,7 @@ test "server anti-amplification limit disarms PTO until more peer bytes arrive" 
 }
 
 test "serviceLossDetectionTimer is no-op before aggregate deadline" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -13595,7 +13612,7 @@ test "serviceLossDetectionTimer is no-op before aggregate deadline" {
 }
 
 test "serviceLossDetectionTimer handles loss-time before due PTO probes" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     _ = try conn.recordPacketSentInSpace(.application, 1000, 100);
@@ -13620,7 +13637,7 @@ test "serviceLossDetectionTimer handles loss-time before due PTO probes" {
 }
 
 test "serviceLossDetectionTimer handles PTO deadline through aggregate timer" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -13637,7 +13654,7 @@ test "serviceLossDetectionTimer handles PTO deadline through aggregate timer" {
 }
 
 test "PTO frame-payload probe bypasses congestion window once" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -13671,12 +13688,12 @@ test "EndpointLossDetectionTimers selects and services earliest connection timer
     var timers = EndpointLossDetectionTimers.init(std.testing.allocator);
     defer timers.deinit();
 
-    var fast = try QuicConnection.init(std.testing.allocator, .client, .{
+    var fast = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer fast.deinit();
     try fast.confirmHandshake();
-    var slow = try QuicConnection.init(std.testing.allocator, .client, .{
+    var slow = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 200,
     });
     defer slow.deinit();
@@ -13731,7 +13748,7 @@ test "EndpointLossDetectionTimers disarms closing connections" {
     var timers = EndpointLossDetectionTimers.init(std.testing.allocator);
     defer timers.deinit();
 
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -13752,7 +13769,7 @@ test "EndpointLossDetectionTimers disarms connection after loss-time service" {
     var timers = EndpointLossDetectionTimers.init(std.testing.allocator);
     defer timers.deinit();
 
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     _ = try conn.recordPacketSentInSpace(.application, 300, 100);
@@ -13790,7 +13807,7 @@ test "EndpointConnectionLifecycle retires routes with recovery timer" {
     var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer lifecycle.deinit();
 
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -14028,7 +14045,7 @@ test "EndpointConnectionLifecycle mirrors ECN validation by UDP path" {
     try std.testing.expectEqual(endpoint.EcnPathValidationState.unknown, lifecycle.ecnPathState(old_path));
     try std.testing.expect(lifecycle.mayUseEctOnPath(old_path));
 
-    var validated = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var validated = try Connection.init(std.testing.allocator, .client, .{});
     defer validated.deinit();
 
     _ = try validated.recordEcnPacketSentInSpace(.application, 10, 100, .ect0);
@@ -14052,7 +14069,7 @@ test "EndpointConnectionLifecycle mirrors ECN validation by UDP path" {
     try std.testing.expectEqual(endpoint.EcnPathValidationState.unknown, lifecycle.ecnPathState(migrated_path));
     try std.testing.expect(lifecycle.mayUseEctOnPath(migrated_path));
 
-    var failed = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var failed = try Connection.init(std.testing.allocator, .client, .{});
     defer failed.deinit();
 
     _ = try failed.recordEcnPacketSentInSpace(.application, 10, 100, .ect0);
@@ -14088,9 +14105,9 @@ test "EndpointConnectionLifecycle resets spin bit after route path update" {
     defer lifecycle.deinit();
     try lifecycle.registerConnectionId(51, &server_dcid, old_path, .{});
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{ .enable_spin_bit = true });
+    var client = try Connection.init(std.testing.allocator, .client, .{ .enable_spin_bit = true });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{ .enable_spin_bit = true });
+    var server = try Connection.init(std.testing.allocator, .server, .{ .enable_spin_bit = true });
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -14137,11 +14154,11 @@ test "EndpointConnectionLifecycle refreshes protected long timer lifecycle" {
     var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer server_lifecycle.deinit();
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer server.deinit();
@@ -14236,11 +14253,11 @@ test "EndpointConnectionLifecycle refreshes protected long CRYPTO space timer li
     var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer server_lifecycle.deinit();
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer server.deinit();
@@ -14338,11 +14355,11 @@ test "EndpointConnectionLifecycle refreshes caller-keyed zero RTT timer lifecycl
     var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer server_lifecycle.deinit();
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer server.deinit();
@@ -14463,11 +14480,11 @@ test "EndpointConnectionLifecycle refreshes installed-key Handshake timer lifecy
     var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer server_lifecycle.deinit();
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer server.deinit();
@@ -14565,11 +14582,11 @@ test "EndpointConnectionLifecycle refreshes installed-key zero RTT timer lifecyc
     var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer server_lifecycle.deinit();
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer server.deinit();
@@ -14701,11 +14718,11 @@ test "EndpointConnectionLifecycle refreshes caller-keyed protected short timer l
     var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer server_lifecycle.deinit();
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer server.deinit();
@@ -14798,11 +14815,11 @@ test "EndpointConnectionLifecycle refreshes explicit key update short timer life
     var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer server_lifecycle.deinit();
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer server.deinit();
@@ -14904,11 +14921,11 @@ test "EndpointConnectionLifecycle refreshes caller-owned key phase short timer l
     var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer server_lifecycle.deinit();
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer server.deinit();
@@ -15008,11 +15025,11 @@ test "EndpointConnectionLifecycle refreshes installed-key protected short timer 
     var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer server_lifecycle.deinit();
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer server.deinit();
@@ -15106,7 +15123,7 @@ test "EndpointLossDetectionTimers drives protected short PTO and ACK disarm" {
     var timers = EndpointLossDetectionTimers.init(std.testing.allocator);
     defer timers.deinit();
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
@@ -15178,7 +15195,7 @@ test "protected short PTO probe bypasses congestion window once" {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
@@ -15213,7 +15230,7 @@ test "EndpointLossDetectionTimers services protected short loss-time retransmiss
     var timers = EndpointLossDetectionTimers.init(std.testing.allocator);
     defer timers.deinit();
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     try client.sendCrypto("endpoint timer protected crypto");
@@ -15253,7 +15270,7 @@ test "loss detection timer expires protected short CRYPTO retransmission" {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     try client.sendCrypto("loss-timer protected crypto");
@@ -15328,7 +15345,7 @@ test "loss detection timer expires protected short CRYPTO retransmission" {
 }
 
 test "ACK-driven losses establish persistent congestion after prior RTT sample" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -15358,7 +15375,7 @@ test "ACK-driven losses establish persistent congestion after prior RTT sample" 
 }
 
 test "ACK-driven persistent congestion duration ignores PTO backoff" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -15391,7 +15408,7 @@ test "ACK-driven persistent congestion duration ignores PTO backoff" {
 }
 
 test "ACK-driven losses do not establish persistent congestion before first RTT sample" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -15414,7 +15431,7 @@ test "ACK-driven losses do not establish persistent congestion before first RTT 
 }
 
 test "ACK losses respect NewReno congestion recovery period" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -15443,7 +15460,7 @@ test "ACK losses respect NewReno congestion recovery period" {
 }
 
 test "ACK-driven NewReno loss keeps ssthresh below minimum cwnd clamp" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -15466,7 +15483,7 @@ test "ACK-driven NewReno loss keeps ssthresh below minimum cwnd clamp" {
 }
 
 test "ACK growth follows NewReno slow start then congestion avoidance" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -15518,7 +15535,7 @@ test "ACK growth follows NewReno slow start then congestion avoidance" {
 }
 
 test "batched ACK growth consumes multiple NewReno congestion avoidance credits" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -15545,7 +15562,7 @@ test "batched ACK growth consumes multiple NewReno congestion avoidance credits"
 }
 
 test "ACK growth is suppressed when congestion window was underutilized" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -15567,7 +15584,7 @@ test "ACK growth is suppressed when congestion window was underutilized" {
 }
 
 test "processDatagram rolls back packet-threshold losses when later frame is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
@@ -15593,7 +15610,7 @@ test "processDatagram rolls back packet-threshold losses when later frame is inv
 }
 
 test "processDatagram rolls back time-threshold losses when later frame is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
@@ -15617,7 +15634,7 @@ test "processDatagram rolls back time-threshold losses when later frame is inval
 }
 
 test "processDatagram rolls back persistent congestion when later frame is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -15653,7 +15670,7 @@ test "processDatagram rolls back persistent congestion when later frame is inval
 }
 
 test "checkPtoTimeouts queues application PING and backs off PTO" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -15691,7 +15708,7 @@ test "checkPtoTimeouts queues application PING and backs off PTO" {
 }
 
 test "checkPtoTimeouts uses queued STREAM data as application probe before PING" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -15727,7 +15744,7 @@ test "checkPtoTimeouts uses queued STREAM data as application probe before PING"
 }
 
 test "checkPtoTimeouts retransmits in-flight STREAM data before PING" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -15770,7 +15787,7 @@ test "checkPtoTimeouts retransmits protected Initial CRYPTO data before PING" {
     const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
@@ -15833,7 +15850,7 @@ test "checkPtoTimeouts retransmits protected short CRYPTO data before PING" {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
@@ -15881,7 +15898,7 @@ test "checkPtoTimeouts retransmits protected short CRYPTO data before PING" {
 }
 
 test "checkPtoTimeouts backs off PTO across packet number spaces" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -15939,7 +15956,7 @@ test "checkPtoTimeouts backs off PTO across packet number spaces" {
 }
 
 test "ACK resets connection-level PTO backoff across packet number spaces" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -15965,7 +15982,7 @@ test "ACK resets connection-level PTO backoff across packet number spaces" {
 }
 
 test "client Initial ACK preserves connection-level PTO backoff" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -15986,7 +16003,7 @@ test "client Initial ACK preserves connection-level PTO backoff" {
     try std.testing.expectEqual(@as(u8, 2), conn.recovery_state.pto_count);
     try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.initial));
 
-    var handshake_conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var handshake_conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer handshake_conn.deinit();
@@ -16006,7 +16023,7 @@ test "client Initial ACK preserves connection-level PTO backoff" {
 }
 
 test "invalid payload rolls back connection-level PTO backoff reset" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
@@ -16037,7 +16054,7 @@ test "invalid payload rolls back connection-level PTO backoff reset" {
 }
 
 test "checkPtoTimeouts is no-op when no application packet is in flight" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try conn.checkPtoTimeouts(10_000);
@@ -16046,7 +16063,7 @@ test "checkPtoTimeouts is no-op when no application packet is in flight" {
 }
 
 test "packet number spaces isolate ACK recovery state" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), try conn.recordPacketSentInSpace(.initial, 10, 100));
@@ -16078,7 +16095,7 @@ test "packet number spaces isolate ACK recovery state" {
 }
 
 test "discardPacketNumberSpace clears Initial recovery and prevents reuse" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     _ = try conn.recordPacketSentInSpace(.initial, 300, 100);
@@ -16147,7 +16164,7 @@ test "discardPacketNumberSpace clears Initial recovery and prevents reuse" {
 }
 
 test "client Handshake send discards Initial space after successful packet commit" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     _ = try client.recordPacketSentInSpace(.initial, 0, 100);
@@ -16170,7 +16187,7 @@ test "client Handshake send discards Initial space after successful packet commi
 }
 
 test "server Handshake receive discards Initial space after valid payload" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
@@ -16198,9 +16215,9 @@ test "protected Handshake packet commits discard Initial at the RFC 9001 boundar
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     _ = try client.recordPacketSentInSpace(.initial, 0, 100);
@@ -16238,7 +16255,7 @@ test "discardPacketNumberSpace clears installed Handshake protection keys" {
     const scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try conn.installHandshakeTrafficSecrets(.{
@@ -16266,9 +16283,9 @@ test "processInitialProtectedDatagram opens Initial packet into Initial space" {
     const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try client.sendCryptoInSpace(.initial, "client initial");
@@ -16297,9 +16314,9 @@ test "processInitialProtectedDatagram rejects tampered packet without state chan
     const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try client.sendCryptoInSpace(.initial, "plaintext");
@@ -16328,9 +16345,9 @@ test "pollInitialProtectedDatagram emits protected Initial CRYPTO packet" {
     const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try client.sendCryptoInSpace(.initial, "client initial");
@@ -16367,7 +16384,7 @@ test "ACK-driven loss requeues protected Initial CRYPTO frame for retransmission
     const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     try client.sendCryptoInSpace(.initial, "lost protected initial");
@@ -16447,14 +16464,14 @@ test "Initial datagram size follows RFC 9000 minimum rules" {
     defer std.testing.allocator.free(small_initial);
     try std.testing.expect(small_initial.len < min_initial_udp_datagram_len);
 
-    var small_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var small_server = try Connection.init(std.testing.allocator, .server, .{});
     defer small_server.deinit();
     try std.testing.expectError(error.InvalidPacket, small_server.processInitialProtectedDatagram(0, secrets.client, small_initial));
     try std.testing.expectEqual(@as(u64, 0), small_server.nextPeerPacketNumber(.initial));
     try std.testing.expectEqual(@as(?u64, null), small_server.pendingAckLargest(.initial));
     try std.testing.expectEqual(@as(?[]const u8, null), small_server.originalDestinationConnectionId());
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try client.sendCryptoInSpace(.initial, "client initial");
     const padded_client_initial = (try client.pollInitialProtectedDatagram(
@@ -16467,7 +16484,7 @@ test "Initial datagram size follows RFC 9000 minimum rules" {
     defer std.testing.allocator.free(padded_client_initial);
     try std.testing.expect(padded_client_initial.len >= min_initial_udp_datagram_len);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.processInitialProtectedDatagram(2, secrets.client, padded_client_initial);
     try std.testing.expectEqualStrings(&dcid, server.originalDestinationConnectionId().?);
@@ -16484,7 +16501,7 @@ test "Initial datagram size follows RFC 9000 minimum rules" {
     defer std.testing.allocator.free(padded_server_initial);
     try std.testing.expect(padded_server_initial.len >= min_initial_udp_datagram_len);
 
-    var ack_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var ack_server = try Connection.init(std.testing.allocator, .server, .{});
     defer ack_server.deinit();
     try ack_server.validatePeerAddress();
     try ack_server.processInitialProtectedDatagram(4, secrets.client, padded_client_initial);
@@ -16505,7 +16522,7 @@ test "configured QUIC v2 protected Initial uses v2 version and packet type bits"
     const versions = [_]packet.Version{ .v2, .v1 };
     const secrets = try protection.deriveInitialSecrets(.v2, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .chosen_version = .v2,
         .available_versions = &versions,
     });
@@ -16526,7 +16543,7 @@ test "configured QUIC v2 protected Initial uses v2 version and packet type bits"
     try std.testing.expectEqual(packet.PacketType.initial, info.packet_type);
     try std.testing.expectEqual(@as(u8, 0xd0), datagram[0] & 0xf0);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .chosen_version = .v2,
         .available_versions = &versions,
     });
@@ -16536,7 +16553,7 @@ test "configured QUIC v2 protected Initial uses v2 version and packet type bits"
     try std.testing.expectEqualStrings(&original_dcid, server.originalDestinationConnectionId().?);
     try std.testing.expectEqualStrings(&client_scid, server.peerInitialSourceConnectionId().?);
 
-    var v1_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var v1_server = try Connection.init(std.testing.allocator, .server, .{});
     defer v1_server.deinit();
     try std.testing.expectError(error.InvalidPacket, v1_server.processInitialProtectedDatagram(2, secrets.client, datagram));
     try std.testing.expectEqual(@as(u64, 0), v1_server.nextPeerPacketNumber(.initial));
@@ -16549,7 +16566,7 @@ test "configured QUIC v2 Retry datagram uses v2 integrity and client processing"
     const retry_token = "v2-retry-token";
     const versions = [_]packet.Version{ .v2, .v1 };
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .chosen_version = .v2,
         .available_versions = &versions,
     });
@@ -16572,7 +16589,7 @@ test "configured QUIC v2 Retry datagram uses v2 integrity and client processing"
     defer packet.deinitRetryPacket(&parsed_retry, std.testing.allocator);
     try std.testing.expectEqual(packet.Version.v2, parsed_retry.version);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .chosen_version = .v2,
         .available_versions = &versions,
     });
@@ -16609,7 +16626,7 @@ test "Initial packetization enforces client DCID length and server empty token" 
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try client.sendCryptoInSpace(.initial, "client initial");
     const short_secrets = try protection.deriveInitialSecrets(.v1, &short_dcid);
@@ -16623,7 +16640,7 @@ test "Initial packetization enforces client DCID length and server empty token" 
     try std.testing.expectEqual(@as(u64, 0), client.nextPacketNumber(.initial));
     try std.testing.expectEqual(@as(?[]const u8, null), client.originalDestinationConnectionId());
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.sendCryptoInSpace(.initial, "server initial");
     const valid_secrets = try protection.deriveInitialSecrets(.v1, &valid_dcid);
@@ -16637,7 +16654,7 @@ test "Initial packetization enforces client DCID length and server empty token" 
     try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.initial));
     try std.testing.expectEqual(@as(?[]const u8, null), server.localInitialSourceConnectionId());
 
-    var follow_client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var follow_client = try Connection.init(std.testing.allocator, .client, .{});
     defer follow_client.deinit();
     try follow_client.sendCryptoInSpace(.initial, "client initial");
     const first_initial = (try follow_client.pollInitialProtectedDatagram(
@@ -16649,7 +16666,7 @@ test "Initial packetization enforces client DCID length and server empty token" 
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(first_initial);
 
-    var follow_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var follow_server = try Connection.init(std.testing.allocator, .server, .{});
     defer follow_server.deinit();
     try follow_server.validatePeerAddress();
     try follow_server.sendCryptoInSpace(.initial, "server initial");
@@ -16710,7 +16727,7 @@ test "Initial receive validates first client DCID length and server token direct
     }, try packet.encodePacketNumberForHeader(0, null), short_secrets.client, "client initial");
     defer std.testing.allocator.free(short_protected);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try std.testing.expectError(error.InvalidPacket, server.processInitialProtectedDatagram(0, short_secrets.client, short_protected));
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.initial));
@@ -16730,7 +16747,7 @@ test "Initial receive validates first client DCID length and server token direct
     }, try packet.encodePacketNumberForHeader(0, null), valid_secrets.server, "server initial");
     defer std.testing.allocator.free(token_protected);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try std.testing.expectError(error.InvalidPacket, client.processInitialProtectedDatagram(0, valid_secrets.server, token_protected));
     try std.testing.expectEqual(@as(u64, 0), client.nextPeerPacketNumber(.initial));
@@ -16753,7 +16770,7 @@ test "processRetryDatagram stores token and Initial packetization reuses it" {
     const retry_datagram = try protection.encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
     defer std.testing.allocator.free(retry_datagram);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     try client.processRetryDatagram(10, &original_dcid, retry_datagram);
@@ -16796,7 +16813,7 @@ test "processRetryDatagram rejects invalid or duplicate Retry without mutation" 
     const retry_datagram = try protection.encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
     defer std.testing.allocator.free(retry_datagram);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try std.testing.expectError(error.InvalidPacket, server.processRetryDatagram(9, &original_dcid, retry_datagram));
     try std.testing.expectEqual(@as(?[]const u8, null), server.latestRetryToken());
@@ -16805,14 +16822,14 @@ test "processRetryDatagram rejects invalid or duplicate Retry without mutation" 
     defer std.testing.allocator.free(tampered);
     tampered[tampered.len - 1] ^= 0x01;
 
-    var tampered_client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var tampered_client = try Connection.init(std.testing.allocator, .client, .{});
     defer tampered_client.deinit();
     try std.testing.expectError(error.InvalidPacket, tampered_client.processRetryDatagram(10, &original_dcid, tampered));
     try std.testing.expectEqual(@as(?[]const u8, null), tampered_client.latestRetryToken());
     try std.testing.expectEqual(@as(?[]const u8, null), tampered_client.originalDestinationConnectionId());
     try std.testing.expectEqual(@as(?[]const u8, null), tampered_client.retrySourceConnectionId());
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try client.processRetryDatagram(11, &original_dcid, retry_datagram);
     try std.testing.expectError(error.InvalidPacket, client.processRetryDatagram(12, &original_dcid, retry_datagram));
@@ -16834,7 +16851,7 @@ test "processVersionNegotiationDatagram selects mutual version once" {
         .versions = &server_versions,
     });
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .chosen_version = .v1,
         .available_versions = &client_versions,
     });
@@ -16889,7 +16906,7 @@ test "processVersionNegotiationDatagram ignores unsafe or mismatched packets" {
         .versions = &v2_only,
     });
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .chosen_version = .v1,
         .available_versions = &client_versions,
     });
@@ -16930,7 +16947,7 @@ test "processVersionNegotiationDatagram rejects no mutual version without mutati
         .versions = &server_versions,
     });
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .chosen_version = .v1,
         .available_versions = &client_versions,
     });
@@ -16944,7 +16961,7 @@ test "processVersionNegotiationDatagram rejects no mutual version without mutati
     ));
     try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try std.testing.expectError(error.InvalidPacket, server.processVersionNegotiationDatagram(
         10,
@@ -16959,7 +16976,7 @@ test "pollInitialProtectedDatagram leaves Initial space idle when no CRYPTO is q
     const scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     try std.testing.expectEqual(@as(?[]u8, null), try client.pollInitialProtectedDatagram(
@@ -16980,9 +16997,9 @@ test "protected long datagram bridge emits Handshake CRYPTO packet" {
     const scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try server.validatePeerAddress();
 
@@ -17015,9 +17032,9 @@ test "processProtectedLongDatagram routes coalesced Initial and Handshake packet
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try server.validatePeerAddress();
 
@@ -17070,9 +17087,9 @@ test "processProtectedLongDatagram validates coalesced keys before mutation" {
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try server.validatePeerAddress();
 
@@ -17122,9 +17139,9 @@ test "pollProtectedLongDatagram coalesces Initial and Handshake CRYPTO packets" 
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try server.validatePeerAddress();
 
@@ -17172,7 +17189,7 @@ test "pollProtectedLongDatagram validates keys before send-state mutation" {
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
     try server.sendCryptoInSpace(.initial, "server initial");
@@ -17208,9 +17225,9 @@ test "pollProtectedZeroRttDatagram emits protected STREAM in Application packet 
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     const stream_id = try client.openStream();
@@ -17246,7 +17263,7 @@ test "ACK-driven loss requeues protected 0-RTT STREAM frame for retransmission" 
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     const stream_id = try client.openStream();
@@ -17319,7 +17336,7 @@ test "checkPtoTimeouts retransmits protected 0-RTT STREAM data before PING" {
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
@@ -17389,7 +17406,7 @@ test "ACK-driven loss requeues protected 0-RTT control frames for retransmission
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var reset_client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var reset_client = try Connection.init(std.testing.allocator, .client, .{});
     defer reset_client.deinit();
 
     const reset_stream_id = try reset_client.openStream();
@@ -17446,7 +17463,7 @@ test "ACK-driven loss requeues protected 0-RTT control frames for retransmission
         .{ .reset_stream = reset_frame },
     ));
 
-    var stop_client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var stop_client = try Connection.init(std.testing.allocator, .client, .{});
     defer stop_client.deinit();
 
     const stop_stream_id = try stop_client.openStream();
@@ -17507,7 +17524,7 @@ test "checkPtoTimeouts retransmits protected 0-RTT control frames before PING" {
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var reset_client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var reset_client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer reset_client.deinit();
@@ -17550,7 +17567,7 @@ test "checkPtoTimeouts retransmits protected 0-RTT control frames before PING" {
         .{ .reset_stream = reset_frame },
     ));
 
-    var stop_client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var stop_client = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer stop_client.deinit();
@@ -17598,7 +17615,7 @@ test "invalid ACK payload rolls back protected 0-RTT control-frame requeue" {
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     const stream_id = try client.openStream();
@@ -17666,9 +17683,9 @@ test "driveCryptoBackendInSpace installs zero RTT traffic secrets for long packe
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     var client_backend = SecretBackend{ .secrets = .{ .local = secrets.client.secret } };
@@ -17727,7 +17744,7 @@ test "discardZeroRttProtectionKeys clears installed early-data keys" {
     const scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try conn.installZeroRttTrafficSecrets(.{
@@ -17759,7 +17776,7 @@ test "installed zero RTT receive requires explicit accept or rejects and discard
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try std.testing.expectError(error.InvalidPacket, server.acceptZeroRtt());
@@ -17783,7 +17800,7 @@ test "installOneRttTrafficSecrets discards client zero RTT keys" {
     const scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try client.installZeroRttTrafficSecrets(.{
         .local = secrets.client.secret,
@@ -17804,7 +17821,7 @@ test "installOneRttTrafficSecrets discards client zero RTT keys" {
         client.pollProtectedZeroRttDatagramWithInstalledKeys(0, &dcid, &scid),
     );
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.installZeroRttTrafficSecrets(.{ .peer = secrets.client.secret });
     try server.installOneRttTrafficSecrets(.{
@@ -17820,9 +17837,9 @@ test "server discards zero RTT keys after successful one RTT receive" {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try server.installZeroRttTrafficSecrets(.{ .peer = secrets.client.secret });
@@ -17863,9 +17880,9 @@ test "pollProtectedLongDatagram coalesces Initial and 0-RTT packets with key val
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try client.sendCryptoInSpace(.initial, "client initial");
@@ -17944,7 +17961,7 @@ test "processProtectedZeroRttDatagram rejects protected ACK frame" {
     }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
     defer std.testing.allocator.free(protected);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try std.testing.expectError(
@@ -17961,7 +17978,7 @@ test "pollProtectedLongDatagram drops obsolete 0-RTT STOP_SENDING" {
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     const stream_id = try client.openStream();
@@ -18008,7 +18025,7 @@ test "processProtectedShortDatagram routes protected 1-RTT payload" {
     }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
     defer std.testing.allocator.free(protected);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try server.processProtectedShortDatagram(10, secrets.client, server_dcid.len, protected);
@@ -18035,7 +18052,7 @@ test "processProtectedShortDatagram discards packets while draining" {
     }, try packet.encodePacketNumberForHeader(0, null), secrets.client, close_out.getWritten());
     defer std.testing.allocator.free(close_packet);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try server.processProtectedShortDatagram(10, secrets.client, server_dcid.len, close_packet);
@@ -18057,9 +18074,9 @@ test "protected short datagram spin bit follows enabled single-path policy" {
     const client_dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{ .enable_spin_bit = true });
+    var client = try Connection.init(std.testing.allocator, .client, .{ .enable_spin_bit = true });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{ .enable_spin_bit = true });
+    var server = try Connection.init(std.testing.allocator, .server, .{ .enable_spin_bit = true });
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -18119,12 +18136,12 @@ test "spin bit disabled and invalid packets do not update modeled state" {
     defer std.testing.allocator.free(protected);
     try std.testing.expect(try protection.peekShortPacketSpinBit(protected));
 
-    var disabled_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var disabled_server = try Connection.init(std.testing.allocator, .server, .{});
     defer disabled_server.deinit();
     try disabled_server.processProtectedShortDatagram(10, secrets.client, server_dcid.len, protected);
     try std.testing.expect(!disabled_server.nextOutgoingSpinBit());
 
-    var enabled_server = try QuicConnection.init(std.testing.allocator, .server, .{ .enable_spin_bit = true });
+    var enabled_server = try Connection.init(std.testing.allocator, .server, .{ .enable_spin_bit = true });
     defer enabled_server.deinit();
     var tampered = try std.testing.allocator.dupe(u8, protected);
     defer std.testing.allocator.free(tampered);
@@ -18145,7 +18162,7 @@ test "protected short datagram key update selects next key phase" {
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     const next_client_keys = protection.nextAes128PacketProtectionKeys(secrets.client);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try client.sendPing();
     const protected = (try client.pollProtectedShortDatagramWithKeyPhase(
@@ -18158,7 +18175,7 @@ test "protected short datagram key update selects next key phase" {
     try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.application));
     try std.testing.expect(try protection.peekShortPacketKeyPhaseAes128(secrets.client.hp, protected, server_dcid.len));
 
-    var rejecting_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var rejecting_server = try Connection.init(std.testing.allocator, .server, .{});
     defer rejecting_server.deinit();
     try std.testing.expectError(
         error.InvalidPacket,
@@ -18167,7 +18184,7 @@ test "protected short datagram key update selects next key phase" {
     try std.testing.expectEqual(@as(u64, 0), rejecting_server.nextPeerPacketNumber(.application));
     try std.testing.expectEqual(@as(?u64, null), rejecting_server.pendingAckLargest(.application));
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.processProtectedShortDatagramWithKeyUpdate(12, .{
         .current = secrets.client,
@@ -18187,7 +18204,7 @@ test "protected short datagram key phase state advances after successful receive
     var server_recv_state = protection.Aes128KeyPhaseState.init(secrets.client, false);
     client_send_state.initiateKeyUpdate();
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try client.sendPing();
     const protected = (try client.pollProtectedShortDatagramWithKeyPhaseState(
@@ -18202,7 +18219,7 @@ test "protected short datagram key phase state advances after successful receive
     defer std.testing.allocator.free(tampered);
     tampered[tampered.len - 1] ^= 0x01;
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try std.testing.expectError(
         error.InvalidPacket,
@@ -18251,9 +18268,9 @@ test "driveCryptoBackendInSpace installs handshake traffic secrets for long pack
     const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -18342,9 +18359,9 @@ test "driveCryptoBackendInSpace installs one RTT traffic secrets for short packe
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -18389,9 +18406,9 @@ test "installed one RTT key phase state advances only after successful receive" 
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -18440,9 +18457,9 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -18484,7 +18501,7 @@ test "installed one RTT key update ACK confirmation rolls back with invalid payl
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try client.installOneRttTrafficSecrets(.{
         .local = secrets.client.secret,
@@ -18527,7 +18544,7 @@ test "processProtectedShortDatagram rejects invalid short packets without mutati
         @intFromEnum(frame.FrameType.padding),
     };
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     const wrong_packet_number = try protection.protectShortPacketAes128(std.testing.allocator, .{
@@ -18568,9 +18585,9 @@ test "pollProtectedShortDatagram emits protected PING and ACK-only response" {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -18605,9 +18622,9 @@ test "pollProtectedShortDatagram emits protected STREAM and ACK response" {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -18647,9 +18664,9 @@ test "pollProtectedShortDatagram emits protected CRYPTO and ACK response" {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -18685,7 +18702,7 @@ test "ACK-driven loss requeues protected short CRYPTO frame for retransmission" 
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     try client.sendCrypto("lost protected crypto");
@@ -18740,9 +18757,9 @@ test "pollProtectedShortDatagram preserves STREAM when anti-amplification blocks
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     const stream_id = try server.openStream();
@@ -18772,9 +18789,9 @@ test "pollProtectedShortDatagram preserves CRYPTO when anti-amplification blocks
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     try server.sendCrypto("blocked crypto");
@@ -18804,9 +18821,9 @@ test "pollProtectedShortDatagram emits protected PATH_CHALLENGE and PATH_RESPONS
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -18864,9 +18881,9 @@ test "endpoint route path update follows protected PATH_RESPONSE validation" {
     defer router.deinit();
     try router.registerConnectionId(19, &server_dcid, old_path, .{});
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try server.validatePeerAddress();
 
@@ -18900,9 +18917,9 @@ test "pollProtectedShortDatagram preserves PATH_CHALLENGE when anti-amplificatio
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     const challenge_data = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22 };
@@ -18936,9 +18953,9 @@ test "pollProtectedShortDatagram emits protected NEW_CONNECTION_ID and RETIRE_CO
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -19000,9 +19017,9 @@ test "pollProtectedShortDatagram preserves NEW_CONNECTION_ID when anti-amplifica
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     const cid = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
@@ -19035,12 +19052,12 @@ test "pollProtectedShortDatagram emits protected MAX_DATA and MAX_STREAM_DATA" {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
@@ -19078,12 +19095,12 @@ test "pollProtectedShortDatagram emits protected BLOCKED frames" {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var data_client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var data_client = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 16,
     });
     defer data_client.deinit();
-    var data_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var data_server = try Connection.init(std.testing.allocator, .server, .{});
     defer data_server.deinit();
     const data_stream = try data_client.openStream();
     try data_client.sendOnStream(data_stream, "hello", false);
@@ -19095,12 +19112,12 @@ test "pollProtectedShortDatagram emits protected BLOCKED frames" {
     try data_server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, data_blocked);
     try std.testing.expectEqual(@as(?u64, 5), data_server.peerDataBlockedLimit());
 
-    var stream_client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var stream_client = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 16,
         .initial_max_stream_data = 5,
     });
     defer stream_client.deinit();
-    var stream_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var stream_server = try Connection.init(std.testing.allocator, .server, .{});
     defer stream_server.deinit();
     const stream_id = try stream_client.openStream();
     try stream_client.sendOnStream(stream_id, "hello", false);
@@ -19112,9 +19129,9 @@ test "pollProtectedShortDatagram emits protected BLOCKED frames" {
     try stream_server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, stream_blocked);
     try std.testing.expectEqual(@as(?u64, 5), stream_server.peerStreamDataBlockedLimit(stream_id));
 
-    var bidi_client = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
+    var bidi_client = try Connection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
     defer bidi_client.deinit();
-    var bidi_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var bidi_server = try Connection.init(std.testing.allocator, .server, .{});
     defer bidi_server.deinit();
     _ = try bidi_client.openStream();
     try std.testing.expectError(error.FlowControlBlocked, bidi_client.openStream());
@@ -19125,9 +19142,9 @@ test "pollProtectedShortDatagram emits protected BLOCKED frames" {
     try bidi_server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, bidi_blocked);
     try std.testing.expectEqual(@as(?u64, 1), bidi_server.peerStreamsBlockedBidiLimit());
 
-    var uni_client = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_uni = 1 });
+    var uni_client = try Connection.init(std.testing.allocator, .client, .{ .initial_max_streams_uni = 1 });
     defer uni_client.deinit();
-    var uni_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var uni_server = try Connection.init(std.testing.allocator, .server, .{});
     defer uni_server.deinit();
     _ = try uni_client.openUniStream();
     try std.testing.expectError(error.FlowControlBlocked, uni_client.openUniStream());
@@ -19144,7 +19161,7 @@ test "pollProtectedShortDatagram preserves MAX and BLOCKED frames when anti-ampl
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var max_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var max_server = try Connection.init(std.testing.allocator, .server, .{});
     defer max_server.deinit();
     try max_server.queueMaxDataFrame(max_server.recv_max_data);
 
@@ -19161,7 +19178,7 @@ test "pollProtectedShortDatagram preserves MAX and BLOCKED frames when anti-ampl
     try std.testing.expectEqual(@as(usize, 0), max_server.pending_max_frames.items.len);
     try std.testing.expectEqual(@as(u64, 1), max_server.nextPacketNumber(.application));
 
-    var blocked_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var blocked_server = try Connection.init(std.testing.allocator, .server, .{});
     defer blocked_server.deinit();
     try blocked_server.queueDataBlockedFrame(blocked_server.peer_max_data);
 
@@ -19185,9 +19202,9 @@ test "pollProtectedShortDatagram emits protected RESET_STREAM and ACK response" 
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -19223,9 +19240,9 @@ test "pollProtectedShortDatagram emits protected STOP_SENDING and RESET_STREAM r
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -19268,9 +19285,9 @@ test "pollProtectedShortDatagram drops obsolete STOP_SENDING after RESET_STREAM"
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -19303,9 +19320,9 @@ test "sendHandshakeDone and issueNewToken validate server-only queues" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.installHandshakeTrafficSecrets(.{
         .local = secrets.server.secret,
@@ -19342,10 +19359,10 @@ test "pollProtectedShortDatagram emits protected HANDSHAKE_DONE" {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try client.installHandshakeTrafficSecrets(.{
         .local = secrets.client.secret,
@@ -19380,10 +19397,10 @@ test "pollProtectedShortDatagram emits protected NEW_TOKEN" {
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     try server.issueNewToken("future-protected");
@@ -19403,9 +19420,9 @@ test "pollProtectedShortDatagram preserves HANDSHAKE_DONE and NEW_TOKEN when ant
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     try server.sendHandshakeDone();
@@ -19440,9 +19457,9 @@ test "pollProtectedShortDatagram emits protected CONNECTION_CLOSE and retransmit
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    var client = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    var server = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -19487,10 +19504,10 @@ test "pollProtectedShortDatagram emits protected APPLICATION_CLOSE" {
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     try server.closeApplication(42, "app done");
@@ -19514,7 +19531,7 @@ test "pollProtectedShortDatagram preserves close frame when anti-amplification b
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try server.closeConnection(0, @intFromEnum(frame.FrameType.stream), "blocked close");
@@ -19535,9 +19552,9 @@ test "pollProtectedLongDatagram emits protected ACK-only without bytes in flight
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -19571,9 +19588,9 @@ test "pollProtectedLongDatagram emits protected PING with ACK" {
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
     try server.validatePeerAddress();
 
@@ -19617,7 +19634,7 @@ test "protected long datagram bridge rejects mismatched packet type without stat
     }, try packet.encodePacketNumberForHeader(0, null), secrets.client, "plaintext");
     defer std.testing.allocator.free(protected);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     try std.testing.expectError(
@@ -19635,7 +19652,7 @@ test "protected long CRYPTO poll rejects Handshake token without mutation" {
     const scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
     try server.sendCryptoInSpace(.handshake, "server handshake");
@@ -19649,7 +19666,7 @@ test "protected long CRYPTO poll rejects Handshake token without mutation" {
 }
 
 test "packet number spaces reject frames forbidden by RFC 9000 packet type rules" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -19688,7 +19705,7 @@ test "packet number spaces reject frames forbidden by RFC 9000 packet type rules
 }
 
 test "handshakeState tracks Handshake space use and confirmation" {
-    var sender = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var sender = try Connection.init(std.testing.allocator, .client, .{});
     defer sender.deinit();
 
     try std.testing.expectEqual(HandshakeState.initial, sender.handshakeState());
@@ -19702,7 +19719,7 @@ test "handshakeState tracks Handshake space use and confirmation" {
     try std.testing.expectEqual(HandshakeState.confirmed, sender.handshakeState());
     try std.testing.expect(sender.handshakeConfirmed());
 
-    var receiver = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var receiver = try Connection.init(std.testing.allocator, .client, .{});
     defer receiver.deinit();
     const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
     try receiver.processDatagramInSpace(.handshake, 0, &ping);
@@ -19710,7 +19727,7 @@ test "handshakeState tracks Handshake space use and confirmation" {
     try std.testing.expect(!receiver.handshakeConfirmed());
     try std.testing.expectEqual(@as(?u64, 0), receiver.pendingAckLargest(.handshake));
 
-    var rollback = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var rollback = try Connection.init(std.testing.allocator, .client, .{});
     defer rollback.deinit();
     const invalid_payload = [_]u8{
         @intFromEnum(frame.FrameType.ping),
@@ -19724,7 +19741,7 @@ test "handshakeState tracks Handshake space use and confirmation" {
 }
 
 test "0-RTT packet type shares Application packet number space but filters frames" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -19748,7 +19765,7 @@ test "0-RTT packet type shares Application packet number space but filters frame
 }
 
 test "0-RTT packet type rejects forbidden frames and rolls back earlier state" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     var datagram: [96]u8 = undefined;
@@ -19783,7 +19800,7 @@ test "0-RTT packet type rejects forbidden frames and rolls back earlier state" {
 }
 
 test "processDatagramForPacketTypeOrClose queues protocol violation close" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -19820,7 +19837,7 @@ test "processDatagramForPacketTypeOrClose queues protocol violation close" {
 }
 
 test "processDatagramForPacketTypeOrClose queues frame encoding close" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -19850,7 +19867,7 @@ test "processDatagramForPacketTypeOrClose queues frame encoding close" {
 }
 
 test "0-RTT rejects RETIRE_CONNECTION_ID before semantic retirement" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -19876,7 +19893,7 @@ test "0-RTT rejects RETIRE_CONNECTION_ID before semantic retirement" {
 }
 
 test "0-RTT packet type allows reset and stop-sending frames" {
-    var reset_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var reset_server = try Connection.init(std.testing.allocator, .server, .{});
     defer reset_server.deinit();
 
     var reset_raw: [32]u8 = undefined;
@@ -19894,7 +19911,7 @@ test "0-RTT packet type allows reset and stop-sending frames" {
     try std.testing.expectEqual(@as(?u64, 0), reset_server.recv_streams.items[0].final_size);
     try std.testing.expectEqual(@as(?u64, 7), reset_server.recv_streams.items[0].reset_error_code);
 
-    var stop_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var stop_server = try Connection.init(std.testing.allocator, .server, .{});
     defer stop_server.deinit();
 
     var stop_raw: [32]u8 = undefined;
@@ -19913,7 +19930,7 @@ test "0-RTT packet type allows reset and stop-sending frames" {
 }
 
 test "packet number spaces isolate receive-side ACK generation" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
@@ -19934,7 +19951,7 @@ test "packet number spaces isolate receive-side ACK generation" {
 }
 
 test "processDatagram ACK_ECN updates recovery without queuing ACK" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -19969,7 +19986,7 @@ test "processDatagram ACK_ECN updates recovery without queuing ACK" {
 }
 
 test "ACK_ECN validates ECT0 counters for modeled sent packets" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), try conn.recordEcnPacketSentInSpace(.application, 10, 100, .ect0));
@@ -19995,7 +20012,7 @@ test "ACK_ECN validates ECT0 counters for modeled sent packets" {
 }
 
 test "ACK_ECN CE increase enters NewReno recovery" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -20027,7 +20044,7 @@ test "ACK_ECN CE increase enters NewReno recovery" {
 }
 
 test "ACK_ECN CE increase respects NewReno recovery period" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -20071,7 +20088,7 @@ test "ACK_ECN CE increase respects NewReno recovery period" {
 }
 
 test "regular ACK disables ECN validation for newly acknowledged ECT packet" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     _ = try conn.recordEcnPacketSentInSpace(.application, 10, 100, .ect0);
@@ -20088,7 +20105,7 @@ test "regular ACK disables ECN validation for newly acknowledged ECT packet" {
 }
 
 test "ACK_ECN disables validation when counters do not cover newly acknowledged ECT packets" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     _ = try conn.recordEcnPacketSentInSpace(.application, 10, 100, .ect0);
@@ -20112,7 +20129,7 @@ test "ACK_ECN disables validation when counters do not cover newly acknowledged 
 }
 
 test "ACK_ECN disables validation when counters exceed sent ECT totals" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     _ = try conn.recordPacketSentInSpace(.application, 10, 100);
@@ -20134,7 +20151,7 @@ test "ACK_ECN disables validation when counters exceed sent ECT totals" {
 }
 
 test "ACK_ECN reordered ACK does not fail validation when largest ack does not increase" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     _ = try conn.recordEcnPacketSentInSpace(.application, 10, 100, .ect0);
@@ -20173,7 +20190,7 @@ test "ACK_ECN reordered ACK does not fail validation when largest ack does not i
 }
 
 test "processDatagram rolls back ECN validation state when later frame is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
@@ -20209,7 +20226,7 @@ test "processDatagram rolls back ECN validation state when later frame is invali
 }
 
 test "processDatagram rejects ACK for packet number never sent" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -20235,9 +20252,9 @@ test "processDatagram rejects ACK for packet number never sent" {
 }
 
 test "processDatagram queues ACK for ack-eliciting payloads" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -20271,7 +20288,7 @@ test "processDatagram queues ACK for ack-eliciting payloads" {
 }
 
 test "PATH_CHALLENGE queues PATH_RESPONSE with pending ACK" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -20306,7 +20323,7 @@ test "PATH_CHALLENGE queues PATH_RESPONSE with pending ACK" {
 }
 
 test "processDatagram rolls back PATH_RESPONSE state when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [32]u8 = undefined;
@@ -20324,7 +20341,7 @@ test "processDatagram rolls back PATH_RESPONSE state when payload is invalid" {
 }
 
 test "processDatagram rejects PATH_RESPONSE without outstanding challenge" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [32]u8 = undefined;
@@ -20339,7 +20356,7 @@ test "processDatagram rejects PATH_RESPONSE without outstanding challenge" {
 }
 
 test "sendPathChallenge emits challenge and accepts matching PATH_RESPONSE" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const challenge_data = [_]u8{ 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80 };
@@ -20379,7 +20396,7 @@ test "sendPathChallenge emits challenge and accepts matching PATH_RESPONSE" {
 }
 
 test "processDatagram rejects duplicate or mismatched PATH_RESPONSE" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const challenge_data = [_]u8{ 1, 3, 5, 7, 9, 11, 13, 15 };
@@ -20414,7 +20431,7 @@ test "processDatagram rejects duplicate or mismatched PATH_RESPONSE" {
 }
 
 test "processDatagram rolls back matched PATH_RESPONSE when later frame is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const challenge_data = [_]u8{ 0, 2, 4, 6, 8, 10, 12, 14 };
@@ -20441,7 +20458,7 @@ test "processDatagram rolls back matched PATH_RESPONSE when later frame is inval
 }
 
 test "path challenge timeout retries then records validation failure" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const challenge_data = [_]u8{ 9, 8, 7, 6, 5, 4, 3, 2 };
@@ -20484,7 +20501,7 @@ test "path challenge timeout retries then records validation failure" {
 }
 
 test "pollTx automatically retries timed-out path challenge" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const challenge_data = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22 };
@@ -20508,7 +20525,7 @@ test "pollTx automatically retries timed-out path challenge" {
 }
 
 test "issueConnectionId emits NEW_CONNECTION_ID and accepts peer retirement" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
@@ -20546,7 +20563,7 @@ test "issueConnectionId emits NEW_CONNECTION_ID and accepts peer retirement" {
 }
 
 test "issueConnectionId rejects duplicate CIDs duplicate reset tokens and peer active id limit overflow" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
@@ -20565,7 +20582,7 @@ test "issueConnectionId rejects duplicate CIDs duplicate reset tokens and peer a
 }
 
 test "RETIRE_CONNECTION_ID rejects unknown or unsent local ids" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
@@ -20586,7 +20603,7 @@ test "RETIRE_CONNECTION_ID rejects unknown or unsent local ids" {
 }
 
 test "RETIRE_CONNECTION_ID rolls back local retirement when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
@@ -20611,7 +20628,7 @@ test "RETIRE_CONNECTION_ID rolls back local retirement when payload is invalid" 
 }
 
 test "NEW_CONNECTION_ID tracks active peer ids and queues RETIRE_CONNECTION_ID" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const cid0 = [_]u8{ 0xaa, 0xbb, 0xcc, 0x00 };
@@ -20667,7 +20684,7 @@ test "NEW_CONNECTION_ID tracks active peer ids and queues RETIRE_CONNECTION_ID" 
 }
 
 test "NEW_CONNECTION_ID enforces active id limit and duplicate consistency" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
@@ -20749,7 +20766,7 @@ test "NEW_CONNECTION_ID enforces active id limit and duplicate consistency" {
 }
 
 test "NEW_CONNECTION_ID retire_prior_to rolls back when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
@@ -20788,7 +20805,7 @@ test "NEW_CONNECTION_ID retire_prior_to rolls back when payload is invalid" {
 }
 
 test "detectStatelessReset matches active peer-issued reset token" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const cid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
@@ -20817,7 +20834,7 @@ test "detectStatelessReset matches active peer-issued reset token" {
 }
 
 test "detectStatelessReset ignores retired peer-issued reset tokens" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .active_connection_id_limit = 3 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .active_connection_id_limit = 3 });
     defer conn.deinit();
 
     const cid0 = [_]u8{ 0xaa, 0xbb, 0xcc, 0x00 };
@@ -20852,7 +20869,7 @@ test "detectStatelessReset ignores retired peer-issued reset tokens" {
 }
 
 test "STOP_SENDING queues RESET_STREAM and drops unsent stream data" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -20897,7 +20914,7 @@ test "STOP_SENDING queues RESET_STREAM and drops unsent stream data" {
 }
 
 test "resetStream queues RESET_STREAM and drops unsent stream data" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -20928,7 +20945,7 @@ test "resetStream queues RESET_STREAM and drops unsent stream data" {
 }
 
 test "resetStream can abort an observed peer bidirectional stream" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
@@ -20969,7 +20986,7 @@ test "resetStream can abort an observed peer bidirectional stream" {
 }
 
 test "resetStream validates stream direction, state, and application error code" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try std.testing.expectError(error.InvalidStream, conn.resetStream(0, 1));
@@ -20985,7 +21002,7 @@ test "resetStream validates stream direction, state, and application error code"
 }
 
 test "duplicate resetStream does not queue duplicate RESET_STREAM" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -20997,9 +21014,9 @@ test "duplicate resetStream does not queue duplicate RESET_STREAM" {
 }
 
 test "stopSending queues STOP_SENDING and peer responds with RESET_STREAM" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -21054,7 +21071,7 @@ test "stopSending queues STOP_SENDING and peer responds with RESET_STREAM" {
 }
 
 test "stopSending validates receive-side direction and stream state" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try std.testing.expectError(error.InvalidStream, conn.stopSending(0, 1));
@@ -21083,7 +21100,7 @@ test "stopSending validates receive-side direction and stream state" {
 }
 
 test "duplicate stopSending does not queue duplicate STOP_SENDING" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -21095,7 +21112,7 @@ test "duplicate stopSending does not queue duplicate STOP_SENDING" {
 }
 
 test "stopSending rejects receive stream after RESET_STREAM" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var reset_buf: [16]u8 = undefined;
@@ -21112,7 +21129,7 @@ test "stopSending rejects receive stream after RESET_STREAM" {
 }
 
 test "stopSending rejects receive stream after final data is received" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var stream_buf: [32]u8 = undefined;
@@ -21130,7 +21147,7 @@ test "stopSending rejects receive stream after final data is received" {
 }
 
 test "stopSending is still valid while final-size stream data has gaps" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var stream_buf: [32]u8 = undefined;
@@ -21148,7 +21165,7 @@ test "stopSending is still valid while final-size stream data has gaps" {
 }
 
 test "pending STOP_SENDING is dropped after matching RESET_STREAM arrives" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -21177,7 +21194,7 @@ test "pending STOP_SENDING is dropped after matching RESET_STREAM arrives" {
 }
 
 test "pending STOP_SENDING is dropped after final data arrives" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -21211,7 +21228,7 @@ test "pending STOP_SENDING is dropped after final data arrives" {
 }
 
 test "STOP_SENDING on peer bidirectional stream prevents later reply" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
@@ -21267,7 +21284,7 @@ test "STOP_SENDING on peer bidirectional stream prevents later reply" {
 }
 
 test "STOP_SENDING rolls back reset state when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -21289,7 +21306,7 @@ test "STOP_SENDING rolls back reset state when payload is invalid" {
 }
 
 test "STOP_SENDING rolls back peer bidirectional stream creation when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [32]u8 = undefined;
@@ -21309,7 +21326,7 @@ test "STOP_SENDING rolls back peer bidirectional stream creation when payload is
 }
 
 test "STOP_SENDING validates stream direction and count before queuing reset" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_streams_bidi = 1,
         .initial_max_streams_uni = 1,
     });
@@ -21338,7 +21355,7 @@ test "STOP_SENDING validates stream direction and count before queuing reset" {
 }
 
 test "duplicate STOP_SENDING does not queue duplicate RESET_STREAM" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -21355,9 +21372,9 @@ test "duplicate STOP_SENDING does not queue duplicate RESET_STREAM" {
 }
 
 test "pollTx coalesces pending ACK with queued STREAM payload" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -21403,9 +21420,9 @@ test "pollTx coalesces pending ACK with queued STREAM payload" {
 }
 
 test "pollTx keeps queued STREAM when pending ACK cannot fit output buffer" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -21432,7 +21449,7 @@ test "pollTx keeps queued STREAM when pending ACK cannot fit output buffer" {
 }
 
 test "ACK ranges keep unacknowledged sent packets in flight" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -21466,7 +21483,7 @@ test "ACK ranges keep unacknowledged sent packets in flight" {
 }
 
 test "ACK-driven loss requeues STREAM frame for retransmission" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -21509,7 +21526,7 @@ test "ACK-driven loss requeues STREAM frame for retransmission" {
 }
 
 test "ACK-driven loss skips STREAM retransmission after RESET_STREAM" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -21568,7 +21585,7 @@ test "ACK-driven loss skips STREAM retransmission after RESET_STREAM" {
 }
 
 test "new congestion event allows one STREAM retransmission probe despite full cwnd" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -21612,7 +21629,7 @@ test "new congestion event allows one STREAM retransmission probe despite full c
 }
 
 test "processDatagram rolls back STREAM retransmission requeue when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -21646,7 +21663,7 @@ test "processDatagram rolls back STREAM retransmission requeue when payload is i
 }
 
 test "ACK-driven loss requeues CRYPTO frame for retransmission" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try conn.sendCryptoInSpace(.handshake, "lost crypto");
@@ -21683,7 +21700,7 @@ test "ACK-driven loss requeues CRYPTO frame for retransmission" {
 }
 
 test "processDatagram rolls back CRYPTO retransmission requeue when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try conn.sendCryptoInSpace(.handshake, "lost crypto");
@@ -21712,7 +21729,7 @@ test "processDatagram rolls back CRYPTO retransmission requeue when payload is i
 }
 
 test "processDatagram rolls back ACK recovery state when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -21738,9 +21755,9 @@ test "processDatagram rolls back ACK recovery state when payload is invalid" {
 }
 
 test "processDatagram and recvOnStream move stream data" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     const stream_id = try client.openStream();
@@ -21758,7 +21775,7 @@ test "processDatagram and recvOnStream move stream data" {
 }
 
 test "RESET_STREAM closes receive stream and accounts final size once" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 10,
     });
@@ -21801,7 +21818,7 @@ test "RESET_STREAM closes receive stream and accounts final size once" {
 }
 
 test "RESET_STREAM rejects inconsistent final size and rolls back state" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -21830,7 +21847,7 @@ test "RESET_STREAM rejects inconsistent final size and rolls back state" {
 }
 
 test "RESET_STREAM after FIN with same final size keeps received data readable" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -21859,7 +21876,7 @@ test "RESET_STREAM after FIN with same final size keeps received data readable" 
 }
 
 test "RESET_STREAM after FIN with gaps aborts receive side and accounts final size" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 6,
         .initial_max_stream_data = 10,
     });
@@ -21904,7 +21921,7 @@ test "RESET_STREAM after FIN with gaps aborts receive side and accounts final si
 }
 
 test "RESET_STREAM flow-control violation does not create receive state" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 2,
         .initial_max_stream_data = 10,
     });
@@ -21924,7 +21941,7 @@ test "RESET_STREAM flow-control violation does not create receive state" {
 }
 
 test "processDatagram enforces inbound bidirectional stream count for STREAM" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_max_streams_bidi = 1 });
+    var conn = try Connection.init(std.testing.allocator, .server, .{ .initial_max_streams_bidi = 1 });
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -21952,7 +21969,7 @@ test "processDatagram enforces inbound bidirectional stream count for STREAM" {
 }
 
 test "processDatagram enforces inbound bidirectional stream count for RESET_STREAM" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_max_streams_bidi = 1 });
+    var conn = try Connection.init(std.testing.allocator, .server, .{ .initial_max_streams_bidi = 1 });
     defer conn.deinit();
 
     var datagram: [32]u8 = undefined;
@@ -21969,7 +21986,7 @@ test "processDatagram enforces inbound bidirectional stream count for RESET_STRE
 }
 
 test "processDatagram enforces inbound unidirectional stream count" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_max_streams_uni = 1 });
+    var conn = try Connection.init(std.testing.allocator, .server, .{ .initial_max_streams_uni = 1 });
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -21997,7 +22014,7 @@ test "processDatagram enforces inbound unidirectional stream count" {
 }
 
 test "processDatagram rejects local bidirectional streams that were not opened" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -22033,7 +22050,7 @@ test "processDatagram rejects local bidirectional streams that were not opened" 
 }
 
 test "processDatagram accepts peer unidirectional stream receive state" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -22063,7 +22080,7 @@ test "processDatagram accepts peer unidirectional stream receive state" {
 }
 
 test "processDatagram rejects local unidirectional stream receive state" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     _ = try conn.openUniStream();
@@ -22090,7 +22107,7 @@ test "processDatagram rejects local unidirectional stream receive state" {
 }
 
 test "recvOnStream rejects locally initiated unidirectional streams" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openUniStream();
@@ -22107,7 +22124,7 @@ test "client accepts HANDSHAKE_DONE and queues ACK" {
     const scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
     try conn.installHandshakeTrafficSecrets(.{
         .local = secrets.client.secret,
@@ -22144,7 +22161,7 @@ test "HANDSHAKE_DONE state rolls back when payload is invalid" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
     try conn.installHandshakeTrafficSecrets(.{
         .local = secrets.client.secret,
@@ -22165,7 +22182,7 @@ test "HANDSHAKE_DONE state rolls back when payload is invalid" {
 }
 
 test "server rejects HANDSHAKE_DONE from peer" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     const payload = [_]u8{@intFromEnum(frame.FrameType.handshake_done)};
@@ -22178,7 +22195,7 @@ test "server rejects HANDSHAKE_DONE from peer" {
 }
 
 test "client stores NEW_TOKEN and queues ACK" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     var token_buf: [32]u8 = undefined;
@@ -22202,7 +22219,7 @@ test "client stores NEW_TOKEN and queues ACK" {
 }
 
 test "client stores NEW_TOKEN values up to configured limit" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_stored_new_tokens = 2 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .max_stored_new_tokens = 2 });
     defer conn.deinit();
 
     var token_buf: [64]u8 = undefined;
@@ -22224,7 +22241,7 @@ test "client stores NEW_TOKEN values up to configured limit" {
 }
 
 test "server rejects NEW_TOKEN from peer" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var token_buf: [32]u8 = undefined;
@@ -22241,7 +22258,7 @@ test "server rejects NEW_TOKEN from peer" {
 }
 
 test "NEW_TOKEN storage rolls back when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     var token_buf: [64]u8 = undefined;
@@ -22262,7 +22279,7 @@ test "NEW_TOKEN storage rolls back when payload is invalid" {
 }
 
 test "connection close frame closes public connection API" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var close_buf: [64]u8 = undefined;
@@ -22299,7 +22316,7 @@ test "connection close frame closes public connection API" {
 }
 
 test "invalid payload rolls back connection close state" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -22319,7 +22336,7 @@ test "invalid payload rolls back connection close state" {
 }
 
 test "processDatagramOrClose queues frame encoding close" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
@@ -22346,7 +22363,7 @@ test "processDatagramOrClose queues frame encoding close" {
 }
 
 test "processDatagramInSpaceOrClose queues protocol violation close" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
@@ -22376,7 +22393,7 @@ test "processDatagramInSpaceOrClose queues protocol violation close" {
 }
 
 test "closeConnection queues CONNECTION_CLOSE and closes after pollTx" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try conn.closeConnection(0, @intFromEnum(frame.FrameType.stream), "done");
@@ -22426,7 +22443,7 @@ test "closeConnection queues CONNECTION_CLOSE and closes after pollTx" {
 }
 
 test "closeApplication queues APPLICATION_CLOSE and closes after pollTx" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
     try conn.validatePeerAddress();
 
@@ -22462,7 +22479,7 @@ test "closeApplication queues APPLICATION_CLOSE and closes after pollTx" {
 }
 
 test "local closing state expires after close timeout" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
     defer conn.deinit();
 
     try conn.closeConnection(0, @intFromEnum(frame.FrameType.ping), "bye");
@@ -22489,7 +22506,7 @@ test "local closing state expires after close timeout" {
 }
 
 test "remote close enters draining state until close timeout expires" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    var conn = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
     defer conn.deinit();
 
     var close_buf: [64]u8 = undefined;
@@ -22518,7 +22535,7 @@ test "remote close enters draining state until close timeout expires" {
 }
 
 test "remote close exposes peer close diagnostics" {
-    var transport = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    var transport = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
     defer transport.deinit();
 
     var close_buf: [64]u8 = undefined;
@@ -22548,7 +22565,7 @@ test "remote close exposes peer close diagnostics" {
         else => return error.TestUnexpectedResult,
     }
 
-    var application = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var application = try Connection.init(std.testing.allocator, .client, .{});
     defer application.deinit();
 
     close_out = buffer.fixedWriter(&close_buf);
@@ -22568,7 +22585,7 @@ test "remote close exposes peer close diagnostics" {
 }
 
 test "local close validates size before mutating connection state" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 5 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 5 });
     defer conn.deinit();
 
     try std.testing.expectError(
@@ -22592,7 +22609,7 @@ test "local close validates size before mutating connection state" {
 }
 
 test "local close rejects invalid varint values before mutating connection state" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try std.testing.expectError(error.InvalidPacket, conn.closeConnection(max_quic_varint + 1, 0, ""));
@@ -22604,7 +22621,7 @@ test "local close rejects invalid varint values before mutating connection state
 }
 
 test "pollTx returns null when congestion window is full" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -22621,7 +22638,7 @@ test "pollTx returns null when congestion window is full" {
 }
 
 test "congestion admission accounts bytes in flight across packet spaces" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -22656,7 +22673,7 @@ test "congestion admission accounts bytes in flight across packet spaces" {
 }
 
 test "pollTx checks congestion before writing output buffer" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -22670,7 +22687,7 @@ test "pollTx checks congestion before writing output buffer" {
 }
 
 test "pollTx keeps queued frame when output buffer is too small" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -22691,7 +22708,7 @@ test "pollTx keeps queued frame when output buffer is too small" {
 }
 
 test "sendOnStream rejects unsendable stream frames before mutating state" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 3 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 3 });
     defer conn.deinit();
 
     const stream_id = try conn.openStream();
@@ -22716,7 +22733,7 @@ test "sendOnStream rejects unsendable stream frames before mutating state" {
 }
 
 test "sendOnStream does not create state for oversized new streams" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 3 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 3 });
     defer conn.deinit();
 
     var datagram: [8]u8 = undefined;
@@ -22734,7 +22751,7 @@ test "sendOnStream does not create state for oversized new streams" {
 }
 
 test "sendOnStream rolls back partial fragmentation when later offsets cannot fit" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{ .max_datagram_size = 4 });
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .max_datagram_size = 4 });
     defer conn.deinit();
 
     var datagram: [8]u8 = undefined;
@@ -22754,7 +22771,7 @@ test "sendOnStream rolls back partial fragmentation when later offsets cannot fi
 }
 
 test "sendOnStream enforces connection flow control until MAX_DATA" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 10,
     });
@@ -22777,7 +22794,7 @@ test "sendOnStream enforces connection flow control until MAX_DATA" {
 }
 
 test "sendOnStream queues DATA_BLOCKED when connection flow control blocks" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 10,
     });
@@ -22802,7 +22819,7 @@ test "sendOnStream queues DATA_BLOCKED when connection flow control blocks" {
 }
 
 test "obsolete DATA_BLOCKED is dropped after MAX_DATA update" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 10,
     });
@@ -22842,7 +22859,7 @@ test "obsolete DATA_BLOCKED is dropped after MAX_DATA update" {
 }
 
 test "sendOnStream enforces stream flow control until MAX_STREAM_DATA" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 10,
         .initial_max_stream_data = 5,
     });
@@ -22879,7 +22896,7 @@ test "sendOnStream enforces stream flow control until MAX_STREAM_DATA" {
 }
 
 test "sendOnStream queues STREAM_DATA_BLOCKED when stream flow control blocks" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 10,
         .initial_max_stream_data = 5,
     });
@@ -22904,7 +22921,7 @@ test "sendOnStream queues STREAM_DATA_BLOCKED when stream flow control blocks" {
 }
 
 test "pending STREAM_DATA_BLOCKED is dropped when FIN closes send side before transmit" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 10,
         .initial_max_stream_data = 5,
     });
@@ -22934,7 +22951,7 @@ test "pending STREAM_DATA_BLOCKED is dropped when FIN closes send side before tr
 }
 
 test "pending STREAM_DATA_BLOCKED is dropped when reset closes send side before transmit" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 10,
         .initial_max_stream_data = 5,
     });
@@ -22966,12 +22983,12 @@ test "pending STREAM_DATA_BLOCKED is dropped when reset closes send side before 
 }
 
 test "recvOnStream queues MAX_DATA and MAX_STREAM_DATA after consuming bytes" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
@@ -23025,12 +23042,12 @@ test "recvOnStream queues MAX_DATA and MAX_STREAM_DATA after consuming bytes" {
 }
 
 test "pending MAX_STREAM_DATA is dropped when final size becomes known before transmit" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
@@ -23060,12 +23077,12 @@ test "pending MAX_STREAM_DATA is dropped when final size becomes known before tr
 }
 
 test "pending MAX_STREAM_DATA is dropped when RESET_STREAM arrives before transmit" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
@@ -23095,12 +23112,12 @@ test "pending MAX_STREAM_DATA is dropped when RESET_STREAM arrives before transm
 }
 
 test "recvOnStream uses configured target receive windows" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
         .receive_connection_window = 10,
@@ -23137,13 +23154,13 @@ test "recvOnStream uses configured target receive windows" {
 }
 
 test "recvOnStream queues MAX_STREAMS_BIDI when peer bidirectional stream finishes" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 16,
         .initial_max_stream_data = 16,
         .initial_max_streams_bidi = 1,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 16,
         .initial_max_stream_data = 16,
         .initial_max_streams_bidi = 1,
@@ -23172,11 +23189,11 @@ test "recvOnStream queues MAX_STREAMS_BIDI when peer bidirectional stream finish
 }
 
 test "recvOnStream queues MAX_STREAMS_UNI when zero-length peer unidirectional stream finishes" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_uni = 1,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_streams_uni = 1,
     });
     defer server.deinit();
@@ -23202,11 +23219,11 @@ test "recvOnStream queues MAX_STREAMS_UNI when zero-length peer unidirectional s
 }
 
 test "recvOnStream queues MAX_STREAMS_BIDI after peer bidirectional RESET_STREAM is observed" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_bidi = 1,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_streams_bidi = 1,
     });
     defer server.deinit();
@@ -23231,11 +23248,11 @@ test "recvOnStream queues MAX_STREAMS_BIDI after peer bidirectional RESET_STREAM
 }
 
 test "recvOnStream queues MAX_STREAMS_UNI after peer unidirectional RESET_STREAM is observed" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+    var client = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_uni = 1,
     });
     defer client.deinit();
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_streams_uni = 1,
     });
     defer server.deinit();
@@ -23260,7 +23277,7 @@ test "recvOnStream queues MAX_STREAMS_UNI after peer unidirectional RESET_STREAM
 }
 
 test "openStream queues STREAMS_BLOCKED frames when stream count blocks" {
-    var bidi = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
+    var bidi = try Connection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
     defer bidi.deinit();
 
     _ = try bidi.openStream();
@@ -23275,7 +23292,7 @@ test "openStream queues STREAMS_BLOCKED frames when stream count blocks" {
         else => return error.TestUnexpectedResult,
     }
 
-    var uni = try QuicConnection.init(std.testing.allocator, .client, .{ .initial_max_streams_uni = 1 });
+    var uni = try Connection.init(std.testing.allocator, .client, .{ .initial_max_streams_uni = 1 });
     defer uni.deinit();
 
     _ = try uni.openUniStream();
@@ -23291,7 +23308,7 @@ test "openStream queues STREAMS_BLOCKED frames when stream count blocks" {
 }
 
 test "processDatagram records peer BLOCKED frame limits" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [96]u8 = undefined;
@@ -23314,7 +23331,7 @@ test "processDatagram records peer BLOCKED frame limits" {
 }
 
 test "STREAM_DATA_BLOCKED creates receive stream state before STREAM data" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_stream_data = 10,
     });
     defer conn.deinit();
@@ -23339,7 +23356,7 @@ test "STREAM_DATA_BLOCKED creates receive stream state before STREAM data" {
 }
 
 test "STREAM_DATA_BLOCKED validates receive-side stream direction and count" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{ .initial_max_streams_uni = 1 });
+    var server = try Connection.init(std.testing.allocator, .server, .{ .initial_max_streams_uni = 1 });
     defer server.deinit();
 
     const local_uni = try server.openUniStream();
@@ -23362,7 +23379,7 @@ test "STREAM_DATA_BLOCKED validates receive-side stream direction and count" {
     try std.testing.expectEqual(@as(?u64, null), server.peerStreamDataBlockedLimit(6));
     try std.testing.expectEqual(@as(usize, 0), server.recv_streams.items.len);
 
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     out = buffer.fixedWriter(&datagram);
@@ -23385,7 +23402,7 @@ test "STREAM_DATA_BLOCKED validates receive-side stream direction and count" {
 }
 
 test "peer BLOCKED frame limits keep highest reported value" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [96]u8 = undefined;
@@ -23417,7 +23434,7 @@ test "peer BLOCKED frame limits keep highest reported value" {
 }
 
 test "peer BLOCKED frame state rolls back when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [96]u8 = undefined;
@@ -23453,7 +23470,7 @@ test "peer BLOCKED frame state rolls back when payload is invalid" {
 }
 
 test "peer DATA_BLOCKED below current receive limit retransmits MAX_DATA" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     conn.recv_max_data = 10;
@@ -23471,7 +23488,7 @@ test "peer DATA_BLOCKED below current receive limit retransmits MAX_DATA" {
 }
 
 test "peer STREAM_DATA_BLOCKED below current receive stream limit retransmits MAX_STREAM_DATA" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_stream_data = 10,
     });
     defer conn.deinit();
@@ -23503,7 +23520,7 @@ test "peer STREAM_DATA_BLOCKED below current receive stream limit retransmits MA
 }
 
 test "peer DATA_BLOCKED at current receive limit waits without configured window" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
     });
     defer conn.deinit();
@@ -23520,7 +23537,7 @@ test "peer DATA_BLOCKED at current receive limit waits without configured window
 }
 
 test "peer DATA_BLOCKED at receive limit grows configured receive window" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
         .receive_connection_window = 10,
     });
@@ -23548,7 +23565,7 @@ test "peer DATA_BLOCKED at receive limit grows configured receive window" {
 }
 
 test "peer STREAM_DATA_BLOCKED at receive limit grows configured receive window" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_stream_data = 5,
         .receive_stream_window = 12,
     });
@@ -23583,7 +23600,7 @@ test "peer STREAM_DATA_BLOCKED at receive limit grows configured receive window"
 }
 
 test "peer STREAM_DATA_BLOCKED is discarded after stream final size is known" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_stream_data = 5,
         .receive_stream_window = 12,
     });
@@ -23613,7 +23630,7 @@ test "peer STREAM_DATA_BLOCKED is discarded after stream final size is known" {
 }
 
 test "peer STREAMS_BLOCKED below current receive limits retransmits MAX_STREAMS" {
-    var bidi = try QuicConnection.init(std.testing.allocator, .client, .{
+    var bidi = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_bidi = 4,
     });
     defer bidi.deinit();
@@ -23629,7 +23646,7 @@ test "peer STREAMS_BLOCKED below current receive limits retransmits MAX_STREAMS"
     const bidi_payload = (try bidi.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(try payloadContainsExpectedMaxFrame(bidi_payload, .{ .streams_bidi = 4 }));
 
-    var uni = try QuicConnection.init(std.testing.allocator, .client, .{
+    var uni = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_uni = 3,
     });
     defer uni.deinit();
@@ -23645,7 +23662,7 @@ test "peer STREAMS_BLOCKED below current receive limits retransmits MAX_STREAMS"
 }
 
 test "peer STREAMS_BLOCKED at receive limit waits without configured window" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_bidi = 2,
     });
     defer conn.deinit();
@@ -23662,7 +23679,7 @@ test "peer STREAMS_BLOCKED at receive limit waits without configured window" {
 }
 
 test "peer STREAMS_BLOCKED at receive limit grows configured stream-count window" {
-    var bidi = try QuicConnection.init(std.testing.allocator, .client, .{
+    var bidi = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_bidi = 2,
         .receive_stream_count_window = 3,
     });
@@ -23688,7 +23705,7 @@ test "peer STREAMS_BLOCKED at receive limit grows configured stream-count window
     const stale_payload = (try bidi.pollTx(3, &out_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(try payloadContainsExpectedMaxFrame(stale_payload, .{ .streams_bidi = 5 }));
 
-    var uni = try QuicConnection.init(std.testing.allocator, .client, .{
+    var uni = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_uni = 1,
         .receive_stream_count_window = 2,
     });
@@ -23706,7 +23723,7 @@ test "peer STREAMS_BLOCKED at receive limit grows configured stream-count window
 }
 
 test "peer BLOCKED triggered MAX retransmission rolls back when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     conn.recv_max_data = 10;
@@ -23724,7 +23741,7 @@ test "peer BLOCKED triggered MAX retransmission rolls back when payload is inval
 }
 
 test "peer STREAMS_BLOCKED stream-count growth rolls back when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_bidi = 2,
         .receive_stream_count_window = 3,
     });
@@ -23744,7 +23761,7 @@ test "peer STREAMS_BLOCKED stream-count growth rolls back when payload is invali
 }
 
 test "peer BLOCKED receive-window growth rolls back when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
         .receive_connection_window = 10,
     });
@@ -23764,7 +23781,7 @@ test "peer BLOCKED receive-window growth rolls back when payload is invalid" {
 }
 
 test "MAX_STREAM_DATA rejects unopened local and receive-only streams" {
-    var client = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var client = try Connection.init(std.testing.allocator, .client, .{});
     defer client.deinit();
 
     var update_buf: [32]u8 = undefined;
@@ -23778,7 +23795,7 @@ test "MAX_STREAM_DATA rejects unopened local and receive-only streams" {
     try std.testing.expectEqual(@as(?u64, null), client.pending_ack_largest);
     try std.testing.expectEqual(@as(u64, 0), client.next_peer_packet_number);
 
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
 
     update_out = buffer.fixedWriter(&update_buf);
@@ -23791,7 +23808,7 @@ test "MAX_STREAM_DATA rejects unopened local and receive-only streams" {
 }
 
 test "MAX_STREAM_DATA opens peer bidirectional stream before STREAM data" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 10,
         .initial_max_stream_data = 1,
         .initial_max_streams_bidi = 3,
@@ -23818,7 +23835,7 @@ test "MAX_STREAM_DATA opens peer bidirectional stream before STREAM data" {
 }
 
 test "MAX_STREAM_DATA updates observed peer bidirectional reply credit" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 10,
         .initial_max_stream_data = 1,
     });
@@ -23852,7 +23869,7 @@ test "MAX_STREAM_DATA updates observed peer bidirectional reply credit" {
 }
 
 test "MAX_STREAM_DATA is ignored after send side sends FIN" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 10,
         .initial_max_stream_data = 5,
     });
@@ -23875,7 +23892,7 @@ test "MAX_STREAM_DATA is ignored after send side sends FIN" {
 }
 
 test "MAX_STREAM_DATA send-state creation rolls back when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     var datagram: [32]u8 = undefined;
@@ -23894,7 +23911,7 @@ test "MAX_STREAM_DATA send-state creation rolls back when payload is invalid" {
 }
 
 test "sendOnStream does not create state for flow-control blocked new streams" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 100,
         .initial_max_stream_data = 1,
     });
@@ -23917,7 +23934,7 @@ test "sendOnStream does not create state for flow-control blocked new streams" {
 
 test "processDatagram preserves out of memory from frame decoding" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    var conn = try QuicConnection.init(failing_allocator.allocator(), .server, .{});
+    var conn = try Connection.init(failing_allocator.allocator(), .server, .{});
     defer conn.deinit();
 
     const wire = [_]u8{
@@ -23932,7 +23949,7 @@ test "processDatagram preserves out of memory from frame decoding" {
 
 test "processDatagram rejects truncated ACK ranges before allocation" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    var conn = try QuicConnection.init(failing_allocator.allocator(), .server, .{});
+    var conn = try Connection.init(failing_allocator.allocator(), .server, .{});
     defer conn.deinit();
 
     const wire = [_]u8{
@@ -23947,7 +23964,7 @@ test "processDatagram rejects truncated ACK ranges before allocation" {
 }
 
 test "processDatagram rejects payloads larger than configured datagram size" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{ .max_datagram_size = 3 });
+    var conn = try Connection.init(std.testing.allocator, .server, .{ .max_datagram_size = 3 });
     defer conn.deinit();
 
     const wire = [_]u8{
@@ -23961,14 +23978,14 @@ test "processDatagram rejects payloads larger than configured datagram size" {
 }
 
 test "processDatagram rejects empty payloads" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, &[_]u8{}));
 }
 
 test "processDatagram accepts stream frame without length field" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     const wire = [_]u8{
@@ -23986,7 +24003,7 @@ test "processDatagram accepts stream frame without length field" {
 }
 
 test "STREAM opens lower-numbered peer streams of the same type" {
-    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+    var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_streams_bidi = 3,
         .initial_max_streams_uni = 3,
     });
@@ -24031,7 +24048,7 @@ test "STREAM opens lower-numbered peer streams of the same type" {
 }
 
 test "processDatagram discards duplicate STREAM data without growing flow control" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -24067,7 +24084,7 @@ test "processDatagram discards duplicate STREAM data without growing flow contro
 }
 
 test "processDatagram accepts duplicate pending STREAM frame and rejects conflicting overlap" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -24114,7 +24131,7 @@ test "processDatagram accepts duplicate pending STREAM frame and rejects conflic
 }
 
 test "processDatagram rejects conflicting duplicate STREAM bytes" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -24140,7 +24157,7 @@ test "processDatagram rejects conflicting duplicate STREAM bytes" {
 }
 
 test "processDatagram enforces receive stream flow control" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 100,
         .initial_max_stream_data = 5,
     });
@@ -24161,7 +24178,7 @@ test "processDatagram enforces receive stream flow control" {
 }
 
 test "processDatagram enforces receive connection flow control" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
@@ -24192,7 +24209,7 @@ test "processDatagram enforces receive connection flow control" {
 }
 
 test "processDatagram rolls back flow-control updates when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+    var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 10,
     });
@@ -24213,7 +24230,7 @@ test "processDatagram rolls back flow-control updates when payload is invalid" {
 }
 
 test "processDatagram rolls back stream state when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -24254,7 +24271,7 @@ test "processDatagram rolls back stream state when payload is invalid" {
 }
 
 test "processDatagram buffers and reassembles out-of-order new stream data" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -24298,7 +24315,7 @@ test "processDatagram buffers and reassembles out-of-order new stream data" {
 }
 
 test "processDatagram rejects overlapping out-of-order stream data" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -24329,7 +24346,7 @@ test "processDatagram rejects overlapping out-of-order stream data" {
 }
 
 test "processDatagram rolls back out-of-order pending stream data when payload is invalid" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -24348,7 +24365,7 @@ test "processDatagram rolls back out-of-order pending stream data when payload i
 }
 
 test "RESET_STREAM accounts final size after out-of-order stream data" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 6,
         .initial_max_stream_data = 10,
     });
@@ -24381,7 +24398,7 @@ test "RESET_STREAM accounts final size after out-of-order stream data" {
 }
 
 test "receive stream ignores data after RESET_STREAM within final size" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 10,
         .initial_max_stream_data = 10,
     });
@@ -24424,7 +24441,7 @@ test "receive stream ignores data after RESET_STREAM within final size" {
 }
 
 test "receive stream rejects data after RESET_STREAM that changes final size" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+    var conn = try Connection.init(std.testing.allocator, .server, .{
         .initial_max_data = 10,
         .initial_max_stream_data = 10,
     });
@@ -24465,7 +24482,7 @@ test "receive stream rejects data after RESET_STREAM that changes final size" {
 }
 
 test "receive stream rejects data after final size" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -24489,7 +24506,7 @@ test "receive stream rejects data after final size" {
 }
 
 test "receive stream discards late STREAM after all data is received" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -24521,7 +24538,7 @@ test "receive stream discards late STREAM after all data is received" {
 }
 
 test "receive stream rejects end offset beyond QUIC varint range" {
-    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
     var datagram: [64]u8 = undefined;
@@ -24536,7 +24553,7 @@ test "receive stream rejects end offset beyond QUIC varint range" {
 }
 
 test "stream ids must fit QUIC varint range" {
-    var conn = try QuicConnection.init(std.testing.allocator, .client, .{});
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
 
     try std.testing.expectError(error.InvalidStream, conn.sendOnStream(max_quic_varint + 1, "x", false));

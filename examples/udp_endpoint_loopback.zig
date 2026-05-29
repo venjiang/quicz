@@ -161,7 +161,7 @@ pub fn main() !void {
     try require(std.mem.eql(u8, parsed_version_negotiation.scid, &original_dcid));
     try require(parsed_version_negotiation.versions.len == supported_versions.len);
 
-    var version_negotiation_client = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{
+    var version_negotiation_client = try quicz.Connection.init(std.heap.page_allocator, .client, .{
         .chosen_version = unsupported_version,
         .available_versions = &client_versions,
     });

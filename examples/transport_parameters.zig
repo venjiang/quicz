@@ -60,7 +60,7 @@ pub fn main() !void {
         reset_token,
     );
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{
+    var client = try quicz.Connection.init(allocator, .client, .{
         .max_idle_timeout_ms = 300,
         .ack_delay_exponent = 4,
         .max_ack_delay_ms = 33,
@@ -70,7 +70,7 @@ pub fn main() !void {
     });
     defer client.deinit();
 
-    var server = try quicz.QuicConnection.init(allocator, .server, .{
+    var server = try quicz.Connection.init(allocator, .server, .{
         .max_datagram_size = 1200,
         .max_idle_timeout_ms = 200,
         .ack_delay_exponent = 5,
@@ -129,7 +129,7 @@ pub fn main() !void {
     });
     try requireError(error.InvalidPacket, server.applyPeerTransportParameterBytes(invalid_writer.getWritten()));
 
-    var auto_close_server = try quicz.QuicConnection.init(allocator, .server, .{});
+    var auto_close_server = try quicz.Connection.init(allocator, .server, .{});
     defer auto_close_server.deinit();
     try auto_close_server.validatePeerAddress();
     try requireError(

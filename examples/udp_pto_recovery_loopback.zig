@@ -62,7 +62,7 @@ fn sendClientPacket(
     client_socket: *std.Io.net.Socket,
     server_socket: *std.Io.net.Socket,
     server_lifecycle: *const quicz.EndpointConnectionLifecycle,
-    server: *quicz.QuicConnection,
+    server: *quicz.Connection,
     packet: []const u8,
     now_millis: i64,
     server_dcid: []const u8,
@@ -82,7 +82,7 @@ fn sendServerPacket(
     server_socket: *std.Io.net.Socket,
     client_socket: *std.Io.net.Socket,
     client_lifecycle: *const quicz.EndpointConnectionLifecycle,
-    client: *quicz.QuicConnection,
+    client: *quicz.Connection,
     packet: []const u8,
     now_millis: i64,
     client_dcid: []const u8,
@@ -193,11 +193,11 @@ pub fn main() !void {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{
+    var client = try quicz.Connection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(allocator, .server, .{
+    var server = try quicz.Connection.init(allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer server.deinit();

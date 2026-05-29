@@ -40,18 +40,18 @@ fn requireError(expected: anyerror, result: anytype) !void {
     return error.UnexpectedState;
 }
 
-fn pollRequired(conn: *quicz.QuicConnection, out: []u8) ![]const u8 {
+fn pollRequired(conn: *quicz.Connection, out: []u8) ![]const u8 {
     return (try conn.pollTx(0, out)) orelse error.UnexpectedState;
 }
 
-fn applyFrame(conn: *quicz.QuicConnection, frame_value: quicz.frame.Frame) !void {
+fn applyFrame(conn: *quicz.Connection, frame_value: quicz.frame.Frame) !void {
     var raw: [32]u8 = undefined;
     var writer = fixedWriter(&raw);
     try quicz.frame.encodeFrame(writer.writer(), frame_value);
     try conn.processDatagram(0, writer.getWritten());
 }
 
-fn expectDataBlocked(conn: *quicz.QuicConnection, gpa: std.mem.Allocator, expected_max: u64) !void {
+fn expectDataBlocked(conn: *quicz.Connection, gpa: std.mem.Allocator, expected_max: u64) !void {
     var raw: [64]u8 = undefined;
     const payload = (try conn.pollTx(0, &raw)) orelse return error.UnexpectedState;
     var decoded = try quicz.frame.decodeFrameSlice(payload, gpa);
@@ -65,7 +65,7 @@ fn expectDataBlocked(conn: *quicz.QuicConnection, gpa: std.mem.Allocator, expect
     }
 }
 
-fn expectStreamDataBlocked(conn: *quicz.QuicConnection, gpa: std.mem.Allocator, expected_stream: u64, expected_max: u64) !void {
+fn expectStreamDataBlocked(conn: *quicz.Connection, gpa: std.mem.Allocator, expected_stream: u64, expected_max: u64) !void {
     var raw: [64]u8 = undefined;
     const payload = (try conn.pollTx(0, &raw)) orelse return error.UnexpectedState;
     var decoded = try quicz.frame.decodeFrameSlice(payload, gpa);
@@ -81,7 +81,7 @@ fn expectStreamDataBlocked(conn: *quicz.QuicConnection, gpa: std.mem.Allocator, 
     }
 }
 
-fn expectStreamsBlockedBidi(conn: *quicz.QuicConnection, gpa: std.mem.Allocator, expected_max: u64) !void {
+fn expectStreamsBlockedBidi(conn: *quicz.Connection, gpa: std.mem.Allocator, expected_max: u64) !void {
     var raw: [64]u8 = undefined;
     const payload = (try conn.pollTx(0, &raw)) orelse return error.UnexpectedState;
     var decoded = try quicz.frame.decodeFrameSlice(payload, gpa);
@@ -158,14 +158,14 @@ fn expectMaxStreamsUniPayload(gpa: std.mem.Allocator, payload: []const u8, expec
     if (!found) return error.UnexpectedState;
 }
 
-fn expectMaxDataFrom(conn: *quicz.QuicConnection, gpa: std.mem.Allocator, expected_max: u64) !void {
+fn expectMaxDataFrom(conn: *quicz.Connection, gpa: std.mem.Allocator, expected_max: u64) !void {
     var raw: [128]u8 = undefined;
     const payload = (try conn.pollTx(0, &raw)) orelse return error.UnexpectedState;
     try expectMaxDataPayload(gpa, payload, expected_max);
 }
 
 fn expectMaxStreamDataFrom(
-    conn: *quicz.QuicConnection,
+    conn: *quicz.Connection,
     gpa: std.mem.Allocator,
     expected_stream: u64,
     expected_max: u64,
@@ -175,20 +175,20 @@ fn expectMaxStreamDataFrom(
     try expectMaxStreamDataPayload(gpa, payload, expected_stream, expected_max);
 }
 
-fn expectMaxStreamsBidiFrom(conn: *quicz.QuicConnection, gpa: std.mem.Allocator, expected_max: u64) !void {
+fn expectMaxStreamsBidiFrom(conn: *quicz.Connection, gpa: std.mem.Allocator, expected_max: u64) !void {
     var raw: [128]u8 = undefined;
     const payload = (try conn.pollTx(0, &raw)) orelse return error.UnexpectedState;
     try expectMaxStreamsBidiPayload(gpa, payload, expected_max);
 }
 
-fn expectMaxStreamsUniFrom(conn: *quicz.QuicConnection, gpa: std.mem.Allocator, expected_max: u64) !void {
+fn expectMaxStreamsUniFrom(conn: *quicz.Connection, gpa: std.mem.Allocator, expected_max: u64) !void {
     var raw: [128]u8 = undefined;
     const payload = (try conn.pollTx(0, &raw)) orelse return error.UnexpectedState;
     try expectMaxStreamsUniPayload(gpa, payload, expected_max);
 }
 
 fn expectPeerBlockedRefresh(
-    conn: *quicz.QuicConnection,
+    conn: *quicz.Connection,
     gpa: std.mem.Allocator,
     frame_value: quicz.frame.Frame,
     expected: quicz.frame.Frame,
@@ -283,8 +283,8 @@ fn payloadHasMaxStreamDataFrame(gpa: std.mem.Allocator, payload: []const u8) !bo
 }
 
 fn relayUntilMaxStreamsBidi(
-    sender: *quicz.QuicConnection,
-    receiver: *quicz.QuicConnection,
+    sender: *quicz.Connection,
+    receiver: *quicz.Connection,
     gpa: std.mem.Allocator,
     expected_max: u64,
 ) !void {
@@ -300,7 +300,7 @@ fn relayUntilMaxStreamsBidi(
 }
 
 fn connectionCreditExample(gpa: std.mem.Allocator) !void {
-    var conn = try quicz.QuicConnection.init(gpa, .client, .{
+    var conn = try quicz.Connection.init(gpa, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 16,
     });
@@ -319,7 +319,7 @@ fn connectionCreditExample(gpa: std.mem.Allocator) !void {
 }
 
 fn streamCreditExample(gpa: std.mem.Allocator) !void {
-    var conn = try quicz.QuicConnection.init(gpa, .client, .{
+    var conn = try quicz.Connection.init(gpa, .client, .{
         .initial_max_data = 16,
         .initial_max_stream_data = 5,
     });
@@ -341,7 +341,7 @@ fn streamCreditExample(gpa: std.mem.Allocator) !void {
 }
 
 fn peerBidirectionalCreditBeforeStreamExample(gpa: std.mem.Allocator) !void {
-    var server = try quicz.QuicConnection.init(gpa, .server, .{
+    var server = try quicz.Connection.init(gpa, .server, .{
         .initial_max_data = 10,
         .initial_max_stream_data = 1,
         .initial_max_streams_bidi = 3,
@@ -360,7 +360,7 @@ fn peerBidirectionalCreditBeforeStreamExample(gpa: std.mem.Allocator) !void {
 }
 
 fn streamCountExample(gpa: std.mem.Allocator) !void {
-    var conn = try quicz.QuicConnection.init(gpa, .client, .{
+    var conn = try quicz.Connection.init(gpa, .client, .{
         .initial_max_streams_bidi = 1,
     });
     defer conn.deinit();
@@ -381,12 +381,12 @@ fn streamCountExample(gpa: std.mem.Allocator) !void {
 }
 
 fn receiveCreditExample(gpa: std.mem.Allocator) !void {
-    var client = try quicz.QuicConnection.init(gpa, .client, .{
+    var client = try quicz.Connection.init(gpa, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(gpa, .server, .{
+    var server = try quicz.Connection.init(gpa, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
@@ -420,12 +420,12 @@ fn receiveCreditExample(gpa: std.mem.Allocator) !void {
 }
 
 fn staleMaxStreamDataSuppressionExample(gpa: std.mem.Allocator) !void {
-    var client = try quicz.QuicConnection.init(gpa, .client, .{
+    var client = try quicz.Connection.init(gpa, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(gpa, .server, .{
+    var server = try quicz.Connection.init(gpa, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
@@ -453,7 +453,7 @@ fn staleMaxStreamDataSuppressionExample(gpa: std.mem.Allocator) !void {
 }
 
 fn staleStreamDataBlockedSuppressionExample(gpa: std.mem.Allocator) !void {
-    var client = try quicz.QuicConnection.init(gpa, .client, .{
+    var client = try quicz.Connection.init(gpa, .client, .{
         .initial_max_data = 10,
         .initial_max_stream_data = 5,
     });
@@ -482,12 +482,12 @@ fn staleStreamDataBlockedSuppressionExample(gpa: std.mem.Allocator) !void {
 }
 
 fn adaptiveReceiveWindowExample(gpa: std.mem.Allocator) !void {
-    var client = try quicz.QuicConnection.init(gpa, .client, .{
+    var client = try quicz.Connection.init(gpa, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(gpa, .server, .{
+    var server = try quicz.Connection.init(gpa, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
         .receive_connection_window = 10,
@@ -521,12 +521,12 @@ fn adaptiveReceiveWindowExample(gpa: std.mem.Allocator) !void {
 }
 
 fn peerBlockedRefreshExample(gpa: std.mem.Allocator) !void {
-    var client = try quicz.QuicConnection.init(gpa, .client, .{
+    var client = try quicz.Connection.init(gpa, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(gpa, .server, .{
+    var server = try quicz.Connection.init(gpa, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
@@ -560,7 +560,7 @@ fn peerBlockedRefreshExample(gpa: std.mem.Allocator) !void {
         },
     });
 
-    var stream_count = try quicz.QuicConnection.init(gpa, .client, .{
+    var stream_count = try quicz.Connection.init(gpa, .client, .{
         .initial_max_streams_bidi = 4,
     });
     defer stream_count.deinit();
@@ -568,7 +568,7 @@ fn peerBlockedRefreshExample(gpa: std.mem.Allocator) !void {
         .max_streams_bidi = .{ .maximum_streams = 4 },
     });
 
-    var stream_count_windowed = try quicz.QuicConnection.init(gpa, .client, .{
+    var stream_count_windowed = try quicz.Connection.init(gpa, .client, .{
         .initial_max_streams_bidi = 2,
         .initial_max_streams_uni = 1,
         .receive_stream_count_window = 3,
@@ -581,7 +581,7 @@ fn peerBlockedRefreshExample(gpa: std.mem.Allocator) !void {
         .max_streams_uni = .{ .maximum_streams = 4 },
     });
 
-    var windowed = try quicz.QuicConnection.init(gpa, .server, .{
+    var windowed = try quicz.Connection.init(gpa, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
         .receive_connection_window = 10,
@@ -604,7 +604,7 @@ fn peerBlockedRefreshExample(gpa: std.mem.Allocator) !void {
         },
     });
 
-    var finished = try quicz.QuicConnection.init(gpa, .server, .{
+    var finished = try quicz.Connection.init(gpa, .server, .{
         .initial_max_stream_data = 5,
         .receive_stream_window = 12,
     });
@@ -629,13 +629,13 @@ fn peerBlockedRefreshExample(gpa: std.mem.Allocator) !void {
 }
 
 fn receiveStreamCountCreditExample(gpa: std.mem.Allocator) !void {
-    var client = try quicz.QuicConnection.init(gpa, .client, .{
+    var client = try quicz.Connection.init(gpa, .client, .{
         .initial_max_data = 16,
         .initial_max_stream_data = 16,
         .initial_max_streams_bidi = 1,
     });
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(gpa, .server, .{
+    var server = try quicz.Connection.init(gpa, .server, .{
         .initial_max_data = 16,
         .initial_max_stream_data = 16,
         .initial_max_streams_bidi = 1,
@@ -668,12 +668,12 @@ fn protectedShortFlowControlExample(gpa: std.mem.Allocator) !void {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try quicz.QuicConnection.init(gpa, .client, .{
+    var client = try quicz.Connection.init(gpa, .client, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(gpa, .server, .{
+    var server = try quicz.Connection.init(gpa, .server, .{
         .initial_max_data = 5,
         .initial_max_stream_data = 5,
     });

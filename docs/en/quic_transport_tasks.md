@@ -120,7 +120,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   roll shared RTT changes back with the rest of recovery state;
   `pto_recovery` now prints the shared RTT and Handshake PTO deadline evidence.
 - 2026-05-29: Added RFC 9002 cross-space bytes-in-flight congestion
-  admission. `QuicConnection.totalBytesInFlight()` now exposes the aggregate
+  admission. `Connection.totalBytesInFlight()` now exposes the aggregate
   Initial/Handshake/Application in-flight byte count, and ack-eliciting sends
   use that aggregate before applying a packet number space's congestion window;
   PTO and congestion probes keep their one-shot bypass behavior. Tests cover an
@@ -205,7 +205,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   inflight=101` for the emitted probe.
 - 2026-05-27: Added `EndpointConnectionLifecycle` to own endpoint routing and
   recovery-timer scheduling together. The helper keeps the existing
-  caller-owned `QuicConnection` model, but a socket event loop can now arm,
+  caller-owned `Connection` model, but a socket event loop can now arm,
   service, route, and retire a connection handle through one endpoint state
   owner; retiring a handle removes both routes and any armed loss/PTO timer.
   Tests cover route lookup, active timer arming, route/timer retirement, and
@@ -251,7 +251,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   exchange in its `protected_bytes` evidence.
 - 2026-05-28: Added endpoint lifecycle helpers for caller-owned key-phase-state
   1-RTT short-packet send/receive timer refresh. External key-update state can
-  now pass through the endpoint route/timer owner while `QuicConnection` keeps
+  now pass through the endpoint route/timer owner while `Connection` keeps
   packet-number, ACK, and recovery ownership. Tests cover route-selected next
   key-phase PING delivery, authenticated peer key-phase advancement, ACK
   cleanup, and final timer disarm; `endpoint_recovery_timers` includes the
@@ -602,7 +602,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   validates the Retry-related transport parameters.
 - 2026-05-25: Extended `examples/udp_endpoint_loopback.zig` so the real
   loopback UDP Version Negotiation response is passed into
-  `QuicConnection.processVersionNegotiationDatagram()`. The example now proves
+  `Connection.processVersionNegotiationDatagram()`. The example now proves
   lifecycle-owned endpoint VN response delivery and client-side mutual-version
   selection in the same socket-backed flow.
 - 2026-05-25: Added `examples/udp_close_lifecycle_loopback.zig` and the
@@ -660,7 +660,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   or drop. Full socket-owned accept loops and incompatible VN retry state remain
   pending.
 - 2026-05-23: Added client-side Version Negotiation packet handling state.
-  `QuicConnection.processVersionNegotiationDatagram()` validates the RFC 8999
+  `Connection.processVersionNegotiationDatagram()` validates the RFC 8999
   connection-ID echo, ignores packets that contain the client's Original Version
   or mismatched CIDs, selects a mutual version from local `available_versions`,
   records that this connection attempt already reacted to VN, and exposes the
@@ -779,7 +779,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   including TLS extension bytes and local ACK delay policy, and transport error
   helper roundtrips including transport-parameter, frame codec, and packet-type
   error classification.
-- 2026-05-22: Added `QuicConnection.localTransportParameters()` and
+- 2026-05-22: Added `Connection.localTransportParameters()` and
   `applyPeerTransportParameters()`. Local parameters expose configured receive
   limits, local `ack_delay_exponent`/`max_ack_delay`,
   `disable_active_migration`, configured server-only `stateless_reset_token`,
@@ -817,18 +817,18 @@ produce or consume TLS-owned QUIC packets over UDP.
   server preferred-address/reset-token policy, effective idle-timeout selection,
   peer stream-data limit enforcement, and server rejection of client-sent
   server-only parameters.
-- 2026-05-22: Added `QuicConnection.sendPathChallenge()` with outbound
+- 2026-05-22: Added `Connection.sendPathChallenge()` with outbound
   PATH_CHALLENGE queuing, matching PATH_RESPONSE validation, duplicate or
   mismatched response rejection, and rollback tests for invalid multi-frame
   payloads. Timeout/retry policy is still pending.
 - 2026-05-22: Added peer-issued connection ID lifecycle tracking in
-  `QuicConnection`. NEW_CONNECTION_ID now stores active peer CIDs, rejects
+  `Connection`. NEW_CONNECTION_ID now stores active peer CIDs, rejects
   inconsistent duplicate sequence numbers, rejects stateless reset token reuse
   across CIDs, enforces the configured active CID limit, applies retire_prior_to
   by queuing RETIRE_CONNECTION_ID, and rolls back partial CID state on invalid
   multi-frame payloads. Local CID issuing and full endpoint DCID routing
   lifecycle remain pending.
-- 2026-05-22: Added local connection ID issuing in `QuicConnection`.
+- 2026-05-22: Added local connection ID issuing in `Connection`.
   `issueConnectionId()` copies local CID bytes, assigns NEW_CONNECTION_ID
   sequence numbers, enforces peer active CID limits, rejects duplicate local CID
   values and stateless reset token reuse, and queues unsent IDs for `pollTx()`. Inbound RETIRE_CONNECTION_ID now
@@ -943,7 +943,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   skeleton and verifies that a receive-only peer unidirectional stream rejects
   reverse sends.
 - 2026-05-22: Added receive-side out-of-order STREAM range buffering in
-  `QuicConnection`. Non-overlapping ranges are accounted for when received and
+  `Connection`. Non-overlapping ranges are accounted for when received and
   exposed to `recvOnStream()` only after gaps are filled. Tests cover FIN before
   the missing prefix, overlap rejection, invalid-payload rollback, and
   RESET_STREAM final-size accounting with pending ranges.
@@ -966,7 +966,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   completion after all bytes are consumed. RESET_STREAM final size remains
   visible but does not count as FIN completion. Tests cover out-of-order FIN
   completion, reset behavior, and invalid receive-only stream directions.
-- 2026-05-22: Added `QuicConnection.resetStream()` and
+- 2026-05-22: Added `Connection.resetStream()` and
   `examples/stream_reset.zig` with `zig build run-stream-reset`. The API aborts
   opened local send sides and observed peer bidirectional reply sides, queues a
   single RESET_STREAM with the current send offset as final size, rejects
@@ -982,7 +982,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   size toward connection flow control and closes the receive side, while
   Data Recvd streams still keep readable FIN data. Tests cover the FIN-gap
   abort path, and `examples/stream_reset.zig` demonstrates the boundary.
-- 2026-05-22: Added `QuicConnection.stopSending()` and
+- 2026-05-22: Added `Connection.stopSending()` and
   `examples/stop_sending.zig` with `zig build run-stop-sending`. The API queues
   STOP_SENDING for opened local bidirectional receive sides and observed
   peer-initiated receive streams, rejects send-only and unobserved streams,
@@ -1005,12 +1005,12 @@ produce or consume TLS-owned QUIC packets over UDP.
   filter STOP_SENDING once the receive side reaches Data Recvd or Reset Recvd.
   Tests cover final-data and RESET_STREAM races, and
   `examples/stop_sending.zig` demonstrates the reset race.
-- 2026-05-22: Added client-side NEW_TOKEN storage in `QuicConnection`.
+- 2026-05-22: Added client-side NEW_TOKEN storage in `Connection`.
   Client connections retain opaque token bytes up to `Config.max_stored_new_tokens`
   and expose the newest token via `latestNewToken()`. Tests cover storage,
   capacity, server-side rejection, and invalid-payload rollback. Later bullets
   cover cryptographic token generation and endpoint peer-address binding.
-- 2026-05-22: Added local close emission in `QuicConnection` with
+- 2026-05-22: Added local close emission in `Connection` with
   `closeConnection()` and `closeApplication()`. The methods queue
   CONNECTION_CLOSE variants, `pollTx()` emits the close frame while entering
   local closing state, and tests cover payload encoding, API rejection while
@@ -1102,7 +1102,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   connection-level reset detection. `encodeStatelessReset()` serializes a reset
   datagram from caller-provided unpredictable bytes plus a 16-byte token,
   `matchesStatelessReset()` compares the trailing token in constant time, and
-  `QuicConnection.detectStatelessReset()` matches active peer-issued CID reset
+  `Connection.detectStatelessReset()` matches active peer-issued CID reset
   tokens while ignoring retired CIDs.
 - 2026-05-22: Added `examples/stateless_reset.zig` and
   `zig build run-stateless-reset`. The example demonstrates matching a peer
@@ -1136,7 +1136,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   open roundtrip, authentication failure, too-short header-protection sample
   rejection, and protected long-packet boundary peeking. Endpoint routing,
   real TLS traffic-secret production, key discard, and key update remain pending.
-- 2026-05-22: Added `QuicConnection.processInitialProtectedDatagram()`. This
+- 2026-05-22: Added `Connection.processInitialProtectedDatagram()`. This
   connection-layer bridge opens one QUIC v1 protected Initial long packet with
   caller-supplied RFC 9001 Initial keys, validates the packet type, packet
   number, and single-packet datagram boundary, then routes the plaintext frame
@@ -1144,7 +1144,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   CRYPTO delivery, ACK generation, next peer packet-number advancement, and
   tampered-packet rollback. Protected transmit beyond CRYPTO-only long packets,
   TLS traffic secret production, key discard, and key update remain pending.
-- 2026-05-22: Added `QuicConnection.pollInitialProtectedDatagram()` for the
+- 2026-05-22: Added `Connection.pollInitialProtectedDatagram()` for the
   transmit side of the Initial CRYPTO bridge. It emits one protected QUIC v1
   Initial long packet from the Initial CRYPTO send queue, uses the selected
   packet-number encoding, pads only as needed for the header-protection sample,
@@ -1154,7 +1154,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   accounting, and idle behavior when no Initial CRYPTO is queued. ACK-only,
   PING-only, TLS traffic secret production, key
   discard, and key update remain pending.
-- 2026-05-22: Added `QuicConnection.processProtectedLongDatagramInSpace()` and
+- 2026-05-22: Added `Connection.processProtectedLongDatagramInSpace()` and
   `pollProtectedLongCryptoDatagramInSpace()` to generalize the protected
   long-packet bridge from Initial to both Initial and Handshake packet number
   spaces. The Initial-specific wrappers remain for compatibility. Tests cover
@@ -1164,7 +1164,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   Initial and Handshake CRYPTO flights through protected long packets using
   caller-supplied keys. Endpoint Retry policy, 1-RTT protected
   transmit, TLS secret production, key discard, and key update remain pending.
-- 2026-05-22: Added `QuicConnection.processProtectedLongDatagram()` and
+- 2026-05-22: Added `Connection.processProtectedLongDatagram()` and
   `ProtectedLongDatagramKeys` for coalesced protected long datagram receive
   routing. The method peeks each long-header packet boundary, verifies that all
   packet types are supported and have caller-supplied keys before mutation, then
@@ -1174,7 +1174,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   `examples/crypto_stream.zig` now demonstrates a coalesced server Initial plus
   Handshake flight. Endpoint Retry policy, 1-RTT protected
   transmit, TLS secret production, key discard, and key update remain pending.
-- 2026-05-22: Added `QuicConnection.pollProtectedLongDatagram()` for
+- 2026-05-22: Added `Connection.pollProtectedLongDatagram()` for
   coalesced protected long datagram transmit. The method prebuilds the next
   Initial and Handshake protected packet from queued CRYPTO, PING plus optional
   ACK, or ACK-only state, verifies aggregate datagram size, congestion state,
@@ -1191,7 +1191,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   pending.
 - 2026-05-22: Added `protectShortPacketAes128()`,
   `unprotectShortPacketAes128()`, `deinitProtectedShortPacket()`, and
-  `QuicConnection.processProtectedShortDatagram()` for caller-supplied 1-RTT
+  `Connection.processProtectedShortDatagram()` for caller-supplied 1-RTT
   short-header packet receive. The connection API requires caller-provided
   destination-CID length context, opens one protected short datagram, requires
   the packet number to match the next expected Application packet number, and
@@ -1201,7 +1201,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   failure without state mutation. `examples/crypto_stream.zig` now demonstrates
   a protected 1-RTT PING receive after modeled handshake confirmation. Retry
   routing, TLS secret production, key discard, and key update remain pending.
-- 2026-05-22: Added `QuicConnection.pollProtectedShortDatagram()` for
+- 2026-05-22: Added `Connection.pollProtectedShortDatagram()` for
   caller-supplied 1-RTT short-header PING/ACK transmit. The method protects
   Application-space PING plus optional ACK, or ACK-only state, checks
   congestion and anti-amplification budget, advances packet numbers, tracks
@@ -1211,7 +1211,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   now demonstrates the protected 1-RTT PING/ACK exchange after modeled
   handshake confirmation. Endpoint Retry policy, TLS secret production, key discard,
   and key update remain pending.
-- 2026-05-22: Extended `QuicConnection.pollProtectedShortDatagram()` to protect
+- 2026-05-22: Extended `Connection.pollProtectedShortDatagram()` to protect
   one queued Application-space STREAM frame with an optional ACK in a 1-RTT
   short packet. The commit path now consumes the sent stream frame only after
   packet-number, congestion, and anti-amplification checks pass, and frees the
@@ -1222,7 +1222,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   caller-keyed protected 1-RTT PING/ACK and STREAM/ACK exchanges after modeled
   handshake confirmation. Endpoint Retry policy, TLS secret production, key discard,
   and key update remain pending.
-- 2026-05-22: Extended `QuicConnection.pollProtectedShortDatagram()` to protect
+- 2026-05-22: Extended `Connection.pollProtectedShortDatagram()` to protect
   queued Application-space `RESET_STREAM` and `STOP_SENDING` frames with an
   optional ACK in 1-RTT short packets. The protected path now follows the
   stream-control priority used by `pollTx()`, consumes RESET/STOP queues only
@@ -1233,7 +1233,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   caller-keyed protected 1-RTT PING/ACK, STREAM/ACK, RESET_STREAM/ACK, and
   STOP_SENDING/RESET_STREAM exchanges. Endpoint Retry policy, TLS secret production,
   key discard, and key update remain pending.
-- 2026-05-22: Extended `QuicConnection.pollProtectedShortDatagram()` to protect
+- 2026-05-22: Extended `Connection.pollProtectedShortDatagram()` to protect
   queued Application-space CRYPTO frames with an optional ACK in 1-RTT short
   packets. The protected path consumes the CRYPTO queue only after
   packet-number, congestion, and anti-amplification checks pass, matching the
@@ -1244,7 +1244,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   PING/ACK, CRYPTO/ACK, STREAM/ACK, RESET_STREAM/ACK, and
   STOP_SENDING/RESET_STREAM exchanges. Endpoint Retry policy, TLS secret production,
   key discard, and key update remain pending.
-- 2026-05-22: Extended `QuicConnection.pollProtectedShortDatagram()` to protect
+- 2026-05-22: Extended `Connection.pollProtectedShortDatagram()` to protect
   queued Application-space `PATH_RESPONSE` and outbound `PATH_CHALLENGE` frames
   with an optional ACK in 1-RTT short packets. PATH_RESPONSE queues are consumed
   only after send commit, while PATH_CHALLENGE is moved to outstanding
@@ -1262,7 +1262,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   same tuple routes without a path-change report. `examples/path_validation.zig`
   now prints the endpoint path-change and path-update result. Automatic
   socket-backed path-validation ownership remains pending.
-- 2026-05-23: Extended `QuicConnection.pollProtectedShortDatagram()` to protect
+- 2026-05-23: Extended `Connection.pollProtectedShortDatagram()` to protect
   queued Application-space `RETIRE_CONNECTION_ID` frames and unsent local
   `NEW_CONNECTION_ID` frames with an optional ACK in 1-RTT short packets. The
   protected path consumes the RETIRE queue and marks local connection IDs as
@@ -1273,7 +1273,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   caller-keyed protected 1-RTT NEW_CONNECTION_ID/RETIRE_CONNECTION_ID exchange.
   Endpoint Retry policy, TLS secret production, key discard, and key update remain
   pending.
-- 2026-05-23: Extended `QuicConnection.pollProtectedShortDatagram()` to protect
+- 2026-05-23: Extended `Connection.pollProtectedShortDatagram()` to protect
   queued Application-space MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS_BIDI/UNI,
   DATA_BLOCKED, STREAM_DATA_BLOCKED, and STREAMS_BLOCKED_BIDI/UNI frames with
   an optional ACK in 1-RTT short packets. The protected path drops obsolete
@@ -1285,7 +1285,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   caller-keyed protected short STREAM_DATA_BLOCKED plus MAX_DATA/MAX_STREAM_DATA
   exchange that restores stream sending. Endpoint Retry policy, TLS secret production,
   key discard, and key update remain pending.
-- 2026-05-23: Extended `QuicConnection.pollProtectedShortDatagram()` to protect
+- 2026-05-23: Extended `Connection.pollProtectedShortDatagram()` to protect
   queued Application-space CONNECTION_CLOSE and APPLICATION_CLOSE frames in
   1-RTT short packets. The protected close path is available while a local
   close is pending or closing, advances packet numbers without tracking
@@ -1298,7 +1298,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   retransmission, and protected application close delivery. Endpoint Retry policy, TLS
   secret production, key discard, and key update remain pending.
 - 2026-05-23: Added server-only `sendHandshakeDone()` and `issueNewToken()`,
-  then extended `QuicConnection.pollProtectedShortDatagram()` to protect queued
+  then extended `Connection.pollProtectedShortDatagram()` to protect queued
   HANDSHAKE_DONE and NEW_TOKEN frames in 1-RTT short packets. The protected path
   consumes each queue only after packet-number, congestion, and
   anti-amplification checks pass; tests cover side validation, protected
@@ -1320,7 +1320,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   retransmission. Real TLS-backed early-data secret ownership,
   acceptance policy, replay defense, endpoint Retry policy, key discard, and key
   update remain pending.
-- 2026-05-23: Added client-side `QuicConnection.processRetryDatagram()` for
+- 2026-05-23: Added client-side `Connection.processRetryDatagram()` for
   Retry packet routing. It verifies the RFC 9001 Retry Integrity Tag with the
   Original Destination Connection ID, rejects server-side, duplicate, discarded
   Initial-space, and malformed Retry datagrams without state mutation, stores
@@ -1331,7 +1331,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   `examples/retry_token.zig` now demonstrates the connection-layer Retry
   processing path. Later bullets cover in-memory endpoint-level Retry DCID
   switching and token policy.
-- 2026-05-23: Added server-side `QuicConnection.issueRetryDatagram()` for
+- 2026-05-23: Added server-side `Connection.issueRetryDatagram()` for
   connection-layer Retry issuance. It builds a QUIC v1 Retry datagram with the
   RFC 9001 Retry Integrity Tag, registers the opaque token for one-time
   validation, records Original Destination Connection ID plus Retry Source
@@ -1342,7 +1342,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   Later bullets cover the in-memory endpoint-level Retry DCID switching and
   token policy.
 - 2026-05-23: Added `quicz.address_validation_token` plus
-  `QuicConnection.issueAddressValidationToken()` and
+  `Connection.issueAddressValidationToken()` and
   `validateAddressValidationToken()`. Tokens are HMAC-SHA256 authenticated,
   carry a kind, originating version, issued time, lifetime, and nonce, and bind
   the peer address as MAC input without serializing address bytes into the token. Tests cover
@@ -1365,7 +1365,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   cover replay-filter snapshot export/restore.
 - 2026-05-23: Added `address_validation_token.validateAnySecret()`,
   `validateAnySecretAndRemember()`, and
-  `QuicConnection.validateAddressValidationTokenWithSecrets()`. Callers can
+  `Connection.validateAddressValidationTokenWithSecrets()`. Callers can
   validate address tokens against an ordered current/previous secret set so
   tokens issued before a secret rotation remain usable until their encoded
   lifetime expires. The validate-then-remember helper records a token in
@@ -1622,7 +1622,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   back, and verifies the client can match the retained token. Full TLS-owned
   connection lifecycle integration remains pending.
 - 2026-05-22: Added per-packet-number-space ECN validation state to
-  `QuicConnection`. `recordEcnPacketSentInSpace()` records modeled ECT(0) or
+  `Connection`. `recordEcnPacketSentInSpace()` records modeled ECT(0) or
   ECT(1) sent packets for deterministic tests, ACK_ECN counters are validated
   against newly acknowledged ECT packets and cumulative sent totals, regular
   ACKs for newly acknowledged ECT packets disable ECN validation, and reordered
@@ -1637,7 +1637,7 @@ produce or consume TLS-owned QUIC packets over UDP.
   `zig build run-ecn-validation`. The example demonstrates ECT(0) ACK_ECN
   validation, missing-counter failure, and endpoint path-identity isolation.
 - 2026-05-22: Added simplified RFC 9002 packet-threshold loss detection in
-  `QuicConnection` ACK processing. When the largest acknowledged packet number
+  `Connection` ACK processing. When the largest acknowledged packet number
   is at least three packet numbers ahead of an unacknowledged sent packet in the
   same packet number space, that older packet is removed from sent tracking and
   reported to the recovery state as lost. Invalid multi-frame payloads roll

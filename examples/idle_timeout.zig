@@ -8,7 +8,7 @@ pub fn main() !void {
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
 
-    var conn = try quicz.QuicConnection.init(allocator, .client, .{
+    var conn = try quicz.Connection.init(allocator, .client, .{
         .max_idle_timeout_ms = 100,
     });
     defer conn.deinit();

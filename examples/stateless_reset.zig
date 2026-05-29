@@ -37,7 +37,7 @@ fn require(condition: bool) !void {
 }
 
 pub fn main() !void {
-    var conn = try quicz.QuicConnection.init(std.heap.page_allocator, .client, .{});
+    var conn = try quicz.Connection.init(std.heap.page_allocator, .client, .{});
     defer conn.deinit();
 
     const cid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };

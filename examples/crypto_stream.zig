@@ -31,7 +31,7 @@ fn fixedWriter(buffer: []u8) FixedWriter {
 }
 
 fn readCryptoRequired(
-    conn: *quicz.QuicConnection,
+    conn: *quicz.Connection,
     space: quicz.PacketNumberSpace,
     out: []u8,
 ) ![]const u8 {
@@ -83,7 +83,7 @@ fn appendProtectedShortCryptoPayload(
 }
 
 fn expectStreamClosed(
-    conn: *quicz.QuicConnection,
+    conn: *quicz.Connection,
     stream_id: u64,
     out: []u8,
 ) !void {
@@ -95,7 +95,7 @@ fn expectStreamClosed(
 }
 
 fn processCryptoFrame(
-    conn: *quicz.QuicConnection,
+    conn: *quicz.Connection,
     space: quicz.PacketNumberSpace,
     now_millis: i64,
     offset: u64,
@@ -209,15 +209,15 @@ pub fn main() !void {
     const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
     const initial_secrets = try quicz.protection.deriveInitialSecrets(.v1, &dcid);
 
-    var client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var client = try quicz.Connection.init(gpa, .client, .{});
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var server = try quicz.Connection.init(gpa, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
     var crypto_buf: [128]u8 = undefined;
 
-    var reassembly = try quicz.QuicConnection.init(gpa, .server, .{});
+    var reassembly = try quicz.Connection.init(gpa, .server, .{});
     defer reassembly.deinit();
     try processCryptoFrame(&reassembly, .handshake, 100, 6, "flight");
     try processCryptoFrame(&reassembly, .handshake, 101, 6, "flight");
@@ -230,7 +230,7 @@ pub fn main() !void {
         reassembly.pendingAckLargest(.handshake),
     });
 
-    var crypto_loss = try quicz.QuicConnection.init(gpa, .client, .{});
+    var crypto_loss = try quicz.Connection.init(gpa, .client, .{});
     defer crypto_loss.deinit();
     try crypto_loss.sendCryptoInSpace(.handshake, "lost crypto");
     var loss_payload_buf: [96]u8 = undefined;
@@ -253,7 +253,7 @@ pub fn main() !void {
         crypto_loss.bytesInFlight(.handshake),
     });
 
-    var protected_crypto_loss = try quicz.QuicConnection.init(gpa, .client, .{});
+    var protected_crypto_loss = try quicz.Connection.init(gpa, .client, .{});
     defer protected_crypto_loss.deinit();
     try protected_crypto_loss.sendCrypto("lost protected crypto");
     const lost_protected_crypto = (try protected_crypto_loss.pollProtectedShortDatagram(
@@ -293,7 +293,7 @@ pub fn main() !void {
         protected_crypto_loss.bytesInFlight(.application),
     });
 
-    var bridged = try quicz.QuicConnection.init(gpa, .server, .{});
+    var bridged = try quicz.Connection.init(gpa, .server, .{});
     defer bridged.deinit();
     try processCryptoFrame(&bridged, .handshake, 103, 6, " hello");
     try processCryptoFrame(&bridged, .handshake, 104, 0, "client");
@@ -348,7 +348,7 @@ pub fn main() !void {
         @tagName(bridged.handshakeState()),
     });
 
-    var confirmed_no_output = try quicz.QuicConnection.init(gpa, .server, .{});
+    var confirmed_no_output = try quicz.Connection.init(gpa, .server, .{});
     defer confirmed_no_output.deinit();
     try processCryptoFrame(&confirmed_no_output, .handshake, 106, 0, "client hello");
     var confirmed_backend = MockCryptoBackend{
@@ -371,9 +371,9 @@ pub fn main() !void {
         confirmed_no_output.hasHandshakeProtectionKeys(),
     });
 
-    var installed_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var installed_client = try quicz.Connection.init(gpa, .client, .{});
     defer installed_client.deinit();
-    var installed_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var installed_server = try quicz.Connection.init(gpa, .server, .{});
     defer installed_server.deinit();
     try installed_server.validatePeerAddress();
 
@@ -738,9 +738,9 @@ pub fn main() !void {
         server_client_key_phase.currentKeyPhase(),
     });
 
-    var spin_client = try quicz.QuicConnection.init(gpa, .client, .{ .enable_spin_bit = true });
+    var spin_client = try quicz.Connection.init(gpa, .client, .{ .enable_spin_bit = true });
     defer spin_client.deinit();
-    var spin_server = try quicz.QuicConnection.init(gpa, .server, .{ .enable_spin_bit = true });
+    var spin_server = try quicz.Connection.init(gpa, .server, .{ .enable_spin_bit = true });
     defer spin_server.deinit();
     try spin_server.validatePeerAddress();
 

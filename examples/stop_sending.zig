@@ -32,7 +32,7 @@ fn fixedWriter(buffer: []u8) FixedWriter {
     return .{ .buffer = buffer };
 }
 
-fn pollRequired(conn: *quicz.QuicConnection, out: []u8) ![]const u8 {
+fn pollRequired(conn: *quicz.Connection, out: []u8) ![]const u8 {
     return (try conn.pollTx(0, out)) orelse error.UnexpectedState;
 }
 
@@ -84,9 +84,9 @@ fn expectAckThenReset(
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
 
-    var client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var client = try quicz.Connection.init(gpa, .client, .{});
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var server = try quicz.Connection.init(gpa, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -110,9 +110,9 @@ pub fn main() !void {
         try server.recvStreamFinalSize(stream_id),
     });
 
-    var racing_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var racing_client = try quicz.Connection.init(gpa, .client, .{});
     defer racing_client.deinit();
-    var racing_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var racing_server = try quicz.Connection.init(gpa, .server, .{});
     defer racing_server.deinit();
     try racing_server.validatePeerAddress();
 
@@ -127,9 +127,9 @@ pub fn main() !void {
     try expectAckOnly(gpa, ack_only);
     std.debug.print("[stop] queued STOP_SENDING dropped after RESET_STREAM stream={}\n", .{racing_stream});
 
-    var done_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var done_client = try quicz.Connection.init(gpa, .client, .{});
     defer done_client.deinit();
-    var done_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var done_server = try quicz.Connection.init(gpa, .server, .{});
     defer done_server.deinit();
     try done_server.validatePeerAddress();
 
@@ -139,9 +139,9 @@ pub fn main() !void {
     try requireError(error.StreamClosed, done_server.stopSending(done_stream, 24));
     std.debug.print("[stop] receiver skipped STOP_SENDING after final data stream={}\n", .{done_stream});
 
-    var early_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var early_client = try quicz.Connection.init(gpa, .client, .{});
     defer early_client.deinit();
-    var early_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var early_server = try quicz.Connection.init(gpa, .server, .{});
     defer early_server.deinit();
     try early_server.validatePeerAddress();
 
@@ -158,7 +158,7 @@ pub fn main() !void {
     if (!std.mem.eql(u8, recv_buf[0..early_len], "still open")) return error.UnexpectedState;
     std.debug.print("[stop] STOP_SENDING before STREAM opened stream={} and lower streams, reset reply side, and left receive side open\n", .{early_stream});
 
-    var lost_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var lost_client = try quicz.Connection.init(gpa, .client, .{});
     defer lost_client.deinit();
 
     const lost_stream = try lost_client.openStream();

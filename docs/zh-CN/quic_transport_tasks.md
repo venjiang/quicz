@@ -113,7 +113,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   ACK 的 space 内。无效多帧 payload 会把 shared RTT 变更和其它 recovery state
   一起回滚；`pto_recovery` 现在打印 shared RTT 与 Handshake PTO deadline 证据。
 - 2026-05-29：新增 RFC 9002 跨 packet number space bytes-in-flight
-  拥塞发送准入。`QuicConnection.totalBytesInFlight()` 现在暴露
+  拥塞发送准入。`Connection.totalBytesInFlight()` 现在暴露
   Initial/Handshake/Application 的聚合 in-flight byte count，ack-eliciting
   send 会先用该聚合值与当前 space 的 congestion window 做准入；PTO probe
   和 congestion probe 仍保留一次性绕过语义。测试覆盖 Initial 与 Handshake
@@ -188,7 +188,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   probe 打印 `cwnd=100 inflight=101`。
 - 2026-05-27：新增 `EndpointConnectionLifecycle`，把 endpoint routing 和
   recovery-timer scheduling 交给同一个 endpoint state owner。它仍保持现有
-  caller-owned `QuicConnection` 模型，但 socket event loop 现在可以通过同一状态
+  caller-owned `Connection` 模型，但 socket event loop 现在可以通过同一状态
   owner 对 connection handle 执行 arm、service、route 和 retire；retire 会同时
   移除该 handle 的 route 和任何已 armed 的 loss/PTO timer。测试覆盖 route lookup、
   active timer arming、route/timer retirement 和第二次 retire 的幂等行为；
@@ -231,7 +231,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   `protected_bytes` 现在包含 caller-keyed short exchange。
 - 2026-05-28：新增 endpoint lifecycle 的 caller-owned key-phase-state 1-RTT
   short-packet send/receive timer refresh helper。外部持有的 key-update 状态
-  现在也可穿过 endpoint route/timer owner，同时 `QuicConnection` 继续持有
+  现在也可穿过 endpoint route/timer owner，同时 `Connection` 继续持有
   packet-number、ACK 与 recovery 状态。测试覆盖 route-selected next key-phase
   PING delivery、认证成功后的 peer key-phase advancement、ACK cleanup 和最终
   timer disarm；`endpoint_recovery_timers` 的 `protected_bytes` 现在包含
@@ -567,7 +567,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   并校验 Retry 相关 transport parameter。
 - 2026-05-25：扩展 `examples/udp_endpoint_loopback.zig`，把真实 loopback
   UDP Version Negotiation response 交给
-  `QuicConnection.processVersionNegotiationDatagram()` 处理。示例现在能在同一个
+  `Connection.processVersionNegotiationDatagram()` 处理。示例现在能在同一个
   socket-backed flow 中证明 lifecycle-owned endpoint VN response delivery 与
   client-side mutual-version selection。
 - 2026-05-25：新增 `examples/udp_close_lifecycle_loopback.zig` 和
@@ -617,7 +617,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   datagram 分类为 route、version negotiation、stateless reset 或 drop。完整
   socket-owned accept loop 和 incompatible VN retry state 仍待实现。
 - 2026-05-23：新增 client-side Version Negotiation packet handling state。
-  `QuicConnection.processVersionNegotiationDatagram()` 会校验 RFC 8999
+  `Connection.processVersionNegotiationDatagram()` 会校验 RFC 8999
   connection-ID echo，忽略包含 client Original Version 或 CID 不匹配的 packet，
   从本地 `available_versions` 中选择 mutual version，记录本次 connection attempt
   已经响应过 VN，并通过 `versionNegotiationSelectedVersion()` 暴露结果。启动后续
@@ -719,7 +719,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   transport-parameter 暴露（含 TLS extension bytes、本端 ACK delay policy 和 server preferred_address）与
   transport error helper 的 roundtrip（含 transport-parameter、frame codec 和
   packet-type error 分类）。
-- 2026-05-22：新增 `QuicConnection.localTransportParameters()` 和
+- 2026-05-22：新增 `Connection.localTransportParameters()` 和
   `applyPeerTransportParameters()`。本端参数会暴露配置的接收限制、
   本端 `ack_delay_exponent`/`max_ack_delay`、`disable_active_migration`、配置的
   server-only `stateless_reset_token` 和配置的 server-only `preferred_address`，
@@ -749,15 +749,15 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   `stateless_reset_token` 与 `preferred_address`、client 存储 server
   preferred-address/reset-token policy、有效 idle-timeout 选择、对端 stream-data
   limit enforcement，以及 server 拒绝 client 发送 server-only 参数。
-- 2026-05-22：新增 `QuicConnection.sendPathChallenge()`，支持 outbound
+- 2026-05-22：新增 `Connection.sendPathChallenge()`，支持 outbound
   PATH_CHALLENGE 排队、匹配 PATH_RESPONSE 校验、重复或不匹配 response 拒绝，
   并补充无效多帧 payload 的回滚测试；timeout/retry 策略仍待实现。
-- 2026-05-22：在 `QuicConnection` 增加对端签发 connection ID 生命周期跟踪。
+- 2026-05-22：在 `Connection` 增加对端签发 connection ID 生命周期跟踪。
   NEW_CONNECTION_ID 现在会保存 active peer CID、拒绝 sequence number 相同但
   内容不一致的重复帧、拒绝跨 CID stateless reset token 复用、遵守配置的
   active CID limit，并通过 retire_prior_to 排队 RETIRE_CONNECTION_ID；无效多帧
   payload 会回滚部分 CID 状态。本端 CID 签发与完整 endpoint DCID routing 生命周期仍待实现。
-- 2026-05-22：在 `QuicConnection` 增加本端 connection ID 签发。
+- 2026-05-22：在 `Connection` 增加本端 connection ID 签发。
   `issueConnectionId()` 会复制本端 CID 字节、分配 NEW_CONNECTION_ID sequence
   number、遵守对端 active CID limit、拒绝重复本端 CID 和 stateless reset token
   复用，并把未发送 CID 排队给
@@ -855,7 +855,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   `zig build run-uni-stream`。该示例在当前 frame-payload 骨架中演示
   client 与 server 发起的 unidirectional stream 传递，并验证 receive-only
   的对端单向 stream 会拒绝反向发送。
-- 2026-05-22：在 `QuicConnection` 增加入站乱序 STREAM range 缓存。
+- 2026-05-22：在 `Connection` 增加入站乱序 STREAM range 缓存。
   非重叠 range 会在接收时计入流控，只在缺口补齐后暴露给
   `recvOnStream()`。测试覆盖缺失前缀之前先收到 FIN、重叠拒绝、
   无效 payload 回滚，以及带 pending range 时的 RESET_STREAM final-size
@@ -874,7 +874,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   调用方现在可以观察 STREAM FIN final size，以及所有字节被消费后的接收侧
   成功完成状态。RESET_STREAM final size 仍会暴露，但不算 FIN completion。
   测试覆盖乱序 FIN completion、reset 行为和无效 receive-only stream 方向。
-- 2026-05-22：新增 `QuicConnection.resetStream()` 与
+- 2026-05-22：新增 `Connection.resetStream()` 与
   `examples/stream_reset.zig`，并增加 `zig build run-stream-reset`。该 API
   可中止已打开的本地发送侧和已观察到的对端 bidirectional stream 回复发送侧，
   使用当前发送 offset 作为 final size 排队单个 RESET_STREAM，拒绝 receive-only
@@ -887,7 +887,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   Known 接收 stream。后续 reset 会把缺失的 final size 计入 connection
   flow control 并关闭接收侧；Data Recvd stream 仍保留已完整接收的 FIN 数据可读。
   测试覆盖 FIN 缺口后的 abort 路径，`examples/stream_reset.zig` 演示该边界。
-- 2026-05-22：新增 `QuicConnection.stopSending()` 与
+- 2026-05-22：新增 `Connection.stopSending()` 与
   `examples/stop_sending.zig`，并增加 `zig build run-stop-sending`。该 API
   会为已打开的本地 bidirectional 接收侧和已观察到的对端发起接收 stream
   排队 STOP_SENDING，拒绝 send-only 和未观察到的 stream，去重本地 stop
@@ -905,12 +905,12 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   protected 0-RTT 与 protected 1-RTT packetization 现在会在接收侧进入
   Data Recvd 或 Reset Recvd 后过滤 STOP_SENDING。测试覆盖 final-data 与
   RESET_STREAM 竞态，`examples/stop_sending.zig` 演示 reset 竞态。
-- 2026-05-22：在 `QuicConnection` 增加客户端侧 NEW_TOKEN 存储。
+- 2026-05-22：在 `Connection` 增加客户端侧 NEW_TOKEN 存储。
   client 连接会按 `Config.max_stored_new_tokens` 上限保存 opaque token
   字节，并通过 `latestNewToken()` 暴露最新 token。测试覆盖存储、容量、
   server 侧拒绝和无效 payload 回滚；认证 token 生成、过期和 endpoint
   peer-address binding 由后续 address-validation token 与 endpoint helper 覆盖。
-- 2026-05-22：在 `QuicConnection` 增加本端 close 发出能力，包含
+- 2026-05-22：在 `Connection` 增加本端 close 发出能力，包含
   `closeConnection()` 与 `closeApplication()`。它们会排队 CONNECTION_CLOSE
   变体，`pollTx()` 会在进入本端 closing 状态时发出 close frame；测试覆盖
   payload 编码、closing 状态 API 拒绝、非法值拒绝，以及超尺寸 close 不改变状态。
@@ -987,7 +987,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
 - 2026-05-22：在 `quicz.packet` 增加 stateless reset helper，并在连接层增加
   只读 reset 检测。`encodeStatelessReset()` 使用调用方提供的不可预测字节和
   16 字节 token 序列化 reset datagram，`matchesStatelessReset()` 以 constant-time 方式比较尾部
-  token，`QuicConnection.detectStatelessReset()` 匹配 active peer-issued CID
+  token，`Connection.detectStatelessReset()` 匹配 active peer-issued CID
   的 reset token 并忽略 retired CID。
 - 2026-05-22：新增 `examples/stateless_reset.zig` 和
   `zig build run-stateless-reset`。该示例演示匹配对端 stateless reset token
@@ -1017,7 +1017,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   失败、header-protection sample 过短拒绝，以及 protected long-packet boundary
   peeking。Endpoint routing、真实 TLS traffic-secret production、key discard 和 key
   update 仍待实现。
-- 2026-05-22：新增 `QuicConnection.processInitialProtectedDatagram()`。
+- 2026-05-22：新增 `Connection.processInitialProtectedDatagram()`。
   该连接层 bridge 会用调用方提供的 RFC 9001 Initial keys 解开一个 QUIC v1
   protected Initial long packet，校验 packet type、packet number 和单 packet
   datagram 边界，再把 plaintext frame payload 投递到 Initial packet number
@@ -1025,7 +1025,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   number 前进，以及篡改 packet 的状态回滚。CRYPTO-only long packet 之外的
   protected transmit、TLS traffic secret production、key discard 和 key update
   仍待实现。
-- 2026-05-22：新增 `QuicConnection.pollInitialProtectedDatagram()`，覆盖
+- 2026-05-22：新增 `Connection.pollInitialProtectedDatagram()`，覆盖
   Initial CRYPTO bridge 的发送侧。它会从 Initial CRYPTO send queue 发出一个
   protected QUIC v1 Initial long packet，使用选定的 packet-number encoding，
   只在 header-protection sample 需要时补 PADDING，并把 protected datagram
@@ -1034,7 +1034,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   前进、bytes-in-flight 记账，以及没有 Initial CRYPTO 排队时保持 idle。
   ACK-only、PING-only、coalesced protected packet、TLS traffic secret
   production、key discard 和 key update 仍待实现。
-- 2026-05-22：新增 `QuicConnection.processProtectedLongDatagramInSpace()` 与
+- 2026-05-22：新增 `Connection.processProtectedLongDatagramInSpace()` 与
   `pollProtectedLongCryptoDatagramInSpace()`，把 protected long-packet bridge
   从 Initial 泛化到 Initial 和 Handshake 两个 packet number space。原有
   Initial-specific wrapper 继续保留以兼容现有调用。测试覆盖 protected
@@ -1043,7 +1043,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   `examples/crypto_stream.zig` 现在会用调用方提供的 keys 让 Initial 与
   Handshake CRYPTO flight 都经过 protected long packet。Endpoint Retry policy、
   1-RTT protected transmit、TLS secret production、key discard 和 key update 仍待实现。
-- 2026-05-22：新增 `QuicConnection.processProtectedLongDatagram()` 与
+- 2026-05-22：新增 `Connection.processProtectedLongDatagram()` 与
   `ProtectedLongDatagramKeys`，用于 coalesced protected long datagram 接收路由。
   该方法会先 peek 每个 long-header packet 的边界，确认所有 packet type 均可
   支持且调用方已提供对应 keys，再开始修改连接状态；随后逐个打开 Initial 或
@@ -1052,7 +1052,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   提前修改 Initial 状态。`examples/crypto_stream.zig` 现在演示 coalesced server
   Initial + Handshake flight。Endpoint Retry policy、1-RTT protected transmit、
   TLS secret production、key discard 和 key update 仍待实现。
-- 2026-05-22：新增 `QuicConnection.pollProtectedLongDatagram()`，用于
+- 2026-05-22：新增 `Connection.pollProtectedLongDatagram()`，用于
   coalesced protected long datagram transmit。该方法会从 queued CRYPTO、
   PING 加可选 ACK、或 ACK-only 状态中预构造下一个 Initial 与 Handshake
   protected packet，验证聚合后的 datagram 大小、congestion 状态与
@@ -1067,7 +1067,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   transmit、TLS secret production、key discard 和 key update 仍待实现。
 - 2026-05-22：新增 `protectShortPacketAes128()`、
   `unprotectShortPacketAes128()`、`deinitProtectedShortPacket()` 与
-  `QuicConnection.processProtectedShortDatagram()`，用于调用方提供 key 的
+  `Connection.processProtectedShortDatagram()`，用于调用方提供 key 的
   1-RTT short-header packet 接收。连接层 API 要求调用方提供 destination-CID
   长度上下文，打开单个 protected short datagram，要求 packet number 匹配
   Application packet number space 的下一个期望值，然后按 1-RTT frame 规则投递
@@ -1076,7 +1076,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   以及 authentication failure 不修改状态。`examples/crypto_stream.zig` 现在会在
   建模 handshake confirmation 后演示 protected 1-RTT PING receive。Retry
   routing、TLS secret production、key discard 和 key update 仍待实现。
-- 2026-05-22：新增 `QuicConnection.pollProtectedShortDatagram()`，用于调用方
+- 2026-05-22：新增 `Connection.pollProtectedShortDatagram()`，用于调用方
   提供 key 的 1-RTT short-header PING/ACK transmit。该方法会保护
   Application-space PING 加可选 ACK，或 ACK-only 状态，检查 congestion 和
   anti-amplification 预算，推进 packet number，只为 ack-eliciting packet 记录
@@ -1085,7 +1085,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   `examples/crypto_stream.zig` 现在会在建模 handshake confirmation 后演示
   protected 1-RTT PING/ACK exchange。Endpoint Retry policy、TLS secret production、
   key discard 和 key update 仍待实现。
-- 2026-05-22：扩展 `QuicConnection.pollProtectedShortDatagram()`，支持把一个
+- 2026-05-22：扩展 `Connection.pollProtectedShortDatagram()`，支持把一个
   queued Application-space STREAM frame 和可选 ACK 保护为 1-RTT short packet。
   commit path 只会在 packet-number、congestion 和 anti-amplification 检查通过后
   消费已发送的 stream frame，并在这些检查阻塞发送时释放预构造的 datagram。测试覆盖
@@ -1094,7 +1094,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   handshake confirmation 后演示调用方 key 的 protected 1-RTT PING/ACK 与
   STREAM/ACK exchange。Endpoint Retry policy、TLS secret production、key discard 和
   key update 仍待实现。
-- 2026-05-22：扩展 `QuicConnection.pollProtectedShortDatagram()`，支持把 queued
+- 2026-05-22：扩展 `Connection.pollProtectedShortDatagram()`，支持把 queued
   Application-space `RESET_STREAM` 与 `STOP_SENDING` frame 加可选 ACK 保护为
   1-RTT short packet。protected path 现在沿用 `pollTx()` 的 stream-control
   优先级，只在 send commit 后消费 RESET/STOP 队列，并在 RESET_STREAM 发出后继续
@@ -1104,7 +1104,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   protected 1-RTT PING/ACK、STREAM/ACK、RESET_STREAM/ACK 和
   STOP_SENDING/RESET_STREAM exchange。Endpoint Retry policy、TLS secret production、
   key discard 和 key update 仍待实现。
-- 2026-05-22：扩展 `QuicConnection.pollProtectedShortDatagram()`，支持把 queued
+- 2026-05-22：扩展 `Connection.pollProtectedShortDatagram()`，支持把 queued
   Application-space CRYPTO frame 和可选 ACK 保护为 1-RTT short packet。
   protected path 只会在 packet-number、congestion 和 anti-amplification
   检查通过后消费 CRYPTO 队列，沿用 STREAM transmit 的回滚边界。测试覆盖
@@ -1114,7 +1114,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   PING/ACK、CRYPTO/ACK、STREAM/ACK、RESET_STREAM/ACK 和
   STOP_SENDING/RESET_STREAM exchange。Endpoint Retry policy、TLS secret production、
   key discard 和 key update 仍待实现。
-- 2026-05-22：扩展 `QuicConnection.pollProtectedShortDatagram()`，支持把 queued
+- 2026-05-22：扩展 `Connection.pollProtectedShortDatagram()`，支持把 queued
   Application-space `PATH_RESPONSE` 与 outbound `PATH_CHALLENGE` frame 和可选
   ACK 保护为 1-RTT short packet。PATH_RESPONSE 队列只在 send commit 后消费；
   PATH_CHALLENGE 也只会在 packet-number、congestion 和 anti-amplification
@@ -1130,7 +1130,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   `EndpointRouter.updateRoutePath()`，之后同一 tuple 会在无 path-change 报告下
   路由。`examples/path_validation.zig` 现在输出 endpoint path-change 与
   path-update 结果。自动 socket-backed path-validation ownership 仍待实现。
-- 2026-05-23：扩展 `QuicConnection.pollProtectedShortDatagram()`，支持把 queued
+- 2026-05-23：扩展 `Connection.pollProtectedShortDatagram()`，支持把 queued
   Application-space `RETIRE_CONNECTION_ID` frame 与未发送的本端
   `NEW_CONNECTION_ID` frame 和可选 ACK 保护为 1-RTT short packet。protected path
   只会在 packet-number、congestion 和 anti-amplification 检查通过后消费 RETIRE
@@ -1139,7 +1139,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   未发送的 NEW_CONNECTION_ID、后续仍可发送。`examples/connection_ids.zig` 现在会演示调用方
   key 的 protected 1-RTT NEW_CONNECTION_ID/RETIRE_CONNECTION_ID exchange。
   Endpoint Retry policy、TLS secret production、key discard 和 key update 仍待实现。
-- 2026-05-23：扩展 `QuicConnection.pollProtectedShortDatagram()`，支持把 queued
+- 2026-05-23：扩展 `Connection.pollProtectedShortDatagram()`，支持把 queued
   Application-space MAX_DATA、MAX_STREAM_DATA、MAX_STREAMS_BIDI/UNI、
   DATA_BLOCKED、STREAM_DATA_BLOCKED 与 STREAMS_BLOCKED_BIDI/UNI frame 和可选
   ACK 保护为 1-RTT short packet。protected path 会先丢弃过期 MAX/BLOCKED，
@@ -1149,7 +1149,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   `examples/flow_control.zig` 现在演示调用方 key 的 protected short
   STREAM_DATA_BLOCKED + MAX_DATA/MAX_STREAM_DATA exchange，并恢复 stream 发送。
   Endpoint Retry policy、TLS secret production、key discard 和 key update 仍待实现。
-- 2026-05-23：扩展 `QuicConnection.pollProtectedShortDatagram()`，支持把 queued
+- 2026-05-23：扩展 `Connection.pollProtectedShortDatagram()`，支持把 queued
   Application-space CONNECTION_CLOSE 与 APPLICATION_CLOSE frame 保护为 1-RTT
   short packet。protected close path 可在本地 close pending 或 closing 期间使用，
   会推进 packet number 但不计入 bytes-in-flight，只在 packet-size 与
@@ -1160,7 +1160,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   投递、重发和 protected application close 投递。Endpoint Retry policy、TLS secret
   production、key discard 和 key update 仍待实现。
 - 2026-05-23：新增 server-only `sendHandshakeDone()` 和 `issueNewToken()`，
-  并扩展 `QuicConnection.pollProtectedShortDatagram()`，支持把 queued
+  并扩展 `Connection.pollProtectedShortDatagram()`，支持把 queued
   HANDSHAKE_DONE 与 NEW_TOKEN frame 保护为 1-RTT short packet。protected path
   只在 packet-number、congestion 和 anti-amplification 检查通过后消费队列。
   测试覆盖 side validation、protected HANDSHAKE_DONE 投递与 ACK 清理、
@@ -1180,7 +1180,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   STREAM/RESET_STREAM/STOP_SENDING retransmission。真实 TLS-backed
   early-data secret ownership、acceptance policy、replay defense、endpoint Retry
   policy、key discard 和 key update 仍待实现。
-- 2026-05-23：新增客户端侧 `QuicConnection.processRetryDatagram()`，用于
+- 2026-05-23：新增客户端侧 `Connection.processRetryDatagram()`，用于
   Retry packet 路由。该方法会使用 Original Destination Connection ID 校验
   RFC 9001 Retry Integrity Tag，拒绝 server 侧、重复、Initial space 已丢弃
   和格式错误的 Retry datagram 且不修改状态，保存 `latestRetryToken()` 与
@@ -1189,7 +1189,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   保存、Initial 自动带 token、篡改拒绝、重复拒绝和 server 侧拒绝。
   `examples/retry_token.zig` 现在演示 connection-layer Retry 处理路径。后续条目
   覆盖内存态 endpoint 级 Retry DCID switching 和 token policy。
-- 2026-05-23：新增 server 侧 `QuicConnection.issueRetryDatagram()`，用于连接层
+- 2026-05-23：新增 server 侧 `Connection.issueRetryDatagram()`，用于连接层
   Retry 签发。它会生成带 RFC 9001 Retry Integrity Tag 的 QUIC v1 Retry
   datagram，注册 opaque token 供一次性校验，记录 Original Destination
   Connection ID 与 Retry Source Connection ID，并通过 `localTransportParameters()`
@@ -1198,7 +1198,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   现在使用这条连接层签发路径。后续条目覆盖内存态 endpoint 级 Retry DCID
   switching 和 token policy。
 - 2026-05-23：新增 `quicz.address_validation_token` 以及
-  `QuicConnection.issueAddressValidationToken()` /
+  `Connection.issueAddressValidationToken()` /
   `validateAddressValidationToken()`。token 使用 HMAC-SHA256 认证，携带类型、
   originating version、签发时间、寿命和 nonce，并把 peer address 作为 MAC 输入绑定，但不会把地址字节
   序列化进 token。测试覆盖类型/地址/篡改/过期检查、分配失败、认证校验之后的一次性
@@ -1216,7 +1216,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   `AddressValidationPolicy` 覆盖；后续条目覆盖 replay-filter snapshot 导出/恢复。
 - 2026-05-23：新增 `address_validation_token.validateAnySecret()`、
   `validateAnySecretAndRemember()` 与
-  `QuicConnection.validateAddressValidationTokenWithSecrets()`。调用方可以按
+  `Connection.validateAddressValidationTokenWithSecrets()`。调用方可以按
   当前 secret、旧 secret 的顺序校验地址 token，支持 token 在 secret 轮换后到期前
   继续可用；验证后记录 helper 会在 MAC、类型、地址和寿命校验成功后写入
   `ReplayFilter`，重复使用返回 `TokenReplay`。测试覆盖旧 secret 签发 token
@@ -1436,7 +1436,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
   通过 lifecycle-owned route state 分类为 reset response，再把 reset
   datagram 发回客户端，并验证客户端可以匹配保留的 token。完整 TLS-owned
   connection lifecycle 集成仍待实现。
-- 2026-05-22：为 `QuicConnection` 增加按 packet number space 隔离的 ECN
+- 2026-05-22：为 `Connection` 增加按 packet number space 隔离的 ECN
   validation 状态。`recordEcnPacketSentInSpace()` 可在确定性测试中记录
   已建模的 ECT(0) / ECT(1) 发送 packet；ACK_ECN counter 会按新确认的
   ECT packet 和累计发送总量校验；普通 ACK 新确认 ECT packet 时会禁用 ECN
@@ -1450,7 +1450,7 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
 - 2026-05-22：新增 `examples/ecn_validation.zig` 和
   `zig build run-ecn-validation`。该示例演示 ECT(0) ACK_ECN 校验以及
   缺少 counter 的失败路径，以及 endpoint path-identity isolation。
-- 2026-05-22：在 `QuicConnection` ACK 处理中增加简化 RFC 9002
+- 2026-05-22：在 `Connection` ACK 处理中增加简化 RFC 9002
   packet-threshold loss detection。当同一 packet number space 中的 largest
   acknowledged packet number 比某个未确认已发送 packet 至少领先 3 个
   packet number 时，该较旧 packet 会从 sent tracking 移除，并作为 lost

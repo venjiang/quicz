@@ -59,7 +59,7 @@ fn encodePathResponse(buffer: []u8, data: [8]u8) ![]const u8 {
 }
 
 fn retryThenSucceed(allocator: std.mem.Allocator) !void {
-    var conn = try quicz.QuicConnection.init(allocator, .client, .{});
+    var conn = try quicz.Connection.init(allocator, .client, .{});
     defer conn.deinit();
 
     const challenge_data = [_]u8{ 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80 };
@@ -91,7 +91,7 @@ fn retryThenSucceed(allocator: std.mem.Allocator) !void {
 }
 
 fn retryThenFail(allocator: std.mem.Allocator) !void {
-    var conn = try quicz.QuicConnection.init(allocator, .client, .{});
+    var conn = try quicz.Connection.init(allocator, .client, .{});
     defer conn.deinit();
 
     const challenge_data = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22 };
@@ -127,9 +127,9 @@ fn protectedShortRoundtrip(allocator: std.mem.Allocator) !void {
     try lifecycle.registerConnectionId(33, &client_dcid, old_path, .{});
     try require(lifecycle.routeCount() == 1);
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{});
+    var client = try quicz.Connection.init(allocator, .client, .{});
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(allocator, .server, .{});
+    var server = try quicz.Connection.init(allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 

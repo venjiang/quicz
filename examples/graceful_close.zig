@@ -11,7 +11,7 @@ fn requireError(expected: anyerror, result: anyerror!void) !void {
     return error.UnexpectedState;
 }
 
-fn pollRequired(conn: *quicz.QuicConnection, out: []u8) ![]const u8 {
+fn pollRequired(conn: *quicz.Connection, out: []u8) ![]const u8 {
     return (try conn.pollTx(0, out)) orelse error.UnexpectedState;
 }
 
@@ -73,7 +73,7 @@ fn printPeerClose(prefix: []const u8, close: quicz.PeerClose) void {
 }
 
 fn framePayloadAutoCloseExample(gpa: std.mem.Allocator) !void {
-    var default_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var default_server = try quicz.Connection.init(gpa, .server, .{});
     defer default_server.deinit();
     try default_server.validatePeerAddress();
 
@@ -90,7 +90,7 @@ fn framePayloadAutoCloseExample(gpa: std.mem.Allocator) !void {
         .{@tagName(default_server.connectionState())},
     );
 
-    var initial_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var initial_server = try quicz.Connection.init(gpa, .server, .{});
     defer initial_server.deinit();
     try initial_server.validatePeerAddress();
 
@@ -108,7 +108,7 @@ fn framePayloadAutoCloseExample(gpa: std.mem.Allocator) !void {
 }
 
 fn packetTypeAutoCloseExample(gpa: std.mem.Allocator) !void {
-    var server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var server = try quicz.Connection.init(gpa, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -140,9 +140,9 @@ fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var client = try quicz.Connection.init(gpa, .client, .{});
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var server = try quicz.Connection.init(gpa, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -170,10 +170,10 @@ fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {
         },
     );
 
-    var app_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var app_server = try quicz.Connection.init(gpa, .server, .{});
     defer app_server.deinit();
     try app_server.validatePeerAddress();
-    var app_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var app_client = try quicz.Connection.init(gpa, .client, .{});
     defer app_client.deinit();
 
     try app_server.closeApplication(42, "protected app done");
@@ -190,9 +190,9 @@ fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
 
-    var client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var client = try quicz.Connection.init(gpa, .client, .{});
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var server = try quicz.Connection.init(gpa, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -226,10 +226,10 @@ pub fn main() !void {
     try requirePollError(error.ConnectionClosed, client.pollTx(client.closeDeadlineMillis().?, &datagram));
     std.debug.print("[close] sender expired state={s}\n", .{@tagName(client.connectionState())});
 
-    var app_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var app_server = try quicz.Connection.init(gpa, .server, .{});
     defer app_server.deinit();
     try app_server.validatePeerAddress();
-    var app_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var app_client = try quicz.Connection.init(gpa, .client, .{});
     defer app_client.deinit();
 
     try app_server.closeApplication(42, "app done");

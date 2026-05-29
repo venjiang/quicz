@@ -133,7 +133,7 @@ fn sendClientPacket(
     client_socket: *std.Io.net.Socket,
     server_socket: *std.Io.net.Socket,
     server_lifecycle: *const quicz.EndpointConnectionLifecycle,
-    server: *quicz.QuicConnection,
+    server: *quicz.Connection,
     now_millis: i64,
     packet: []const u8,
     receive_buf: []u8,
@@ -152,7 +152,7 @@ fn sendServerAck(
     server_socket: *std.Io.net.Socket,
     client_socket: *std.Io.net.Socket,
     client_lifecycle: *const quicz.EndpointConnectionLifecycle,
-    client: *quicz.QuicConnection,
+    client: *quicz.Connection,
     now_millis: i64,
     server_packet_number: u64,
     ack: quicz.frame.AckFrame,
@@ -236,9 +236,9 @@ pub fn main() !void {
 
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{});
+    var client = try quicz.Connection.init(allocator, .client, .{});
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(allocator, .server, .{});
+    var server = try quicz.Connection.init(allocator, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
     try client.confirmHandshake();

@@ -151,8 +151,8 @@ fn sendClientPing(
     client_socket: *std.Io.net.Socket,
     server_socket: *std.Io.net.Socket,
     server_lifecycle: *const quicz.EndpointConnectionLifecycle,
-    client: *quicz.QuicConnection,
-    server: *quicz.QuicConnection,
+    client: *quicz.Connection,
+    server: *quicz.Connection,
     now_millis: i64,
     receive_buf: []u8,
     keys: quicz.protection.Aes128PacketProtectionKeys,
@@ -175,7 +175,7 @@ fn sendServerAck(
     server_socket: *std.Io.net.Socket,
     client_socket: *std.Io.net.Socket,
     client_lifecycle: *const quicz.EndpointConnectionLifecycle,
-    client: *quicz.QuicConnection,
+    client: *quicz.Connection,
     now_millis: i64,
     server_packet_number: u64,
     ack: quicz.frame.AckFrame,
@@ -217,12 +217,12 @@ fn runRecoveryPeriodPhase(allocator: std.mem.Allocator, io: std.Io) !RecoveryPer
 
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{
+    var client = try quicz.Connection.init(allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(allocator, .server, .{
+    var server = try quicz.Connection.init(allocator, .server, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -287,12 +287,12 @@ fn runPersistentCongestionPhase(allocator: std.mem.Allocator, io: std.Io) !Persi
 
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try quicz.QuicConnection.init(allocator, .client, .{
+    var client = try quicz.Connection.init(allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(allocator, .server, .{
+    var server = try quicz.Connection.init(allocator, .server, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });

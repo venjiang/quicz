@@ -6,7 +6,7 @@ pub fn main() !void {
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
 
-    var packet_threshold = try quicz.QuicConnection.init(allocator, .client, .{});
+    var packet_threshold = try quicz.Connection.init(allocator, .client, .{});
     defer packet_threshold.deinit();
 
     _ = try packet_threshold.recordPacketSentInSpace(.application, 10, 100);
@@ -27,7 +27,7 @@ pub fn main() !void {
         .{ packet_threshold.sentPacketCount(.application), packet_threshold.bytesInFlight(.application) },
     );
 
-    var invalid_ack = try quicz.QuicConnection.init(allocator, .client, .{});
+    var invalid_ack = try quicz.Connection.init(allocator, .client, .{});
     defer invalid_ack.deinit();
     _ = try invalid_ack.recordPacketSentInSpace(.application, 10, 100);
     _ = try invalid_ack.recordPacketSentInSpace(.application, 20, 100);
@@ -50,7 +50,7 @@ pub fn main() !void {
         .{ invalid_ack.sentPacketCount(.application), invalid_ack.bytesInFlight(.application) },
     );
 
-    var time_threshold = try quicz.QuicConnection.init(allocator, .client, .{});
+    var time_threshold = try quicz.Connection.init(allocator, .client, .{});
     defer time_threshold.deinit();
 
     _ = try time_threshold.recordPacketSentInSpace(.application, 300, 100);
@@ -77,7 +77,7 @@ pub fn main() !void {
         .{ deadline, time_threshold.sentPacketCount(.application), time_threshold.bytesInFlight(.application) },
     );
 
-    var newreno = try quicz.QuicConnection.init(allocator, .client, .{
+    var newreno = try quicz.Connection.init(allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -150,7 +150,7 @@ pub fn main() !void {
         .{ batched_avoidance.congestion_window, batched_avoidance.congestion_avoidance_bytes_acked },
     );
 
-    var newreno_clamp = try quicz.QuicConnection.init(allocator, .client, .{
+    var newreno_clamp = try quicz.Connection.init(allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -173,7 +173,7 @@ pub fn main() !void {
         .{ newreno_clamp.congestionWindow(.application), newreno_clamp.recovery_state.ssthresh },
     );
 
-    var persistent = try quicz.QuicConnection.init(allocator, .client, .{
+    var persistent = try quicz.Connection.init(allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -205,7 +205,7 @@ pub fn main() !void {
         .{ persistent_duration, persistent.congestionWindow(.application) },
     );
 
-    var recovery_period = try quicz.QuicConnection.init(allocator, .client, .{
+    var recovery_period = try quicz.Connection.init(allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -233,7 +233,7 @@ pub fn main() !void {
         .{recovery_window},
     );
 
-    var congestion_probe = try quicz.QuicConnection.init(allocator, .client, .{
+    var congestion_probe = try quicz.Connection.init(allocator, .client, .{
         .max_datagram_size = 1350,
         .initial_rtt_ms = 100,
     });
@@ -267,7 +267,7 @@ pub fn main() !void {
         .{ probe_payload.len, congestion_probe.congestionWindow(.application), congestion_probe.bytesInFlight(.application) },
     );
 
-    var rtt_sampling = try quicz.QuicConnection.init(allocator, .client, .{
+    var rtt_sampling = try quicz.Connection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer rtt_sampling.deinit();
@@ -302,7 +302,7 @@ pub fn main() !void {
         .{ baseline_latest_rtt, baseline_smoothed_rtt, rtt_sampling.sentPacketCount(.application) },
     );
 
-    var cross_space_gate = try quicz.QuicConnection.init(allocator, .server, .{
+    var cross_space_gate = try quicz.Connection.init(allocator, .server, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
     });
@@ -336,7 +336,7 @@ pub fn main() !void {
         .{ blocked_total_inflight, unblocked_total_inflight, cross_space_gate.sentPacketCount(.application) },
     );
 
-    var ack_delay = try quicz.QuicConnection.init(allocator, .client, .{
+    var ack_delay = try quicz.Connection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer ack_delay.deinit();

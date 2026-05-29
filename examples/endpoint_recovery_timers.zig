@@ -24,11 +24,11 @@ pub fn main() !void {
         .remote = quicz.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
     };
 
-    var pto_conn = try quicz.QuicConnection.init(allocator, .client, .{
+    var pto_conn = try quicz.Connection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer pto_conn.deinit();
-    var loss_conn = try quicz.QuicConnection.init(allocator, .client, .{});
+    var loss_conn = try quicz.Connection.init(allocator, .client, .{});
     defer loss_conn.deinit();
     try pto_conn.confirmHandshake();
     try loss_conn.confirmHandshake();
@@ -104,7 +104,7 @@ pub fn main() !void {
     try require(!loss_retired.recovery_timer_disarmed);
     try require(endpoint_lifecycle.routeCount() == 0);
 
-    var closing_conn = try quicz.QuicConnection.init(allocator, .client, .{
+    var closing_conn = try quicz.Connection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer closing_conn.deinit();
@@ -146,11 +146,11 @@ pub fn main() !void {
     const protected_client_id: u64 = 3003;
     const protected_server_id: u64 = 4004;
 
-    var protected_client = try quicz.QuicConnection.init(allocator, .client, .{
+    var protected_client = try quicz.Connection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer protected_client.deinit();
-    var protected_server = try quicz.QuicConnection.init(allocator, .server, .{
+    var protected_server = try quicz.Connection.init(allocator, .server, .{
         .initial_rtt_ms = 100,
     });
     defer protected_server.deinit();

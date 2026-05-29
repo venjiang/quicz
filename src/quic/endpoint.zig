@@ -574,7 +574,7 @@ pub const AddressValidationPolicyOptions = struct {
 
 /// In-memory QUIC endpoint routing table.
 ///
-/// This table does not perform socket I/O and does not own `QuicConnection`
+/// This table does not perform socket I/O and does not own `Connection`
 /// instances. It maps destination connection IDs to caller-owned connection
 /// handles, checks the IPv4 UDP tuple associated with the route, and can route
 /// either long-header datagrams with an encoded DCID length or short-header

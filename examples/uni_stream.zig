@@ -12,8 +12,8 @@ fn requireError(expected: anyerror, result: anyerror!void) !void {
 }
 
 fn relayUntilStreamData(
-    sender: *quicz.QuicConnection,
-    receiver: *quicz.QuicConnection,
+    sender: *quicz.Connection,
+    receiver: *quicz.Connection,
     stream_id: u64,
     out: []u8,
 ) ![]const u8 {
@@ -30,9 +30,9 @@ fn relayUntilStreamData(
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
 
-    var client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var client = try quicz.Connection.init(gpa, .client, .{});
     defer client.deinit();
-    var server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var server = try quicz.Connection.init(gpa, .server, .{});
     defer server.deinit();
     try server.validatePeerAddress();
 
@@ -54,9 +54,9 @@ pub fn main() !void {
     try requireError(error.InvalidStream, server.sendOnStream(client_stream, "reply-not-allowed", true));
     std.debug.print("[uni] server rejected reply on receive-only stream={}\n", .{client_stream});
 
-    var down_client = try quicz.QuicConnection.init(gpa, .client, .{});
+    var down_client = try quicz.Connection.init(gpa, .client, .{});
     defer down_client.deinit();
-    var down_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    var down_server = try quicz.Connection.init(gpa, .server, .{});
     defer down_server.deinit();
     try down_server.validatePeerAddress();
 
