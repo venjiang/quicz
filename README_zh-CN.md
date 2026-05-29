@@ -131,7 +131,7 @@ pub fn main() !void {
   运行：`zig build run-endpoint-recovery-timers`。
 - [Path validation](examples/path_validation.zig)：PATH_CHALLENGE/PATH_RESPONSE 重试和 route update 建模。
   运行：`zig build run-path-validation`。
-- [Address validation](examples/address_validation.zig)：HMAC address-validation token、version binding、secret rotation 和 replay snapshot。
+- [Address validation](examples/address_validation.zig)：HMAC address-validation token、version binding、secret rotation、replay snapshot 和 lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery。
   运行：`zig build run-address-validation`。
 - [Retry token](examples/retry_token.zig)：Retry datagram 处理、token 复用和 Retry CID 校验。
   运行：`zig build run-retry-token`。

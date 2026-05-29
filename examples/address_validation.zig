@@ -10,6 +10,13 @@ fn clientPath(remote_port: u16) quicz.endpoint.Udp4Tuple {
     };
 }
 
+fn reversePath(path: quicz.endpoint.Udp4Tuple) quicz.endpoint.Udp4Tuple {
+    return .{
+        .local = path.remote,
+        .remote = path.local,
+    };
+}
+
 fn protectedTokenAndHandshakeDoneExample(allocator: std.mem.Allocator) !void {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
@@ -31,6 +38,12 @@ fn protectedTokenAndHandshakeDoneExample(allocator: std.mem.Allocator) !void {
     try server.validatePeerAddress();
     var client = try quicz.Connection.init(allocator, .client, .{});
     defer client.deinit();
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+
+    const client_connection_handle: u64 = 501;
+    const client_receive_path = reversePath(client_path);
+    try client_lifecycle.registerConnectionId(client_connection_handle, &client_dcid, client_receive_path, .{});
 
     try server.sendHandshakeDone();
     if (!server.packetNumberSpaceDiscarded(.handshake)) return error.AddressValidationExampleFailed;
@@ -56,12 +69,30 @@ fn protectedTokenAndHandshakeDoneExample(allocator: std.mem.Allocator) !void {
 
     const handshake_done = (try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server)) orelse return error.AddressValidationExampleFailed;
     defer allocator.free(handshake_done);
-    try client.processProtectedShortDatagram(11, secrets.server, client_dcid.len, handshake_done);
+    const handshake_route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        client_connection_handle,
+        &client,
+        client_receive_path,
+        11,
+        secrets.server,
+        handshake_done,
+    );
+    if (handshake_route.connection_id != client_connection_handle) return error.AddressValidationExampleFailed;
+    if (!std.mem.eql(u8, handshake_route.destination_connection_id.asSlice(), &client_dcid)) return error.AddressValidationExampleFailed;
     if (!client.handshakeConfirmed()) return error.AddressValidationExampleFailed;
 
     const new_token = (try server.pollProtectedShortDatagram(12, &client_dcid, secrets.server)) orelse return error.AddressValidationExampleFailed;
     defer allocator.free(new_token);
-    try client.processProtectedShortDatagram(13, secrets.server, client_dcid.len, new_token);
+    const new_token_route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        client_connection_handle,
+        &client,
+        client_receive_path,
+        13,
+        secrets.server,
+        new_token,
+    );
+    if (new_token_route.connection_id != client_connection_handle) return error.AddressValidationExampleFailed;
+    if (!std.mem.eql(u8, new_token_route.destination_connection_id.asSlice(), &client_dcid)) return error.AddressValidationExampleFailed;
     const stored_token = client.latestNewToken() orelse return error.AddressValidationExampleFailed;
 
     var future_server = try quicz.Connection.init(allocator, .server, .{});

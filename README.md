@@ -145,7 +145,8 @@ experimental.
 - [Path validation](examples/path_validation.zig): PATH_CHALLENGE/PATH_RESPONSE
   retry and route update modeling. Run with `zig build run-path-validation`.
 - [Address validation](examples/address_validation.zig): HMAC address-validation
-  tokens, version binding, secret rotation, and replay snapshots. Run with
+  tokens, version binding, secret rotation, replay snapshots, and
+  lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery. Run with
   `zig build run-address-validation`.
 - [Retry token](examples/retry_token.zig): Retry datagram processing, token
   reuse, and Retry CID validation. Run with `zig build run-retry-token`.
