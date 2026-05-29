@@ -53,6 +53,41 @@ pub fn main() !void {
         .{pre_confirm_deadline},
     );
 
+    var initial_ack_client = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer initial_ack_client.deinit();
+    _ = try initial_ack_client.recordPacketSentInSpace(.initial, 10, 100);
+    initial_ack_client.initial_packet_space.recovery_state.pto_count = 2;
+    initial_ack_client.handshake_packet_space.recovery_state.pto_count = 2;
+    initial_ack_client.recovery_state.pto_count = 2;
+    try initial_ack_client.receiveAckInSpace(.initial, 70, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const preserved_initial_ack_backoff = initial_ack_client.initial_packet_space.recovery_state.pto_count;
+    if (preserved_initial_ack_backoff != 2) return error.PtoRecoveryExampleFailed;
+    if (initial_ack_client.handshake_packet_space.recovery_state.pto_count != 2) return error.PtoRecoveryExampleFailed;
+    if (initial_ack_client.recovery_state.pto_count != 2) return error.PtoRecoveryExampleFailed;
+
+    var handshake_ack_client = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer handshake_ack_client.deinit();
+    _ = try handshake_ack_client.recordPacketSentInSpace(.handshake, 20, 100);
+    handshake_ack_client.handshake_packet_space.recovery_state.pto_count = 2;
+    handshake_ack_client.recovery_state.pto_count = 2;
+    try handshake_ack_client.receiveAckInSpace(.handshake, 90, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const reset_handshake_ack_backoff = handshake_ack_client.handshake_packet_space.recovery_state.pto_count;
+    if (reset_handshake_ack_backoff != 0) return error.PtoRecoveryExampleFailed;
+    if (handshake_ack_client.recovery_state.pto_count != 0) return error.PtoRecoveryExampleFailed;
+
+    std.debug.print(
+        "[pto] client Initial ACK preserved PTO backoff={d}; Handshake ACK reset backoff={d}\n",
+        .{ preserved_initial_ack_backoff, reset_handshake_ack_backoff },
+    );
+
     var conn = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer conn.deinit();
     try conn.confirmHandshake();

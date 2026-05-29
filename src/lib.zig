@@ -4121,6 +4121,13 @@ pub const QuicConnection = struct {
         self.setConnectionPtoBackoffCount(0);
     }
 
+    fn ackShouldResetPtoBackoff(self: QuicConnection, space: PacketNumberSpace) bool {
+        // RFC 9002 keeps the PTO backoff armed for client Initial ACKs because
+        // the client cannot treat those ACKs as proof that the server has
+        // validated the client's address.
+        return !(self.side == .client and space == .initial);
+    }
+
     fn increaseConnectionPtoBackoff(self: *QuicConnection) void {
         const current = self.connectionPtoBackoffCount();
         const next = if (current == std.math.maxInt(u8)) current else current + 1;
@@ -8466,6 +8473,7 @@ pub const QuicConnection = struct {
             self.local_one_rtt_key_update_ack_threshold = null;
         }
 
+        const pto_backoff_before_ack = self.ptoBackoffSnapshot();
         if (latest_rtt_sample) |rtt_sample| {
             packet_space.recovery_state.onPacketAckedWithUtilization(
                 acked_bytes,
@@ -8482,7 +8490,11 @@ pub const QuicConnection = struct {
                 congestion_window_utilized,
             );
         }
-        self.resetConnectionPtoBackoff();
+        if (self.ackShouldResetPtoBackoff(space)) {
+            self.resetConnectionPtoBackoff();
+        } else {
+            self.restorePtoBackoffSnapshot(pto_backoff_before_ack);
+        }
         if (persistent_congestion_established) {
             packet_space.recovery_state.onPersistentCongestion();
         }
@@ -15574,6 +15586,47 @@ test "ACK resets connection-level PTO backoff across packet number spaces" {
     try std.testing.expectEqual(@as(u8, 0), conn.initial_packet_space.recovery_state.pto_count);
     try std.testing.expectEqual(@as(u8, 0), conn.handshake_packet_space.recovery_state.pto_count);
     try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
+}
+
+test "client Initial ACK preserves connection-level PTO backoff" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.initial, 10, 100);
+    conn.initial_packet_space.recovery_state.pto_count = 2;
+    conn.handshake_packet_space.recovery_state.pto_count = 2;
+    conn.recovery_state.pto_count = 2;
+
+    try conn.receiveAckInSpace(.initial, 70, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(u8, 2), conn.initial_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 2), conn.handshake_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 2), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.initial));
+
+    var handshake_conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer handshake_conn.deinit();
+
+    _ = try handshake_conn.recordPacketSentInSpace(.handshake, 20, 100);
+    handshake_conn.handshake_packet_space.recovery_state.pto_count = 2;
+    handshake_conn.recovery_state.pto_count = 2;
+
+    try handshake_conn.receiveAckInSpace(.handshake, 90, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(u8, 0), handshake_conn.handshake_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 0), handshake_conn.recovery_state.pto_count);
 }
 
 test "invalid payload rolls back connection-level PTO backoff reset" {
