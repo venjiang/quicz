@@ -3765,6 +3765,7 @@ pub const QuicConnection = struct {
         self.peer_preferred_address = peer_preferred_address;
         self.peer_active_connection_id_limit = params.active_connection_id_limit;
         self.recovery_state.max_ack_delay_ms = params.max_ack_delay;
+        self.syncRecoveryMaxDatagramSize();
 
         for (self.send_streams.items) |*stream| {
             stream.max_data = self.initialPeerStreamDataLimit(stream.stream_id);
@@ -4005,6 +4006,13 @@ pub const QuicConnection = struct {
 
     fn maxTxDatagramSize(self: QuicConnection) usize {
         return @min(@as(usize, self.config.max_datagram_size), self.peer_max_udp_payload_size);
+    }
+
+    fn syncRecoveryMaxDatagramSize(self: *QuicConnection) void {
+        const max_datagram_size = self.maxTxDatagramSize();
+        self.initial_packet_space.recovery_state.updateMaxDatagramSize(max_datagram_size);
+        self.handshake_packet_space.recovery_state.updateMaxDatagramSize(max_datagram_size);
+        self.recovery_state.updateMaxDatagramSize(max_datagram_size);
     }
 
     fn isAntiAmplificationLimited(self: QuicConnection) bool {
@@ -11169,6 +11177,12 @@ test "applyPeerTransportParameters updates send limits and ACK policy" {
 
     try std.testing.expectEqual(@as(u64, 10), conn.peer_max_data);
     try std.testing.expectEqual(@as(usize, 1200), conn.maxTxDatagramSize());
+    try std.testing.expectEqual(@as(usize, 1200), conn.initial_packet_space.recovery_state.max_datagram_size);
+    try std.testing.expectEqual(@as(usize, 1200), conn.handshake_packet_space.recovery_state.max_datagram_size);
+    try std.testing.expectEqual(@as(usize, 1200), conn.recovery_state.max_datagram_size);
+    try std.testing.expectEqual(recovery.initialCongestionWindow(1200), conn.congestionWindow(.initial));
+    try std.testing.expectEqual(recovery.initialCongestionWindow(1200), conn.congestionWindow(.handshake));
+    try std.testing.expectEqual(recovery.initialCongestionWindow(1200), conn.congestionWindow(.application));
     try std.testing.expectEqual(@as(u64, 4), conn.peer_ack_delay_exponent);
     try std.testing.expectEqual(@as(u64, 250), conn.peer_max_idle_timeout_ms);
     try std.testing.expectEqual(@as(?u64, 250), conn.effectiveIdleTimeoutMillis());
@@ -11187,6 +11201,24 @@ test "applyPeerTransportParameters updates send limits and ACK policy" {
     const uni_stream = try conn.openUniStream();
     try std.testing.expectEqual(@as(u64, 9), conn.findSendStream(uni_stream).?.max_data);
     try std.testing.expectError(error.FlowControlBlocked, conn.openUniStream());
+}
+
+test "applyPeerTransportParameters keeps local recovery datagram size when peer limit is larger" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1250,
+    });
+    defer conn.deinit();
+
+    conn.recovery_state.congestion_window = 20_000;
+    conn.recovery_state.congestion_avoidance_bytes_acked = 625;
+    try conn.applyPeerTransportParameters(.{
+        .max_udp_payload_size = 1400,
+    });
+
+    try std.testing.expectEqual(@as(usize, 1250), conn.maxTxDatagramSize());
+    try std.testing.expectEqual(@as(usize, 1250), conn.recovery_state.max_datagram_size);
+    try std.testing.expectEqual(@as(usize, 20_000), conn.congestionWindow(.application));
+    try std.testing.expectEqual(@as(usize, 625), conn.recovery_state.congestion_avoidance_bytes_acked);
 }
 
 test "effectiveIdleTimeoutMillis uses shorter non-zero endpoint value" {

@@ -71,6 +71,7 @@ pub fn main() !void {
     defer client.deinit();
 
     var server = try quicz.QuicConnection.init(allocator, .server, .{
+        .max_datagram_size = 1200,
         .max_idle_timeout_ms = 200,
         .ack_delay_exponent = 5,
         .max_ack_delay_ms = 40,
@@ -102,6 +103,8 @@ pub fn main() !void {
     try client.applyPeerTransportParameterBytes(server_bytes);
 
     try require(client.effectiveIdleTimeoutMillis() == 200);
+    try require(client.recovery_state.max_datagram_size == 1200);
+    try require(client.congestionWindow(.application) == quicz.recovery.initialCongestionWindow(1200));
     try require(client.peerActiveMigrationDisabled());
     const stored_token = client.peerStatelessResetToken() orelse return error.TransportParameterExampleFailed;
     try require(std.mem.eql(u8, &stored_token, &reset_token));
@@ -120,11 +123,13 @@ pub fn main() !void {
     try requireError(error.InvalidPacket, server.applyPeerTransportParameterBytes(invalid_writer.getWritten()));
 
     std.debug.print(
-        "[transport-parameters] client_bytes={} server_bytes={} effective_idle_ms={} preferred_cid_len={} stream_limit_blocked=true invalid_client_server_only_rejected=true\n",
+        "[transport-parameters] client_bytes={} server_bytes={} effective_idle_ms={} recovery_mds={} recovery_cwnd={} preferred_cid_len={} stream_limit_blocked=true invalid_client_server_only_rejected=true\n",
         .{
             client_bytes.len,
             server_bytes.len,
             client.effectiveIdleTimeoutMillis().?,
+            client.recovery_state.max_datagram_size,
+            client.congestionWindow(.application),
             stored_preferred.connectionId().len,
         },
     );

@@ -183,6 +183,23 @@ pub const Recovery = struct {
         return self.backedOffPtoMs(true);
     }
 
+    /// Apply a changed maximum datagram size to congestion-control math.
+    ///
+    /// RFC 9002 uses the sender's current maximum datagram size for the
+    /// initial window, minimum window, and congestion-avoidance growth. When
+    /// the size decreases during handshake setup, the congestion window is
+    /// reset to the recalculated initial window for the new size.
+    pub fn updateMaxDatagramSize(self: *Recovery, new_max_datagram_size: usize) void {
+        const previous = self.max_datagram_size;
+        if (previous == new_max_datagram_size) return;
+
+        self.max_datagram_size = new_max_datagram_size;
+        if (new_max_datagram_size < previous) {
+            self.congestion_window = initialCongestionWindow(new_max_datagram_size);
+            self.congestion_avoidance_bytes_acked = 0;
+        }
+    }
+
     /// Current Initial/Handshake Probe Timeout in milliseconds.
     ///
     /// RFC 9002 sets `max_ack_delay` to zero for Initial and Handshake packet
@@ -369,6 +386,28 @@ test "NewReno congestion avoidance consumes multiple cwnd credits from batched A
     try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
     try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
     try std.testing.expectEqual(@as(usize, 14_400), recovery.congestion_window);
+}
+
+test "max datagram size update resets cwnd on decrease and preserves cwnd on increase" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1400, .initial_rtt_ms = 100 });
+    try std.testing.expectEqual(@as(usize, 14_000), recovery.congestion_window);
+
+    recovery.congestion_window = 20_000;
+    recovery.ssthresh = 12_000;
+    recovery.congestion_avoidance_bytes_acked = 7_000;
+    recovery.updateMaxDatagramSize(1200);
+    try std.testing.expectEqual(@as(usize, 1200), recovery.max_datagram_size);
+    try std.testing.expectEqual(@as(usize, 12_000), recovery.congestion_window);
+    try std.testing.expectEqual(@as(usize, 12_000), recovery.ssthresh);
+    try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
+    try std.testing.expectEqual(@as(usize, 2400), minimumCongestionWindow(recovery.max_datagram_size));
+
+    recovery.congestion_window = 12_600;
+    recovery.congestion_avoidance_bytes_acked = 600;
+    recovery.updateMaxDatagramSize(1300);
+    try std.testing.expectEqual(@as(usize, 1300), recovery.max_datagram_size);
+    try std.testing.expectEqual(@as(usize, 12_600), recovery.congestion_window);
+    try std.testing.expectEqual(@as(usize, 600), recovery.congestion_avoidance_bytes_acked);
 }
 
 test "underutilized ACK updates recovery accounting without growing congestion window" {
