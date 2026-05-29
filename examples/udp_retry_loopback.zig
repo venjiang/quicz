@@ -279,7 +279,16 @@ pub fn main() !void {
     try require(server.peerAddressValidated());
     try require(server.pendingRetryTokenCount() == 0);
 
-    try server.processInitialProtectedDatagram(6, retry_secrets.client, retry_initial_received.data);
+    const server_retry_initial_route = try server_lifecycle.processRoutedProtectedInitialDatagram(
+        connection_handle,
+        &server,
+        retry_initial_path,
+        6,
+        &retry_scid,
+        retry_initial_received.data,
+    );
+    try require(server_retry_initial_route.connection_id == connection_handle);
+    try require(std.mem.eql(u8, server_retry_initial_route.destination_connection_id.asSlice(), &retry_scid));
     var server_crypto_buf: [64]u8 = undefined;
     const server_received_crypto = try readCryptoRequired(&server, .initial, &server_crypto_buf);
     try require(std.mem.eql(u8, server_received_crypto, "client after retry"));
@@ -301,11 +310,16 @@ pub fn main() !void {
 
     const server_initial_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     const server_initial_path = try udp4Tuple(client_socket.address, server_initial_received.from);
-    const client_initial_route = try client_lifecycle.routeDatagram(server_initial_path, server_initial_received.data);
+    const client_initial_route = try client_lifecycle.processRoutedProtectedInitialDatagram(
+        connection_handle,
+        &client,
+        server_initial_path,
+        8,
+        &retry_scid,
+        server_initial_received.data,
+    );
     try require(client_initial_route.connection_id == connection_handle);
     try require(std.mem.eql(u8, client_initial_route.destination_connection_id.asSlice(), &client_initial_scid));
-
-    try client.processInitialProtectedDatagram(8, retry_secrets.server, server_initial_received.data);
     var client_crypto_buf: [64]u8 = undefined;
     const client_received_crypto = try readCryptoRequired(&client, .initial, &client_crypto_buf);
     try require(std.mem.eql(u8, client_received_crypto, "server accepted retry"));

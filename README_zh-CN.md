@@ -173,7 +173,7 @@ pub fn main() !void {
   运行：`zig build run-udp-key-update-loopback`。
 - [UDP path validation loopback](examples/udp_path_validation_loopback.zig)：在新 peer port 上执行 lifecycle-routed PATH_CHALLENGE/PATH_RESPONSE route validation。
   运行：`zig build run-udp-path-validation-loopback`。
-- [UDP Retry loopback](examples/udp_retry_loopback.zig)：lifecycle-owned Retry delivery、token validation 和 follow-up Initial routing。
+- [UDP Retry loopback](examples/udp_retry_loopback.zig)：lifecycle-owned Retry delivery、token validation 和 routed follow-up Initial processing。
   运行：`zig build run-udp-retry-loopback`。
 - [UDP close lifecycle loopback](examples/udp_close_lifecycle_loopback.zig)：lifecycle-routed protected close delivery、route retirement 和 stateless reset follow-up。
   运行：`zig build run-udp-close-lifecycle-loopback`。

@@ -207,8 +207,8 @@ experimental.
   Lifecycle-routed PATH_CHALLENGE/PATH_RESPONSE route validation over a new
   peer port. Run with `zig build run-udp-path-validation-loopback`.
 - [UDP Retry loopback](examples/udp_retry_loopback.zig): Lifecycle-owned Retry
-  delivery, token validation, and follow-up Initial routing. Run with
-  `zig build run-udp-retry-loopback`.
+  delivery, token validation, and routed follow-up Initial processing. Run
+  with `zig build run-udp-retry-loopback`.
 - [UDP close lifecycle loopback](examples/udp_close_lifecycle_loopback.zig):
   Lifecycle-routed protected close delivery, route retirement, and stateless
   reset follow-up. Run with `zig build run-udp-close-lifecycle-loopback`.
