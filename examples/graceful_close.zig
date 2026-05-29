@@ -72,6 +72,33 @@ fn printPeerClose(prefix: []const u8, close: quicz.PeerClose) void {
     }
 }
 
+fn packetTypeAutoCloseExample(gpa: std.mem.Allocator) !void {
+    var server = try quicz.QuicConnection.init(gpa, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const ack_payload = [_]u8{
+        @intFromEnum(quicz.frame.FrameType.ack),
+        0,
+        0,
+        0,
+        0,
+    };
+
+    try requireError(
+        error.InvalidPacket,
+        server.processDatagramForPacketTypeOrClose(.zero_rtt, 0, &ack_payload),
+    );
+
+    var close_payload_buf: [64]u8 = undefined;
+    const close_payload = try pollRequired(&server, &close_payload_buf);
+    try printConnectionClose(gpa, close_payload);
+    std.debug.print(
+        "[close] auto close state={s} after invalid 0-RTT ACK\n",
+        .{@tagName(server.connectionState())},
+    );
+}
+
 fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
@@ -178,5 +205,6 @@ pub fn main() !void {
     try requireError(error.ConnectionClosed, app_client.sendPing());
     std.debug.print("[close] application receiver state={s}\n", .{@tagName(app_client.connectionState())});
 
+    try packetTypeAutoCloseExample(gpa);
     try protectedShortCloseExample(gpa);
 }

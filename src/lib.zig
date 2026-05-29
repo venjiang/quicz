@@ -2070,6 +2070,63 @@ pub fn framePacketTypeErrorCode(decoded: frame.Frame, packet_type: FramePacketTy
     return .protocol_violation;
 }
 
+const FramePayloadCloseError = struct {
+    code: transport_error.TransportErrorCode,
+    frame_type: u64,
+    reason_phrase: []const u8,
+};
+
+fn rawFrameTypeValue(data: []const u8) u64 {
+    var in = buffer.fixedReader(data);
+    return (packet.decodeVarInt(in.reader()) catch return 0).value;
+}
+
+fn classifyFramePayloadCloseError(
+    packet_type: FramePacketType,
+    datagram: []const u8,
+    allocator: std.mem.Allocator,
+) Error!?FramePayloadCloseError {
+    var offset: usize = 0;
+    while (offset < datagram.len) {
+        const frame_type_value = rawFrameTypeValue(datagram[offset..]);
+        var decoded = frame.decodeFrameSlice(datagram[offset..], allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                if (transport_error.frameDecodeErrorCode(err)) |code| {
+                    return .{
+                        .code = code,
+                        .frame_type = frame_type_value,
+                        .reason_phrase = "frame encoding",
+                    };
+                }
+                return null;
+            },
+        };
+
+        if (decoded.len == 0) {
+            frame.deinitFrame(&decoded.frame, allocator);
+            return .{
+                .code = .frame_encoding_error,
+                .frame_type = frame_type_value,
+                .reason_phrase = "frame encoding",
+            };
+        }
+
+        const close_code = framePacketTypeErrorCode(decoded.frame, packet_type);
+        frame.deinitFrame(&decoded.frame, allocator);
+        if (close_code) |code| {
+            return .{
+                .code = code,
+                .frame_type = frame_type_value,
+                .reason_phrase = "packet type",
+            };
+        }
+
+        offset += decoded.len;
+    }
+    return null;
+}
+
 fn defaultFramePacketTypeForSpace(space: PacketNumberSpace) FramePacketType {
     return switch (space) {
         .initial => .initial,
@@ -6810,6 +6867,36 @@ pub const QuicConnection = struct {
             now_millis,
             datagram,
         );
+    }
+
+    /// Process one frame-payload datagram and queue CONNECTION_CLOSE on classified peer errors.
+    ///
+    /// The input and success output match `processDatagramForPacketType()`. On
+    /// malformed/unknown frame payloads or frames that are invalid for the
+    /// selected packet type, this wrapper queues a transport CONNECTION_CLOSE
+    /// with the RFC 9000 close code before returning `InvalidPacket`. Existing
+    /// callers that need pure rollback behavior can continue using
+    /// `processDatagramForPacketType()`.
+    pub fn processDatagramForPacketTypeOrClose(
+        self: *QuicConnection,
+        packet_type: FramePacketType,
+        now_millis: i64,
+        datagram: []const u8,
+    ) Error!void {
+        if (self.isClosingOrClosed() or datagram.len == 0 or datagram.len > self.config.max_datagram_size) {
+            return self.processDatagramForPacketType(packet_type, now_millis, datagram);
+        }
+
+        if (try classifyFramePayloadCloseError(packet_type, datagram, self.allocator)) |close| {
+            try self.closeConnection(
+                transport_error.codeValue(close.code),
+                close.frame_type,
+                close.reason_phrase,
+            );
+            return error.InvalidPacket;
+        }
+
+        return self.processDatagramForPacketType(packet_type, now_millis, datagram);
     }
 
     fn processDatagramInSpaceWithPacketType(
@@ -19440,12 +19527,81 @@ test "0-RTT packet type rejects forbidden frames and rolls back earlier state" {
     try std.testing.expectEqual(@as(usize, 0), server.recv_streams.items.len);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(ConnectionState.active, server.connectionState());
+    try std.testing.expect(server.pending_close == null);
 
     try expectFramePacketTypeRejected(.zero_rtt, .{ .crypto = .{ .offset = 0, .data = "tls" } });
     try expectFramePacketTypeRejected(.zero_rtt, .{ .handshake_done = {} });
     try expectFramePacketTypeRejected(.zero_rtt, .{ .new_token = .{ .token = "token" } });
     try expectFramePacketTypeRejected(.zero_rtt, .{ .path_response = .{ .data = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 } } });
     try expectFramePacketTypeRejected(.zero_rtt, .{ .retire_connection_id = .{ .sequence_number = 0 } });
+}
+
+test "processDatagramForPacketTypeOrClose queues protocol violation close" {
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var datagram: [16]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processDatagramForPacketTypeOrClose(.zero_rtt, 0, out.getWritten()),
+    );
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+
+    var close_buf: [64]u8 = undefined;
+    const payload = (try server.pollTx(1, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.ack)), close.frame_type);
+            try std.testing.expectEqualStrings("packet type", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramForPacketTypeOrClose queues frame encoding close" {
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const unknown_frame = [_]u8{0x1f};
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processDatagramForPacketTypeOrClose(.one_rtt, 0, &unknown_frame),
+    );
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+
+    var close_buf: [64]u8 = undefined;
+    const payload = (try server.pollTx(1, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, 0x1f), close.frame_type);
+            try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
 }
 
 test "0-RTT rejects RETIRE_CONNECTION_ID before semantic retirement" {
