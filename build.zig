@@ -548,6 +548,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_protected_loopback);
 
+    // UDP Handshake keys loopback executable
+    const exe_udp_handshake_keys_loopback = b.addExecutable(.{
+        .name = "quicz-udp-handshake-keys-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_handshake_keys_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_handshake_keys_loopback);
+
     // UDP 0-RTT loopback executable
     const exe_udp_zero_rtt_loopback = b.addExecutable(.{
         .name = "quicz-udp-zero-rtt-loopback",
@@ -963,6 +977,15 @@ pub fn build(b: *std.Build) void {
     run_udp_protected_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_protected_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-handshake-keys-loopback
+    const run_udp_handshake_keys_loopback = b.step("run-udp-handshake-keys-loopback", "Run quicz UDP Handshake keys loopback example");
+    const run_udp_handshake_keys_loopback_cmd = b.addRunArtifact(exe_udp_handshake_keys_loopback);
+    run_udp_handshake_keys_loopback.dependOn(&run_udp_handshake_keys_loopback_cmd.step);
+    run_udp_handshake_keys_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_handshake_keys_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-zero-rtt-loopback

@@ -184,6 +184,10 @@ experimental.
   Lifecycle-owned accepted protected Initial processing and protected server
   Initial response processing plus routed caller-keyed 1-RTT processing over
   loopback UDP. Run with `zig build run-udp-protected-loopback`.
+- [UDP Handshake keys loopback](examples/udp_handshake_keys_loopback.zig):
+  Socket-backed lifecycle-routed installed-key Handshake CRYPTO delivery and
+  ACK cleanup over loopback UDP. Run with
+  `zig build run-udp-handshake-keys-loopback`.
 - [UDP 0-RTT loopback](examples/udp_zero_rtt_loopback.zig):
   Socket-backed lifecycle-routed installed-key 0-RTT STREAM delivery,
   accept-before-process enforcement, 1-RTT ACK cleanup, and server-side
