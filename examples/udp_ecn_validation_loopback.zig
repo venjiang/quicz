@@ -28,11 +28,6 @@ const FixedWriter = struct {
     }
 };
 
-const ReceivedRoute = struct {
-    data: []const u8,
-    route: quicz.endpoint.RouteResult,
-};
-
 fn fixedWriter(buffer: []u8) FixedWriter {
     return .{ .buffer = buffer };
 }
@@ -72,18 +67,26 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
     };
 }
 
-fn receiveRoute(
+fn receiveProtectedShortDatagram(
     io: std.Io,
-    lifecycle: *const quicz.EndpointConnectionLifecycle,
+    lifecycle: *quicz.EndpointConnectionLifecycle,
+    connection_id: u64,
+    connection: *quicz.Connection,
     socket: *std.Io.net.Socket,
     receive_buf: []u8,
-) !ReceivedRoute {
+    now_millis: i64,
+    keys: quicz.protection.Aes128PacketProtectionKeys,
+) !quicz.endpoint.RouteResult {
     const received = try socket.receiveTimeout(io, receive_buf, receiveTimeout());
     const path = try udp4Tuple(socket.address, received.from);
-    return .{
-        .data = received.data,
-        .route = try lifecycle.routeDatagram(path, received.data),
-    };
+    return try lifecycle.processRoutedProtectedShortDatagram(
+        connection_id,
+        connection,
+        path,
+        now_millis,
+        keys,
+        received.data,
+    );
 }
 
 fn protectShortPacket(
@@ -172,10 +175,18 @@ pub fn main() !void {
     try require(try client.recordEcnPacketSentInSpace(.application, 0, ecn_ping.len, .ect0) == 0);
     try client_socket.send(io, &server_socket.address, ecn_ping);
 
-    const received_ping = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
-    try require(received_ping.route.connection_id == 51);
-    try require(std.mem.eql(u8, received_ping.route.destination_connection_id.asSlice(), &server_dcid));
-    try server.processProtectedShortDatagram(1, secrets.client, server_dcid.len, received_ping.data);
+    const ping_route = try receiveProtectedShortDatagram(
+        io,
+        &server_lifecycle,
+        51,
+        &server,
+        &server_socket,
+        &server_receive_buf,
+        1,
+        secrets.client,
+    );
+    try require(ping_route.connection_id == 51);
+    try require(std.mem.eql(u8, ping_route.destination_connection_id.asSlice(), &server_dcid));
     try require(server.pendingAckLargest(.application) == 0);
 
     var ack_ecn_payload: [64]u8 = undefined;
@@ -196,10 +207,18 @@ pub fn main() !void {
     defer allocator.free(ack_ecn);
     try server_socket.send(io, &client_socket.address, ack_ecn);
 
-    const received_ack_ecn = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
-    try require(received_ack_ecn.route.connection_id == 41);
-    try require(std.mem.eql(u8, received_ack_ecn.route.destination_connection_id.asSlice(), &client_dcid));
-    try client.processProtectedShortDatagram(2, secrets.server, client_dcid.len, received_ack_ecn.data);
+    const ack_ecn_route = try receiveProtectedShortDatagram(
+        io,
+        &client_lifecycle,
+        41,
+        &client,
+        &client_socket,
+        &client_receive_buf,
+        2,
+        secrets.server,
+    );
+    try require(ack_ecn_route.connection_id == 41);
+    try require(std.mem.eql(u8, ack_ecn_route.destination_connection_id.asSlice(), &client_dcid));
 
     try require(client.bytesInFlight(.application) == 0);
     try require(client.sentPacketCount(.application) == 0);
@@ -212,10 +231,18 @@ pub fn main() !void {
     try require(try client.recordEcnPacketSentInSpace(.application, 10, ce_ping.len, .ect0) == 1);
     try client_socket.send(io, &server_socket.address, ce_ping);
 
-    const received_ce_ping = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
-    try require(received_ce_ping.route.connection_id == 51);
-    try require(std.mem.eql(u8, received_ce_ping.route.destination_connection_id.asSlice(), &server_dcid));
-    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, received_ce_ping.data);
+    const ce_ping_route = try receiveProtectedShortDatagram(
+        io,
+        &server_lifecycle,
+        51,
+        &server,
+        &server_socket,
+        &server_receive_buf,
+        11,
+        secrets.client,
+    );
+    try require(ce_ping_route.connection_id == 51);
+    try require(std.mem.eql(u8, ce_ping_route.destination_connection_id.asSlice(), &server_dcid));
     try require(server.pendingAckLargest(.application) == 1);
 
     var ce_ack_payload: [64]u8 = undefined;
@@ -236,10 +263,18 @@ pub fn main() !void {
     defer allocator.free(ce_ack);
     try server_socket.send(io, &client_socket.address, ce_ack);
 
-    const received_ce_ack = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
-    try require(received_ce_ack.route.connection_id == 41);
-    try require(std.mem.eql(u8, received_ce_ack.route.destination_connection_id.asSlice(), &client_dcid));
-    try client.processProtectedShortDatagram(12, secrets.server, client_dcid.len, received_ce_ack.data);
+    const ce_ack_route = try receiveProtectedShortDatagram(
+        io,
+        &client_lifecycle,
+        41,
+        &client,
+        &client_socket,
+        &client_receive_buf,
+        12,
+        secrets.server,
+    );
+    try require(ce_ack_route.connection_id == 41);
+    try require(std.mem.eql(u8, ce_ack_route.destination_connection_id.asSlice(), &client_dcid));
 
     const ce_cwnd = client.congestionWindow(.application);
     try require(client.bytesInFlight(.application) == 0);

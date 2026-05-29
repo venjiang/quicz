@@ -159,7 +159,7 @@ pub fn main() !void {
   运行：`zig build run-udp-flow-control-loopback`。
 - [UDP spin bit loopback](examples/udp_spin_bit_loopback.zig)：lifecycle-routed protected short packet 上的可配置单路径 spin-bit signaling。
   运行：`zig build run-udp-spin-bit-loopback`。
-- [UDP ECN validation loopback](examples/udp_ecn_validation_loopback.zig)：loopback UDP 上的建模 ECN state 和 ACK_ECN validation。
+- [UDP ECN validation loopback](examples/udp_ecn_validation_loopback.zig)：loopback UDP 上 lifecycle-routed 建模 ECN state 和 ACK_ECN validation。
   运行：`zig build run-udp-ecn-validation-loopback`。
 - [UDP loss recovery loopback](examples/udp_loss_recovery_loopback.zig)：lifecycle-routed protected ACK 驱动 packet loss 和 timer-driven cleanup。
   运行：`zig build run-udp-loss-recovery-loopback`。

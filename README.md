@@ -186,8 +186,8 @@ experimental.
   single-path spin-bit signaling over lifecycle-routed protected short packets.
   Run with `zig build run-udp-spin-bit-loopback`.
 - [UDP ECN validation loopback](examples/udp_ecn_validation_loopback.zig):
-  Modeled ECN state and ACK_ECN validation over loopback UDP. Run with
-  `zig build run-udp-ecn-validation-loopback`.
+  Lifecycle-routed modeled ECN state and ACK_ECN validation over loopback UDP.
+  Run with `zig build run-udp-ecn-validation-loopback`.
 - [UDP loss recovery loopback](examples/udp_loss_recovery_loopback.zig):
   Lifecycle-routed protected ACK-driven packet loss and timer-driven cleanup
   over loopback UDP. Run with `zig build run-udp-loss-recovery-loopback`.
