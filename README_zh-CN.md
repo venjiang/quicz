@@ -7,9 +7,9 @@
 > 状态：**实验性 / 开发中（WIP）**  
 > 目标：从一个最小但语义正确的子集开始，逐步实现一个完整的 QUIC 传输协议（覆盖 RFC 9000 系列以及 QUIC v2 RFC 9369）。
 
-## 特性与路线图
+## 特性与路线图 (Features and Roadmap)
 
-### 已实现 / 正在进行
+### 已实现 / 正在进行 (Implemented / In Progress)
 
 - [x] 可构建的 Zig package，包含 `Connection`、frame-payload 示例和可运行 loopback 示例。
 - [x] varint、packet header、packet number、frame、transport parameter、transport error、Version Negotiation、Retry、stateless reset、QUIC v2 packet/key/token primitive 的核心 codec 覆盖。
@@ -22,7 +22,7 @@
 - [ ] TLS 1.3 集成（RFC 9001）。
 - [ ] QUIC v2（RFC 9369）完整版本行为支持。
 
-### 规划里程碑
+### 规划里程碑 (Planned Milestones)
 
 1. **最小 QUIC v1 子集**
    - 单路径、仅 IPv4
@@ -41,11 +41,11 @@
 可验证 transport 实现任务计划见 [`docs/zh-CN/quic_transport_tasks.md`](docs/zh-CN/quic_transport_tasks.md)。
 更详细的设计和逐功能说明见 [`docs/zh-CN/`](docs/zh-CN/) 目录。
 
-## 快速开始
+## 快速开始 (Quick Start)
 
 需要安装 Zig **0.16.0**。当前构建会强制校验这个精确测试版本，避免 Zig 标准库变化静默改变行为。
 
-### 构建并运行示例
+### 构建并运行示例 (Build and run examples)
 
 ```bash
 zig build
@@ -56,7 +56,7 @@ zig build run-initial-keys
 
 `zig build` 会构建 `zig-out/lib/libquicz.a` 静态库，以及 `zig-out/bin/` 下的所有示例二进制。当前示例是确定性的协议行为练习，还不是可互操作的 QUIC-over-UDP 程序。
 
-### 作为库使用
+### 作为库使用 (Use as a library)
 
 高层 API 形态仍可能演进：
 
@@ -95,7 +95,7 @@ pub fn main() !void {
 
 `Connection` 是当前推荐的公开连接句柄；`QuicConnection` 作为兼容别名保留，便于旧调用方在实验性 API 继续演进期间平滑迁移。
 
-## 示例
+## 示例 (Examples)
 
 - [Echo server](examples/echo_server.zig)：最小 frame-payload echo server 骨架。
   运行：`zig build run-server`。
@@ -180,7 +180,7 @@ pub fn main() !void {
 - [UDP stateless reset loopback](examples/udp_stateless_reset_loopback.zig)：socket-backed reset trigger delivery、reset emission 和 client token match。
   运行：`zig build run-udp-stateless-reset-loopback`。
 
-## 高级主题
+## 高级主题 (Advanced Topics)
 
 - [传输任务矩阵](docs/zh-CN/quic_transport_tasks.md)：当前 RFC 覆盖、剩余工作和验证证据。
 - [设计说明](docs/zh-CN/spec.md)：当前架构、协议范围和未支持区域。
@@ -189,6 +189,6 @@ pub fn main() !void {
 - 恢复与拥塞：简化 RFC 9002 ACK/loss/PTO/NewReno/ECN 模型，并有确定性测试覆盖。
 - TLS 状态：已有 mock `CryptoBackend` handoff；真实 TLS 1.3 transcript 集成仍待实现。
 
-## 许可证
+## 许可证 (License)
 
 MIT
