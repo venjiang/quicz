@@ -3861,6 +3861,48 @@ pub const QuicConnection = struct {
         try self.applyPeerTransportParameters(params);
     }
 
+    /// Apply peer transport-parameter bytes and queue CONNECTION_CLOSE on peer errors.
+    ///
+    /// The input and success behavior match `applyPeerTransportParameterBytes()`.
+    /// When parsing or peer-parameter validation identifies invalid peer
+    /// transport parameters, this wrapper queues a transport CONNECTION_CLOSE
+    /// with `TRANSPORT_PARAMETER_ERROR` and the CRYPTO frame type before
+    /// returning `InvalidPacket`.
+    pub fn applyPeerTransportParameterBytesOrClose(
+        self: *QuicConnection,
+        data: []const u8,
+    ) Error!void {
+        if (self.isClosingOrClosed()) return self.applyPeerTransportParameterBytes(data);
+
+        var params = transport_parameters.parse(data, self.allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                if (transport_error.transportParameterErrorCode(err)) |code| {
+                    try self.closeConnection(
+                        transport_error.codeValue(code),
+                        @intFromEnum(frame.FrameType.crypto),
+                        "transport parameters",
+                    );
+                    return error.InvalidPacket;
+                }
+                return error.InvalidPacket;
+            },
+        };
+        defer params.deinit(self.allocator);
+
+        self.applyPeerTransportParameters(params) catch |err| switch (err) {
+            error.InvalidPacket => {
+                try self.closeConnection(
+                    transport_error.codeValue(.transport_parameter_error),
+                    @intFromEnum(frame.FrameType.crypto),
+                    "transport parameters",
+                );
+                return error.InvalidPacket;
+            },
+            else => return err,
+        };
+    }
+
     fn validateConnectionIdParameter(cid: ?[]const u8) Error!void {
         if (cid) |value| {
             if (value.len > max_connection_id_len) return error.InvalidPacket;
@@ -11295,6 +11337,72 @@ test "applyPeerTransportParameterBytes rejects malformed or invalid extensions w
     try std.testing.expectEqual(@as(u64, 65_536), conn.peer_max_data);
     try std.testing.expect(conn.peerStatelessResetToken() == null);
     try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+    try std.testing.expect(conn.pending_close == null);
+}
+
+test "applyPeerTransportParameterBytesOrClose queues close for malformed extensions" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const malformed = [_]u8{0x04};
+    try std.testing.expectError(
+        error.InvalidPacket,
+        conn.applyPeerTransportParameterBytesOrClose(&malformed),
+    );
+    try std.testing.expectEqual(@as(u64, 65_536), conn.peer_max_data);
+    try std.testing.expect(conn.peerStatelessResetToken() == null);
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+
+    var close_buf: [96]u8 = undefined;
+    const payload = (try conn.pollTx(0, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "applyPeerTransportParameterBytesOrClose queues close for invalid peer parameters" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const reset_token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    var server_only_raw: [64]u8 = undefined;
+    var server_only_out = buffer.fixedWriter(&server_only_raw);
+    try transport_parameters.encode(server_only_out.writer(), .{
+        .stateless_reset_token = reset_token,
+        .initial_max_data = 7,
+    });
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        conn.applyPeerTransportParameterBytesOrClose(server_only_out.getWritten()),
+    );
+    try std.testing.expectEqual(@as(u64, 65_536), conn.peer_max_data);
+    try std.testing.expect(conn.peerStatelessResetToken() == null);
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+
+    var close_buf: [96]u8 = undefined;
+    const payload = (try conn.pollTx(0, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
 }
 
 test "applyPeerTransportParameters updates send limits and ACK policy" {

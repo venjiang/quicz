@@ -15,7 +15,7 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] Basic API surface for `QuicConnection` (initial draft)
 - [x] QUIC variable-length integer (varint) encode/decode helpers
 - [x] Minimal QUIC packet headers (long/short, including RFC 9369 QUIC v2 long-header packet type bits, short-header spin-bit preservation, protected short-packet spin-bit peeking, and socket-backed UDP spin-bit loopback), header-level packet number truncation/reconstruction, RFC 9000 long/short packet envelope parsing/serialization, packet number encoding selection/reconstruction, Retry packet codec, RFC 8999 Version Negotiation packet parsing/serialization, and client-side Version Negotiation validation/selection state with RFC 9368 downgrade-check handoff
-- [x] RFC 9000 transport parameter typed codec with defaults, duplicate rejection, unknown-parameter ignore behavior, preferred_address support, RFC 9368 `version_information`, `QuicConnection` export/application helpers including post-VN server Version Information downgrade validation, and TLS extension byte encode/apply helpers
+- [x] RFC 9000 transport parameter typed codec with defaults, duplicate rejection, unknown-parameter ignore behavior, preferred_address support, RFC 9368 `version_information`, `QuicConnection` export/application helpers including post-VN server Version Information downgrade validation, TLS extension byte encode/apply helpers, and explicit transport-parameter close propagation
 - [x] RFC 9000/RFC 9368 transport error code helpers, including fixed codes, VERSION_NEGOTIATION_ERROR, CRYPTO_ERROR TLS alert mapping, transport-parameter codec error classification to TRANSPORT_PARAMETER_ERROR, frame codec error classification to FRAME_ENCODING_ERROR, frame packet-type violation classification to PROTOCOL_VIOLATION, and explicit frame-payload close propagation
 - [x] RFC 9001 QUIC v1 and RFC 9369 QUIC v2 Initial secret/key/IV/header-protection key derivation, RFC 9001 `quic ku` key-update derivation, caller-owned and connection-installed short-packet key-phase state and selection with ACK-gated installed-key update initiation plus a socket-backed UDP installed-key key-update loopback, mock backend Handshake/0-RTT/1-RTT traffic-secret handoff, explicit installed-key 0-RTT accept/reject and discard cleanup, 0-RTT key discard at modeled 1-RTT boundaries, AEAD_AES_128_GCM payload protection helpers, protected long/short-packet seal/open, v1/v2 Retry Integrity Tag verification, and AES header-protection mask application with Appendix A vectors
 - [x] Basic frame model (STREAM/CRYPTO/PADDING/PING/ACK/ACK_ECN with ACK range validation/RESET_STREAM/STOP_SENDING/MAX_*/BLOCKED/NEW_TOKEN/NEW_CONNECTION_ID/RETIRE_CONNECTION_ID/PATH_CHALLENGE/PATH_RESPONSE/HANDSHAKE_DONE and CONNECTION_CLOSE subset), including shortest frame-type varint validation and unknown frame-type rejection
@@ -278,7 +278,9 @@ pub fn main() !void {
     // peerActiveMigrationDisabled(), peerStatelessResetToken(), and
     // peerPreferredAddress() observability. encodeLocalTransportParameters()
     // and applyPeerTransportParameterBytes() expose the same data as TLS QUIC
-    // extension bytes for future backend integration.
+    // extension bytes for future backend integration;
+    // applyPeerTransportParameterBytesOrClose() can turn classified peer
+    // parameter errors into transport CONNECTION_CLOSE.
     // DATA_BLOCKED, STREAM_DATA_BLOCKED, and STREAMS_BLOCKED_* are queued when
     // local sends are blocked by peer credit. recvOnStream() queues MAX_DATA
     // and MAX_STREAM_DATA as application reads free receive credit, optionally

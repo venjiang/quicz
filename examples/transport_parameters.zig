@@ -129,8 +129,32 @@ pub fn main() !void {
     });
     try requireError(error.InvalidPacket, server.applyPeerTransportParameterBytes(invalid_writer.getWritten()));
 
+    var auto_close_server = try quicz.QuicConnection.init(allocator, .server, .{});
+    defer auto_close_server.deinit();
+    try auto_close_server.validatePeerAddress();
+    try requireError(
+        error.InvalidPacket,
+        auto_close_server.applyPeerTransportParameterBytesOrClose(invalid_writer.getWritten()),
+    );
+
+    var close_payload_buf: [96]u8 = undefined;
+    const close_payload = (try auto_close_server.pollTx(0, &close_payload_buf)) orelse return error.TransportParameterExampleFailed;
+    var decoded_close = try quicz.frame.decodeFrameSlice(close_payload, allocator);
+    defer quicz.frame.deinitFrame(&decoded_close.frame, allocator);
+    var close_error_code: u64 = 0;
+    var close_frame_type: u64 = 0;
+    switch (decoded_close.frame) {
+        .connection_close => |close| {
+            close_error_code = close.error_code;
+            close_frame_type = close.frame_type;
+            try require(close_error_code == quicz.transport_error.codeValue(.transport_parameter_error));
+            try require(close_frame_type == @intFromEnum(quicz.frame.FrameType.crypto));
+        },
+        else => return error.TransportParameterExampleFailed,
+    }
+
     std.debug.print(
-        "[transport-parameters] client_bytes={} server_bytes={} effective_idle_ms={} recovery_mds={} recovery_cwnd={} preferred_cid_len={} reserved_ignored=true stream_limit_blocked=true invalid_client_server_only_rejected=true\n",
+        "[transport-parameters] client_bytes={} server_bytes={} effective_idle_ms={} recovery_mds={} recovery_cwnd={} preferred_cid_len={} reserved_ignored=true stream_limit_blocked=true invalid_client_server_only_rejected=true auto_close_code={} auto_close_frame_type={}\n",
         .{
             greased_client_bytes.len,
             server_bytes.len,
@@ -138,6 +162,8 @@ pub fn main() !void {
             client.recovery_state.max_datagram_size,
             client.congestionWindow(.application),
             stored_preferred.connectionId().len,
+            close_error_code,
+            close_frame_type,
         },
     );
 }
