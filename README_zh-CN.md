@@ -157,6 +157,8 @@ pub fn main() !void {
   运行：`zig build run-udp-connection-ids-loopback`。
 - [UDP protected loopback](examples/udp_protected_loopback.zig)：lifecycle-owned accepted protected Initial processing、protected server Initial response processing，以及 routed caller-keyed 1-RTT loopback UDP processing。
   运行：`zig build run-udp-protected-loopback`。
+- [UDP 0-RTT loopback](examples/udp_zero_rtt_loopback.zig)：socket-backed lifecycle-routed installed-key 0-RTT STREAM delivery、accept-before-process enforcement、1-RTT ACK cleanup 和 server-side 0-RTT key discard。
+  运行：`zig build run-udp-zero-rtt-loopback`。
 - [UDP flow control loopback](examples/udp_flow_control_loopback.zig)：lifecycle-routed protected STREAM/BLOCKED/MAX flow-control loopback UDP 交换。
   运行：`zig build run-udp-flow-control-loopback`。
 - [UDP spin bit loopback](examples/udp_spin_bit_loopback.zig)：lifecycle-routed protected short packet 上的可配置单路径 spin-bit signaling。

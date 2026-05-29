@@ -184,6 +184,10 @@ experimental.
   Lifecycle-owned accepted protected Initial processing and protected server
   Initial response processing plus routed caller-keyed 1-RTT processing over
   loopback UDP. Run with `zig build run-udp-protected-loopback`.
+- [UDP 0-RTT loopback](examples/udp_zero_rtt_loopback.zig):
+  Socket-backed lifecycle-routed installed-key 0-RTT STREAM delivery,
+  accept-before-process enforcement, 1-RTT ACK cleanup, and server-side
+  0-RTT key discard. Run with `zig build run-udp-zero-rtt-loopback`.
 - [UDP flow control loopback](examples/udp_flow_control_loopback.zig):
   Lifecycle-routed protected STREAM/BLOCKED/MAX flow-control exchange over
   loopback UDP. Run with `zig build run-udp-flow-control-loopback`.
