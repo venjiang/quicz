@@ -297,6 +297,7 @@ pub fn main() !void {
     // ignored once the matching send side has sent FIN.
     // Queued STREAM_DATA_BLOCKED is suppressed before transmit if the send side
     // later finishes or resets.
+    // processDatagramOrClose(), processDatagramInSpaceOrClose(), and
     // processDatagramForPacketTypeOrClose() can turn classified peer frame
     // errors into queued transport CONNECTION_CLOSE frames. closeConnection() and
     // closeApplication() queue CONNECTION_CLOSE variants; pollTx() emits and

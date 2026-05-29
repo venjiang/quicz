@@ -72,6 +72,41 @@ fn printPeerClose(prefix: []const u8, close: quicz.PeerClose) void {
     }
 }
 
+fn framePayloadAutoCloseExample(gpa: std.mem.Allocator) !void {
+    var default_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    defer default_server.deinit();
+    try default_server.validatePeerAddress();
+
+    const unknown_payload = [_]u8{0x1f};
+    try requireError(
+        error.InvalidPacket,
+        default_server.processDatagramOrClose(0, &unknown_payload),
+    );
+    var close_payload_buf: [64]u8 = undefined;
+    const default_close = try pollRequired(&default_server, &close_payload_buf);
+    try printConnectionClose(gpa, default_close);
+    std.debug.print(
+        "[close] default auto close state={s} after unknown frame\n",
+        .{@tagName(default_server.connectionState())},
+    );
+
+    var initial_server = try quicz.QuicConnection.init(gpa, .server, .{});
+    defer initial_server.deinit();
+    try initial_server.validatePeerAddress();
+
+    const handshake_done = [_]u8{@intFromEnum(quicz.frame.FrameType.handshake_done)};
+    try requireError(
+        error.InvalidPacket,
+        initial_server.processDatagramInSpaceOrClose(.initial, 0, &handshake_done),
+    );
+    const initial_close = try pollRequired(&initial_server, &close_payload_buf);
+    try printConnectionClose(gpa, initial_close);
+    std.debug.print(
+        "[close] initial auto close state={s} after forbidden HANDSHAKE_DONE\n",
+        .{@tagName(initial_server.connectionState())},
+    );
+}
+
 fn packetTypeAutoCloseExample(gpa: std.mem.Allocator) !void {
     var server = try quicz.QuicConnection.init(gpa, .server, .{});
     defer server.deinit();
@@ -205,6 +240,7 @@ pub fn main() !void {
     try requireError(error.ConnectionClosed, app_client.sendPing());
     std.debug.print("[close] application receiver state={s}\n", .{@tagName(app_client.connectionState())});
 
+    try framePayloadAutoCloseExample(gpa);
     try packetTypeAutoCloseExample(gpa);
     try protectedShortCloseExample(gpa);
 }

@@ -4427,6 +4427,19 @@ pub const QuicConnection = struct {
         try self.processDatagramInSpace(.application, now_millis, datagram);
     }
 
+    /// Process one unencrypted packet payload and queue CONNECTION_CLOSE on classified peer errors.
+    ///
+    /// This is the Application-space counterpart to
+    /// `processDatagramForPacketTypeOrClose()`. Existing callers that need
+    /// pure rollback behavior can continue using `processDatagram()`.
+    pub fn processDatagramOrClose(
+        self: *QuicConnection,
+        now_millis: i64,
+        datagram: []const u8,
+    ) Error!void {
+        try self.processDatagramInSpaceOrClose(.application, now_millis, datagram);
+    }
+
     /// Process one frame-payload datagram in a selected packet number space.
     ///
     /// This keeps ACK generation and ACK processing isolated between Initial,
@@ -4441,6 +4454,24 @@ pub const QuicConnection = struct {
     ) Error!void {
         try self.processDatagramInSpaceWithPacketType(
             space,
+            defaultFramePacketTypeForSpace(space),
+            now_millis,
+            datagram,
+        );
+    }
+
+    /// Process one selected-space frame-payload datagram and queue CONNECTION_CLOSE on classified peer errors.
+    ///
+    /// Initial and Handshake spaces use their matching packet-type frame rules.
+    /// Application space uses 1-RTT frame rules. Existing callers that need pure
+    /// rollback behavior can continue using `processDatagramInSpace()`.
+    pub fn processDatagramInSpaceOrClose(
+        self: *QuicConnection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        datagram: []const u8,
+    ) Error!void {
+        try self.processDatagramForPacketTypeOrClose(
             defaultFramePacketTypeForSpace(space),
             now_millis,
             datagram,
@@ -22179,6 +22210,63 @@ test "invalid payload rolls back connection close state" {
     try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
     try std.testing.expectEqual(@as(?i64, null), conn.closeDeadlineMillis());
     try std.testing.expectEqual(@as(u64, 1), try conn.openStream());
+}
+
+test "processDatagramOrClose queues frame encoding close" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const unknown_frame = [_]u8{0x1f};
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, &unknown_frame));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, 0x1f), close.frame_type);
+            try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramInSpaceOrClose queues protocol violation close" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const handshake_done = [_]u8{@intFromEnum(frame.FrameType.handshake_done)};
+    try std.testing.expectError(
+        error.InvalidPacket,
+        conn.processDatagramInSpaceOrClose(.initial, 0, &handshake_done),
+    );
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.initial));
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.handshake_done)), close.frame_type);
+            try std.testing.expectEqualStrings("packet type", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
 }
 
 test "closeConnection queues CONNECTION_CLOSE and closes after pollTx" {
