@@ -86,12 +86,19 @@ pub fn main() !void {
 
     var client_extension: [512]u8 = undefined;
     const client_bytes = try client.encodeLocalTransportParameters(&client_extension);
-    var parsed_client = try quicz.transport_parameters.parse(client_bytes, allocator);
+    var greased_client_extension: [640]u8 = undefined;
+    var greased_client_writer = fixedWriter(&greased_client_extension);
+    try quicz.transport_parameters.encodeReservedParameter(greased_client_writer.writer(), 27, "grease");
+    try greased_client_writer.writeAll(client_bytes);
+    const greased_client_bytes = greased_client_writer.getWritten();
+    try require(quicz.transport_parameters.isReservedParameterId(27));
+
+    var parsed_client = try quicz.transport_parameters.parse(greased_client_bytes, allocator);
     defer parsed_client.deinit(allocator);
     try require(parsed_client.stateless_reset_token == null);
     try require(parsed_client.preferred_address == null);
     try require(parsed_client.ack_delay_exponent == 4);
-    try server.applyPeerTransportParameterBytes(client_bytes);
+    try server.applyPeerTransportParameterBytes(greased_client_bytes);
 
     var server_extension: [512]u8 = undefined;
     const server_bytes = try server.encodeLocalTransportParameters(&server_extension);
@@ -123,9 +130,9 @@ pub fn main() !void {
     try requireError(error.InvalidPacket, server.applyPeerTransportParameterBytes(invalid_writer.getWritten()));
 
     std.debug.print(
-        "[transport-parameters] client_bytes={} server_bytes={} effective_idle_ms={} recovery_mds={} recovery_cwnd={} preferred_cid_len={} stream_limit_blocked=true invalid_client_server_only_rejected=true\n",
+        "[transport-parameters] client_bytes={} server_bytes={} effective_idle_ms={} recovery_mds={} recovery_cwnd={} preferred_cid_len={} reserved_ignored=true stream_limit_blocked=true invalid_client_server_only_rejected=true\n",
         .{
-            client_bytes.len,
+            greased_client_bytes.len,
             server_bytes.len,
             client.effectiveIdleTimeoutMillis().?,
             client.recovery_state.max_datagram_size,

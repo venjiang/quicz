@@ -30,6 +30,15 @@ pub const ParameterId = enum(u64) {
     _,
 };
 
+/// Return whether a transport parameter identifier is reserved for greasing.
+///
+/// RFC 9000 reserves identifiers of the form `31 * N + 27` so endpoints can
+/// send parameters with arbitrary values and verify that peers ignore unknown
+/// transport parameters.
+pub fn isReservedParameterId(id: u64) bool {
+    return id % 31 == 27;
+}
+
 /// Server preferred address transport parameter value.
 pub const PreferredAddress = struct {
     ipv4_address: [4]u8,
@@ -138,6 +147,17 @@ fn encodeUncheckedIntegerValue(writer: anytype, id: ParameterId, value: u64) !vo
 
 fn encodeBytesValue(writer: anytype, id: ParameterId, value: []const u8) !void {
     try packet.encodeVarInt(writer, @intFromEnum(id));
+    try packet.encodeVarInt(writer, value.len);
+    try writer.writeAll(value);
+}
+
+/// Serialize one reserved transport parameter with arbitrary bytes.
+///
+/// This helper is intentionally separate from `TransportParameters` because
+/// reserved parameters have no semantics and must be ignored by receivers.
+pub fn encodeReservedParameter(writer: anytype, id: u64, value: []const u8) !void {
+    if (!isReservedParameterId(id)) return error.InvalidParameterValue;
+    try packet.encodeVarInt(writer, id);
     try packet.encodeVarInt(writer, value.len);
     try writer.writeAll(value);
 }
@@ -408,6 +428,15 @@ test "transport parameters parse defaults from empty extension" {
     try std.testing.expect(!params.disable_active_migration);
 }
 
+test "reserved transport parameter identifiers follow RFC 9000 greasing pattern" {
+    try std.testing.expect(isReservedParameterId(27));
+    try std.testing.expect(isReservedParameterId(58));
+    try std.testing.expect(isReservedParameterId(89));
+    try std.testing.expect(!isReservedParameterId(@intFromEnum(ParameterId.preferred_address)));
+    try std.testing.expect(!isReservedParameterId(@intFromEnum(ParameterId.version_information)));
+    try std.testing.expect(!isReservedParameterId(0));
+}
+
 test "transport parameters encode and parse typed values" {
     const reset_token = [_]u8{
         0x00, 0x01, 0x02, 0x03,
@@ -520,12 +549,13 @@ test "transport parameters reject malformed version information" {
 test "transport parameters ignore unknown parameters but reject duplicates" {
     var raw: [32]u8 = undefined;
     var writer = buffer.fixedWriter(&raw);
-    try encodeBytesValue(writer.writer(), @enumFromInt(27), &[_]u8{ 0xaa, 0xbb });
+    try encodeReservedParameter(writer.writer(), 27, &[_]u8{ 0xaa, 0xbb });
     try encodeIntegerValue(writer.writer(), .initial_max_data, 42);
 
     var parsed = try parse(writer.getWritten(), std.testing.allocator);
     defer parsed.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 42), parsed.initial_max_data);
+    try std.testing.expectError(error.InvalidParameterValue, encodeReservedParameter(writer.writer(), 26, &[_]u8{}));
 
     var duplicate_raw: [16]u8 = undefined;
     var duplicate_writer = buffer.fixedWriter(&duplicate_raw);
