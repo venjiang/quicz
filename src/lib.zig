@@ -1500,6 +1500,35 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Route and process one explicit key-update protected 1-RTT datagram.
+    ///
+    /// This keeps caller-supplied key-update state on the same endpoint-owned
+    /// route and recovery-timer boundary as the other protected short-packet
+    /// receive paths. The route must resolve to `connection_id`; the routed
+    /// destination CID length is used for short-header packet protection
+    /// removal before the endpoint recovery timer is refreshed.
+    pub fn processRoutedProtectedShortDatagramWithKeyUpdate(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        keys: protection.ShortPacketKeyUpdateKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedShortDatagramWithKeyUpdate(
+            connection_id,
+            connection,
+            now_millis,
+            keys,
+            route.destination_connection_id.asSlice().len,
+            datagram,
+        );
+        return route;
+    }
+
     /// Poll one caller-owned key-phase protected 1-RTT datagram and refresh timers.
     ///
     /// This bridge keeps deterministic key-update tests and external
@@ -1538,6 +1567,35 @@ pub const EndpointConnectionLifecycle = struct {
     ) Error!void {
         try connection.processProtectedShortDatagramWithKeyPhaseState(now_millis, key_phase_state, dcid_len, datagram);
         try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
+    /// Route and process one caller-owned key-phase protected 1-RTT datagram.
+    ///
+    /// The key-phase state still advances only after packet authentication
+    /// and frame processing succeed inside `Connection`. The lifecycle helper
+    /// first validates endpoint routing, uses the routed destination CID
+    /// length for packet protection removal, then mirrors the resulting
+    /// aggregate recovery timer.
+    pub fn processRoutedProtectedShortDatagramWithKeyPhaseState(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        key_phase_state: *protection.Aes128KeyPhaseState,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedShortDatagramWithKeyPhaseState(
+            connection_id,
+            connection,
+            now_millis,
+            key_phase_state,
+            route.destination_connection_id.asSlice().len,
+            datagram,
+        );
+        return route;
     }
 
     /// Poll one installed-key protected Handshake datagram and refresh timers.
@@ -16222,20 +16280,32 @@ test "EndpointConnectionLifecycle refreshes explicit key update short timer life
     try std.testing.expectEqual(@as(usize, 1), client_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
 
-    const server_route = try server_lifecycle.routeDatagram(server_receive_path, ping);
-    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
-    try server_lifecycle.processProtectedShortDatagramWithKeyUpdate(
-        server_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdate(
+        client_connection_id,
         &server,
+        server_receive_path,
         11,
         .{
             .current = secrets.client,
             .next = next_client_keys,
             .current_key_phase = false,
         },
-        server_dcid.len,
+        ping,
+    ));
+    const server_route = try server_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdate(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        .{
+            .current = secrets.client,
+            .next = next_client_keys,
+            .current_key_phase = false,
+        },
         ping,
     );
+    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, server_route.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 
@@ -16251,20 +16321,32 @@ test "EndpointConnectionLifecycle refreshes explicit key update short timer life
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 
-    const client_route = try client_lifecycle.routeDatagram(client_receive_path, ack);
-    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
-    try client_lifecycle.processProtectedShortDatagramWithKeyUpdate(
-        client_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, client_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdate(
+        server_connection_id,
         &client,
+        client_receive_path,
         13,
         .{
             .current = secrets.server,
             .next = next_server_keys,
             .current_key_phase = false,
         },
-        client_dcid.len,
+        ack,
+    ));
+    const client_route = try client_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdate(
+        client_connection_id,
+        &client,
+        client_receive_path,
+        13,
+        .{
+            .current = secrets.server,
+            .next = next_server_keys,
+            .current_key_phase = false,
+        },
         ack,
     );
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &client_dcid, client_route.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
@@ -16333,16 +16415,25 @@ test "EndpointConnectionLifecycle refreshes caller-owned key phase short timer l
     try std.testing.expect(client_send_state.currentKeyPhase());
     try std.testing.expectEqual(@as(usize, 1), client_lifecycle.recoveryTimerCount());
 
-    const server_route = try server_lifecycle.routeDatagram(server_receive_path, ping);
-    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
-    try server_lifecycle.processProtectedShortDatagramWithKeyPhaseState(
-        server_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithKeyPhaseState(
+        client_connection_id,
         &server,
+        server_receive_path,
         11,
         &server_recv_state,
-        server_dcid.len,
+        ping,
+    ));
+    try std.testing.expect(!server_recv_state.currentKeyPhase());
+    const server_route = try server_lifecycle.processRoutedProtectedShortDatagramWithKeyPhaseState(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        &server_recv_state,
         ping,
     );
+    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, server_route.destination_connection_id.asSlice());
     try std.testing.expect(server_recv_state.currentKeyPhase());
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
@@ -16358,16 +16449,24 @@ test "EndpointConnectionLifecycle refreshes caller-owned key phase short timer l
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 
-    const client_route = try client_lifecycle.routeDatagram(client_receive_path, ack);
-    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
-    try client_lifecycle.processProtectedShortDatagramWithKeyPhaseState(
-        client_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, client_lifecycle.processRoutedProtectedShortDatagramWithKeyPhaseState(
+        server_connection_id,
         &client,
+        client_receive_path,
         13,
         &client_recv_state,
-        client_dcid.len,
+        ack,
+    ));
+    const client_route = try client_lifecycle.processRoutedProtectedShortDatagramWithKeyPhaseState(
+        client_connection_id,
+        &client,
+        client_receive_path,
+        13,
+        &client_recv_state,
         ack,
     );
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &client_dcid, client_route.destination_connection_id.asSlice());
     try std.testing.expect(!client_recv_state.currentKeyPhase());
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));

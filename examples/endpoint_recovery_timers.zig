@@ -512,20 +512,20 @@ pub fn main() !void {
     defer allocator.free(explicit_key_phase_ping);
     try require(protected_client_lifecycle.recoveryTimerCount() == 1);
 
-    const explicit_key_phase_ping_route = try protected_server_lifecycle.routeDatagram(server_receive_path, explicit_key_phase_ping);
-    try require(explicit_key_phase_ping_route.connection_id == protected_server_id);
-    try protected_server_lifecycle.processProtectedShortDatagramWithKeyUpdate(
-        explicit_key_phase_ping_route.connection_id,
+    const explicit_key_phase_ping_route = try protected_server_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdate(
+        protected_server_id,
         &protected_server,
+        server_receive_path,
         35,
         .{
             .current = secrets.client,
             .next = explicit_next_client_keys,
             .current_key_phase = false,
         },
-        server_dcid.len,
         explicit_key_phase_ping,
     );
+    try require(explicit_key_phase_ping_route.connection_id == protected_server_id);
+    try require(std.mem.eql(u8, explicit_key_phase_ping_route.destination_connection_id.asSlice(), &server_dcid));
     try require(protected_server.pendingAckLargest(.application) == 4);
 
     const explicit_key_phase_ack = (try protected_server_lifecycle.pollProtectedShortDatagramWithKeyPhase(
@@ -539,20 +539,20 @@ pub fn main() !void {
     defer allocator.free(explicit_key_phase_ack);
     try require(protected_server_lifecycle.recoveryTimerCount() == 0);
 
-    const explicit_key_phase_ack_route = try protected_client_lifecycle.routeDatagram(client_receive_path, explicit_key_phase_ack);
-    try require(explicit_key_phase_ack_route.connection_id == protected_client_id);
-    try protected_client_lifecycle.processProtectedShortDatagramWithKeyUpdate(
-        explicit_key_phase_ack_route.connection_id,
+    const explicit_key_phase_ack_route = try protected_client_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdate(
+        protected_client_id,
         &protected_client,
+        client_receive_path,
         37,
         .{
             .current = secrets.server,
             .next = explicit_next_server_keys,
             .current_key_phase = false,
         },
-        client_dcid.len,
         explicit_key_phase_ack,
     );
+    try require(explicit_key_phase_ack_route.connection_id == protected_client_id);
+    try require(std.mem.eql(u8, explicit_key_phase_ack_route.destination_connection_id.asSlice(), &client_dcid));
     try require(protected_client.bytesInFlight(.application) == 0);
 
     var key_phase_client_send_state = quicz.protection.Aes128KeyPhaseState.init(secrets.client, false);
@@ -572,16 +572,16 @@ pub fn main() !void {
     defer allocator.free(key_phase_ping);
     try require(protected_client_lifecycle.recoveryTimerCount() == 1);
 
-    const key_phase_ping_route = try protected_server_lifecycle.routeDatagram(server_receive_path, key_phase_ping);
-    try require(key_phase_ping_route.connection_id == protected_server_id);
-    try protected_server_lifecycle.processProtectedShortDatagramWithKeyPhaseState(
-        key_phase_ping_route.connection_id,
+    const key_phase_ping_route = try protected_server_lifecycle.processRoutedProtectedShortDatagramWithKeyPhaseState(
+        protected_server_id,
         &protected_server,
+        server_receive_path,
         39,
         &key_phase_server_recv_state,
-        server_dcid.len,
         key_phase_ping,
     );
+    try require(key_phase_ping_route.connection_id == protected_server_id);
+    try require(std.mem.eql(u8, key_phase_ping_route.destination_connection_id.asSlice(), &server_dcid));
     try require(key_phase_server_recv_state.currentKeyPhase());
     try require(protected_server.pendingAckLargest(.application) == 5);
 
@@ -595,16 +595,16 @@ pub fn main() !void {
     defer allocator.free(key_phase_ack);
     try require(protected_server_lifecycle.recoveryTimerCount() == 0);
 
-    const key_phase_ack_route = try protected_client_lifecycle.routeDatagram(client_receive_path, key_phase_ack);
-    try require(key_phase_ack_route.connection_id == protected_client_id);
-    try protected_client_lifecycle.processProtectedShortDatagramWithKeyPhaseState(
-        key_phase_ack_route.connection_id,
+    const key_phase_ack_route = try protected_client_lifecycle.processRoutedProtectedShortDatagramWithKeyPhaseState(
+        protected_client_id,
         &protected_client,
+        client_receive_path,
         41,
         &key_phase_client_recv_state,
-        client_dcid.len,
         key_phase_ack,
     );
+    try require(key_phase_ack_route.connection_id == protected_client_id);
+    try require(std.mem.eql(u8, key_phase_ack_route.destination_connection_id.asSlice(), &client_dcid));
     try require(!key_phase_client_recv_state.currentKeyPhase());
     try require(protected_client.bytesInFlight(.application) == 0);
     const protected_timers_remaining = protected_client_lifecycle.recoveryTimerCount() + protected_server_lifecycle.recoveryTimerCount();
