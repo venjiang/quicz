@@ -248,7 +248,8 @@ pub fn main() !void {
     const initial_serviced = (try spaces.serviceLossDetectionTimer(initial_deadline)) orelse return error.PtoRecoveryExampleFailed;
     if (initial_serviced.space != .initial) return error.PtoRecoveryExampleFailed;
     if (initial_serviced.kind != .pto) return error.PtoRecoveryExampleFailed;
-    if (spaces.ptoDeadlineMillis(.handshake) != handshake_deadline) return error.PtoRecoveryExampleFailed;
+    const backed_off_handshake_deadline = spaces.ptoDeadlineMillis(.handshake) orelse return error.PtoRecoveryExampleFailed;
+    if (backed_off_handshake_deadline != 620) return error.PtoRecoveryExampleFailed;
 
     const initial_payload = (try spaces.pollTxInSpace(.initial, initial_deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
     var initial_decoded = try quicz.frame.decodeFrameSlice(initial_payload, allocator);
@@ -267,7 +268,7 @@ pub fn main() !void {
     }
 
     std.debug.print(
-        "[pto] spaces initial_deadline={d} handshake_deadline={d} initial_probe={d} handshake_peer_probe={d}\n",
-        .{ initial_deadline, handshake_deadline, initial_payload.len, handshake_payload.len },
+        "[pto] spaces initial_deadline={d} handshake_deadline={d} backed_off_handshake={d} initial_probe={d} handshake_peer_probe={d}\n",
+        .{ initial_deadline, handshake_deadline, backed_off_handshake_deadline, initial_payload.len, handshake_payload.len },
     );
 }

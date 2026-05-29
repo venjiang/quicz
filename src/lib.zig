@@ -1642,6 +1642,12 @@ const RttEstimateSnapshot = struct {
     rttvar_ms: u64,
 };
 
+const PtoBackoffSnapshot = struct {
+    initial: u8,
+    handshake: u8,
+    application: u8,
+};
+
 const ActiveConnectionId = struct {
     sequence_number: u64,
     connection_id: []u8,
@@ -1727,6 +1733,7 @@ fn ptoDeadlineFor(
     sent_packets: []const SentPacket,
     recovery_state: recovery.Recovery,
     include_max_ack_delay: bool,
+    pto_count: u8,
 ) ?i64 {
     var latest_sent_time: ?i64 = null;
     for (sent_packets) |sent_packet| {
@@ -1736,10 +1743,12 @@ fn ptoDeadlineFor(
             sent_packet.sent_time_millis;
     }
     const sent_time = latest_sent_time orelse return null;
+    var deadline_recovery_state = recovery_state;
+    deadline_recovery_state.pto_count = pto_count;
     const pto_ms = if (include_max_ack_delay)
-        recovery_state.ptoMs()
+        deadline_recovery_state.ptoMs()
     else
-        recovery_state.ptoMsWithoutMaxAckDelay();
+        deadline_recovery_state.ptoMsWithoutMaxAckDelay();
     return saturatingAddMillis(sent_time, pto_ms);
 }
 
@@ -2713,15 +2722,16 @@ pub const QuicConnection = struct {
     /// Return the modeled PTO deadline for one packet number space.
     ///
     /// This uses the latest ack-eliciting packet tracked in the selected space
-    /// and the current simplified PTO duration. ACK-only payloads are not
+    /// and the connection-level PTO backoff count. ACK-only payloads are not
     /// tracked in `sent_packets`, so they do not arm PTO. RFC 9002 forbids
     /// arming Application Data PTO before the handshake is confirmed.
     pub fn ptoDeadlineMillis(self: QuicConnection, space: PacketNumberSpace) ?i64 {
         if (!self.ptoAllowedInSpace(space)) return null;
+        const pto_count = self.connectionPtoBackoffCount();
         return switch (space) {
-            .initial => ptoDeadlineFor(self.initial_packet_space.sent_packets.items, self.initial_packet_space.recovery_state, false),
-            .handshake => ptoDeadlineFor(self.handshake_packet_space.sent_packets.items, self.handshake_packet_space.recovery_state, false),
-            .application => ptoDeadlineFor(self.sent_packets.items, self.recovery_state, true),
+            .initial => ptoDeadlineFor(self.initial_packet_space.sent_packets.items, self.initial_packet_space.recovery_state, false, pto_count),
+            .handshake => ptoDeadlineFor(self.handshake_packet_space.sent_packets.items, self.handshake_packet_space.recovery_state, false, pto_count),
+            .application => ptoDeadlineFor(self.sent_packets.items, self.recovery_state, true, pto_count),
         };
     }
 
@@ -2769,9 +2779,9 @@ pub const QuicConnection = struct {
     /// This is the endpoint/event-loop entry point for the simplified recovery
     /// model. It recomputes the aggregate timer, does nothing before the
     /// deadline, and when due dispatches to loss-time handling before PTO
-    /// probing. A late call may service multiple due packet number spaces via
-    /// the existing per-space timeout handlers; the returned value is the
-    /// earliest timer that caused this service call to run.
+    /// probing. Loss-time service drains due loss deadlines; PTO service handles
+    /// one earliest PTO expiration and advances the connection-level backoff.
+    /// The returned value is the earliest timer that caused this service call to run.
     pub fn serviceLossDetectionTimer(self: *QuicConnection, now_millis: i64) Error!?LossDetectionTimerDeadline {
         const deadline = self.lossDetectionTimerDeadlineMillis() orelse return null;
         if (deadline.deadline_millis > now_millis) return null;
@@ -3477,19 +3487,28 @@ pub const QuicConnection = struct {
     /// This is a deterministic hook for the current frame-payload model. It
     /// lets already queued ack-eliciting data serve as the probe. If nothing is
     /// queued, it reuses in-flight CRYPTO first, then Application STREAM, before
-    /// falling back to a PING. When a space expires, other packet number spaces
-    /// that still have in-flight packets also get probes without advancing their
-    /// own PTO backoff until their own deadline expires.
+    /// falling back to a PING. When one space expires, the connection-level PTO
+    /// backoff advances and other packet number spaces that still have
+    /// in-flight packets also get peer probes.
     pub fn checkPtoTimeouts(self: *QuicConnection, now_millis: i64) Error!void {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         try self.expireLossDetectionTimeouts(now_millis);
         const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
+        var expired_space: ?PacketNumberSpace = null;
+        var expired_deadline: ?i64 = null;
         for (spaces) |space| {
-            if (try self.checkPtoTimeoutInSpace(space, now_millis)) {
-                try self.queuePtoPeerSpaceProbes(space);
+            const deadline = self.ptoDeadlineMillis(space) orelse continue;
+            if (deadline > now_millis) continue;
+            if (expired_deadline == null or deadline < expired_deadline.?) {
+                expired_space = space;
+                expired_deadline = deadline;
             }
+        }
+        if (expired_space) |space| {
+            try self.checkPtoTimeoutInSpace(space);
+            try self.queuePtoPeerSpaceProbes(space);
         }
     }
 
@@ -3552,6 +3571,7 @@ pub const QuicConnection = struct {
         packet_space.ecn_largest_acknowledged.* = null;
         packet_space.ecn_counts.* = zeroEcnCounts();
         packet_space.ecn_validation_state.* = .unknown;
+        self.resetConnectionPtoBackoff();
     }
 
     /// Record a modeled ack-eliciting packet in the selected packet number space.
@@ -4055,6 +4075,56 @@ pub const QuicConnection = struct {
         packet_space.recovery_state.min_rtt_ms = snapshot.min_rtt_ms;
         packet_space.recovery_state.smoothed_rtt_ms = snapshot.smoothed_rtt_ms;
         packet_space.recovery_state.rttvar_ms = snapshot.rttvar_ms;
+    }
+
+    fn ptoBackoffSnapshot(self: QuicConnection) PtoBackoffSnapshot {
+        return .{
+            .initial = self.initial_packet_space.recovery_state.pto_count,
+            .handshake = self.handshake_packet_space.recovery_state.pto_count,
+            .application = self.recovery_state.pto_count,
+        };
+    }
+
+    fn restorePtoBackoffSnapshot(self: *QuicConnection, snapshot: PtoBackoffSnapshot) void {
+        self.initial_packet_space.recovery_state.pto_count = snapshot.initial;
+        self.handshake_packet_space.recovery_state.pto_count = snapshot.handshake;
+        self.recovery_state.pto_count = snapshot.application;
+    }
+
+    fn connectionPtoBackoffCount(self: QuicConnection) u8 {
+        var count: u8 = 0;
+        if (!self.initial_packet_space.discarded) {
+            count = @max(count, self.initial_packet_space.recovery_state.pto_count);
+        }
+        if (!self.handshake_packet_space.discarded) {
+            count = @max(count, self.handshake_packet_space.recovery_state.pto_count);
+        }
+        if (!self.application_packet_space_discarded) {
+            count = @max(count, self.recovery_state.pto_count);
+        }
+        return count;
+    }
+
+    fn setConnectionPtoBackoffCount(self: *QuicConnection, count: u8) void {
+        if (!self.initial_packet_space.discarded) {
+            self.initial_packet_space.recovery_state.pto_count = count;
+        }
+        if (!self.handshake_packet_space.discarded) {
+            self.handshake_packet_space.recovery_state.pto_count = count;
+        }
+        if (!self.application_packet_space_discarded) {
+            self.recovery_state.pto_count = count;
+        }
+    }
+
+    fn resetConnectionPtoBackoff(self: *QuicConnection) void {
+        self.setConnectionPtoBackoffCount(0);
+    }
+
+    fn increaseConnectionPtoBackoff(self: *QuicConnection) void {
+        const current = self.connectionPtoBackoffCount();
+        const next = if (current == std.math.maxInt(u8)) current else current + 1;
+        self.setConnectionPtoBackoffCount(next);
     }
 
     fn rememberFirstRttSampleSentTime(self: *QuicConnection, sent_time_millis: i64) void {
@@ -6720,6 +6790,7 @@ pub const QuicConnection = struct {
         const initial_rtt_snapshot = self.rttEstimateSnapshot(.initial);
         const handshake_rtt_snapshot = self.rttEstimateSnapshot(.handshake);
         const application_rtt_snapshot = self.rttEstimateSnapshot(.application);
+        const pto_backoff_snapshot = self.ptoBackoffSnapshot();
         const recovery_snapshot = packet_space.recovery_state.*;
         const sent_packet_snapshots = try self.cloneSentPackets(packet_space.sent_packets.items);
         var sent_packet_snapshots_restored = false;
@@ -6889,6 +6960,7 @@ pub const QuicConnection = struct {
             self.restoreRttEstimateSnapshot(.initial, initial_rtt_snapshot);
             self.restoreRttEstimateSnapshot(.handshake, handshake_rtt_snapshot);
             self.restoreRttEstimateSnapshot(.application, application_rtt_snapshot);
+            self.restorePtoBackoffSnapshot(pto_backoff_snapshot);
         }
 
         var ack_eliciting = false;
@@ -8410,6 +8482,7 @@ pub const QuicConnection = struct {
                 congestion_window_utilized,
             );
         }
+        self.resetConnectionPtoBackoff();
         if (persistent_congestion_established) {
             packet_space.recovery_state.onPersistentCongestion();
         }
@@ -8712,14 +8785,11 @@ pub const QuicConnection = struct {
         }
     }
 
-    fn checkPtoTimeoutInSpace(self: *QuicConnection, space: PacketNumberSpace, now_millis: i64) Error!bool {
+    fn checkPtoTimeoutInSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
         const packet_space = self.packetNumberSpace(space);
-        if (packet_space.discarded.*) return false;
-        const deadline = self.ptoDeadlineMillis(space) orelse return false;
-        if (deadline > now_millis) return false;
+        if (packet_space.discarded.*) return;
         try self.queuePtoProbeInSpace(space);
-        packet_space.recovery_state.onPtoExpired();
-        return true;
+        self.increaseConnectionPtoBackoff();
     }
 
     fn queuePtoCryptoRetransmission(self: *QuicConnection, space: PacketNumberSpace) Error!bool {
@@ -15422,7 +15492,7 @@ test "checkPtoTimeouts retransmits protected short CRYPTO data before PING" {
     }
 }
 
-test "checkPtoTimeouts queues peer-space PTO probes without early backoff" {
+test "checkPtoTimeouts backs off PTO across packet number spaces" {
     var conn = try QuicConnection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
     });
@@ -15447,8 +15517,10 @@ test "checkPtoTimeouts queues peer-space PTO probes without early backoff" {
     try std.testing.expectEqual(@as(usize, 1), conn.handshake_packet_space.pending_ping_count);
     try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
     try std.testing.expectEqual(@as(u8, 1), conn.initial_packet_space.recovery_state.pto_count);
-    try std.testing.expectEqual(@as(u8, 0), conn.handshake_packet_space.recovery_state.pto_count);
-    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.handshake_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(?i64, 610), conn.ptoDeadlineMillis(.initial));
+    try std.testing.expectEqual(@as(?i64, 620), conn.ptoDeadlineMillis(.handshake));
 
     try conn.checkPtoTimeouts(320);
     try std.testing.expectEqual(@as(usize, 1), conn.initial_packet_space.pending_ping_count);
@@ -15456,7 +15528,7 @@ test "checkPtoTimeouts queues peer-space PTO probes without early backoff" {
     try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
     try std.testing.expectEqual(@as(u8, 1), conn.initial_packet_space.recovery_state.pto_count);
     try std.testing.expectEqual(@as(u8, 1), conn.handshake_packet_space.recovery_state.pto_count);
-    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
 
     var out_buf: [32]u8 = undefined;
     const initial_payload = (try conn.pollTxInSpace(.initial, 321, &out_buf)) orelse return error.TestUnexpectedResult;
@@ -15476,6 +15548,63 @@ test "checkPtoTimeouts queues peer-space PTO probes without early backoff" {
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(usize, 0), conn.handshake_packet_space.pending_ping_count);
+}
+
+test "ACK resets connection-level PTO backoff across packet number spaces" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    _ = try conn.recordPacketSentInSpace(.initial, 10, 100);
+    _ = try conn.recordPacketSentInSpace(.handshake, 20, 100);
+
+    try conn.checkPtoTimeouts(310);
+    try std.testing.expectEqual(@as(u8, 1), conn.initial_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.handshake_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+
+    try conn.receiveAckInSpace(.handshake, 70, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(u8, 0), conn.initial_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 0), conn.handshake_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
+}
+
+test "invalid payload rolls back connection-level PTO backoff reset" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    _ = try conn.recordPacketSentInSpace(.initial, 10, 100);
+    _ = try conn.recordPacketSentInSpace(.handshake, 20, 100);
+
+    try conn.checkPtoTimeouts(310);
+    try std.testing.expectEqual(@as(u8, 1), conn.initial_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.handshake_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+
+    var payload_buf: [32]u8 = undefined;
+    var payload = buffer.fixedWriter(&payload_buf);
+    try frame.encodeFrame(payload.writer(), .{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+    try payload.writer().writeByte(@intFromEnum(frame.FrameType.handshake_done));
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramInSpace(.handshake, 70, payload.getWritten()));
+    try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(u8, 1), conn.initial_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.handshake_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
 }
 
 test "checkPtoTimeouts is no-op when no application packet is in flight" {
@@ -15548,6 +15677,8 @@ test "discardPacketNumberSpace clears Initial recovery and prevents reuse" {
     try conn.processDatagramInSpace(.initial, 650, crypto_out.getWritten());
     try conn.queueAckForReceivedPacketInSpace(.initial);
     conn.initial_packet_space.recovery_state.pto_count = 2;
+    conn.handshake_packet_space.recovery_state.pto_count = 2;
+    conn.recovery_state.pto_count = 2;
 
     try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.initial));
     try std.testing.expectEqual(@as(u64, 13), conn.initial_packet_space.crypto_send_offset);
@@ -15567,6 +15698,8 @@ test "discardPacketNumberSpace clears Initial recovery and prevents reuse" {
     try std.testing.expectEqual(@as(?i64, null), conn.ptoDeadlineMillis(.initial));
     try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.initial));
     try std.testing.expectEqual(@as(u8, 0), conn.initial_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 0), conn.handshake_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
     try std.testing.expectEqual(@as(u64, 0), conn.initial_packet_space.crypto_send_offset);
     try std.testing.expectEqual(@as(usize, 0), conn.initial_packet_space.crypto_send_queue.items.len);
     try std.testing.expectEqual(@as(usize, 0), conn.initial_packet_space.crypto_recv_buffer.items.len);
