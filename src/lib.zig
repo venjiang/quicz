@@ -1519,6 +1519,31 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Route and process one installed-key protected Handshake datagram.
+    ///
+    /// This is the endpoint event-loop receive bridge for TLS-owned Handshake
+    /// packet protection keys. The route must resolve to `connection_id`;
+    /// the connection then opens the packet with its installed Handshake keys,
+    /// and the endpoint lifecycle mirrors the resulting recovery timer.
+    pub fn processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedHandshakeDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+        return route;
+    }
+
     /// Poll one installed-key protected 0-RTT datagram and refresh timers.
     ///
     /// This is the TLS early-data bridge for endpoint event loops after a
@@ -1555,6 +1580,31 @@ pub const EndpointConnectionLifecycle = struct {
     ) Error!void {
         try connection.processProtectedZeroRttDatagramWithInstalledKeys(now_millis, datagram);
         try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
+    /// Route and process one installed-key protected 0-RTT datagram.
+    ///
+    /// This is the endpoint event-loop receive bridge for TLS early-data
+    /// packet protection keys. The route must resolve to `connection_id`;
+    /// the connection still enforces 0-RTT acceptance and frame restrictions,
+    /// and the endpoint lifecycle mirrors the resulting recovery timer.
+    pub fn processRoutedProtectedZeroRttDatagramWithInstalledKeys(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedZeroRttDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+        return route;
     }
 
     /// Poll one installed-key protected 1-RTT datagram and refresh recovery scheduling.
@@ -15723,14 +15773,22 @@ test "EndpointConnectionLifecycle refreshes installed-key Handshake timer lifecy
     try std.testing.expectEqual(@as(usize, 1), server_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(usize, 1), server.sentPacketCount(.handshake));
 
-    const client_route = try client_lifecycle.routeDatagram(client_receive_path, handshake);
-    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
-    try client_lifecycle.processProtectedHandshakeDatagramWithInstalledKeys(
-        client_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, client_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        server_connection_id,
         &client,
+        client_receive_path,
+        11,
+        handshake,
+    ));
+    const client_route = try client_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        client_connection_id,
+        &client,
+        client_receive_path,
         11,
         handshake,
     );
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &client_scid, client_route.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.handshake));
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
 
@@ -15749,14 +15807,22 @@ test "EndpointConnectionLifecycle refreshes installed-key Handshake timer lifecy
     try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.handshake));
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
 
-    const server_route = try server_lifecycle.routeDatagram(server_receive_path, ack);
-    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
-    try server_lifecycle.processProtectedHandshakeDatagramWithInstalledKeys(
-        server_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        client_connection_id,
         &server,
+        server_receive_path,
+        13,
+        ack,
+    ));
+    const server_route = try server_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        server_connection_id,
+        &server,
+        server_receive_path,
         13,
         ack,
     );
+    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_scid, server_route.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
     try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.handshake));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
@@ -15827,14 +15893,22 @@ test "EndpointConnectionLifecycle refreshes installed-key zero RTT timer lifecyc
     try std.testing.expectEqual(@as(usize, 1), client_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
 
-    const server_route = try server_lifecycle.routeDatagram(server_receive_path, early);
-    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
-    try server_lifecycle.processProtectedZeroRttDatagramWithInstalledKeys(
-        server_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedZeroRttDatagramWithInstalledKeys(
+        client_connection_id,
         &server,
+        server_receive_path,
+        11,
+        early,
+    ));
+    const server_route = try server_lifecycle.processRoutedProtectedZeroRttDatagramWithInstalledKeys(
+        server_connection_id,
+        &server,
+        server_receive_path,
         11,
         early,
     );
+    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_scid, server_route.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 

@@ -284,14 +284,15 @@ pub fn main() !void {
     defer allocator.free(installed_handshake);
     try require(protected_server_lifecycle.recoveryTimerCount() == 1);
 
-    const installed_handshake_route = try protected_client_lifecycle.routeDatagram(client_receive_path, installed_handshake);
-    try require(installed_handshake_route.connection_id == protected_client_id);
-    try protected_client_lifecycle.processProtectedHandshakeDatagramWithInstalledKeys(
-        installed_handshake_route.connection_id,
+    const installed_handshake_route = try protected_client_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        protected_client_id,
         &protected_client,
+        client_receive_path,
         17,
         installed_handshake,
     );
+    try require(installed_handshake_route.connection_id == protected_client_id);
+    try require(std.mem.eql(u8, installed_handshake_route.destination_connection_id.asSlice(), &client_dcid));
     try require(protected_client.pendingAckLargest(.handshake) == 1);
 
     const installed_handshake_ack = (try protected_client_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
@@ -304,14 +305,15 @@ pub fn main() !void {
     defer allocator.free(installed_handshake_ack);
     try require(protected_client_lifecycle.recoveryTimerCount() == 0);
 
-    const installed_handshake_ack_route = try protected_server_lifecycle.routeDatagram(server_receive_path, installed_handshake_ack);
-    try require(installed_handshake_ack_route.connection_id == protected_server_id);
-    try protected_server_lifecycle.processProtectedHandshakeDatagramWithInstalledKeys(
-        installed_handshake_ack_route.connection_id,
+    const installed_handshake_ack_route = try protected_server_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        protected_server_id,
         &protected_server,
+        server_receive_path,
         19,
         installed_handshake_ack,
     );
+    try require(installed_handshake_ack_route.connection_id == protected_server_id);
+    try require(std.mem.eql(u8, installed_handshake_ack_route.destination_connection_id.asSlice(), &server_dcid));
     try require(protected_server.bytesInFlight(.handshake) == 0);
     try require(protected_server_lifecycle.recoveryTimerCount() == 0);
 
@@ -385,14 +387,15 @@ pub fn main() !void {
     defer allocator.free(installed_zero);
     try require(protected_client_lifecycle.recoveryTimerCount() == 1);
 
-    const installed_zero_route = try protected_server_lifecycle.routeDatagram(server_receive_path, installed_zero);
-    try require(installed_zero_route.connection_id == protected_server_id);
-    try protected_server_lifecycle.processProtectedZeroRttDatagramWithInstalledKeys(
-        installed_zero_route.connection_id,
+    const installed_zero_route = try protected_server_lifecycle.processRoutedProtectedZeroRttDatagramWithInstalledKeys(
+        protected_server_id,
         &protected_server,
+        server_receive_path,
         25,
         installed_zero,
     );
+    try require(installed_zero_route.connection_id == protected_server_id);
+    try require(std.mem.eql(u8, installed_zero_route.destination_connection_id.asSlice(), &server_dcid));
     try require(protected_server.pendingAckLargest(.application) == 1);
     try require(protected_server_lifecycle.recoveryTimerCount() == 0);
 
