@@ -169,7 +169,7 @@ pub fn main() !void {
   运行：`zig build run-udp-pto-recovery-loopback`。
 - [UDP STREAM retransmission loopback](examples/udp_stream_retransmission_loopback.zig)：通过 lifecycle route 执行 ACK-loss-triggered STREAM retransmission。
   运行：`zig build run-udp-stream-retransmission-loopback`。
-- [UDP key update loopback](examples/udp_key_update_loopback.zig)：installed-key key update、key phase advancement 和 ACK gating。
+- [UDP key update loopback](examples/udp_key_update_loopback.zig)：经 lifecycle route 的 installed-key key update、key phase advancement 和 ACK gating。
   运行：`zig build run-udp-key-update-loopback`。
 - [UDP path validation loopback](examples/udp_path_validation_loopback.zig)：在新 peer port 上执行 PATH_CHALLENGE/PATH_RESPONSE route validation。
   运行：`zig build run-udp-path-validation-loopback`。

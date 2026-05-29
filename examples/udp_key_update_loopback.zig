@@ -3,9 +3,9 @@ const quicz = @import("quicz");
 
 const ExampleError = error{UnexpectedState};
 
-const ReceivedRoute = struct {
+const ReceivedDatagram = struct {
     data: []const u8,
-    route: quicz.endpoint.RouteResult,
+    path: quicz.endpoint.Udp4Tuple,
 };
 
 fn require(condition: bool) ExampleError!void {
@@ -43,17 +43,16 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
     };
 }
 
-fn receiveRoute(
+fn receiveDatagram(
     io: std.Io,
-    lifecycle: *const quicz.EndpointConnectionLifecycle,
     socket: *std.Io.net.Socket,
     receive_buf: []u8,
-) !ReceivedRoute {
+) !ReceivedDatagram {
     const received = try socket.receiveTimeout(io, receive_buf, receiveTimeout());
     const path = try udp4Tuple(socket.address, received.from);
     return .{
         .data = received.data,
-        .route = try lifecycle.routeDatagram(path, received.data),
+        .path = path,
     };
 }
 
@@ -125,7 +124,12 @@ pub fn main() !void {
     try expectInvalidSecondUpdate(&client);
 
     try client.sendPing();
-    const key_update_ping = (try client.pollProtectedShortDatagramWithInstalledKeys(0, &server_dcid)) orelse return error.UnexpectedState;
+    const key_update_ping = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        41,
+        &client,
+        0,
+        &server_dcid,
+    )) orelse return error.UnexpectedState;
     defer allocator.free(key_update_ping);
     const ping_key_phase = try quicz.protection.peekShortPacketKeyPhaseAes128(secrets.client.hp, key_update_ping, server_dcid.len);
     try require(ping_key_phase);
@@ -134,23 +138,40 @@ pub fn main() !void {
     var server_receive_buf: [1500]u8 = undefined;
     var client_receive_buf: [1500]u8 = undefined;
 
-    const ping_received = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
-    try require(ping_received.route.connection_id == 51);
-    try require(std.mem.eql(u8, ping_received.route.destination_connection_id.asSlice(), &server_dcid));
-    try server.processProtectedShortDatagramWithInstalledKeys(1, server_dcid.len, ping_received.data);
+    const ping_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const ping_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        51,
+        &server,
+        ping_received.path,
+        1,
+        ping_received.data,
+    );
+    try require(ping_route.connection_id == 51);
+    try require(std.mem.eql(u8, ping_route.destination_connection_id.asSlice(), &server_dcid));
     try require(server.peerOneRttKeyPhase().?);
     try require(server.pendingAckLargest(.application) == 0);
 
-    const ack = (try server.pollProtectedShortDatagramWithInstalledKeys(2, &client_dcid)) orelse return error.UnexpectedState;
+    const ack = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        51,
+        &server,
+        2,
+        &client_dcid,
+    )) orelse return error.UnexpectedState;
     defer allocator.free(ack);
     const ack_key_phase = try quicz.protection.peekShortPacketKeyPhaseAes128(secrets.server.hp, ack, client_dcid.len);
     try require(!ack_key_phase);
     try server_socket.send(io, &client_socket.address, ack);
 
-    const ack_received = try receiveRoute(io, &client_lifecycle, &client_socket, &client_receive_buf);
-    try require(ack_received.route.connection_id == 41);
-    try require(std.mem.eql(u8, ack_received.route.destination_connection_id.asSlice(), &client_dcid));
-    try client.processProtectedShortDatagramWithInstalledKeys(3, client_dcid.len, ack_received.data);
+    const ack_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+    const ack_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        41,
+        &client,
+        ack_received.path,
+        3,
+        ack_received.data,
+    );
+    try require(ack_route.connection_id == 41);
+    try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &client_dcid));
     try require(client.bytesInFlight(.application) == 0);
 
     try client.initiateOneRttKeyUpdate();

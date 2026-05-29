@@ -1595,6 +1595,33 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Route and process one installed-key protected 1-RTT datagram.
+    ///
+    /// Socket loops can use this after the connection owns 1-RTT packet
+    /// protection keys. The route must resolve to `connection_id`; the routed
+    /// destination CID length is used for short-header packet protection
+    /// removal, and the endpoint recovery timer is refreshed after successful
+    /// connection processing.
+    pub fn processRoutedProtectedShortDatagramWithInstalledKeys(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedShortDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            route.destination_connection_id.asSlice().len,
+            datagram,
+        );
+        return route;
+    }
+
     /// Retire all routes and any armed recovery timer for one connection handle.
     pub fn retireConnection(self: *EndpointConnectionLifecycle, connection_id: u64) EndpointConnectionRetireResult {
         return .{
@@ -16250,15 +16277,22 @@ test "EndpointConnectionLifecycle refreshes installed-key protected short timer 
     try std.testing.expectEqual(@as(usize, 1), client_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
 
-    const server_route = try server_lifecycle.routeDatagram(server_receive_path, ping);
-    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
-    try server_lifecycle.processProtectedShortDatagramWithInstalledKeys(
-        server_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        client_connection_id,
         &server,
+        server_receive_path,
         11,
-        server_dcid.len,
+        ping,
+    ));
+    const server_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
         ping,
     );
+    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, server_route.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 
@@ -16272,15 +16306,22 @@ test "EndpointConnectionLifecycle refreshes installed-key protected short timer 
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 
-    const client_route = try client_lifecycle.routeDatagram(client_receive_path, ack);
-    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
-    try client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
-        client_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_connection_id,
         &client,
+        client_receive_path,
         13,
-        client_dcid.len,
+        ack,
+    ));
+    const client_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        client_connection_id,
+        &client,
+        client_receive_path,
+        13,
         ack,
     );
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &client_dcid, client_route.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());

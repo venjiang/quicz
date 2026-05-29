@@ -75,6 +75,13 @@ produce or consume TLS-owned QUIC packets over UDP.
 
 ## Progress Notes
 
+- 2026-05-29: Added lifecycle-owned routed installed-key protected short-packet
+  processing. `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeys()`
+  now combines endpoint route selection, connection-handle validation, routed
+  DCID length selection, connection-owned 1-RTT key processing, and recovery-timer
+  refresh. Tests cover route mismatch rejection and ACK cleanup; `udp_key_update_loopback`
+  and `endpoint_recovery_timers` now use it for installed-key PING/ACK receive
+  processing.
 - 2026-05-29: Added lifecycle-owned routed protected short-packet processing.
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagram()` now
   combines endpoint route selection, connection-handle validation, routed DCID
@@ -1979,7 +1986,7 @@ run from `build.zig`.
 | `udp_congestion_recovery_loopback` | Socket-backed loopback UDP lifecycle congestion-recovery exercise: lifecycle-owned protected short PING/ACK routing, NewReno recovery-period repeated-loss suppression, and persistent congestion reduction to the minimum congestion window. | Present |
 | `udp_pto_recovery_loopback` | Socket-backed loopback UDP lifecycle PTO recovery exercise: lifecycle timer-driven ACK-loss PTO deadline, protected PING fallback probe delivery, queued STREAM data as a protected PTO probe, in-flight STREAM/CRYPTO data as protected PTO probes, duplicate receive/CRYPTO range discard, ACK cleanup, and final timer disarm. | Present |
 | `udp_stream_retransmission_loopback` | Socket-backed loopback UDP lifecycle STREAM retransmission exercise: lifecycle-owned sparse protected ACK routing marks a 1-RTT STREAM packet lost, the sender emits a new protected STREAM retransmission packet, the receiver discards the duplicate stream range idempotently, and a final ACK clears bytes in flight. | Present |
-| `udp_key_update_loopback` | Socket-backed loopback UDP key-update exercise: lifecycle-owned route selection with installed 1-RTT traffic secrets, local key update initiation, next key-phase PING routing, authenticated peer key-phase advancement, ACK delivery, and ACK-gated second-update re-enable. | Present |
+| `udp_key_update_loopback` | Socket-backed loopback UDP key-update exercise: lifecycle-owned route selection and protected receive processing with installed 1-RTT traffic secrets, local key update initiation, next key-phase PING routing, authenticated peer key-phase advancement, ACK delivery, and ACK-gated second-update re-enable. | Present |
 | `udp_path_validation_loopback` | Socket-backed loopback UDP path-validation exercise: protected PATH_CHALLENGE delivery to a new peer port, PATH_RESPONSE routing with `path_changed`, `EndpointConnectionLifecycle` route path update after validation, and confirmed routing on the new path. | Present |
 | `udp_retry_loopback` | Socket-backed loopback UDP lifecycle Retry/address-validation exercise: lifecycle-owned server Retry delivery, Retry Source CID route switching, address-bound token validation with replay rejection, follow-up protected Initial routing, and Retry CID transport-parameter validation. | Present |
 | `udp_close_lifecycle_loopback` | Socket-backed loopback UDP close lifecycle exercise: lifecycle-owned client/server route registration, protected CONNECTION_CLOSE delivery, connection-handle route retirement, retained inactive-CID stateless reset token lookup, reset emission, and client token match. | Present |

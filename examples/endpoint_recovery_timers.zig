@@ -461,15 +461,15 @@ pub fn main() !void {
     defer allocator.free(ping);
     try require(protected_client_lifecycle.recoveryTimerCount() == 1);
 
-    const ping_route = try protected_server_lifecycle.routeDatagram(server_receive_path, ping);
-    try require(ping_route.connection_id == protected_server_id);
-    try protected_server_lifecycle.processProtectedShortDatagramWithInstalledKeys(
-        ping_route.connection_id,
+    const ping_route = try protected_server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        protected_server_id,
         &protected_server,
+        server_receive_path,
         31,
-        server_dcid.len,
         ping,
     );
+    try require(ping_route.connection_id == protected_server_id);
+    try require(std.mem.eql(u8, ping_route.destination_connection_id.asSlice(), &server_dcid));
     try require(protected_server.pendingAckLargest(.application) == 3);
 
     const ack = (try protected_server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
@@ -481,15 +481,15 @@ pub fn main() !void {
     defer allocator.free(ack);
     try require(protected_server_lifecycle.recoveryTimerCount() == 0);
 
-    const ack_route = try protected_client_lifecycle.routeDatagram(client_receive_path, ack);
-    try require(ack_route.connection_id == protected_client_id);
-    try protected_client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
-        ack_route.connection_id,
+    const ack_route = try protected_client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        protected_client_id,
         &protected_client,
+        client_receive_path,
         33,
-        client_dcid.len,
         ack,
     );
+    try require(ack_route.connection_id == protected_client_id);
+    try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &client_dcid));
     try require(protected_client.bytesInFlight(.application) == 0);
 
     const explicit_next_client_keys = quicz.protection.nextAes128PacketProtectionKeys(secrets.client);

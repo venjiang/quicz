@@ -201,8 +201,8 @@ experimental.
   ACK-loss-triggered STREAM retransmission through lifecycle routes. Run with
   `zig build run-udp-stream-retransmission-loopback`.
 - [UDP key update loopback](examples/udp_key_update_loopback.zig):
-  Installed-key key update, key phase advancement, and ACK gating. Run with
-  `zig build run-udp-key-update-loopback`.
+  Lifecycle-routed installed-key key update, key phase advancement, and ACK
+  gating. Run with `zig build run-udp-key-update-loopback`.
 - [UDP path validation loopback](examples/udp_path_validation_loopback.zig):
   PATH_CHALLENGE/PATH_RESPONSE route validation over a new peer port. Run with
   `zig build run-udp-path-validation-loopback`.
