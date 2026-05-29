@@ -93,11 +93,16 @@ pub fn main() !void {
     var server_receive_buf: [1500]u8 = undefined;
     const close_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const close_path = try udp4Tuple(server_socket.address, close_received.from);
-    const close_route = try server_lifecycle.routeDatagram(close_path, close_received.data);
+    const close_route = try server_lifecycle.processRoutedProtectedShortDatagram(
+        connection_handle,
+        &server,
+        close_path,
+        2,
+        secrets.client,
+        close_received.data,
+    );
     try require(close_route.connection_id == connection_handle);
     try require(std.mem.eql(u8, close_route.destination_connection_id.asSlice(), &server_dcid));
-
-    try server.processProtectedShortDatagram(2, secrets.client, server_dcid.len, close_received.data);
     try require(server.connectionState() == .draining);
     switch (server.peerClose() orelse return error.UnexpectedState) {
         .connection => |close| {

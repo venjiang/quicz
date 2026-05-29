@@ -75,6 +75,13 @@ produce or consume TLS-owned QUIC packets over UDP.
 
 ## Progress Notes
 
+- 2026-05-29: Routed UDP close lifecycle protected receive through the
+  endpoint lifecycle helper. `udp_close_lifecycle_loopback` now uses
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagram()` for the
+  protected CONNECTION_CLOSE receive path, so route selection, connection-handle
+  validation, routed DCID length selection, packet processing, and
+  recovery-timer refresh stay on the same lifecycle owner that later retires
+  the route and emits the stateless reset.
 - 2026-05-29: Routed UDP ECN validation loopback protected receives through
   the endpoint lifecycle helper. `udp_ecn_validation_loopback` now uses
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagram()` for the
@@ -2055,7 +2062,7 @@ run from `build.zig`.
 | `udp_key_update_loopback` | Socket-backed loopback UDP key-update exercise: lifecycle-owned route selection and protected receive processing with installed 1-RTT traffic secrets, local key update initiation, next key-phase PING routing, authenticated peer key-phase advancement, ACK delivery, and ACK-gated second-update re-enable. | Present |
 | `udp_path_validation_loopback` | Socket-backed loopback UDP path-validation exercise: protected PATH_CHALLENGE delivery to a new peer port, PATH_RESPONSE routing with `path_changed`, `EndpointConnectionLifecycle` route path update after validation, and confirmed routing on the new path. | Present |
 | `udp_retry_loopback` | Socket-backed loopback UDP lifecycle Retry/address-validation exercise: lifecycle-owned server Retry delivery, Retry Source CID route switching, address-bound token validation with replay rejection, follow-up protected Initial routing, and Retry CID transport-parameter validation. | Present |
-| `udp_close_lifecycle_loopback` | Socket-backed loopback UDP close lifecycle exercise: lifecycle-owned client/server route registration, protected CONNECTION_CLOSE delivery, connection-handle route retirement, retained inactive-CID stateless reset token lookup, reset emission, and client token match. | Present |
+| `udp_close_lifecycle_loopback` | Socket-backed loopback UDP close lifecycle exercise: lifecycle-owned client/server route registration, lifecycle-routed protected CONNECTION_CLOSE delivery, connection-handle route retirement, retained inactive-CID stateless reset token lookup, reset emission, and client token match. | Present |
 | `udp_stateless_reset_loopback` | Socket-backed loopback UDP stateless reset exercise: lifecycle-owned retired-CID route retirement, trigger datagram classification, server reset datagram send, and client token match. | Present |
 | `udp_echo_client` / `udp_echo_server` | Real QUIC-over-UDP/TLS stream echo. | Planned |
 | `uni_stream` | Current in-memory unidirectional stream send/receive, direction validation, duplicate STREAM retransmission discard, and FIN completion observability. | Present |
