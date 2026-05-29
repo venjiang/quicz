@@ -75,6 +75,12 @@ produce or consume TLS-owned QUIC packets over UDP.
 
 ## Progress Notes
 
+- 2026-05-29: Routed UDP path-validation protected receives through the
+  endpoint lifecycle helper. `udp_path_validation_loopback` now registers the
+  client's new-port receive CID with its lifecycle owner, then uses
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagram()` for both
+  the protected PATH_CHALLENGE delivery and the `path_changed` protected
+  PATH_RESPONSE receive before the caller-validated route path update.
 - 2026-05-29: Routed UDP close lifecycle protected receive through the
   endpoint lifecycle helper. `udp_close_lifecycle_loopback` now uses
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagram()` for the
@@ -2060,7 +2066,7 @@ run from `build.zig`.
 | `udp_pto_recovery_loopback` | Socket-backed loopback UDP lifecycle PTO recovery exercise: lifecycle-routed protected short receive paths, lifecycle timer-driven ACK-loss PTO deadline, protected PING fallback probe delivery, queued STREAM data as a protected PTO probe, in-flight STREAM/CRYPTO data as protected PTO probes, duplicate receive/CRYPTO range discard, ACK cleanup, and final timer disarm. | Present |
 | `udp_stream_retransmission_loopback` | Socket-backed loopback UDP lifecycle STREAM retransmission exercise: lifecycle-routed sparse protected ACK receive marks a 1-RTT STREAM packet lost, the sender emits a new protected STREAM retransmission packet, the receiver discards the duplicate stream range idempotently, and a final ACK clears bytes in flight. | Present |
 | `udp_key_update_loopback` | Socket-backed loopback UDP key-update exercise: lifecycle-owned route selection and protected receive processing with installed 1-RTT traffic secrets, local key update initiation, next key-phase PING routing, authenticated peer key-phase advancement, ACK delivery, and ACK-gated second-update re-enable. | Present |
-| `udp_path_validation_loopback` | Socket-backed loopback UDP path-validation exercise: protected PATH_CHALLENGE delivery to a new peer port, PATH_RESPONSE routing with `path_changed`, `EndpointConnectionLifecycle` route path update after validation, and confirmed routing on the new path. | Present |
+| `udp_path_validation_loopback` | Socket-backed loopback UDP path-validation exercise: lifecycle-routed protected PATH_CHALLENGE delivery to a new peer port, lifecycle-routed PATH_RESPONSE routing with `path_changed`, `EndpointConnectionLifecycle` route path update after validation, and confirmed routing on the new path. | Present |
 | `udp_retry_loopback` | Socket-backed loopback UDP lifecycle Retry/address-validation exercise: lifecycle-owned server Retry delivery, Retry Source CID route switching, address-bound token validation with replay rejection, follow-up protected Initial routing, and Retry CID transport-parameter validation. | Present |
 | `udp_close_lifecycle_loopback` | Socket-backed loopback UDP close lifecycle exercise: lifecycle-owned client/server route registration, lifecycle-routed protected CONNECTION_CLOSE delivery, connection-handle route retirement, retained inactive-CID stateless reset token lookup, reset emission, and client token match. | Present |
 | `udp_stateless_reset_loopback` | Socket-backed loopback UDP stateless reset exercise: lifecycle-owned retired-CID route retirement, trigger datagram classification, server reset datagram send, and client token match. | Present |

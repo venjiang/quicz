@@ -77,9 +77,13 @@ pub fn main() !void {
 
     var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
     defer server_lifecycle.deinit();
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
 
     const old_path = try udp4Tuple(server_socket.address, old_client_socket.address);
+    const new_client_path = try udp4Tuple(new_client_socket.address, server_socket.address);
     try server_lifecycle.registerConnectionId(connection_handle, &server_dcid, old_path, .{});
+    try client_lifecycle.registerConnectionId(connection_handle, &client_dcid, new_client_path, .{});
 
     try server.sendPathChallenge(challenge_data);
     const challenge_packet = (try server.pollProtectedShortDatagram(
@@ -94,7 +98,18 @@ pub fn main() !void {
 
     var client_receive_buf: [1500]u8 = undefined;
     const challenge_received = try new_client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
-    try client.processProtectedShortDatagram(2, secrets.server, client_dcid.len, challenge_received.data);
+    const challenge_path = try udp4Tuple(new_client_socket.address, challenge_received.from);
+    const challenge_route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        connection_handle,
+        &client,
+        challenge_path,
+        2,
+        secrets.server,
+        challenge_received.data,
+    );
+    try require(challenge_route.connection_id == connection_handle);
+    try require(!challenge_route.path_changed);
+    try require(std.mem.eql(u8, challenge_route.destination_connection_id.asSlice(), &client_dcid));
     try require(client.pendingAckLargest(.application) == 0);
 
     const response_packet = (try client.pollProtectedShortDatagram(
@@ -108,12 +123,18 @@ pub fn main() !void {
     var server_receive_buf: [1500]u8 = undefined;
     const response_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const response_path = try udp4Tuple(server_socket.address, response_received.from);
-    const migrated_route = try server_lifecycle.routeDatagram(response_path, response_received.data);
+    const migrated_route = try server_lifecycle.processRoutedProtectedShortDatagram(
+        connection_handle,
+        &server,
+        response_path,
+        4,
+        secrets.client,
+        response_received.data,
+    );
     try require(migrated_route.connection_id == connection_handle);
     try require(migrated_route.path_changed);
     try require(std.mem.eql(u8, migrated_route.destination_connection_id.asSlice(), &server_dcid));
 
-    try server.processProtectedShortDatagram(4, secrets.client, server_dcid.len, response_received.data);
     try require(server.outstandingPathChallengeCount() == 0);
     try require(server.bytesInFlight(.application) == 0);
     try require(server.pendingAckLargest(.application) == 0);

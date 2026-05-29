@@ -204,8 +204,8 @@ experimental.
   Lifecycle-routed installed-key key update, key phase advancement, and ACK
   gating. Run with `zig build run-udp-key-update-loopback`.
 - [UDP path validation loopback](examples/udp_path_validation_loopback.zig):
-  PATH_CHALLENGE/PATH_RESPONSE route validation over a new peer port. Run with
-  `zig build run-udp-path-validation-loopback`.
+  Lifecycle-routed PATH_CHALLENGE/PATH_RESPONSE route validation over a new
+  peer port. Run with `zig build run-udp-path-validation-loopback`.
 - [UDP Retry loopback](examples/udp_retry_loopback.zig): Lifecycle-owned Retry
   delivery, token validation, and follow-up Initial routing. Run with
   `zig build run-udp-retry-loopback`.
