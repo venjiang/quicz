@@ -288,8 +288,9 @@ fn versionNegotiationRoundtrip(allocator: std.mem.Allocator) !void {
     try require(parsed.versions[0] == .v1);
     try require(parsed.versions[1] == .v2);
 
-    const client_versions = [_]quicz.packet.Version{ .v2, .v1 };
-    const negotiated_versions = [_]quicz.packet.Version{.v2};
+    const reserved_version: quicz.packet.Version = @enumFromInt(0x1a2a3a4a);
+    const client_versions = [_]quicz.packet.Version{ reserved_version, .v2, .v1 };
+    const negotiated_versions = [_]quicz.packet.Version{ reserved_version, .v2 };
     var negotiated_raw: [64]u8 = undefined;
     var negotiated_writer = fixedWriter(&negotiated_raw);
     try quicz.packet.encodeVersionNegotiationPacket(negotiated_writer.writer(), .{
@@ -310,6 +311,7 @@ fn versionNegotiationRoundtrip(allocator: std.mem.Allocator) !void {
         negotiated_writer.getWritten(),
     )) orelse return error.UnexpectedRoundtrip;
     try require(selected == .v2);
+    try require(quicz.packet.isReservedVersion(reserved_version));
     try require(client.versionNegotiationSelectedVersion() == .v2);
 
     var followup = try quicz.QuicConnection.init(allocator, .client, .{
@@ -325,9 +327,10 @@ fn versionNegotiationRoundtrip(allocator: std.mem.Allocator) !void {
         },
     });
 
-    std.debug.print("[codec] version negotiation versions={} selected=0x{x} downgrade_checked={}\n", .{
+    std.debug.print("[codec] version negotiation versions={} selected=0x{x} reserved_skipped={} downgrade_checked={}\n", .{
         parsed.versions.len,
         @intFromEnum(selected),
+        selected != reserved_version,
         followup.versionNegotiationSelectedVersion() == .v2,
     });
 }

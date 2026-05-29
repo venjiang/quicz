@@ -9,6 +9,15 @@ pub const Version = enum(u32) {
     _,
 };
 
+/// Return whether a version number is reserved for QUIC version greasing.
+///
+/// RFC 9000 reserves every version matching 0x?a?a?a?a so endpoints can
+/// advertise or send unsupported versions without those values ever becoming
+/// real protocol versions.
+pub fn isReservedVersion(version: Version) bool {
+    return (@intFromEnum(version) & 0x0f0f0f0f) == 0x0a0a0a0a;
+}
+
 pub const PacketType = enum(u2) {
     initial = 0b00,
     zero_rtt = 0b01,
@@ -1323,6 +1332,16 @@ test "encode/parse version negotiation packet roundtrip with long connection ids
     try std.testing.expectEqualSlices(u8, input.dcid, parsed.dcid);
     try std.testing.expectEqualSlices(u8, input.scid, parsed.scid);
     try std.testing.expectEqualSlices(Version, input.versions, parsed.versions);
+}
+
+test "reserved version helper matches QUIC greasing pattern" {
+    try std.testing.expect(isReservedVersion(@enumFromInt(0x0a0a0a0a)));
+    try std.testing.expect(isReservedVersion(@enumFromInt(0x1a2a3a4a)));
+    try std.testing.expect(isReservedVersion(@enumFromInt(0xfafafafa)));
+    try std.testing.expect(!isReservedVersion(Version.v1));
+    try std.testing.expect(!isReservedVersion(Version.v2));
+    try std.testing.expect(!isReservedVersion(@enumFromInt(0x00000000)));
+    try std.testing.expect(!isReservedVersion(@enumFromInt(0xfaceb00c)));
 }
 
 test "version negotiation parser ignores unused first-byte bits" {

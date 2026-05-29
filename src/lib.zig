@@ -219,6 +219,7 @@ fn statelessResetTokensEqual(
 
 fn selectMutualVersion(preferred_versions: []const packet.Version, offered_versions: []const packet.Version) ?packet.Version {
     for (preferred_versions) |preferred| {
+        if (packet.isReservedVersion(preferred)) continue;
         if (versionListContains(offered_versions, preferred)) return preferred;
     }
     return null;
@@ -230,6 +231,7 @@ fn selectMutualVersionWithExtra(
     extra_version: packet.Version,
 ) ?packet.Version {
     for (preferred_versions) |preferred| {
+        if (packet.isReservedVersion(preferred)) continue;
         if (@intFromEnum(preferred) == @intFromEnum(extra_version) or versionListContains(offered_versions, preferred)) {
             return preferred;
         }
@@ -239,6 +241,7 @@ fn selectMutualVersionWithExtra(
 
 fn validateLocalVersionInformation(side: ConnectionSide, config: Config) Error!void {
     if (isZeroVersion(config.chosen_version)) return error.InvalidPacket;
+    if (side == .server and packet.isReservedVersion(config.chosen_version)) return error.InvalidPacket;
     for (config.available_versions) |available| {
         if (isZeroVersion(available)) return error.InvalidPacket;
     }
@@ -249,6 +252,7 @@ fn validateLocalVersionInformation(side: ConnectionSide, config: Config) Error!v
     if (config.version_negotiation_selected_version) |selected| {
         if (side != .client) return error.InvalidPacket;
         if (isZeroVersion(selected)) return error.InvalidPacket;
+        if (packet.isReservedVersion(selected)) return error.InvalidPacket;
         if (@intFromEnum(selected) != @intFromEnum(config.chosen_version)) return error.InvalidPacket;
         if (!versionListContains(config.available_versions, selected)) return error.InvalidPacket;
     }
@@ -3800,6 +3804,7 @@ pub const QuicConnection = struct {
         version_information: transport_parameters.VersionInformation,
     ) Error!void {
         if (isZeroVersion(version_information.chosen_version)) return error.InvalidPacket;
+        if (packet.isReservedVersion(version_information.chosen_version)) return error.InvalidPacket;
         for (version_information.available_versions) |available| {
             if (isZeroVersion(available)) return error.InvalidPacket;
         }
@@ -10853,6 +10858,8 @@ test "localTransportParameters exposes configured receive limits" {
 test "version_information transport parameter validation follows endpoint role" {
     const v2_first = [_]packet.Version{ .v2, .v1 };
     const v1_only = [_]packet.Version{.v1};
+    const reserved_version: packet.Version = @enumFromInt(0x1a2a3a4a);
+    const v1_with_reserved = [_]packet.Version{ .v1, reserved_version };
 
     try std.testing.expectError(error.InvalidPacket, QuicConnection.init(std.testing.allocator, .client, .{
         .chosen_version = @enumFromInt(0),
@@ -10894,6 +10901,23 @@ test "version_information transport parameter validation follows endpoint role" 
         .version_information = .{
             .chosen_version = .v2,
             .available_versions = &v2_first,
+        },
+    }));
+
+    var reserved_client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .available_versions = &v1_with_reserved,
+    });
+    defer reserved_client.deinit();
+    try reserved_client.applyPeerTransportParameters(.{
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &v1_with_reserved,
+        },
+    });
+    try std.testing.expectError(error.InvalidPacket, reserved_client.applyPeerTransportParameters(.{
+        .version_information = .{
+            .chosen_version = reserved_version,
+            .available_versions = &v1_with_reserved,
         },
     }));
 }
@@ -16419,8 +16443,9 @@ test "processRetryDatagram rejects invalid or duplicate Retry without mutation" 
 test "processVersionNegotiationDatagram selects mutual version once" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
-    const client_versions = [_]packet.Version{ .v2, .v1 };
-    const server_versions = [_]packet.Version{.v2};
+    const reserved_version: packet.Version = @enumFromInt(0x1a2a3a4a);
+    const client_versions = [_]packet.Version{ reserved_version, .v2, .v1 };
+    const server_versions = [_]packet.Version{ reserved_version, .v2 };
     var raw: [64]u8 = undefined;
     var out = buffer.fixedWriter(&raw);
     try packet.encodeVersionNegotiationPacket(out.writer(), .{
@@ -16514,8 +16539,9 @@ test "processVersionNegotiationDatagram ignores unsafe or mismatched packets" {
 test "processVersionNegotiationDatagram rejects no mutual version without mutation" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
-    const client_versions = [_]packet.Version{ .v2, .v1 };
-    const server_versions = [_]packet.Version{@enumFromInt(0xface_b00c)};
+    const reserved_version: packet.Version = @enumFromInt(0x1a2a3a4a);
+    const client_versions = [_]packet.Version{ reserved_version, .v2, .v1 };
+    const server_versions = [_]packet.Version{reserved_version};
     var raw: [64]u8 = undefined;
     var out = buffer.fixedWriter(&raw);
     try packet.encodeVersionNegotiationPacket(out.writer(), .{
