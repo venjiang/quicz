@@ -15,8 +15,10 @@ pub fn main() !void {
 
     const pto_connection_id: u64 = 1001;
     const loss_connection_id: u64 = 2002;
+    const closing_connection_id: u64 = 2502;
     const pto_cid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const loss_cid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const closing_cid = [_]u8{ 0x25, 0x02, 0x25, 0x02 };
     const path = quicz.endpoint.Udp4Tuple{
         .local = quicz.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
         .remote = quicz.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
@@ -98,6 +100,25 @@ pub fn main() !void {
     const loss_retired = endpoint_lifecycle.retireConnection(loss_connection_id);
     try require(loss_retired.routes_retired == 1);
     try require(!loss_retired.recovery_timer_disarmed);
+    try require(endpoint_lifecycle.routeCount() == 0);
+
+    var closing_conn = try quicz.QuicConnection.init(allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer closing_conn.deinit();
+    try endpoint_lifecycle.registerConnectionId(closing_connection_id, &closing_cid, path, .{
+        .sequence_number = 2,
+    });
+    _ = try closing_conn.recordPacketSentInSpace(.application, 42, 100);
+    try endpoint_lifecycle.armRecoveryTimerFromConnection(closing_connection_id, &closing_conn);
+    try require(endpoint_lifecycle.recoveryTimerCount() == 1);
+    try closing_conn.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "done");
+    try endpoint_lifecycle.armRecoveryTimerFromConnection(closing_connection_id, &closing_conn);
+    const closing_disarmed = endpoint_lifecycle.recoveryTimerCount() == 0 and closing_conn.lossDetectionTimerDeadlineMillis() == null;
+    try require(closing_disarmed);
+    const closing_retired = endpoint_lifecycle.retireConnection(closing_connection_id);
+    try require(closing_retired.routes_retired == 1);
+    try require(!closing_retired.recovery_timer_disarmed);
     try require(endpoint_lifecycle.routeCount() == 0);
 
     var protected_client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
@@ -576,7 +597,7 @@ pub fn main() !void {
     try require(protected_client.bytesInFlight(.application) == 0);
     const protected_timers_remaining = protected_client_lifecycle.recoveryTimerCount() + protected_server_lifecycle.recoveryTimerCount();
 
-    std.debug.print("[endpoint-timers] first_connection={} first_kind={s} first_deadline={} second_connection={} second_kind={s} second_deadline={} pto_ping={} loss_remaining={} timers_remaining={} routes_remaining={} protected_bytes={} protected_timers={}\n", .{
+    std.debug.print("[endpoint-timers] first_connection={} first_kind={s} first_deadline={} second_connection={} second_kind={s} second_deadline={} pto_ping={} loss_remaining={} close_disarmed={} timers_remaining={} routes_remaining={} protected_bytes={} protected_timers={}\n", .{
         first.connection_id,
         @tagName(first.timer.kind),
         first.timer.deadline_millis,
@@ -585,6 +606,7 @@ pub fn main() !void {
         second.timer.deadline_millis,
         pto_conn.pending_ping_count,
         loss_conn.sentPacketCount(.application),
+        closing_disarmed,
         endpoint_lifecycle.recoveryTimerCount(),
         endpoint_lifecycle.routeCount(),
         long_initial.len + long_ack.len + caller_handshake.len + caller_handshake_ack.len + installed_handshake.len + installed_handshake_ack.len + caller_zero.len + caller_zero_ack.len + installed_zero.len + caller_short.len + caller_short_ack.len + ping.len + ack.len + explicit_key_phase_ping.len + explicit_key_phase_ack.len + key_phase_ping.len + key_phase_ack.len,

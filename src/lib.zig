@@ -2700,6 +2700,8 @@ pub const QuicConnection = struct {
     /// value to `checkLossDetectionTimeouts()` and `checkPtoTimeouts()` when the
     /// deadline expires.
     pub fn lossDetectionTimerDeadlineMillis(self: QuicConnection) ?LossDetectionTimerDeadline {
+        if (self.isClosingOrClosed()) return null;
+
         const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
 
         var loss_deadline: ?LossDetectionTimerDeadline = null;
@@ -12798,6 +12800,46 @@ test "loss detection timer reports earliest PTO when no loss time is armed" {
     try std.testing.expectEqual(@as(i64, 310), deadline.deadline_millis);
 }
 
+test "loss detection timer is disarmed in closing and draining states" {
+    var closing = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer closing.deinit();
+
+    _ = try closing.recordPacketSentInSpace(.application, 10, 100);
+    try std.testing.expect(closing.lossDetectionTimerDeadlineMillis() != null);
+    try closing.closeConnection(0, @intFromEnum(frame.FrameType.stream), "done");
+
+    try std.testing.expectEqual(ConnectionState.closing, closing.connectionState());
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), closing.lossDetectionTimerDeadlineMillis());
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), try closing.serviceLossDetectionTimer(335));
+    try std.testing.expectEqual(@as(usize, 0), closing.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 0), closing.recovery_state.pto_count);
+
+    var draining = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer draining.deinit();
+
+    _ = try draining.recordPacketSentInSpace(.application, 20, 100);
+    try std.testing.expect(draining.lossDetectionTimerDeadlineMillis() != null);
+
+    var close_payload_buf: [32]u8 = undefined;
+    var close_payload = buffer.fixedWriter(&close_payload_buf);
+    try frame.encodeFrame(close_payload.writer(), .{ .connection_close = .{
+        .error_code = 0,
+        .frame_type = 0,
+        .reason_phrase = "",
+    } });
+    try draining.processDatagram(30, close_payload.getWritten());
+
+    try std.testing.expectEqual(ConnectionState.draining, draining.connectionState());
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), draining.lossDetectionTimerDeadlineMillis());
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), try draining.serviceLossDetectionTimer(335));
+    try std.testing.expectEqual(@as(usize, 0), draining.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 0), draining.recovery_state.pto_count);
+}
+
 test "serviceLossDetectionTimer is no-op before aggregate deadline" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
@@ -12942,6 +12984,26 @@ test "EndpointLossDetectionTimers selects and services earliest connection timer
     const remaining = timers.earliestDeadline() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 20), remaining.connection_id);
     try std.testing.expectEqual(slow_timer.deadline_millis, remaining.timer.deadline_millis);
+}
+
+test "EndpointLossDetectionTimers disarms closing connections" {
+    var timers = EndpointLossDetectionTimers.init(std.testing.allocator);
+    defer timers.deinit();
+
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try timers.armFromConnection(77, &conn);
+    try std.testing.expectEqual(@as(usize, 1), timers.count());
+
+    try conn.closeConnection(0, @intFromEnum(frame.FrameType.stream), "done");
+    try timers.armFromConnection(77, &conn);
+
+    try std.testing.expectEqual(@as(usize, 0), timers.count());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), timers.earliestDeadline());
 }
 
 test "EndpointLossDetectionTimers disarms connection after loss-time service" {
