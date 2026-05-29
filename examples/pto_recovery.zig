@@ -204,6 +204,31 @@ pub fn main() !void {
         .{handshake_rtt.smoothedRttMillis(.handshake)},
     );
 
+    var shared_rtt = try quicz.QuicConnection.init(allocator, .server, .{ .initial_rtt_ms = 100 });
+    defer shared_rtt.deinit();
+    try shared_rtt.validatePeerAddress();
+
+    _ = try shared_rtt.recordPacketSentInSpace(.initial, 0, 100);
+    _ = try shared_rtt.recordPacketSentInSpace(.handshake, 10, 100);
+    try shared_rtt.receiveAckInSpace(.initial, 50, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 5,
+        .first_ack_range = 0,
+    });
+    const shared_handshake_deadline = shared_rtt.ptoDeadlineMillis(.handshake) orelse return error.PtoRecoveryExampleFailed;
+    if (shared_rtt.smoothedRttMillis(.handshake) != 50) return error.PtoRecoveryExampleFailed;
+    if (shared_rtt.smoothedRttMillis(.application) != 50) return error.PtoRecoveryExampleFailed;
+    if (shared_handshake_deadline != 160) return error.PtoRecoveryExampleFailed;
+
+    std.debug.print(
+        "[pto] RTT shared across spaces initial_smoothed={d} handshake_deadline={d} application_smoothed={d}\n",
+        .{
+            shared_rtt.smoothedRttMillis(.initial),
+            shared_handshake_deadline,
+            shared_rtt.smoothedRttMillis(.application),
+        },
+    );
+
     var spaces = try quicz.QuicConnection.init(allocator, .server, .{ .initial_rtt_ms = 100 });
     defer spaces.deinit();
     try spaces.validatePeerAddress();

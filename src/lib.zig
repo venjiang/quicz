@@ -1634,6 +1634,14 @@ const PacketNumberSpaceView = struct {
     ecn_validation_state: *EcnValidationState,
 };
 
+const RttEstimateSnapshot = struct {
+    first_rtt_sample_sent_time_millis: ?i64,
+    latest_rtt_ms: ?u64,
+    min_rtt_ms: ?u64,
+    smoothed_rtt_ms: u64,
+    rttvar_ms: u64,
+};
+
 const ActiveConnectionId = struct {
     sequence_number: u64,
     connection_id: []u8,
@@ -4023,6 +4031,56 @@ pub const QuicConnection = struct {
         const scaled_ack_delay = self.scaledPeerAckDelay(ack_delay);
         if (!self.handshake_confirmed) return scaled_ack_delay;
         return @min(scaled_ack_delay, self.recovery_state.max_ack_delay_ms);
+    }
+
+    fn rttEstimateSnapshot(self: *QuicConnection, space: PacketNumberSpace) RttEstimateSnapshot {
+        const packet_space = self.packetNumberSpace(space);
+        return .{
+            .first_rtt_sample_sent_time_millis = packet_space.first_rtt_sample_sent_time_millis.*,
+            .latest_rtt_ms = packet_space.recovery_state.latest_rtt_ms,
+            .min_rtt_ms = packet_space.recovery_state.min_rtt_ms,
+            .smoothed_rtt_ms = packet_space.recovery_state.smoothed_rtt_ms,
+            .rttvar_ms = packet_space.recovery_state.rttvar_ms,
+        };
+    }
+
+    fn restoreRttEstimateSnapshot(
+        self: *QuicConnection,
+        space: PacketNumberSpace,
+        snapshot: RttEstimateSnapshot,
+    ) void {
+        const packet_space = self.packetNumberSpace(space);
+        packet_space.first_rtt_sample_sent_time_millis.* = snapshot.first_rtt_sample_sent_time_millis;
+        packet_space.recovery_state.latest_rtt_ms = snapshot.latest_rtt_ms;
+        packet_space.recovery_state.min_rtt_ms = snapshot.min_rtt_ms;
+        packet_space.recovery_state.smoothed_rtt_ms = snapshot.smoothed_rtt_ms;
+        packet_space.recovery_state.rttvar_ms = snapshot.rttvar_ms;
+    }
+
+    fn rememberFirstRttSampleSentTime(self: *QuicConnection, sent_time_millis: i64) void {
+        const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
+        for (spaces) |sample_space| {
+            const packet_space = self.packetNumberSpace(sample_space);
+            if (packet_space.discarded.*) continue;
+            if (packet_space.first_rtt_sample_sent_time_millis.* == null) {
+                packet_space.first_rtt_sample_sent_time_millis.* = sent_time_millis;
+            }
+        }
+    }
+
+    fn syncRttEstimatesFromSpace(self: *QuicConnection, source_space: PacketNumberSpace) void {
+        const source_packet_space = self.packetNumberSpace(source_space);
+        const source_recovery = source_packet_space.recovery_state.*;
+        const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
+        for (spaces) |target_space| {
+            if (target_space == source_space) continue;
+            const target_packet_space = self.packetNumberSpace(target_space);
+            if (target_packet_space.discarded.*) continue;
+            target_packet_space.recovery_state.latest_rtt_ms = source_recovery.latest_rtt_ms;
+            target_packet_space.recovery_state.min_rtt_ms = source_recovery.min_rtt_ms;
+            target_packet_space.recovery_state.smoothed_rtt_ms = source_recovery.smoothed_rtt_ms;
+            target_packet_space.recovery_state.rttvar_ms = source_recovery.rttvar_ms;
+        }
     }
 
     fn markHandshakeSpaceUsed(self: *QuicConnection, space: PacketNumberSpace) void {
@@ -6659,6 +6717,9 @@ pub const QuicConnection = struct {
 
         var packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
+        const initial_rtt_snapshot = self.rttEstimateSnapshot(.initial);
+        const handshake_rtt_snapshot = self.rttEstimateSnapshot(.handshake);
+        const application_rtt_snapshot = self.rttEstimateSnapshot(.application);
         const recovery_snapshot = packet_space.recovery_state.*;
         const sent_packet_snapshots = try self.cloneSentPackets(packet_space.sent_packets.items);
         var sent_packet_snapshots_restored = false;
@@ -6825,6 +6886,9 @@ pub const QuicConnection = struct {
             packet_space.ecn_counts.* = ecn_counts_snapshot;
             packet_space.ecn_validation_state.* = ecn_validation_state_snapshot;
             packet_space.recovery_state.* = recovery_snapshot;
+            self.restoreRttEstimateSnapshot(.initial, initial_rtt_snapshot);
+            self.restoreRttEstimateSnapshot(.handshake, handshake_rtt_snapshot);
+            self.restoreRttEstimateSnapshot(.application, application_rtt_snapshot);
         }
 
         var ack_eliciting = false;
@@ -8282,8 +8346,8 @@ pub const QuicConnection = struct {
             elapsedMillis(largest_acked_packet.?.sent_time_millis, now_millis)
         else
             null;
-        if (latest_rtt_sample != null and packet_space.first_rtt_sample_sent_time_millis.* == null) {
-            packet_space.first_rtt_sample_sent_time_millis.* = largest_acked_packet.?.sent_time_millis;
+        if (latest_rtt_sample != null) {
+            self.rememberFirstRttSampleSentTime(largest_acked_packet.?.sent_time_millis);
         }
         if (acked_bytes != 0) {
             if (packet_space.largest_acknowledged.*) |previous_largest| {
@@ -8338,6 +8402,7 @@ pub const QuicConnection = struct {
                 self.ackDelayForRtt(space, ack.ack_delay),
                 congestion_window_utilized,
             );
+            self.syncRttEstimatesFromSpace(space);
         } else {
             packet_space.recovery_state.onPacketAckedWithoutRttSample(
                 acked_bytes,
@@ -12702,44 +12767,111 @@ test "connection ACK APIs reject ACK ranges that compute negative packet numbers
 }
 
 test "ACK delay is ignored for Initial and Handshake RTT samples" {
+    var initial_conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer initial_conn.deinit();
+
+    _ = try initial_conn.recordPacketSentInSpace(.initial, 0, 100);
+    try initial_conn.receiveAckInSpace(.initial, 100, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 1,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 100), initial_conn.smoothedRttMillis(.initial));
+
+    _ = try initial_conn.recordPacketSentInSpace(.initial, 100, 100);
+    try initial_conn.receiveAckInSpace(.initial, 220, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 1,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 102), initial_conn.smoothedRttMillis(.initial));
+
+    var handshake_conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer handshake_conn.deinit();
+
+    _ = try handshake_conn.recordPacketSentInSpace(.handshake, 0, 100);
+    try handshake_conn.receiveAckInSpace(.handshake, 100, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 1,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 100), handshake_conn.smoothedRttMillis(.handshake));
+
+    _ = try handshake_conn.recordPacketSentInSpace(.handshake, 100, 100);
+    try handshake_conn.receiveAckInSpace(.handshake, 220, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 1,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(u64, 102), handshake_conn.smoothedRttMillis(.handshake));
+}
+
+test "RTT estimates are shared across packet number spaces" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    _ = try conn.recordPacketSentInSpace(.initial, 0, 100);
+    _ = try conn.recordPacketSentInSpace(.handshake, 10, 100);
+    try conn.receiveAckInSpace(.initial, 50, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 5,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(u64, 50), conn.smoothedRttMillis(.initial));
+    try std.testing.expectEqual(@as(u64, 50), conn.smoothedRttMillis(.handshake));
+    try std.testing.expectEqual(@as(u64, 50), conn.smoothedRttMillis(.application));
+    try std.testing.expectEqual(@as(?i64, 0), conn.initial_packet_space.first_rtt_sample_sent_time_millis);
+    try std.testing.expectEqual(@as(?i64, 0), conn.handshake_packet_space.first_rtt_sample_sent_time_millis);
+    try std.testing.expectEqual(@as(?i64, 0), conn.first_rtt_sample_sent_time_millis);
+    try std.testing.expectEqual(@as(?i64, 160), conn.ptoDeadlineMillis(.handshake));
+}
+
+test "RTT sharing rolls back when datagram payload is rejected" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
-    try conn.confirmHandshake();
-    try conn.confirmHandshake();
 
     _ = try conn.recordPacketSentInSpace(.initial, 0, 100);
-    try conn.receiveAckInSpace(.initial, 100, .{
+
+    var datagram_buf: [96]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram_buf);
+    try frame.encodeFrame(out.writer(), .{ .ack = .{
         .largest_acknowledged = 0,
-        .ack_delay = 1,
+        .ack_delay = 0,
         .first_ack_range = 0,
-    });
+    } });
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "invalid-initial-stream",
+    } });
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        conn.processDatagramForPacketType(.initial, 50, out.getWritten()),
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 100), conn.bytesInFlight(.initial));
+    try std.testing.expectEqual(@as(?u64, null), conn.initial_packet_space.recovery_state.latest_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, null), conn.handshake_packet_space.recovery_state.latest_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, null), conn.recovery_state.latest_rtt_ms);
     try std.testing.expectEqual(@as(u64, 100), conn.smoothedRttMillis(.initial));
-
-    _ = try conn.recordPacketSentInSpace(.initial, 100, 100);
-    try conn.receiveAckInSpace(.initial, 220, .{
-        .largest_acknowledged = 1,
-        .ack_delay = 1,
-        .first_ack_range = 0,
-    });
-    try std.testing.expectEqual(@as(u64, 102), conn.smoothedRttMillis(.initial));
-
-    _ = try conn.recordPacketSentInSpace(.handshake, 0, 100);
-    try conn.receiveAckInSpace(.handshake, 100, .{
-        .largest_acknowledged = 0,
-        .ack_delay = 1,
-        .first_ack_range = 0,
-    });
     try std.testing.expectEqual(@as(u64, 100), conn.smoothedRttMillis(.handshake));
-
-    _ = try conn.recordPacketSentInSpace(.handshake, 100, 100);
-    try conn.receiveAckInSpace(.handshake, 220, .{
-        .largest_acknowledged = 1,
-        .ack_delay = 1,
-        .first_ack_range = 0,
-    });
-    try std.testing.expectEqual(@as(u64, 102), conn.smoothedRttMillis(.handshake));
+    try std.testing.expectEqual(@as(u64, 100), conn.smoothedRttMillis(.application));
+    try std.testing.expectEqual(@as(?i64, null), conn.initial_packet_space.first_rtt_sample_sent_time_millis);
+    try std.testing.expectEqual(@as(?i64, null), conn.handshake_packet_space.first_rtt_sample_sent_time_millis);
+    try std.testing.expectEqual(@as(?i64, null), conn.first_rtt_sample_sent_time_millis);
 }
 
 test "ACK delay is capped by peer max_ack_delay after handshake confirmation" {
