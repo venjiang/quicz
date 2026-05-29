@@ -2668,6 +2668,13 @@ pub const QuicConnection = struct {
         };
     }
 
+    /// Return connection-level bytes in flight across all packet number spaces.
+    pub fn totalBytesInFlight(self: QuicConnection) usize {
+        const initial_and_handshake =
+            std.math.add(usize, self.bytesInFlight(.initial), self.bytesInFlight(.handshake)) catch std.math.maxInt(usize);
+        return std.math.add(usize, initial_and_handshake, self.bytesInFlight(.application)) catch std.math.maxInt(usize);
+    }
+
     /// Return the congestion window for one packet number space's recovery state.
     pub fn congestionWindow(self: QuicConnection, space: PacketNumberSpace) usize {
         return switch (space) {
@@ -4113,9 +4120,11 @@ pub const QuicConnection = struct {
 
     fn canSendAckElicitingInSpace(self: *QuicConnection, space: PacketNumberSpace, bytes: usize) bool {
         const packet_space = self.packetNumberSpace(space);
+        const total_in_flight = self.totalBytesInFlight();
+        const after_send = std.math.add(usize, total_in_flight, bytes) catch return false;
         return packet_space.pto_probe_count.* != 0 or
             packet_space.congestion_probe_count.* != 0 or
-            packet_space.recovery_state.canSend(bytes);
+            after_send <= packet_space.recovery_state.congestion_window;
     }
 
     fn armPtoProbeInSpace(self: *QuicConnection, space: PacketNumberSpace) void {
@@ -21683,6 +21692,41 @@ test "pollTx returns null when congestion window is full" {
     conn.recovery_state.congestion_window = 128;
     const payload = (try conn.pollTx(0, &out_buf)).?;
     try std.testing.expect(payload.len > 0);
+}
+
+test "congestion admission accounts bytes in flight across packet spaces" {
+    var conn = try QuicConnection.init(std.testing.allocator, .server, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    _ = try conn.recordPacketSentInSpace(.initial, 0, 6000);
+    _ = try conn.recordPacketSentInSpace(.handshake, 1, 6000);
+    try std.testing.expectEqual(@as(usize, 12_000), conn.totalBytesInFlight());
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "blocked", false);
+    var out_buf: [128]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(10, &out_buf));
+    try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.application));
+
+    try conn.receiveAckInSpace(.initial, 20, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(usize, 6000), conn.totalBytesInFlight());
+
+    const payload = (try conn.pollTx(30, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .stream => |stream_frame| try std.testing.expectEqualStrings("blocked", stream_frame.data),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.application));
 }
 
 test "pollTx checks congestion before writing output buffer" {

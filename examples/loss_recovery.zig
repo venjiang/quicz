@@ -302,6 +302,40 @@ pub fn main() !void {
         .{ baseline_latest_rtt, baseline_smoothed_rtt, rtt_sampling.sentPacketCount(.application) },
     );
 
+    var cross_space_gate = try quicz.QuicConnection.init(allocator, .server, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer cross_space_gate.deinit();
+    try cross_space_gate.validatePeerAddress();
+    _ = try cross_space_gate.recordPacketSentInSpace(.initial, 0, 6000);
+    _ = try cross_space_gate.recordPacketSentInSpace(.handshake, 1, 6000);
+    const blocked_total_inflight = cross_space_gate.totalBytesInFlight();
+    const blocked_stream_id = try cross_space_gate.openStream();
+    try cross_space_gate.sendOnStream(blocked_stream_id, "blocked", false);
+    var gate_buf: [128]u8 = undefined;
+    if (try cross_space_gate.pollTx(10, &gate_buf) != null) return error.LossRecoveryExampleFailed;
+    try cross_space_gate.receiveAckInSpace(.initial, 20, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const unblocked_total_inflight = cross_space_gate.totalBytesInFlight();
+    const gate_payload = (try cross_space_gate.pollTx(30, &gate_buf)) orelse return error.LossRecoveryExampleFailed;
+    var gate_decoded = try quicz.frame.decodeFrameSlice(gate_payload, allocator);
+    defer quicz.frame.deinitFrame(&gate_decoded.frame, allocator);
+    switch (gate_decoded.frame) {
+        .stream => |stream_frame| {
+            if (stream_frame.stream_id != blocked_stream_id) return error.LossRecoveryExampleFailed;
+            if (!std.mem.eql(u8, stream_frame.data, "blocked")) return error.LossRecoveryExampleFailed;
+        },
+        else => return error.LossRecoveryExampleFailed,
+    }
+    std.debug.print(
+        "[loss] cross-space congestion gate blocked_inflight={d} unblocked_inflight={d} app_packets={d}\n",
+        .{ blocked_total_inflight, unblocked_total_inflight, cross_space_gate.sentPacketCount(.application) },
+    );
+
     var ack_delay = try quicz.QuicConnection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });
