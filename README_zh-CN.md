@@ -7,7 +7,7 @@
 > 状态：**实验性 / 开发中（WIP）**  
 > 目标：从一个最小但语义正确的子集开始，逐步实现一个完整的 QUIC 传输协议（覆盖 RFC 9000 系列以及 QUIC v2 RFC 9369）。
 
-## 特性与路线图（Features and Roadmap）
+## 特性与路线图
 
 ### 已实现 / 正在进行
 
@@ -41,7 +41,7 @@
 可验证 transport 实现任务计划见 [`docs/zh-CN/quic_transport_tasks.md`](docs/zh-CN/quic_transport_tasks.md)。
 更详细的设计和逐功能说明见 [`docs/zh-CN/`](docs/zh-CN/) 目录。
 
-## 快速开始（Quick Start）
+## 快速开始
 
 需要安装 Zig **0.16.0**。当前构建会强制校验这个精确测试版本，避免 Zig 标准库变化静默改变行为。
 
@@ -95,7 +95,7 @@ pub fn main() !void {
 
 `Connection` 是当前推荐的公开连接句柄；`QuicConnection` 作为兼容别名保留，便于旧调用方在实验性 API 继续演进期间平滑迁移。
 
-## 示例（Examples）
+## 示例
 
 - [Echo server](examples/echo_server.zig)：最小 frame-payload echo server 骨架。
   运行：`zig build run-server`。
@@ -180,7 +180,7 @@ pub fn main() !void {
 - [UDP stateless reset loopback](examples/udp_stateless_reset_loopback.zig)：socket-backed reset trigger delivery、reset emission 和 client token match。
   运行：`zig build run-udp-stateless-reset-loopback`。
 
-## 高级主题（Advanced Topics）
+## 高级主题
 
 - [Transport task matrix](docs/zh-CN/quic_transport_tasks.md)：当前 RFC 覆盖、剩余工作和验证证据。
 - [Design notes](docs/zh-CN/spec.md)：当前架构、协议范围和未支持区域。
