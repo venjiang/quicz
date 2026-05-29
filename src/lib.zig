@@ -2059,6 +2059,17 @@ fn frameAllowedInPacketNumberSpace(decoded: frame.Frame, space: PacketNumberSpac
     return frameAllowedInFramePacketType(decoded, defaultFramePacketTypeForSpace(space));
 }
 
+/// Classify a decoded frame that is not permitted in an RFC 9000 packet type.
+///
+/// The frame codec handles malformed or unknown frame types separately via
+/// `transport_error.frameDecodeErrorCode()`. This helper covers frames that are
+/// syntactically valid but appear in the wrong Initial, Handshake, 0-RTT, or
+/// 1-RTT packet context.
+pub fn framePacketTypeErrorCode(decoded: frame.Frame, packet_type: FramePacketType) ?transport_error.TransportErrorCode {
+    if (frameAllowedInFramePacketType(decoded, packet_type)) return null;
+    return .protocol_violation;
+}
+
 fn defaultFramePacketTypeForSpace(space: PacketNumberSpace) FramePacketType {
     return switch (space) {
         .initial => .initial,
@@ -10752,6 +10763,43 @@ fn expectFramePacketTypeRejected(
     const space = packetNumberSpaceForFramePacketType(packet_type);
     try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(space));
     try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(space));
+}
+
+test "frame packet type violations map to PROTOCOL_VIOLATION" {
+    try std.testing.expectEqual(
+        @as(?transport_error.TransportErrorCode, null),
+        framePacketTypeErrorCode(.{ .ping = {} }, .initial),
+    );
+    try std.testing.expectEqual(
+        @as(?transport_error.TransportErrorCode, null),
+        framePacketTypeErrorCode(.{ .stream = .{
+            .stream_id = 0,
+            .offset = 0,
+            .fin = false,
+            .data = "",
+        } }, .one_rtt),
+    );
+    try std.testing.expectEqual(
+        @as(?transport_error.TransportErrorCode, .protocol_violation),
+        framePacketTypeErrorCode(.{ .stream = .{
+            .stream_id = 0,
+            .offset = 0,
+            .fin = false,
+            .data = "",
+        } }, .initial),
+    );
+    try std.testing.expectEqual(
+        @as(?transport_error.TransportErrorCode, .protocol_violation),
+        framePacketTypeErrorCode(.{ .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        } }, .zero_rtt),
+    );
+    try std.testing.expectEqual(
+        @as(?transport_error.TransportErrorCode, .protocol_violation),
+        framePacketTypeErrorCode(.{ .handshake_done = {} }, .handshake),
+    );
 }
 
 test "openStream allocates client and server bidirectional stream ids" {

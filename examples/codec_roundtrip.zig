@@ -499,6 +499,12 @@ fn transportErrorMapping() !void {
     const decoded_alert = quicz.transport_error.cryptoErrorAlert(code);
     const frame_decode_code = quicz.transport_error.frameDecodeErrorCode(error.UnsupportedFrameType) orelse
         return error.UnexpectedRoundtrip;
+    const packet_type_code = quicz.framePacketTypeErrorCode(.{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "",
+    } }, .initial) orelse return error.UnexpectedRoundtrip;
 
     try require(quicz.transport_error.isKnownCode(@intFromEnum(quicz.transport_error.TransportErrorCode.protocol_violation)));
     try require(quicz.transport_error.isKnownCode(@intFromEnum(quicz.transport_error.TransportErrorCode.version_negotiation_error)));
@@ -506,11 +512,13 @@ fn transportErrorMapping() !void {
     try require(decoded_alert != null);
     try require(decoded_alert.? == tls_alert);
     try require(frame_decode_code == .frame_encoding_error);
+    try require(packet_type_code == .protocol_violation);
 
-    std.debug.print("[codec] transport error tls_alert={} code=0x{x} frame_decode={s}\n", .{
+    std.debug.print("[codec] transport error tls_alert={} code=0x{x} frame_decode={s} packet_type={s}\n", .{
         tls_alert,
         code,
         @tagName(frame_decode_code),
+        @tagName(packet_type_code),
     });
 }
 
