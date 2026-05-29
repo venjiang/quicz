@@ -35,6 +35,7 @@ pub fn main() !void {
     const protected_packet_number_hex = std.fmt.bytesToHex(protected_packet_number, .lower);
 
     const server_scid = [_]u8{ 0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const plaintext = "server initial";
     const initial_header = quicz.packet.LongHeader{
         .version = .v1,
@@ -52,6 +53,30 @@ pub fn main() !void {
     defer allocator.free(protected_packet);
     var opened_packet = try quicz.protection.unprotectLongPacketAes128(allocator, secrets.server, protected_packet, 0);
     defer quicz.protection.deinitProtectedLongPacket(&opened_packet, allocator);
+
+    const versions = [_]quicz.packet.Version{ .v2, .v1 };
+    var v2_client = try quicz.QuicConnection.init(allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &versions,
+    });
+    defer v2_client.deinit();
+    try v2_client.sendCryptoInSpace(.initial, "v2 connection initial");
+    const v2_connection_initial = (try v2_client.pollInitialProtectedDatagram(
+        0,
+        &dcid,
+        &client_scid,
+        &[_]u8{},
+        v2_secrets.client,
+    )) orelse return error.InitialKeysExampleFailed;
+    defer allocator.free(v2_connection_initial);
+    const v2_info = try quicz.protection.peekProtectedLongPacketInfo(v2_connection_initial);
+    var opened_v2_connection_initial = try quicz.protection.unprotectLongPacketAes128(
+        allocator,
+        v2_secrets.client,
+        v2_connection_initial,
+        0,
+    );
+    defer quicz.protection.deinitProtectedLongPacket(&opened_v2_connection_initial, allocator);
 
     std.debug.print("[initial-keys] dcid=8394c8f03e515708 client_key={s} client_iv={s}\n", .{
         &client_key_hex,
@@ -85,5 +110,11 @@ pub fn main() !void {
     std.debug.print("[initial-keys] protected_initial_bytes={} opened={}\n", .{
         protected_packet.len,
         std.mem.eql(u8, plaintext, opened_packet.packet.plaintext),
+    });
+    std.debug.print("[initial-keys] v2_connection_initial version=0x{x} packet_type={s} bytes={} opened={}\n", .{
+        @intFromEnum(v2_info.version),
+        @tagName(v2_info.packet_type),
+        v2_connection_initial.len,
+        opened_v2_connection_initial.packet.header.version == .v2,
     });
 }

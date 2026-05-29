@@ -175,9 +175,10 @@ pub const Config = struct {
     active_connection_id_limit: u64 = min_active_connection_id_limit,
     /// QUIC version advertised as this endpoint's chosen version.
     ///
-    /// The connection skeleton still emits QUIC v1 packet headers in most
-    /// packetized helpers; this value is currently used for authenticated
-    /// RFC 9368 version_information transport-parameter exchange.
+    /// Protected long-packet and Retry helpers use this value for the wire
+    /// version and version-specific long-header packet type bits. Short
+    /// headers remain version independent. The value is also advertised in
+    /// authenticated RFC 9368 version_information transport parameters.
     chosen_version: packet.Version = .v1,
     /// Versions advertised in the RFC 9368 Available Versions list.
     available_versions: []const packet.Version = &default_available_versions,
@@ -3205,7 +3206,7 @@ pub const QuicConnection = struct {
         }
 
         const retry = packet.RetryPacket{
-            .version = .v1,
+            .version = self.config.chosen_version,
             .dcid = client_source_connection_id,
             .scid = retry_source_connection_id,
             .token = token,
@@ -3233,7 +3234,7 @@ pub const QuicConnection = struct {
         return datagram;
     }
 
-    /// Validate and process one client-side QUIC v1 Retry datagram.
+    /// Validate and process one client-side Retry datagram for the configured version.
     ///
     /// The Retry Integrity Tag is verified using the Original Destination
     /// Connection ID from the first client Initial. A valid Retry stores the
@@ -3264,7 +3265,7 @@ pub const QuicConnection = struct {
         };
         defer packet.deinitRetryPacket(&retry, self.allocator);
 
-        if (retry.version != .v1) return error.InvalidPacket;
+        if (@intFromEnum(retry.version) != @intFromEnum(self.config.chosen_version)) return error.InvalidPacket;
         try self.validateOriginalDestinationConnectionIdForRecord(original_destination_connection_id);
         if (self.original_destination_connection_id_len == null) {
             try validateInitialDestinationConnectionIdLength(original_destination_connection_id);
@@ -4503,7 +4504,7 @@ pub const QuicConnection = struct {
         var packet_count: usize = 0;
         while (offset < datagram.len) {
             const info = protection.peekProtectedLongPacketInfo(datagram[offset..]) catch return error.InvalidPacket;
-            if (info.version != .v1 or info.len == 0) return error.InvalidPacket;
+            if (@intFromEnum(info.version) != @intFromEnum(self.config.chosen_version) or info.len == 0) return error.InvalidPacket;
             const route = protectedLongPacketRouteFor(keys, info.packet_type) orelse return error.InvalidPacket;
             const packet_space = self.packetNumberSpace(route.space);
             if (packet_space.discarded.*) return error.InvalidPacket;
@@ -4532,10 +4533,11 @@ pub const QuicConnection = struct {
 
     /// Remove long-header packet protection for Initial or Handshake space.
     ///
-    /// This accepts exactly one QUIC v1 protected long packet for the selected
-    /// Initial or Handshake packet number space, decrypts it with caller-supplied
-    /// keys, requires the packet number to match the next expected value for
-    /// that space, then routes the plaintext through the matching frame rules.
+    /// This accepts exactly one protected long packet for the connection's
+    /// configured QUIC version and the selected Initial or Handshake packet
+    /// number space, decrypts it with caller-supplied keys, requires the packet
+    /// number to match the next expected value for that space, then routes the
+    /// plaintext through the matching frame rules.
     /// Closing or draining connections discard the datagram before parsing.
     /// Coalesced packets, 1-RTT protected transmit, real TLS transcript
     /// ownership, key discard, and key update remain endpoint/TLS integration
@@ -4600,7 +4602,7 @@ pub const QuicConnection = struct {
         defer protection.deinitProtectedLongPacket(&decoded, self.allocator);
 
         if (decoded.len != datagram.len) return error.InvalidPacket;
-        if (decoded.packet.header.version != .v1 or decoded.packet.header.packet_type != route.packet_type) {
+        if (@intFromEnum(decoded.packet.header.version) != @intFromEnum(self.config.chosen_version) or decoded.packet.header.packet_type != route.packet_type) {
             return error.InvalidPacket;
         }
         if (decoded.packet.header.packet_number != expected_packet_number) return error.InvalidPacket;
@@ -5344,7 +5346,7 @@ pub const QuicConnection = struct {
         ) catch return error.Internal;
 
         const header = packet.LongHeader{
-            .version = .v1,
+            .version = self.config.chosen_version,
             .dcid = dcid,
             .scid = scid,
             .packet_type = long_space.packet_type,
@@ -5519,7 +5521,7 @@ pub const QuicConnection = struct {
         };
 
         const datagram = protection.protectLongPacketAes128(self.allocator, .{
-            .version = .v1,
+            .version = self.config.chosen_version,
             .dcid = dcid,
             .scid = scid,
             .packet_type = .zero_rtt,
@@ -5655,7 +5657,7 @@ pub const QuicConnection = struct {
         ) catch return error.Internal;
 
         const header = packet.LongHeader{
-            .version = .v1,
+            .version = self.config.chosen_version,
             .dcid = dcid,
             .scid = scid,
             .packet_type = long_space.packet_type,
@@ -16495,6 +16497,110 @@ test "Initial datagram size follows RFC 9000 minimum rules" {
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(ack_only);
     try std.testing.expect(ack_only.len < min_initial_udp_datagram_len);
+}
+
+test "configured QUIC v2 protected Initial uses v2 version and packet type bits" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const versions = [_]packet.Version{ .v2, .v1 };
+    const secrets = try protection.deriveInitialSecrets(.v2, &original_dcid);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &versions,
+    });
+    defer client.deinit();
+    try client.sendCryptoInSpace(.initial, "v2 client initial");
+
+    const datagram = (try client.pollInitialProtectedDatagram(
+        1,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+
+    const info = try protection.peekProtectedLongPacketInfo(datagram);
+    try std.testing.expectEqual(packet.Version.v2, info.version);
+    try std.testing.expectEqual(packet.PacketType.initial, info.packet_type);
+    try std.testing.expectEqual(@as(u8, 0xd0), datagram[0] & 0xf0);
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &versions,
+    });
+    defer server.deinit();
+    try server.processInitialProtectedDatagram(2, secrets.client, datagram);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqualStrings(&original_dcid, server.originalDestinationConnectionId().?);
+    try std.testing.expectEqualStrings(&client_scid, server.peerInitialSourceConnectionId().?);
+
+    var v1_server = try QuicConnection.init(std.testing.allocator, .server, .{});
+    defer v1_server.deinit();
+    try std.testing.expectError(error.InvalidPacket, v1_server.processInitialProtectedDatagram(2, secrets.client, datagram));
+    try std.testing.expectEqual(@as(u64, 0), v1_server.nextPeerPacketNumber(.initial));
+}
+
+test "configured QUIC v2 Retry datagram uses v2 integrity and client processing" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const retry_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const retry_token = "v2-retry-token";
+    const versions = [_]packet.Version{ .v2, .v1 };
+
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &versions,
+    });
+    defer server.deinit();
+
+    const retry_datagram = try server.issueRetryDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        &retry_scid,
+        retry_token,
+    );
+    defer std.testing.allocator.free(retry_datagram);
+
+    var parsed_retry = try protection.parseRetryPacketWithIntegrity(
+        std.testing.allocator,
+        &original_dcid,
+        retry_datagram,
+    );
+    defer packet.deinitRetryPacket(&parsed_retry, std.testing.allocator);
+    try std.testing.expectEqual(packet.Version.v2, parsed_retry.version);
+
+    var client = try QuicConnection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &versions,
+    });
+    defer client.deinit();
+    try client.processRetryDatagram(11, &original_dcid, retry_datagram);
+    try std.testing.expectEqualStrings(retry_token, client.latestRetryToken().?);
+    try std.testing.expectEqualStrings(&retry_scid, client.retrySourceConnectionId().?);
+
+    const retry_secrets = try protection.deriveInitialSecrets(.v2, &retry_scid);
+    try client.sendCryptoInSpace(.initial, "v2 client after retry");
+    const protected = (try client.pollInitialProtectedDatagram(
+        12,
+        &retry_scid,
+        &client_scid,
+        &[_]u8{},
+        retry_secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    const info = try protection.peekProtectedLongPacketInfo(protected);
+    try std.testing.expectEqual(packet.Version.v2, info.version);
+    try std.testing.expectEqual(packet.PacketType.initial, info.packet_type);
+
+    var opened = try protection.unprotectLongPacketAes128(std.testing.allocator, retry_secrets.client, protected, 0);
+    defer protection.deinitProtectedLongPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqual(packet.Version.v2, opened.packet.header.version);
+    try std.testing.expectEqualStrings(retry_token, opened.packet.header.token);
+    try std.testing.expectEqualStrings(&retry_scid, opened.packet.header.dcid);
 }
 
 test "Initial packetization enforces client DCID length and server empty token" {
