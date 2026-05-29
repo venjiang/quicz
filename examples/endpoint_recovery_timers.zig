@@ -362,16 +362,16 @@ pub fn main() !void {
     defer allocator.free(caller_zero_ack);
     try require(protected_server_lifecycle.recoveryTimerCount() == 0);
 
-    const caller_zero_ack_route = try protected_client_lifecycle.routeDatagram(client_receive_path, caller_zero_ack);
-    try require(caller_zero_ack_route.connection_id == protected_client_id);
-    try protected_client_lifecycle.processProtectedShortDatagram(
-        caller_zero_ack_route.connection_id,
+    const caller_zero_ack_route = try protected_client_lifecycle.processRoutedProtectedShortDatagram(
+        protected_client_id,
         &protected_client,
+        client_receive_path,
         23,
         secrets.server,
-        client_dcid.len,
         caller_zero_ack,
     );
+    try require(caller_zero_ack_route.connection_id == protected_client_id);
+    try require(std.mem.eql(u8, caller_zero_ack_route.destination_connection_id.asSlice(), &client_dcid));
     try require(protected_client.bytesInFlight(.application) == 0);
     try require(protected_client_lifecycle.recoveryTimerCount() == 0);
 
@@ -417,16 +417,16 @@ pub fn main() !void {
     defer allocator.free(caller_short);
     try require(protected_client_lifecycle.recoveryTimerCount() == 1);
 
-    const caller_short_route = try protected_server_lifecycle.routeDatagram(server_receive_path, caller_short);
-    try require(caller_short_route.connection_id == protected_server_id);
-    try protected_server_lifecycle.processProtectedShortDatagram(
-        caller_short_route.connection_id,
+    const caller_short_route = try protected_server_lifecycle.processRoutedProtectedShortDatagram(
+        protected_server_id,
         &protected_server,
+        server_receive_path,
         27,
         secrets.client,
-        server_dcid.len,
         caller_short,
     );
+    try require(caller_short_route.connection_id == protected_server_id);
+    try require(std.mem.eql(u8, caller_short_route.destination_connection_id.asSlice(), &server_dcid));
     try require(protected_server.pendingAckLargest(.application) == 2);
 
     const caller_short_ack = (try protected_server_lifecycle.pollProtectedShortDatagram(
@@ -439,16 +439,16 @@ pub fn main() !void {
     defer allocator.free(caller_short_ack);
     try require(protected_server_lifecycle.recoveryTimerCount() == 0);
 
-    const caller_short_ack_route = try protected_client_lifecycle.routeDatagram(client_receive_path, caller_short_ack);
-    try require(caller_short_ack_route.connection_id == protected_client_id);
-    try protected_client_lifecycle.processProtectedShortDatagram(
-        caller_short_ack_route.connection_id,
+    const caller_short_ack_route = try protected_client_lifecycle.processRoutedProtectedShortDatagram(
+        protected_client_id,
         &protected_client,
+        client_receive_path,
         29,
         secrets.server,
-        client_dcid.len,
         caller_short_ack,
     );
+    try require(caller_short_ack_route.connection_id == protected_client_id);
+    try require(std.mem.eql(u8, caller_short_ack_route.destination_connection_id.asSlice(), &client_dcid));
     try require(protected_client.bytesInFlight(.application) == 0);
     try require(protected_client_lifecycle.recoveryTimerCount() == 0);
 

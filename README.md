@@ -140,8 +140,8 @@ experimental.
 - [PTO recovery](examples/pto_recovery.zig): PTO timers, probe selection,
   backoff, and anti-amplification gating. Run with `zig build run-pto-recovery`.
 - [Endpoint recovery timers](examples/endpoint_recovery_timers.zig):
-  Endpoint-owned recovery timer scheduling across connection handles. Run with
-  `zig build run-endpoint-recovery-timers`.
+  Endpoint-owned recovery timer scheduling and routed protected receive refresh
+  across connection handles. Run with `zig build run-endpoint-recovery-timers`.
 - [Path validation](examples/path_validation.zig): PATH_CHALLENGE/PATH_RESPONSE
   retry and route update modeling. Run with `zig build run-path-validation`.
 - [Address validation](examples/address_validation.zig): HMAC address-validation
