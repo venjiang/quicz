@@ -533,6 +533,14 @@ pub const EndpointAcceptedProtectedInitialResult = struct {
     processed_packets: usize,
 };
 
+/// Endpoint result after routing and processing protected long packets.
+pub const EndpointProtectedLongDatagramResult = struct {
+    /// Endpoint route selected for the triggering datagram.
+    route: endpoint.RouteResult,
+    /// Number of protected long packets processed from the datagram.
+    processed_packets: usize,
+};
+
 /// Endpoint result after accepting a protected Initial and emitting a response.
 pub const EndpointAcceptedProtectedInitialResponseResult = struct {
     /// Authentication, packet processing, and route installation result.
@@ -1243,6 +1251,38 @@ pub const EndpointConnectionLifecycle = struct {
         const count = try connection.processProtectedLongDatagram(now_millis, keys, datagram);
         try self.armRecoveryTimerFromConnection(connection_id, connection);
         return count;
+    }
+
+    /// Route and process protected long-header packets.
+    ///
+    /// This is the lifecycle-owned receive bridge for coalesced Initial,
+    /// Handshake, and 0-RTT datagrams when the endpoint owns route selection
+    /// but the caller still supplies packet-protection keys. The route must
+    /// resolve to `connection_id`; the connection then processes every
+    /// protected long packet in the datagram, and the endpoint lifecycle
+    /// mirrors the resulting recovery timer.
+    pub fn processRoutedProtectedLongDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        keys: ProtectedLongDatagramKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!EndpointProtectedLongDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        const processed_packets = try self.processProtectedLongDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            keys,
+            datagram,
+        );
+        return .{
+            .route = route,
+            .processed_packets = processed_packets,
+        };
     }
 
     /// Poll one caller-keyed Initial/Handshake CRYPTO datagram and refresh timers.
@@ -15556,15 +15596,25 @@ test "EndpointConnectionLifecycle refreshes protected long timer lifecycle" {
     try std.testing.expectEqual(@as(usize, 1), client_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.initial));
 
-    const server_route = try server_lifecycle.routeDatagram(server_receive_path, initial);
-    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
-    try std.testing.expectEqual(@as(usize, 1), try server_lifecycle.processProtectedLongDatagram(
-        server_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedLongDatagram(
+        client_connection_id,
         &server,
+        server_receive_path,
         11,
         .{ .initial = secrets.client },
         initial,
     ));
+    const server_result = try server_lifecycle.processRoutedProtectedLongDatagram(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        .{ .initial = secrets.client },
+        initial,
+    );
+    try std.testing.expectEqual(server_connection_id, server_result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &original_dcid, server_result.route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 1), server_result.processed_packets);
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 
@@ -15585,15 +15635,25 @@ test "EndpointConnectionLifecycle refreshes protected long timer lifecycle" {
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 
-    const client_route = try client_lifecycle.routeDatagram(client_receive_path, ack);
-    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
-    try std.testing.expectEqual(@as(usize, 1), try client_lifecycle.processProtectedLongDatagram(
-        client_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, client_lifecycle.processRoutedProtectedLongDatagram(
+        server_connection_id,
         &client,
+        client_receive_path,
         13,
         .{ .initial = secrets.server },
         ack,
     ));
+    const client_result = try client_lifecycle.processRoutedProtectedLongDatagram(
+        client_connection_id,
+        &client,
+        client_receive_path,
+        13,
+        .{ .initial = secrets.server },
+        ack,
+    );
+    try std.testing.expectEqual(client_connection_id, client_result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &client_scid, client_result.route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 1), client_result.processed_packets);
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.initial));
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.initial));
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());

@@ -187,15 +187,17 @@ pub fn main() !void {
     defer allocator.free(long_initial);
     try require(protected_client_lifecycle.recoveryTimerCount() == 1);
 
-    const long_initial_route = try protected_server_lifecycle.routeDatagram(server_receive_path, long_initial);
-    try require(long_initial_route.connection_id == protected_server_id);
-    try require(try protected_server_lifecycle.processProtectedLongDatagram(
-        long_initial_route.connection_id,
+    const long_initial_result = try protected_server_lifecycle.processRoutedProtectedLongDatagram(
+        protected_server_id,
         &protected_server,
+        server_receive_path,
         9,
         .{ .initial = secrets.client },
         long_initial,
-    ) == 1);
+    );
+    try require(long_initial_result.route.connection_id == protected_server_id);
+    try require(std.mem.eql(u8, long_initial_result.route.destination_connection_id.asSlice(), &original_dcid));
+    try require(long_initial_result.processed_packets == 1);
     try require(protected_server.pendingAckLargest(.initial) == 0);
 
     const long_ack = (try protected_server_lifecycle.pollProtectedLongDatagram(
@@ -210,15 +212,17 @@ pub fn main() !void {
     defer allocator.free(long_ack);
     try require(protected_server_lifecycle.recoveryTimerCount() == 0);
 
-    const long_ack_route = try protected_client_lifecycle.routeDatagram(client_receive_path, long_ack);
-    try require(long_ack_route.connection_id == protected_client_id);
-    try require(try protected_client_lifecycle.processProtectedLongDatagram(
-        long_ack_route.connection_id,
+    const long_ack_result = try protected_client_lifecycle.processRoutedProtectedLongDatagram(
+        protected_client_id,
         &protected_client,
+        client_receive_path,
         11,
         .{ .initial = secrets.server },
         long_ack,
-    ) == 1);
+    );
+    try require(long_ack_result.route.connection_id == protected_client_id);
+    try require(std.mem.eql(u8, long_ack_result.route.destination_connection_id.asSlice(), &client_dcid));
+    try require(long_ack_result.processed_packets == 1);
     try require(protected_client.bytesInFlight(.initial) == 0);
     try require(protected_client_lifecycle.recoveryTimerCount() == 0);
 
