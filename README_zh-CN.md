@@ -161,13 +161,13 @@ pub fn main() !void {
   运行：`zig build run-udp-spin-bit-loopback`。
 - [UDP ECN validation loopback](examples/udp_ecn_validation_loopback.zig)：loopback UDP 上的建模 ECN state 和 ACK_ECN validation。
   运行：`zig build run-udp-ecn-validation-loopback`。
-- [UDP loss recovery loopback](examples/udp_loss_recovery_loopback.zig)：protected ACK 驱动 packet loss 和 timer-driven cleanup。
+- [UDP loss recovery loopback](examples/udp_loss_recovery_loopback.zig)：lifecycle-routed protected ACK 驱动 packet loss 和 timer-driven cleanup。
   运行：`zig build run-udp-loss-recovery-loopback`。
-- [UDP congestion recovery loopback](examples/udp_congestion_recovery_loopback.zig)：loopback UDP 上的 NewReno recovery-period 和 persistent-congestion 行为。
+- [UDP congestion recovery loopback](examples/udp_congestion_recovery_loopback.zig)：loopback UDP 上 lifecycle-routed NewReno recovery-period 和 persistent-congestion 行为。
   运行：`zig build run-udp-congestion-recovery-loopback`。
-- [UDP PTO recovery loopback](examples/udp_pto_recovery_loopback.zig)：endpoint lifecycle PTO probe 和 retransmission choice。
+- [UDP PTO recovery loopback](examples/udp_pto_recovery_loopback.zig)：endpoint lifecycle PTO probe、routed receive processing 和 retransmission choice。
   运行：`zig build run-udp-pto-recovery-loopback`。
-- [UDP STREAM retransmission loopback](examples/udp_stream_retransmission_loopback.zig)：通过 lifecycle route 执行 ACK-loss-triggered STREAM retransmission。
+- [UDP STREAM retransmission loopback](examples/udp_stream_retransmission_loopback.zig)：通过 lifecycle-routed protected receive 执行 ACK-loss-triggered STREAM retransmission。
   运行：`zig build run-udp-stream-retransmission-loopback`。
 - [UDP key update loopback](examples/udp_key_update_loopback.zig)：经 lifecycle route 的 installed-key key update、key phase advancement 和 ACK gating。
   运行：`zig build run-udp-key-update-loopback`。

@@ -32,9 +32,9 @@ const FixedWriter = struct {
     }
 };
 
-const ReceivedRoute = struct {
+const ReceivedDatagram = struct {
     data: []const u8,
-    route: quicz.endpoint.RouteResult,
+    path: quicz.endpoint.Udp4Tuple,
 };
 
 const RecoveryPeriodResult = struct {
@@ -93,17 +93,16 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
     };
 }
 
-fn receiveRoute(
+fn receiveDatagram(
     io: std.Io,
-    lifecycle: *const quicz.EndpointConnectionLifecycle,
     socket: *std.Io.net.Socket,
     receive_buf: []u8,
-) !ReceivedRoute {
+) !ReceivedDatagram {
     const received = try socket.receiveTimeout(io, receive_buf, receiveTimeout());
     const path = try udp4Tuple(socket.address, received.from);
     return .{
         .data = received.data,
-        .route = try lifecycle.routeDatagram(path, received.data),
+        .path = path,
     };
 }
 
@@ -150,7 +149,7 @@ fn sendClientPing(
     io: std.Io,
     client_socket: *std.Io.net.Socket,
     server_socket: *std.Io.net.Socket,
-    server_lifecycle: *const quicz.EndpointConnectionLifecycle,
+    server_lifecycle: *quicz.EndpointConnectionLifecycle,
     client: *quicz.Connection,
     server: *quicz.Connection,
     now_millis: i64,
@@ -162,10 +161,17 @@ fn sendClientPing(
     defer allocator.free(packet);
 
     try client_socket.send(io, &server_socket.address, packet);
-    const received = try receiveRoute(io, server_lifecycle, server_socket, receive_buf);
-    try require(received.route.connection_id == 51);
-    try require(std.mem.eql(u8, received.route.destination_connection_id.asSlice(), &server_dcid));
-    try server.processProtectedShortDatagram(now_millis + 1, keys, server_dcid.len, received.data);
+    const received = try receiveDatagram(io, server_socket, receive_buf);
+    const route = try server_lifecycle.processRoutedProtectedShortDatagram(
+        51,
+        server,
+        received.path,
+        now_millis + 1,
+        keys,
+        received.data,
+    );
+    try require(route.connection_id == 51);
+    try require(std.mem.eql(u8, route.destination_connection_id.asSlice(), &server_dcid));
     return packet.len;
 }
 
@@ -174,7 +180,7 @@ fn sendServerAck(
     io: std.Io,
     server_socket: *std.Io.net.Socket,
     client_socket: *std.Io.net.Socket,
-    client_lifecycle: *const quicz.EndpointConnectionLifecycle,
+    client_lifecycle: *quicz.EndpointConnectionLifecycle,
     client: *quicz.Connection,
     now_millis: i64,
     server_packet_number: u64,
@@ -196,10 +202,17 @@ fn sendServerAck(
     defer allocator.free(packet);
 
     try server_socket.send(io, &client_socket.address, packet);
-    const received = try receiveRoute(io, client_lifecycle, client_socket, receive_buf);
-    try require(received.route.connection_id == 41);
-    try require(std.mem.eql(u8, received.route.destination_connection_id.asSlice(), &client_dcid));
-    try client.processProtectedShortDatagram(now_millis, keys, client_dcid.len, received.data);
+    const received = try receiveDatagram(io, client_socket, receive_buf);
+    const route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        41,
+        client,
+        received.path,
+        now_millis,
+        keys,
+        received.data,
+    );
+    try require(route.connection_id == 41);
+    try require(std.mem.eql(u8, route.destination_connection_id.asSlice(), &client_dcid));
     return packet.len;
 }
 

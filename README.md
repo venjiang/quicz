@@ -189,17 +189,17 @@ experimental.
   Modeled ECN state and ACK_ECN validation over loopback UDP. Run with
   `zig build run-udp-ecn-validation-loopback`.
 - [UDP loss recovery loopback](examples/udp_loss_recovery_loopback.zig):
-  Protected ACK-driven packet loss and timer-driven cleanup over loopback UDP.
-  Run with `zig build run-udp-loss-recovery-loopback`.
+  Lifecycle-routed protected ACK-driven packet loss and timer-driven cleanup
+  over loopback UDP. Run with `zig build run-udp-loss-recovery-loopback`.
 - [UDP congestion recovery loopback](examples/udp_congestion_recovery_loopback.zig):
-  NewReno recovery-period and persistent-congestion behavior over loopback UDP.
-  Run with `zig build run-udp-congestion-recovery-loopback`.
+  Lifecycle-routed NewReno recovery-period and persistent-congestion behavior
+  over loopback UDP. Run with `zig build run-udp-congestion-recovery-loopback`.
 - [UDP PTO recovery loopback](examples/udp_pto_recovery_loopback.zig):
-  Endpoint lifecycle PTO probing and retransmission choices over loopback UDP.
-  Run with `zig build run-udp-pto-recovery-loopback`.
+  Endpoint lifecycle PTO probing, routed receive processing, and retransmission
+  choices over loopback UDP. Run with `zig build run-udp-pto-recovery-loopback`.
 - [UDP STREAM retransmission loopback](examples/udp_stream_retransmission_loopback.zig):
-  ACK-loss-triggered STREAM retransmission through lifecycle routes. Run with
-  `zig build run-udp-stream-retransmission-loopback`.
+  ACK-loss-triggered STREAM retransmission through lifecycle-routed protected
+  receives. Run with `zig build run-udp-stream-retransmission-loopback`.
 - [UDP key update loopback](examples/udp_key_update_loopback.zig):
   Lifecycle-routed installed-key key update, key phase advancement, and ACK
   gating. Run with `zig build run-udp-key-update-loopback`.
