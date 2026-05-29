@@ -2724,7 +2724,8 @@ pub const QuicConnection = struct {
     /// This uses the latest ack-eliciting packet tracked in the selected space
     /// and the connection-level PTO backoff count. ACK-only payloads are not
     /// tracked in `sent_packets`, so they do not arm PTO. RFC 9002 forbids
-    /// arming Application Data PTO before the handshake is confirmed.
+    /// arming Application Data PTO before the handshake is confirmed, and
+    /// disarms PTO while an unvalidated server has no anti-amplification credit.
     pub fn ptoDeadlineMillis(self: QuicConnection, space: PacketNumberSpace) ?i64 {
         if (!self.ptoAllowedInSpace(space)) return null;
         const pto_count = self.connectionPtoBackoffCount();
@@ -4013,6 +4014,11 @@ pub const QuicConnection = struct {
     fn canSendToPeerAddress(self: QuicConnection, bytes: usize) bool {
         const remaining = self.antiAmplificationLimitRemaining() orelse return true;
         return bytes <= remaining;
+    }
+
+    fn serverAtAntiAmplificationLimit(self: QuicConnection) bool {
+        const remaining = self.antiAmplificationLimitRemaining() orelse return false;
+        return remaining == 0;
     }
 
     fn initialTokenForPacket(self: QuicConnection, space: PacketNumberSpace, token: []const u8) []const u8 {
@@ -8757,6 +8763,7 @@ pub const QuicConnection = struct {
     }
 
     fn ptoAllowedInSpace(self: QuicConnection, space: PacketNumberSpace) bool {
+        if (self.serverAtAntiAmplificationLimit()) return false;
         return switch (space) {
             .initial, .handshake => true,
             .application => self.handshake_confirmed,
@@ -13198,6 +13205,43 @@ test "Application PTO is gated until handshake confirmation" {
     try std.testing.expectEqual(PacketNumberSpace.application, deadline.space);
     try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline.kind);
     try std.testing.expectEqual(@as(i64, 335), deadline.deadline_millis);
+}
+
+test "server anti-amplification limit disarms PTO until more peer bytes arrive" {
+    var server = try QuicConnection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+
+    try server.recordPeerAddressBytesReceived(1);
+    _ = try server.recordPacketSentInSpace(.initial, 10, 3);
+    try std.testing.expectEqual(@as(?usize, 0), server.antiAmplificationLimitRemaining());
+    try std.testing.expectEqual(@as(?i64, null), server.ptoDeadlineMillis(.initial));
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), server.lossDetectionTimerDeadlineMillis());
+
+    try server.checkPtoTimeouts(10_000);
+    try std.testing.expectEqual(@as(usize, 0), server.initial_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 0), server.initial_packet_space.recovery_state.pto_count);
+
+    try server.recordPeerAddressBytesReceived(1);
+    try std.testing.expectEqual(@as(?usize, 3), server.antiAmplificationLimitRemaining());
+    try std.testing.expectEqual(@as(?i64, 310), server.ptoDeadlineMillis(.initial));
+
+    const serviced = (try server.serviceLossDetectionTimer(310)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, serviced.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.kind);
+    try std.testing.expectEqual(@as(usize, 1), server.initial_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), server.initial_packet_space.recovery_state.pto_count);
+
+    var out_buf: [16]u8 = undefined;
+    const probe = (try server.pollTxInSpace(.initial, 311, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(probe, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(?usize, 2), server.antiAmplificationLimitRemaining());
 }
 
 test "serviceLossDetectionTimer is no-op before aggregate deadline" {

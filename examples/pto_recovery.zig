@@ -88,6 +88,40 @@ pub fn main() !void {
         .{ preserved_initial_ack_backoff, reset_handshake_ack_backoff },
     );
 
+    var limited_server = try quicz.QuicConnection.init(allocator, .server, .{ .initial_rtt_ms = 100 });
+    defer limited_server.deinit();
+    try limited_server.recordPeerAddressBytesReceived(1);
+    _ = try limited_server.recordPacketSentInSpace(.initial, 10, 3);
+    if ((limited_server.antiAmplificationLimitRemaining() orelse return error.PtoRecoveryExampleFailed) != 0) {
+        return error.PtoRecoveryExampleFailed;
+    }
+    if (limited_server.ptoDeadlineMillis(.initial) != null) return error.PtoRecoveryExampleFailed;
+    if (limited_server.lossDetectionTimerDeadlineMillis() != null) return error.PtoRecoveryExampleFailed;
+    try limited_server.checkPtoTimeouts(10_000);
+    if (limited_server.initial_packet_space.pending_ping_count != 0) return error.PtoRecoveryExampleFailed;
+    if (limited_server.initial_packet_space.recovery_state.pto_count != 0) return error.PtoRecoveryExampleFailed;
+
+    try limited_server.recordPeerAddressBytesReceived(1);
+    const anti_amp_pto_deadline = limited_server.ptoDeadlineMillis(.initial) orelse return error.PtoRecoveryExampleFailed;
+    const anti_amp_serviced = (try limited_server.serviceLossDetectionTimer(anti_amp_pto_deadline)) orelse return error.PtoRecoveryExampleFailed;
+    if (anti_amp_serviced.space != .initial) return error.PtoRecoveryExampleFailed;
+    if (anti_amp_serviced.kind != .pto) return error.PtoRecoveryExampleFailed;
+    if (limited_server.initial_packet_space.pending_ping_count != 1) return error.PtoRecoveryExampleFailed;
+
+    var anti_amp_buf: [32]u8 = undefined;
+    const anti_amp_probe = (try limited_server.pollTxInSpace(.initial, anti_amp_pto_deadline + 1, &anti_amp_buf)) orelse return error.PtoRecoveryExampleFailed;
+    var anti_amp_decoded = try quicz.frame.decodeFrameSlice(anti_amp_probe, allocator);
+    defer quicz.frame.deinitFrame(&anti_amp_decoded.frame, allocator);
+    switch (anti_amp_decoded.frame) {
+        .ping => {},
+        else => return error.PtoRecoveryExampleFailed,
+    }
+
+    std.debug.print(
+        "[pto] anti-amplification limited PTO disarmed until credit deadline={d} probe={d}\n",
+        .{ anti_amp_pto_deadline, anti_amp_probe.len },
+    );
+
     var conn = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer conn.deinit();
     try conn.confirmHandshake();
