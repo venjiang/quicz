@@ -87,18 +87,29 @@ pub fn main() !void {
         _ = try newreno.recordPacketSentInSpace(.application, 120, 1200);
     }
     const avoidance_before = newreno.congestionWindow(.application);
-    const avoidance_increase = @max(@as(usize, 1), (1200 * 1200) / avoidance_before);
     try newreno.receiveAckInSpace(.application, 220, .{
         .largest_acknowledged = 2,
         .ack_delay = 0,
         .first_ack_range = 0,
     });
+    const avoidance_credit_cwnd = newreno.congestionWindow(.application);
+    if (avoidance_credit_cwnd != avoidance_before) return error.LossRecoveryExampleFailed;
+    if (newreno.recovery_state.congestion_avoidance_bytes_acked != 1200) return error.LossRecoveryExampleFailed;
+
+    _ = try newreno.recordPacketSentInSpace(.application, 230, 1200);
+    if (newreno.bytesInFlight(.application) != avoidance_before) return error.LossRecoveryExampleFailed;
+    try newreno.receiveAckInSpace(.application, 240, .{
+        .largest_acknowledged = 12,
+        .ack_delay = 0,
+        .first_ack_range = 9,
+    });
     const avoidance_cwnd = newreno.congestionWindow(.application);
-    if (avoidance_cwnd != avoidance_before + avoidance_increase) return error.LossRecoveryExampleFailed;
-    if (newreno.bytesInFlight(.application) != avoidance_before - 1200) return error.LossRecoveryExampleFailed;
+    if (avoidance_cwnd != avoidance_before + 1200) return error.LossRecoveryExampleFailed;
+    if (newreno.recovery_state.congestion_avoidance_bytes_acked != 0) return error.LossRecoveryExampleFailed;
+    if (newreno.bytesInFlight(.application) != 1200) return error.LossRecoveryExampleFailed;
     std.debug.print(
-        "[loss] NewReno underutilized_cwnd={d} slow_start_cwnd={d} congestion_avoidance_cwnd={d} avoidance_increase={d}\n",
-        .{ underutilized_cwnd, slow_start_cwnd, avoidance_cwnd, avoidance_increase },
+        "[loss] NewReno underutilized_cwnd={d} slow_start_cwnd={d} congestion_avoidance_credit_cwnd={d} congestion_avoidance_cwnd={d} avoidance_increase={d}\n",
+        .{ underutilized_cwnd, slow_start_cwnd, avoidance_credit_cwnd, avoidance_cwnd, avoidance_cwnd - avoidance_before },
     );
 
     var newreno_clamp = try quicz.QuicConnection.init(allocator, .client, .{

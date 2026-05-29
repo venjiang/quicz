@@ -46,6 +46,9 @@ pub const Recovery = struct {
     pto_count: u8 = 0,
     bytes_in_flight: usize = 0,
     congestion_window: usize,
+    /// Bytes acknowledged while in congestion avoidance but not yet converted
+    /// into a full max-datagram-sized congestion-window increase.
+    congestion_avoidance_bytes_acked: usize = 0,
     congestion_recovery_start_time_millis: ?i64 = null,
     ssthresh: usize = std.math.maxInt(usize),
 
@@ -106,15 +109,16 @@ pub const Recovery = struct {
 
         if (self.congestion_window < self.ssthresh) {
             self.congestion_window = std.math.add(usize, self.congestion_window, bytes) catch std.math.maxInt(usize);
+            self.congestion_avoidance_bytes_acked = 0;
             return;
         }
         if (self.congestion_window == 0) {
             self.congestion_window = @max(bytes, minimumCongestionWindow(self.max_datagram_size));
+            self.congestion_avoidance_bytes_acked = 0;
             return;
         }
 
-        const increase = @max(@as(usize, 1), saturatingMulUsize(self.max_datagram_size, bytes) / self.congestion_window);
-        self.congestion_window = std.math.add(usize, self.congestion_window, increase) catch std.math.maxInt(usize);
+        self.growCongestionAvoidance(bytes);
     }
 
     /// Record packet loss and start a congestion recovery period if needed.
@@ -131,6 +135,7 @@ pub const Recovery = struct {
     pub fn onCongestionEvent(self: *Recovery, sent_time_millis: i64, now_millis: i64) void {
         if (self.inCongestionRecovery(sent_time_millis)) return;
         self.congestion_recovery_start_time_millis = now_millis;
+        self.congestion_avoidance_bytes_acked = 0;
         self.ssthresh = self.congestion_window / 2;
         self.congestion_window = @max(self.ssthresh, minimumCongestionWindow(self.max_datagram_size));
     }
@@ -186,6 +191,7 @@ pub const Recovery = struct {
     /// Apply the persistent congestion response by reducing cwnd to kMinimumWindow.
     pub fn onPersistentCongestion(self: *Recovery) void {
         self.congestion_window = minimumCongestionWindow(self.max_datagram_size);
+        self.congestion_avoidance_bytes_acked = 0;
         self.congestion_recovery_start_time_millis = null;
     }
 
@@ -196,6 +202,20 @@ pub const Recovery = struct {
 
     fn removeBytesInFlight(self: *Recovery, bytes: usize) void {
         self.bytes_in_flight = if (bytes >= self.bytes_in_flight) 0 else self.bytes_in_flight - bytes;
+    }
+
+    fn growCongestionAvoidance(self: *Recovery, bytes: usize) void {
+        self.congestion_avoidance_bytes_acked =
+            std.math.add(usize, self.congestion_avoidance_bytes_acked, bytes) catch std.math.maxInt(usize);
+
+        if (self.congestion_avoidance_bytes_acked < self.congestion_window) return;
+
+        self.congestion_avoidance_bytes_acked -= self.congestion_window;
+        self.congestion_window =
+            std.math.add(usize, self.congestion_window, self.max_datagram_size) catch std.math.maxInt(usize);
+        if (self.congestion_window == std.math.maxInt(usize)) {
+            self.congestion_avoidance_bytes_acked = 0;
+        }
     }
 
     fn updateRtt(self: *Recovery, latest_rtt_ms: u64, ack_delay_ms: u64) void {
@@ -289,16 +309,26 @@ test "NewReno slow start grows congestion window by acked bytes" {
     try std.testing.expectEqual(std.math.maxInt(usize), recovery.ssthresh);
 }
 
-test "NewReno congestion avoidance grows by max datagram scaled by bytes acked" {
+test "NewReno congestion avoidance grows by byte-counted cwnd credit" {
     var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
     recovery.congestion_window = 12_000;
     recovery.ssthresh = 12_000;
 
+    var acked_packets: usize = 0;
+    while (acked_packets < 9) : (acked_packets += 1) {
+        recovery.onPacketSent(1200);
+        recovery.onPacketAcked(1200, @as(i64, @intCast(acked_packets)), 100, 0);
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
+    try std.testing.expectEqual(@as(usize, 10_800), recovery.congestion_avoidance_bytes_acked);
+    try std.testing.expectEqual(@as(usize, 12_000), recovery.congestion_window);
+
     recovery.onPacketSent(1200);
     recovery.onPacketAcked(1200, 10, 100, 0);
 
-    try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
-    try std.testing.expectEqual(@as(usize, 12_120), recovery.congestion_window);
+    try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
+    try std.testing.expectEqual(@as(usize, 13_200), recovery.congestion_window);
 }
 
 test "underutilized ACK updates recovery accounting without growing congestion window" {
@@ -351,7 +381,16 @@ test "congestion recovery period avoids repeated loss reduction and ACK growth" 
 
     recovery.onPacketSent(1200);
     recovery.onPacketAcked(1200, 150, 100, 0);
+    try std.testing.expectEqual(recovery_window, recovery.congestion_window);
+    try std.testing.expectEqual(@as(usize, 1200), recovery.congestion_avoidance_bytes_acked);
+
+    var acked_after_recovery: usize = 1;
+    while (acked_after_recovery < 5) : (acked_after_recovery += 1) {
+        recovery.onPacketSent(1200);
+        recovery.onPacketAcked(1200, @as(i64, @intCast(150 + acked_after_recovery)), 100, 0);
+    }
     try std.testing.expect(recovery.congestion_window > recovery_window);
+    try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
 }
 
 test "NewReno congestion event clamps cwnd without clamping ssthresh" {
@@ -411,8 +450,10 @@ test "recovery arithmetic saturates at numeric extremes" {
     recovery.rttvar_ms = std.math.maxInt(u64);
     try std.testing.expectEqual(std.math.maxInt(u64), recovery.ptoMs());
 
+    recovery.max_datagram_size = std.math.maxInt(usize);
     recovery.congestion_window = 1;
     recovery.ssthresh = 0;
-    recovery.onPacketAcked(std.math.maxInt(usize), 0, std.math.maxInt(u64), std.math.maxInt(u64));
+    recovery.onPacketAcked(1, 0, std.math.maxInt(u64), std.math.maxInt(u64));
     try std.testing.expectEqual(std.math.maxInt(usize), recovery.congestion_window);
+    try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
 }

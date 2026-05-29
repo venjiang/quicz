@@ -3511,6 +3511,7 @@ pub const QuicConnection = struct {
         self.rollbackCryptoFrameQueue(packet_space.crypto_recv_pending, 0);
         packet_space.recovery_state.bytes_in_flight = 0;
         packet_space.recovery_state.pto_count = 0;
+        packet_space.recovery_state.congestion_avoidance_bytes_acked = 0;
         packet_space.ecn_sent_ect0.* = 0;
         packet_space.ecn_sent_ect1.* = 0;
         packet_space.ecn_largest_acknowledged.* = null;
@@ -14675,15 +14676,26 @@ test "ACK growth follows NewReno slow start then congestion avoidance" {
         _ = try conn.recordPacketSentInSpace(.application, 120, 1200);
     }
     const avoidance_before = conn.congestionWindow(.application);
-    const expected_increase = @max(@as(usize, 1), (1200 * 1200) / avoidance_before);
     try conn.receiveAckInSpace(.application, 220, .{
         .largest_acknowledged = 1,
         .ack_delay = 0,
         .first_ack_range = 0,
     });
-
-    try std.testing.expectEqual(avoidance_before + expected_increase, conn.congestionWindow(.application));
+    try std.testing.expectEqual(avoidance_before, conn.congestionWindow(.application));
+    try std.testing.expectEqual(@as(usize, 1200), conn.recovery_state.congestion_avoidance_bytes_acked);
     try std.testing.expectEqual(avoidance_before - 1200, conn.bytesInFlight(.application));
+
+    _ = try conn.recordPacketSentInSpace(.application, 230, 1200);
+    try std.testing.expectEqual(avoidance_before, conn.bytesInFlight(.application));
+    try conn.receiveAckInSpace(.application, 240, .{
+        .largest_acknowledged = 11,
+        .ack_delay = 0,
+        .first_ack_range = 9,
+    });
+
+    try std.testing.expectEqual(avoidance_before + 1200, conn.congestionWindow(.application));
+    try std.testing.expectEqual(@as(usize, 0), conn.recovery_state.congestion_avoidance_bytes_acked);
+    try std.testing.expectEqual(@as(usize, 1200), conn.bytesInFlight(.application));
 }
 
 test "ACK growth is suppressed when congestion window was underutilized" {
