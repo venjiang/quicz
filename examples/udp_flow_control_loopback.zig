@@ -3,9 +3,9 @@ const quicz = @import("quicz");
 
 const ExampleError = error{UnexpectedState};
 
-const ReceivedRoute = struct {
+const ReceivedDatagram = struct {
     data: []const u8,
-    route: quicz.endpoint.RouteResult,
+    path: quicz.endpoint.Udp4Tuple,
 };
 
 fn require(condition: bool) ExampleError!void {
@@ -51,17 +51,16 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
     };
 }
 
-fn receiveRoute(
+fn receiveDatagram(
     io: std.Io,
-    lifecycle: *const quicz.EndpointConnectionLifecycle,
     socket: *std.Io.net.Socket,
     receive_buf: []u8,
-) !ReceivedRoute {
+) !ReceivedDatagram {
     const received = try socket.receiveTimeout(io, receive_buf, receiveTimeout());
     const path = try udp4Tuple(socket.address, received.from);
     return .{
         .data = received.data,
-        .route = try lifecycle.routeDatagram(path, received.data),
+        .path = path,
     };
 }
 
@@ -69,42 +68,62 @@ fn sendClientPacket(
     io: std.Io,
     allocator: std.mem.Allocator,
     client: *quicz.Connection,
-    server_lifecycle: *const quicz.EndpointConnectionLifecycle,
+    server_lifecycle: *quicz.EndpointConnectionLifecycle,
+    server: *quicz.Connection,
     client_socket: *std.Io.net.Socket,
     server_socket: *std.Io.net.Socket,
     now_millis: i64,
     server_dcid: []const u8,
     keys: quicz.protection.Aes128PacketProtectionKeys,
     receive_buf: []u8,
-) ![]const u8 {
+) !usize {
     const packet = (try client.pollProtectedShortDatagram(now_millis, server_dcid, keys)) orelse return error.UnexpectedState;
     defer allocator.free(packet);
     try client_socket.send(io, &server_socket.address, packet);
 
-    const received = try receiveRoute(io, server_lifecycle, server_socket, receive_buf);
-    try require(std.mem.eql(u8, received.route.destination_connection_id.asSlice(), server_dcid));
-    return received.data;
+    const received = try receiveDatagram(io, server_socket, receive_buf);
+    const route = try server_lifecycle.processRoutedProtectedShortDatagram(
+        51,
+        server,
+        received.path,
+        now_millis + 1,
+        keys,
+        received.data,
+    );
+    try require(route.connection_id == 51);
+    try require(std.mem.eql(u8, route.destination_connection_id.asSlice(), server_dcid));
+    return received.data.len;
 }
 
 fn sendServerPacket(
     io: std.Io,
     allocator: std.mem.Allocator,
     server: *quicz.Connection,
-    client_lifecycle: *const quicz.EndpointConnectionLifecycle,
+    client_lifecycle: *quicz.EndpointConnectionLifecycle,
+    client: *quicz.Connection,
     server_socket: *std.Io.net.Socket,
     client_socket: *std.Io.net.Socket,
     now_millis: i64,
     client_dcid: []const u8,
     keys: quicz.protection.Aes128PacketProtectionKeys,
     receive_buf: []u8,
-) ![]const u8 {
+) !usize {
     const packet = (try server.pollProtectedShortDatagram(now_millis, client_dcid, keys)) orelse return error.UnexpectedState;
     defer allocator.free(packet);
     try server_socket.send(io, &client_socket.address, packet);
 
-    const received = try receiveRoute(io, client_lifecycle, client_socket, receive_buf);
-    try require(std.mem.eql(u8, received.route.destination_connection_id.asSlice(), client_dcid));
-    return received.data;
+    const received = try receiveDatagram(io, client_socket, receive_buf);
+    const route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        41,
+        client,
+        received.path,
+        now_millis + 1,
+        keys,
+        received.data,
+    );
+    try require(route.connection_id == 41);
+    try require(std.mem.eql(u8, route.destination_connection_id.asSlice(), client_dcid));
+    return received.data.len;
 }
 
 pub fn main() !void {
@@ -169,6 +188,7 @@ pub fn main() !void {
         allocator,
         &client,
         &server_lifecycle,
+        &server,
         &client_socket,
         &server_socket,
         0,
@@ -176,7 +196,6 @@ pub fn main() !void {
         secrets.client,
         &server_receive_buf,
     );
-    try server.processProtectedShortDatagram(1, secrets.client, server_dcid.len, stream_packet);
 
     try expectFlowControlBlocked(client.sendOnStream(stream_id, "!", false));
     const blocked_packet = try sendClientPacket(
@@ -184,6 +203,7 @@ pub fn main() !void {
         allocator,
         &client,
         &server_lifecycle,
+        &server,
         &client_socket,
         &server_socket,
         2,
@@ -191,7 +211,6 @@ pub fn main() !void {
         secrets.client,
         &server_receive_buf,
     );
-    try server.processProtectedShortDatagram(3, secrets.client, server_dcid.len, blocked_packet);
     try require(server.peerStreamDataBlockedLimit(stream_id) == 5);
 
     const first_len = (try server.recvOnStream(stream_id, &read_buf)) orelse return error.UnexpectedState;
@@ -202,6 +221,7 @@ pub fn main() !void {
         allocator,
         &server,
         &client_lifecycle,
+        &client,
         &server_socket,
         &client_socket,
         4,
@@ -209,13 +229,13 @@ pub fn main() !void {
         secrets.server,
         &client_receive_buf,
     );
-    try client.processProtectedShortDatagram(5, secrets.server, client_dcid.len, max_data_packet);
 
     const max_stream_packet = try sendServerPacket(
         io,
         allocator,
         &server,
         &client_lifecycle,
+        &client,
         &server_socket,
         &client_socket,
         6,
@@ -223,7 +243,6 @@ pub fn main() !void {
         secrets.server,
         &client_receive_buf,
     );
-    try client.processProtectedShortDatagram(7, secrets.server, client_dcid.len, max_stream_packet);
 
     try client.sendOnStream(stream_id, "!", true);
     const resumed_packet = try sendClientPacket(
@@ -231,6 +250,7 @@ pub fn main() !void {
         allocator,
         &client,
         &server_lifecycle,
+        &server,
         &client_socket,
         &server_socket,
         8,
@@ -238,7 +258,6 @@ pub fn main() !void {
         secrets.client,
         &server_receive_buf,
     );
-    try server.processProtectedShortDatagram(9, secrets.client, server_dcid.len, resumed_packet);
 
     const resumed_len = (try server.recvOnStream(stream_id, &read_buf)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, read_buf[0..resumed_len], "!"));
@@ -248,6 +267,7 @@ pub fn main() !void {
         allocator,
         &server,
         &client_lifecycle,
+        &client,
         &server_socket,
         &client_socket,
         10,
@@ -255,19 +275,18 @@ pub fn main() !void {
         secrets.server,
         &client_receive_buf,
     );
-    try client.processProtectedShortDatagram(11, secrets.server, client_dcid.len, final_ack);
     try require(client.bytesInFlight(.application) == 0);
 
     std.debug.print("[udp-flow] client_port={} server_port={} stream={} stream_packet={} blocked_packet={} max_data_packet={} max_stream_packet={} resumed_packet={} final_ack={} peer_blocked={} client_inflight={}\n", .{
         client_local.port,
         server_local.port,
         stream_id,
-        stream_packet.len,
-        blocked_packet.len,
-        max_data_packet.len,
-        max_stream_packet.len,
-        resumed_packet.len,
-        final_ack.len,
+        stream_packet,
+        blocked_packet,
+        max_data_packet,
+        max_stream_packet,
+        resumed_packet,
+        final_ack,
         server.peerStreamDataBlockedLimit(stream_id).?,
         client.bytesInFlight(.application),
     });

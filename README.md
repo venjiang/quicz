@@ -180,8 +180,8 @@ experimental.
   Initial response processing plus routed caller-keyed 1-RTT processing over
   loopback UDP. Run with `zig build run-udp-protected-loopback`.
 - [UDP flow control loopback](examples/udp_flow_control_loopback.zig):
-  Protected STREAM/BLOCKED/MAX flow-control exchange over loopback UDP. Run with
-  `zig build run-udp-flow-control-loopback`.
+  Lifecycle-routed protected STREAM/BLOCKED/MAX flow-control exchange over
+  loopback UDP. Run with `zig build run-udp-flow-control-loopback`.
 - [UDP spin bit loopback](examples/udp_spin_bit_loopback.zig): Configurable
   single-path spin-bit signaling over protected short packets. Run with
   `zig build run-udp-spin-bit-loopback`.
