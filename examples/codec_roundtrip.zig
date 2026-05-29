@@ -314,11 +314,7 @@ fn versionNegotiationRoundtrip(allocator: std.mem.Allocator) !void {
     try require(quicz.packet.isReservedVersion(reserved_version));
     try require(client.versionNegotiationSelectedVersion() == .v2);
 
-    var followup = try quicz.Connection.init(allocator, .client, .{
-        .chosen_version = .v2,
-        .available_versions = &client_versions,
-        .version_negotiation_selected_version = .v2,
-    });
+    var followup = try quicz.Connection.init(allocator, .client, try client.versionNegotiationFollowupConfig());
     defer followup.deinit();
     try followup.applyPeerTransportParameters(.{
         .version_information = .{

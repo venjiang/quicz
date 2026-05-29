@@ -3176,6 +3176,23 @@ pub const Connection = struct {
         return self.version_negotiation_selected_version;
     }
 
+    /// Return a config for the client follow-up connection after Version Negotiation.
+    ///
+    /// RFC 8999 Version Negotiation asks the client to start a new connection
+    /// attempt with the selected version. The returned config preserves the
+    /// caller's version list while setting both `chosen_version` and
+    /// `version_negotiation_selected_version`, so later authenticated RFC 9368
+    /// Version Information can validate that the server did not downgrade the
+    /// negotiated version.
+    pub fn versionNegotiationFollowupConfig(self: Connection) Error!Config {
+        if (self.side != .client) return error.InvalidPacket;
+        const selected = self.version_negotiation_selected_version orelse return error.InvalidPacket;
+        var config = self.config;
+        config.chosen_version = selected;
+        config.version_negotiation_selected_version = selected;
+        return config;
+    }
+
     /// Build and record one server-side QUIC v1 Retry datagram.
     ///
     /// The returned datagram is allocated with the connection allocator and
@@ -16865,6 +16882,27 @@ test "processVersionNegotiationDatagram selects mutual version once" {
     )) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(packet.Version.v2, selected);
     try std.testing.expectEqual(packet.Version.v2, client.versionNegotiationSelectedVersion().?);
+
+    const followup_config = try client.versionNegotiationFollowupConfig();
+    try std.testing.expectEqual(packet.Version.v2, followup_config.chosen_version);
+    try std.testing.expectEqual(packet.Version.v2, followup_config.version_negotiation_selected_version.?);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, followup_config.available_versions);
+
+    var followup = try Connection.init(std.testing.allocator, .client, followup_config);
+    defer followup.deinit();
+    try followup.applyPeerTransportParameters(.{
+        .version_information = .{
+            .chosen_version = .v2,
+            .available_versions = &client_versions,
+        },
+    });
+    try std.testing.expectError(error.InvalidPacket, followup.applyPeerTransportParameters(.{
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &[_]packet.Version{.v1},
+        },
+    }));
+
     try std.testing.expectEqual(@as(?packet.Version, null), try client.processVersionNegotiationDatagram(
         11,
         &original_dcid,
@@ -16931,6 +16969,7 @@ test "processVersionNegotiationDatagram ignores unsafe or mismatched packets" {
         wrong_scid_out.getWritten(),
     ));
     try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
+    try std.testing.expectError(error.InvalidPacket, client.versionNegotiationFollowupConfig());
 }
 
 test "processVersionNegotiationDatagram rejects no mutual version without mutation" {
