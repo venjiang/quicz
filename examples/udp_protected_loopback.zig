@@ -171,10 +171,16 @@ pub fn main() !void {
 
     const one_rtt_ping_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const ping_path = try udp4Tuple(server_socket.address, one_rtt_ping_received.from);
-    const server_short_route = try server_lifecycle.routeDatagram(ping_path, one_rtt_ping_received.data);
+    const server_short_route = try server_lifecycle.processRoutedProtectedShortDatagram(
+        51,
+        &server,
+        ping_path,
+        5,
+        secrets.client,
+        one_rtt_ping_received.data,
+    );
     try require(server_short_route.connection_id == 51);
     try require(std.mem.eql(u8, server_short_route.destination_connection_id.asSlice(), &server_scid));
-    try server.processProtectedShortDatagram(5, secrets.client, server_scid.len, one_rtt_ping_received.data);
     try require(server.pendingAckLargest(.application) == 0);
 
     const one_rtt_ack = (try server.pollProtectedShortDatagram(
@@ -187,10 +193,16 @@ pub fn main() !void {
 
     const one_rtt_ack_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     const ack_path = try udp4Tuple(client_socket.address, one_rtt_ack_received.from);
-    const client_short_route = try client_lifecycle.routeDatagram(ack_path, one_rtt_ack_received.data);
+    const client_short_route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        41,
+        &client,
+        ack_path,
+        7,
+        secrets.server,
+        one_rtt_ack_received.data,
+    );
     try require(client_short_route.connection_id == 41);
     try require(std.mem.eql(u8, client_short_route.destination_connection_id.asSlice(), &client_scid));
-    try client.processProtectedShortDatagram(7, secrets.server, client_scid.len, one_rtt_ack_received.data);
     try require(client.bytesInFlight(.application) == 0);
 
     std.debug.print("[udp-protected] client_port={} server_port={} initial_client_bytes={} initial_server_bytes={} ping_bytes={} ack_bytes={} server_route={} client_route={} client_inflight={}\n", .{

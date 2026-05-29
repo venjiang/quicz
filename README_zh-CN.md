@@ -153,7 +153,7 @@ pub fn main() !void {
   运行：`zig build run-udp-replacement-cid-loopback`。
 - [UDP connection IDs loopback](examples/udp_connection_ids_loopback.zig)：通过 lifecycle route 交换 protected NEW_CONNECTION_ID/RETIRE_CONNECTION_ID。
   运行：`zig build run-udp-connection-ids-loopback`。
-- [UDP protected loopback](examples/udp_protected_loopback.zig)：lifecycle-owned accepted protected Initial processing 和 protected server Initial response processing，以及 caller-keyed 1-RTT loopback UDP routing。
+- [UDP protected loopback](examples/udp_protected_loopback.zig)：lifecycle-owned accepted protected Initial processing、protected server Initial response processing，以及 routed caller-keyed 1-RTT loopback UDP processing。
   运行：`zig build run-udp-protected-loopback`。
 - [UDP flow control loopback](examples/udp_flow_control_loopback.zig)：protected STREAM/BLOCKED/MAX flow-control loopback UDP 交换。
   运行：`zig build run-udp-flow-control-loopback`。

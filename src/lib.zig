@@ -491,6 +491,9 @@ pub const EndpointVersionNegotiationError = Error || endpoint.RouteError;
 /// Errors returned while coordinating endpoint-owned protected Initial accept state.
 pub const EndpointProtectedInitialError = Error || endpoint.RouteError;
 
+/// Errors returned while coordinating routed protected endpoint datagrams.
+pub const EndpointProtectedDatagramError = Error || endpoint.RouteError;
+
 /// Endpoint result after accepting Version Negotiation and registering follow-up routing.
 pub const EndpointVersionNegotiationFollowupResult = struct {
     /// Version Negotiation processing result, including selected version and old route cleanup.
@@ -1367,6 +1370,35 @@ pub const EndpointConnectionLifecycle = struct {
     ) Error!void {
         try connection.processProtectedShortDatagram(now_millis, keys, dcid_len, datagram);
         try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
+    /// Route and process one caller-keyed protected 1-RTT datagram.
+    ///
+    /// Socket loops can use this when the endpoint owns route selection while
+    /// the caller still supplies packet-protection keys. The route must resolve
+    /// to `connection_id`; the routed destination CID length is then used for
+    /// short-header packet protection removal, and the endpoint recovery timer
+    /// is refreshed after successful connection processing.
+    pub fn processRoutedProtectedShortDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedShortDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            keys,
+            route.destination_connection_id.asSlice().len,
+            datagram,
+        );
+        return route;
     }
 
     /// Poll one explicit-key-phase protected 1-RTT datagram and refresh timers.
@@ -15895,16 +15927,16 @@ test "EndpointConnectionLifecycle refreshes caller-keyed protected short timer l
     try std.testing.expectEqual(@as(usize, 1), client_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
 
-    const server_route = try server_lifecycle.routeDatagram(server_receive_path, ping);
-    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
-    try server_lifecycle.processProtectedShortDatagram(
-        server_route.connection_id,
+    const server_route = try server_lifecycle.processRoutedProtectedShortDatagram(
+        server_connection_id,
         &server,
+        server_receive_path,
         11,
         secrets.client,
-        server_dcid.len,
         ping,
     );
+    try std.testing.expectEqual(server_connection_id, server_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, server_route.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 
@@ -15919,16 +15951,24 @@ test "EndpointConnectionLifecycle refreshes caller-keyed protected short timer l
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 
-    const client_route = try client_lifecycle.routeDatagram(client_receive_path, ack);
-    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
-    try client_lifecycle.processProtectedShortDatagram(
-        client_route.connection_id,
+    try std.testing.expectError(error.InvalidPacket, client_lifecycle.processRoutedProtectedShortDatagram(
+        server_connection_id,
         &client,
+        client_receive_path,
         13,
         secrets.server,
-        client_dcid.len,
+        ack,
+    ));
+    const client_route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        client_connection_id,
+        &client,
+        client_receive_path,
+        13,
+        secrets.server,
         ack,
     );
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &client_dcid, client_route.destination_connection_id.asSlice());
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
