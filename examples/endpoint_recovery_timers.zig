@@ -30,6 +30,8 @@ pub fn main() !void {
     defer pto_conn.deinit();
     var loss_conn = try quicz.QuicConnection.init(allocator, .client, .{});
     defer loss_conn.deinit();
+    try pto_conn.confirmHandshake();
+    try loss_conn.confirmHandshake();
 
     _ = try pto_conn.recordPacketSentInSpace(.application, 10, 100);
 
@@ -106,6 +108,7 @@ pub fn main() !void {
         .initial_rtt_ms = 100,
     });
     defer closing_conn.deinit();
+    try closing_conn.confirmHandshake();
     try endpoint_lifecycle.registerConnectionId(closing_connection_id, &closing_cid, path, .{
         .sequence_number = 2,
     });
@@ -311,6 +314,9 @@ pub fn main() !void {
     );
     try require(protected_server.bytesInFlight(.handshake) == 0);
     try require(protected_server_lifecycle.recoveryTimerCount() == 0);
+
+    try protected_client.confirmHandshake();
+    try protected_server.confirmHandshake();
 
     const caller_early_stream_id = try protected_client.openStream();
     try protected_client.sendOnStream(caller_early_stream_id, "caller early", true);

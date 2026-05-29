@@ -38,8 +38,24 @@ pub fn main() !void {
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
 
+    var pre_confirm = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer pre_confirm.deinit();
+    _ = try pre_confirm.recordPacketSentInSpace(.application, 10, 100);
+    if (pre_confirm.ptoDeadlineMillis(.application) != null) return error.PtoRecoveryExampleFailed;
+    if (pre_confirm.lossDetectionTimerDeadlineMillis() != null) return error.PtoRecoveryExampleFailed;
+    try pre_confirm.checkPtoTimeouts(10_000);
+    if (pre_confirm.pending_ping_count != 0) return error.PtoRecoveryExampleFailed;
+    if (pre_confirm.recovery_state.pto_count != 0) return error.PtoRecoveryExampleFailed;
+    try pre_confirm.confirmHandshake();
+    const pre_confirm_deadline = pre_confirm.ptoDeadlineMillis(.application) orelse return error.PtoRecoveryExampleFailed;
+    std.debug.print(
+        "[pto] application PTO gated until handshake confirmed deadline={d}\n",
+        .{pre_confirm_deadline},
+    );
+
     var conn = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer conn.deinit();
+    try conn.confirmHandshake();
 
     _ = try conn.recordPacketSentInSpace(.application, 10, 100);
     const timer = conn.lossDetectionTimerDeadlineMillis() orelse return error.PtoRecoveryExampleFailed;
@@ -77,6 +93,7 @@ pub fn main() !void {
 
     var stream_probe = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer stream_probe.deinit();
+    try stream_probe.confirmHandshake();
     const stream_id = try stream_probe.openStream();
     try stream_probe.sendOnStream(stream_id, "old", false);
     _ = (try stream_probe.pollTx(10, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
@@ -103,6 +120,7 @@ pub fn main() !void {
 
     var retransmit_probe = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer retransmit_probe.deinit();
+    try retransmit_probe.confirmHandshake();
     const retransmit_stream_id = try retransmit_probe.openStream();
     try retransmit_probe.sendOnStream(retransmit_stream_id, "old", false);
     _ = (try retransmit_probe.pollTx(10, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
@@ -132,6 +150,7 @@ pub fn main() !void {
 
     var crypto_probe = try quicz.QuicConnection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer crypto_probe.deinit();
+    try crypto_probe.confirmHandshake();
     try crypto_probe.sendCrypto("pto protected crypto");
     const first_crypto = (try crypto_probe.pollProtectedShortDatagram(
         10,

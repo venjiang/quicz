@@ -2683,8 +2683,10 @@ pub const QuicConnection = struct {
     ///
     /// This uses the latest ack-eliciting packet tracked in the selected space
     /// and the current simplified PTO duration. ACK-only payloads are not
-    /// tracked in `sent_packets`, so they do not arm PTO.
+    /// tracked in `sent_packets`, so they do not arm PTO. RFC 9002 forbids
+    /// arming Application Data PTO before the handshake is confirmed.
     pub fn ptoDeadlineMillis(self: QuicConnection, space: PacketNumberSpace) ?i64 {
+        if (!self.ptoAllowedInSpace(space)) return null;
         return switch (space) {
             .initial => ptoDeadlineFor(self.initial_packet_space.sent_packets.items, self.initial_packet_space.recovery_state, false),
             .handshake => ptoDeadlineFor(self.handshake_packet_space.sent_packets.items, self.handshake_packet_space.recovery_state, false),
@@ -8569,7 +8571,15 @@ pub const QuicConnection = struct {
         }
     }
 
+    fn ptoAllowedInSpace(self: QuicConnection, space: PacketNumberSpace) bool {
+        return switch (space) {
+            .initial, .handshake => true,
+            .application => self.handshake_confirmed,
+        };
+    }
+
     fn queuePtoProbeInSpace(self: *QuicConnection, space: PacketNumberSpace) Error!void {
+        if (!self.ptoAllowedInSpace(space)) return;
         if (self.hasPendingPtoProbeDataInSpace(space)) {
             self.armPtoProbeInSpace(space);
             return;
@@ -8594,6 +8604,7 @@ pub const QuicConnection = struct {
         const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
         for (spaces) |space| {
             if (space == expired_space) continue;
+            if (!self.ptoAllowedInSpace(space)) continue;
 
             const packet_space = self.packetNumberSpace(space);
             if (packet_space.discarded.* or packet_space.sent_packets.items.len == 0) continue;
@@ -12621,6 +12632,8 @@ test "ACK delay is ignored for Initial and Handshake RTT samples" {
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
+    try conn.confirmHandshake();
+    try conn.confirmHandshake();
 
     _ = try conn.recordPacketSentInSpace(.initial, 0, 100);
     try conn.receiveAckInSpace(.initial, 100, .{
@@ -12805,6 +12818,7 @@ test "loss detection timer is disarmed in closing and draining states" {
         .initial_rtt_ms = 100,
     });
     defer closing.deinit();
+    try closing.confirmHandshake();
 
     _ = try closing.recordPacketSentInSpace(.application, 10, 100);
     try std.testing.expect(closing.lossDetectionTimerDeadlineMillis() != null);
@@ -12820,6 +12834,7 @@ test "loss detection timer is disarmed in closing and draining states" {
         .initial_rtt_ms = 100,
     });
     defer draining.deinit();
+    try draining.confirmHandshake();
 
     _ = try draining.recordPacketSentInSpace(.application, 20, 100);
     try std.testing.expect(draining.lossDetectionTimerDeadlineMillis() != null);
@@ -12840,11 +12855,33 @@ test "loss detection timer is disarmed in closing and draining states" {
     try std.testing.expectEqual(@as(u8, 0), draining.recovery_state.pto_count);
 }
 
+test "Application PTO is gated until handshake confirmation" {
+    var conn = try QuicConnection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try std.testing.expectEqual(@as(?i64, null), conn.ptoDeadlineMillis(.application));
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), conn.lossDetectionTimerDeadlineMillis());
+
+    try conn.checkPtoTimeouts(10_000);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
+
+    try conn.confirmHandshake();
+    const deadline = conn.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, deadline.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline.kind);
+    try std.testing.expectEqual(@as(i64, 335), deadline.deadline_millis);
+}
+
 test "serviceLossDetectionTimer is no-op before aggregate deadline" {
     var conn = try QuicConnection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
+    try conn.confirmHandshake();
 
     _ = try conn.recordPacketSentInSpace(.application, 10, 100);
     const deadline = conn.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
@@ -12887,6 +12924,7 @@ test "serviceLossDetectionTimer handles PTO deadline through aggregate timer" {
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
+    try conn.confirmHandshake();
 
     _ = try conn.recordPacketSentInSpace(.application, 10, 100);
 
@@ -12903,6 +12941,7 @@ test "PTO frame-payload probe bypasses congestion window once" {
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
+    try conn.confirmHandshake();
 
     _ = try conn.recordPacketSentInSpace(.application, 10, 100);
     const deadline = conn.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
@@ -12936,10 +12975,12 @@ test "EndpointLossDetectionTimers selects and services earliest connection timer
         .initial_rtt_ms = 100,
     });
     defer fast.deinit();
+    try fast.confirmHandshake();
     var slow = try QuicConnection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 200,
     });
     defer slow.deinit();
+    try slow.confirmHandshake();
 
     _ = try fast.recordPacketSentInSpace(.application, 10, 100);
     _ = try slow.recordPacketSentInSpace(.application, 20, 100);
@@ -12994,6 +13035,7 @@ test "EndpointLossDetectionTimers disarms closing connections" {
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
+    try conn.confirmHandshake();
 
     _ = try conn.recordPacketSentInSpace(.application, 10, 100);
     try timers.armFromConnection(77, &conn);
@@ -13052,6 +13094,7 @@ test "EndpointConnectionLifecycle retires routes with recovery timer" {
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
+    try conn.confirmHandshake();
 
     const path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
@@ -13604,6 +13647,8 @@ test "EndpointConnectionLifecycle refreshes caller-keyed zero RTT timer lifecycl
     });
     defer server.deinit();
     try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
 
     const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000);
     const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
@@ -13829,6 +13874,8 @@ test "EndpointConnectionLifecycle refreshes installed-key zero RTT timer lifecyc
     });
     defer server.deinit();
     try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
 
     try client.installZeroRttTrafficSecrets(.{
         .local = secrets.client.secret,
@@ -13963,6 +14010,8 @@ test "EndpointConnectionLifecycle refreshes caller-keyed protected short timer l
     });
     defer server.deinit();
     try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
 
     const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000);
     const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
@@ -14058,6 +14107,8 @@ test "EndpointConnectionLifecycle refreshes explicit key update short timer life
     });
     defer server.deinit();
     try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
 
     const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000);
     const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
@@ -14162,6 +14213,8 @@ test "EndpointConnectionLifecycle refreshes caller-owned key phase short timer l
     });
     defer server.deinit();
     try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
 
     var client_send_state = protection.Aes128KeyPhaseState.init(secrets.client, false);
     var server_recv_state = protection.Aes128KeyPhaseState.init(secrets.client, false);
@@ -14264,6 +14317,8 @@ test "EndpointConnectionLifecycle refreshes installed-key protected short timer 
     });
     defer server.deinit();
     try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
 
     try client.installOneRttTrafficSecrets(.{
         .local = secrets.client.secret,
@@ -14355,6 +14410,7 @@ test "EndpointLossDetectionTimers drives protected short PTO and ACK disarm" {
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
+    try client.confirmHandshake();
 
     try client.sendPing();
     const first = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
@@ -14426,6 +14482,7 @@ test "protected short PTO probe bypasses congestion window once" {
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
+    try client.confirmHandshake();
 
     try client.sendPing();
     const first = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
@@ -14900,6 +14957,7 @@ test "checkPtoTimeouts queues application PING and backs off PTO" {
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
+    try conn.confirmHandshake();
 
     _ = try conn.recordPacketSentInSpace(.application, 10, 100);
     try std.testing.expectEqual(@as(?i64, 335), conn.ptoDeadlineMillis(.application));
@@ -14937,6 +14995,7 @@ test "checkPtoTimeouts uses queued STREAM data as application probe before PING"
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
+    try conn.confirmHandshake();
 
     const stream_id = try conn.openStream();
     try conn.sendOnStream(stream_id, "old", false);
@@ -14972,6 +15031,7 @@ test "checkPtoTimeouts retransmits in-flight STREAM data before PING" {
         .initial_rtt_ms = 100,
     });
     defer conn.deinit();
+    try conn.confirmHandshake();
 
     const stream_id = try conn.openStream();
     try conn.sendOnStream(stream_id, "old", false);
@@ -15077,6 +15137,7 @@ test "checkPtoTimeouts retransmits protected short CRYPTO data before PING" {
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
+    try client.confirmHandshake();
 
     try client.sendCrypto("pto protected crypto");
     const protected = (try client.pollProtectedShortDatagram(
@@ -15128,25 +15189,32 @@ test "checkPtoTimeouts queues peer-space PTO probes without early backoff" {
 
     _ = try conn.recordPacketSentInSpace(.initial, 10, 100);
     _ = try conn.recordPacketSentInSpace(.handshake, 20, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 30, 100);
 
     try std.testing.expectEqual(@as(?i64, 310), conn.ptoDeadlineMillis(.initial));
     try std.testing.expectEqual(@as(?i64, 320), conn.ptoDeadlineMillis(.handshake));
+    try std.testing.expectEqual(@as(?i64, null), conn.ptoDeadlineMillis(.application));
 
     try conn.checkPtoTimeouts(309);
     try std.testing.expectEqual(@as(usize, 0), conn.initial_packet_space.pending_ping_count);
     try std.testing.expectEqual(@as(usize, 0), conn.handshake_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
 
     try conn.checkPtoTimeouts(310);
     try std.testing.expectEqual(@as(usize, 1), conn.initial_packet_space.pending_ping_count);
     try std.testing.expectEqual(@as(usize, 1), conn.handshake_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
     try std.testing.expectEqual(@as(u8, 1), conn.initial_packet_space.recovery_state.pto_count);
     try std.testing.expectEqual(@as(u8, 0), conn.handshake_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
 
     try conn.checkPtoTimeouts(320);
     try std.testing.expectEqual(@as(usize, 1), conn.initial_packet_space.pending_ping_count);
     try std.testing.expectEqual(@as(usize, 1), conn.handshake_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
     try std.testing.expectEqual(@as(u8, 1), conn.initial_packet_space.recovery_state.pto_count);
     try std.testing.expectEqual(@as(u8, 1), conn.handshake_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
 
     var out_buf: [32]u8 = undefined;
     const initial_payload = (try conn.pollTxInSpace(.initial, 321, &out_buf)) orelse return error.TestUnexpectedResult;
@@ -16345,6 +16413,7 @@ test "checkPtoTimeouts retransmits protected 0-RTT STREAM data before PING" {
         .initial_rtt_ms = 100,
     });
     defer client.deinit();
+    try client.confirmHandshake();
 
     const stream_id = try client.openStream();
     try client.sendOnStream(stream_id, "pto early", true);
@@ -16532,6 +16601,7 @@ test "checkPtoTimeouts retransmits protected 0-RTT control frames before PING" {
         .initial_rtt_ms = 100,
     });
     defer reset_client.deinit();
+    try reset_client.confirmHandshake();
 
     const reset_stream_id = try reset_client.openStream();
     try reset_client.sendOnStream(reset_stream_id, "bye", false);
@@ -16574,6 +16644,7 @@ test "checkPtoTimeouts retransmits protected 0-RTT control frames before PING" {
         .initial_rtt_ms = 100,
     });
     defer stop_client.deinit();
+    try stop_client.confirmHandshake();
 
     const stop_stream_id = try stop_client.openStream();
     try stop_client.stopSending(stop_stream_id, 13);
