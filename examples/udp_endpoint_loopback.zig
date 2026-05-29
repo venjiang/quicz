@@ -119,6 +119,7 @@ pub fn main() !void {
     const client_versions = [_]quicz.packet.Version{ .v2, .v1, unsupported_version };
     const original_dcid = [_]u8{ 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88 };
     const client_initial_scid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const followup_client_initial_scid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
 
     var unsupported_initial_raw: [64]u8 = undefined;
     const unsupported_initial = try buildInitialDatagram(
@@ -129,6 +130,17 @@ pub fn main() !void {
         &.{},
         &[_]u8{0x01},
     );
+
+    const client_path = try udp4Tuple(client_socket.address, server_socket.address);
+    var version_negotiation_client = try quicz.Connection.init(std.heap.page_allocator, .client, .{
+        .chosen_version = unsupported_version,
+        .available_versions = &client_versions,
+    });
+    defer version_negotiation_client.deinit();
+    _ = try client_lifecycle.registerClientInitialSourceConnectionId(31, &client_initial_scid, client_path, .{
+        .active_migration_disabled = true,
+    });
+    try require(client_lifecycle.routeCount() == 1);
 
     try client_socket.send(io, &server_socket.address, unsupported_initial);
 
@@ -161,22 +173,25 @@ pub fn main() !void {
     try require(std.mem.eql(u8, parsed_version_negotiation.scid, &original_dcid));
     try require(parsed_version_negotiation.versions.len == supported_versions.len);
 
-    var version_negotiation_client = try quicz.Connection.init(std.heap.page_allocator, .client, .{
-        .chosen_version = unsupported_version,
-        .available_versions = &client_versions,
-    });
-    defer version_negotiation_client.deinit();
-    const selected_version = (try version_negotiation_client.processVersionNegotiationDatagram(
+    const version_negotiation_result = (try client_lifecycle.processVersionNegotiationDatagram(
+        31,
+        &version_negotiation_client,
         0,
         &original_dcid,
         &client_initial_scid,
         version_negotiation_received.data,
     )) orelse return error.UnexpectedState;
+    const selected_version = version_negotiation_result.selected_version;
     try require(selected_version == .v2);
     try require(version_negotiation_client.versionNegotiationSelectedVersion() == .v2);
+    try require(version_negotiation_result.followup_config.chosen_version == .v2);
+    try require(version_negotiation_result.retired.routes_retired == 1);
+    try require(client_lifecycle.routeCount() == 0);
 
-    const client_path = try udp4Tuple(client_socket.address, server_socket.address);
-    _ = try client_lifecycle.registerClientInitialSourceConnectionId(31, &client_initial_scid, client_path, .{
+    var followup_client = try quicz.Connection.init(std.heap.page_allocator, .client, version_negotiation_result.followup_config);
+    defer followup_client.deinit();
+    try require(followup_client.versionNegotiationSelectedVersion() == .v2);
+    _ = try client_lifecycle.registerClientInitialSourceConnectionId(32, &followup_client_initial_scid, client_path, .{
         .active_migration_disabled = true,
     });
     try require(client_lifecycle.routeCount() == 1);
@@ -185,9 +200,9 @@ pub fn main() !void {
     var supported_initial_raw: [64]u8 = undefined;
     const supported_initial = try buildInitialDatagram(
         &supported_initial_raw,
-        .v1,
+        selected_version,
         &original_dcid,
-        &client_initial_scid,
+        &followup_client_initial_scid,
         &initial_token,
         &[_]u8{ 0x02, 0x00, 0xff },
     );
@@ -207,9 +222,9 @@ pub fn main() !void {
     const server_reset_token = [_]u8{ 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f };
     const accepted_route = switch (accept_action) {
         .accept_initial => |accept| blk: {
-            try require(accept.version == .v1);
+            try require(accept.version == selected_version);
             try require(std.mem.eql(u8, accept.original_destination_connection_id, &original_dcid));
-            try require(std.mem.eql(u8, accept.source_connection_id, &client_initial_scid));
+            try require(std.mem.eql(u8, accept.source_connection_id, &followup_client_initial_scid));
             try require(std.mem.eql(u8, accept.token, &initial_token));
             break :blk try server_lifecycle.registerAcceptedInitialConnectionIds(21, accept, &server_initial_scid, .{
                 .active_migration_disabled = true,
@@ -225,8 +240,8 @@ pub fn main() !void {
     var server_initial_raw: [64]u8 = undefined;
     const server_initial = try buildInitialDatagram(
         &server_initial_raw,
-        .v1,
-        &client_initial_scid,
+        selected_version,
+        &followup_client_initial_scid,
         &server_initial_scid,
         &.{},
         &[_]u8{ 0x06, 0x00 },
@@ -236,8 +251,8 @@ pub fn main() !void {
     const server_initial_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     const server_initial_path = try udp4Tuple(client_socket.address, server_initial_received.from);
     const client_route = try client_lifecycle.routeDatagram(server_initial_path, server_initial_received.data);
-    try require(client_route.connection_id == 31);
-    try require(std.mem.eql(u8, client_route.destination_connection_id.asSlice(), &client_initial_scid));
+    try require(client_route.connection_id == 32);
+    try require(std.mem.eql(u8, client_route.destination_connection_id.asSlice(), &followup_client_initial_scid));
 
     const short_followup = [_]u8{ 0x40, 0xb1, 0xb2, 0xb3, 0xb4, 0x01 };
     try client_socket.send(io, &server_socket.address, &short_followup);
