@@ -374,6 +374,16 @@ pub fn main() !void {
     var close_on_bad_tp = try quicz.Connection.init(gpa, .server, .{});
     defer close_on_bad_tp.deinit();
     try close_on_bad_tp.validatePeerAddress();
+    try close_on_bad_tp.installHandshakeTrafficSecrets(.{
+        .local = initial_secrets.server.secret,
+        .peer = initial_secrets.client.secret,
+    });
+    var close_client = try quicz.Connection.init(gpa, .client, .{});
+    defer close_client.deinit();
+    try close_client.installHandshakeTrafficSecrets(.{
+        .local = initial_secrets.client.secret,
+        .peer = initial_secrets.server.secret,
+    });
     var invalid_peer_tp = [_]u8{0x04};
     var closing_backend = MockCryptoBackend{
         .outbound = "blocked backend output",
@@ -385,20 +395,25 @@ pub fn main() !void {
         if (err != error.InvalidPacket) return err;
     }
     if (closing_backend.outbound_offset != 0) return error.UnexpectedState;
-    var close_payload_buf: [96]u8 = undefined;
-    const close_payload = (try close_on_bad_tp.pollTx(110, &close_payload_buf)) orelse return error.UnexpectedState;
-    var decoded_close = try quicz.frame.decodeFrameSlice(close_payload, gpa);
-    defer quicz.frame.deinitFrame(&decoded_close.frame, gpa);
-    switch (decoded_close.frame) {
-        .connection_close => |close| {
+    const close_packet = (try close_on_bad_tp.pollProtectedHandshakeDatagramWithInstalledKeys(
+        110,
+        &client_scid,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer gpa.free(close_packet);
+    try close_client.processProtectedHandshakeDatagramWithInstalledKeys(111, close_packet);
+    switch (close_client.peerClose() orelse return error.UnexpectedState) {
+        .connection => |close| {
             if (close.error_code != quicz.transport_error.codeValue(.transport_parameter_error)) return error.UnexpectedState;
             if (close.frame_type != @intFromEnum(quicz.frame.FrameType.crypto)) return error.UnexpectedState;
-            std.debug.print("[crypto] backend_tp_close error={} frame_type={} reason={s} output_pulled={} state={s}\n", .{
+            std.debug.print("[crypto] backend_tp_protected_close bytes={} error={} frame_type={} reason={s} output_pulled={} sender={s} receiver={s}\n", .{
+                close_packet.len,
                 close.error_code,
                 close.frame_type,
                 close.reason_phrase,
                 closing_backend.outbound_offset != 0,
                 @tagName(close_on_bad_tp.connectionState()),
+                @tagName(close_client.connectionState()),
             });
         },
         else => return error.UnexpectedState,

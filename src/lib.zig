@@ -2051,6 +2051,7 @@ const BuiltProtectedLongPacket = struct {
     packet_number: u64,
     datagram: []u8,
     ack_eliciting: bool,
+    close_packet: bool = false,
     sent_stream_frame: ?PendingStreamFrame = null,
     sent_reset_stream_frame: ?frame.ResetStreamFrame = null,
     sent_stop_sending_frame: ?frame.StopSendingFrame = null,
@@ -5921,11 +5922,11 @@ pub const Connection = struct {
 
     /// Return one protected Handshake long-header datagram using installed keys.
     ///
-    /// This emits at most one Handshake CRYPTO, PING+ACK, or ACK-only packet
-    /// from the Handshake packet number space without requiring the caller to
-    /// pass packet-protection keys on every call. Use the caller-keyed
-    /// `pollProtectedLongDatagram()` when coalescing Initial and Handshake
-    /// packets is required.
+    /// This emits at most one pending transport `CONNECTION_CLOSE`, Handshake
+    /// CRYPTO, PING+ACK, or ACK-only packet from the Handshake packet number
+    /// space without requiring the caller to pass packet-protection keys on
+    /// every call. Use the caller-keyed `pollProtectedLongDatagram()` when
+    /// coalescing Initial and Handshake packets is required.
     pub fn pollProtectedHandshakeDatagramWithInstalledKeys(
         self: *Connection,
         now_millis: i64,
@@ -5934,9 +5935,13 @@ pub const Connection = struct {
     ) Error!?[]u8 {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
-        if (self.isClosingOrClosed()) return error.ConnectionClosed;
 
         const keys = self.local_handshake_keys orelse return error.InvalidPacket;
+        if (self.pending_close != null) {
+            return try self.pollProtectedLongCloseDatagramInSpace(.handshake, now_millis, dcid, scid, &[_]u8{}, keys);
+        }
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+
         const built = (try self.buildNextProtectedLongPacketInSpace(
             .handshake,
             dcid,
@@ -5958,6 +5963,28 @@ pub const Connection = struct {
         }
 
         try self.ensureProtectedLongCommitCapacity(built);
+        self.commitBuiltProtectedLongPacket(built, now_millis);
+        return built.datagram;
+    }
+
+    fn pollProtectedLongCloseDatagramInSpace(
+        self: *Connection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+        token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+    ) Error!?[]u8 {
+        const built = try self.buildProtectedLongClosePacketInSpace(space, dcid, scid, token, keys, 0);
+        errdefer self.deinitBuiltProtectedLongPacket(built);
+
+        if (built.datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        if (!self.canSendToPeerAddress(built.datagram.len)) {
+            self.deinitBuiltProtectedLongPacket(built);
+            return null;
+        }
+
         self.commitBuiltProtectedLongPacket(built, now_millis);
         return built.datagram;
     }
@@ -6012,6 +6039,87 @@ pub const Connection = struct {
         keys: protection.Aes128PacketProtectionKeys,
     ) Error!?[]u8 {
         return self.pollProtectedLongCryptoDatagramInSpace(.initial, now_millis, dcid, scid, token, keys);
+    }
+
+    fn buildProtectedLongClosePacketInSpace(
+        self: *Connection,
+        space: PacketNumberSpace,
+        dcid: []const u8,
+        scid: []const u8,
+        token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        min_datagram_len: usize,
+    ) Error!BuiltProtectedLongPacket {
+        const long_space = protectedLongPacketSpaceFor(space) orelse return error.InvalidPacket;
+        if (space != .initial and token.len != 0) return error.InvalidPacket;
+        const header_token = self.initialTokenForPacket(space, token);
+        try self.validateOutgoingInitialPacketFields(space, dcid, header_token);
+
+        const packet_space = self.packetNumberSpace(space);
+        if (packet_space.discarded.*) return error.InvalidPacket;
+        if (packet_space.next_packet_number.* > max_quic_varint) return error.Internal;
+
+        const close = self.pending_close orelse return error.Internal;
+        const connection_close = switch (close) {
+            .connection => |connection| connection,
+            .application => return error.InvalidPacket,
+        };
+        const close_frame = frame.Frame{ .connection_close = connection_close };
+        if (!frameAllowedInFramePacketType(close_frame, long_space.frame_packet_type)) return error.InvalidPacket;
+        const encoded_frame_len = try connectionCloseFrameWireLen(connection_close);
+
+        const packet_number = packet_space.next_packet_number.*;
+        const packet_number_encoding = packet.encodePacketNumberForHeader(
+            packet_number,
+            packet_space.largest_acknowledged.*,
+        ) catch return error.Internal;
+
+        const header = packet.LongHeader{
+            .version = self.config.chosen_version,
+            .dcid = dcid,
+            .scid = scid,
+            .packet_type = long_space.packet_type,
+            .token = header_token,
+            .packet_number = packet_number,
+            .payload_length = 0,
+        };
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        const plaintext_len = try protectedLongPlaintextLenForMinDatagram(
+            header,
+            packet_number_encoding.len,
+            @max(encoded_frame_len, min_payload_len),
+            min_datagram_len,
+        );
+        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        frame.encodeFrame(plaintext_out.writer(), close_frame) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectLongPacketAes128(self.allocator, header, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.InvalidPacket,
+        };
+        errdefer self.allocator.free(datagram);
+
+        if (datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
+        var built = BuiltProtectedLongPacket{
+            .space = space,
+            .packet_number = packet_number,
+            .datagram = datagram,
+            .ack_eliciting = false,
+            .close_packet = true,
+        };
+        built.recordLocalOriginalDestinationConnectionId(self.localOriginalDestinationConnectionIdForPacket(space, dcid));
+        built.recordLocalInitialSourceConnectionId(self.localInitialSourceConnectionIdForPacket(space, scid));
+        return built;
     }
 
     fn buildProtectedLongCryptoPacketInSpace(
@@ -6552,6 +6660,7 @@ pub const Connection = struct {
         if (built.clear_ack) packet_space.pending_ack_largest.* = null;
         packet_space.next_packet_number.* = built.packet_number + 1;
         if (built.ack_eliciting) self.recordAckElicitingSendInSpace(built.space, built.datagram.len);
+        if (built.close_packet and !self.closed) self.enterClosingState(now_millis);
         self.recordPeerAddressBytesSent(built.datagram.len);
         self.recordPacketActivity(now_millis);
         if (built.local_original_destination_connection_id_len) |len| {
@@ -13437,6 +13546,86 @@ test "driveCryptoBackendInSpaceOrClose queues close for invalid peer transport p
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
         },
         else => return error.InvalidPacket,
+    }
+}
+
+test "driveCryptoBackendInSpaceOrClose emits protected Handshake CONNECTION_CLOSE with installed keys" {
+    const BadBackend = struct {
+        output_pulled: bool = false,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(error.InvalidPacket, server.driveCryptoBackendInSpaceOrClose(.handshake, backend.backend(), &scratch));
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+
+    const close_packet = (try server.pollProtectedHandshakeDatagramWithInstalledKeys(10, &client_dcid, &server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.closeDeadlineMillis().? > 10);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.handshake));
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(11, close_packet);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
     }
 }
 
