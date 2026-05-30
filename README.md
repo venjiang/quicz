@@ -188,6 +188,10 @@ experimental.
   Socket-backed lifecycle-routed installed-key Handshake CRYPTO delivery and
   ACK cleanup over loopback UDP. Run with
   `zig build run-udp-handshake-keys-loopback`.
+- [UDP Crypto stream loopback](examples/udp_crypto_stream_loopback.zig):
+  Socket-backed mock `CryptoBackend` Handshake CRYPTO byte handoff,
+  transport-parameter exchange, and routed ACK cleanup. Run with
+  `zig build run-udp-crypto-stream-loopback`.
 - [UDP 0-RTT loopback](examples/udp_zero_rtt_loopback.zig):
   Socket-backed lifecycle-routed installed-key 0-RTT STREAM delivery,
   accept-before-process enforcement, 1-RTT ACK cleanup, and server-side

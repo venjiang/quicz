@@ -562,6 +562,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_udp_handshake_keys_loopback);
 
+    // UDP CryptoBackend CRYPTO stream loopback executable
+    const exe_udp_crypto_stream_loopback = b.addExecutable(.{
+        .name = "quicz-udp-crypto-stream-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/udp_crypto_stream_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_udp_crypto_stream_loopback);
+
     // UDP 0-RTT loopback executable
     const exe_udp_zero_rtt_loopback = b.addExecutable(.{
         .name = "quicz-udp-zero-rtt-loopback",
@@ -1028,6 +1042,15 @@ pub fn build(b: *std.Build) void {
     run_udp_handshake_keys_loopback_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_udp_handshake_keys_loopback_cmd.addArgs(args);
+    }
+
+    // zig build run-udp-crypto-stream-loopback
+    const run_udp_crypto_stream_loopback = b.step("run-udp-crypto-stream-loopback", "Run quicz UDP CryptoBackend CRYPTO stream loopback example");
+    const run_udp_crypto_stream_loopback_cmd = b.addRunArtifact(exe_udp_crypto_stream_loopback);
+    run_udp_crypto_stream_loopback.dependOn(&run_udp_crypto_stream_loopback_cmd.step);
+    run_udp_crypto_stream_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_udp_crypto_stream_loopback_cmd.addArgs(args);
     }
 
     // zig build run-udp-zero-rtt-loopback
