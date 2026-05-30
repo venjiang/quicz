@@ -304,6 +304,64 @@ fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
         },
         else => return error.UnexpectedState,
     }
+
+    var cid_client = try quicz.Connection.init(gpa, .client, .{});
+    defer cid_client.deinit();
+
+    const cid0 = [_]u8{ 0xc0, 0, 0, 0 };
+    const cid1 = [_]u8{ 0xc0, 0, 0, 1 };
+    const cid2 = [_]u8{ 0xc0, 0, 0, 2 };
+    const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    const token2 = [_]u8{0xa5} ** quicz.packet.stateless_reset_token_len;
+
+    var cid_payload: [96]u8 = undefined;
+    out = fixedWriter(&cid_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &cid0,
+        .stateless_reset_token = token0,
+    } });
+    try cid_client.processDatagram(0, out.getWritten());
+
+    out = fixedWriter(&cid_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &cid1,
+        .stateless_reset_token = token1,
+    } });
+    try cid_client.processDatagram(1, out.getWritten());
+
+    out = fixedWriter(&cid_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 2,
+        .retire_prior_to = 0,
+        .connection_id = &cid2,
+        .stateless_reset_token = token2,
+    } });
+    try requireError(
+        error.InvalidPacket,
+        cid_client.processDatagramOrClose(2, out.getWritten()),
+    );
+
+    var cid_close_buf: [64]u8 = undefined;
+    const cid_close_payload = try pollRequired(&cid_client, &cid_close_buf);
+    var cid_close = try quicz.frame.decodeFrameSlice(cid_close_payload, gpa);
+    defer quicz.frame.deinitFrame(&cid_close.frame, gpa);
+    if (cid_close.len != cid_close_payload.len) return error.UnexpectedState;
+
+    switch (cid_close.frame) {
+        .connection_close => |close| {
+            if (close.error_code != quicz.transport_error.codeValue(.connection_id_limit_error)) return error.UnexpectedState;
+            std.debug.print(
+                "[close] semantic connection-id-limit auto close error={} frame_type={} reason={s} state={s}\n",
+                .{ close.error_code, close.frame_type, close.reason_phrase, @tagName(cid_client.connectionState()) },
+            );
+        },
+        else => return error.UnexpectedState,
+    }
 }
 
 fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {
