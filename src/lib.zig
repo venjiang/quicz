@@ -12247,6 +12247,9 @@ pub const Connection = struct {
     }
 
     fn receivePathChallengeFrame(self: *Connection, path_challenge: frame.PathChallengeFrame) Error!void {
+        for (self.pending_path_responses.items) |response_data| {
+            if (std.mem.eql(u8, &response_data, &path_challenge.data)) return;
+        }
         self.pending_path_responses.append(self.allocator, path_challenge.data) catch return error.OutOfMemory;
     }
 
@@ -23552,6 +23555,26 @@ test "PATH_CHALLENGE queues PATH_RESPONSE with pending ACK" {
         .path_response => |path_response| try std.testing.expectEqualSlices(u8, &challenge_data, &path_response.data),
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "duplicate PATH_CHALLENGE data queues one pending PATH_RESPONSE" {
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const first_challenge = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0, 1, 2, 3 };
+    const second_challenge = [_]u8{ 0x10, 0x20, 0x30, 0x40, 4, 5, 6, 7 };
+    var challenge_buf: [64]u8 = undefined;
+    var challenge_out = buffer.fixedWriter(&challenge_buf);
+    try frame.encodeFrame(challenge_out.writer(), .{ .path_challenge = .{ .data = first_challenge } });
+    try frame.encodeFrame(challenge_out.writer(), .{ .path_challenge = .{ .data = first_challenge } });
+    try frame.encodeFrame(challenge_out.writer(), .{ .path_challenge = .{ .data = second_challenge } });
+
+    try server.processDatagram(20, challenge_out.getWritten());
+    try std.testing.expectEqual(@as(usize, 2), server.pending_path_responses.items.len);
+    try std.testing.expectEqualSlices(u8, &first_challenge, &server.pending_path_responses.items[0]);
+    try std.testing.expectEqualSlices(u8, &second_challenge, &server.pending_path_responses.items[1]);
+    try std.testing.expectEqual(@as(?u64, 0), server.pending_ack_largest);
 }
 
 test "processDatagram rolls back PATH_RESPONSE state when payload is invalid" {
