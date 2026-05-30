@@ -8620,8 +8620,16 @@ pub const Connection = struct {
                 .stream_data_blocked => |blocked| self.classifyReceiveStreamIdCloseError(blocked.stream_id, frame_type_value),
                 .max_stream_data => |max_stream_data| self.classifySendControlStreamIdCloseError(max_stream_data.stream_id, frame_type_value),
                 .stop_sending => |stop_sending| self.classifySendControlStreamIdCloseError(stop_sending.stream_id, frame_type_value),
+                .new_token => if (self.side == .server)
+                    semanticCloseError(.protocol_violation, frame_type_value, "new token")
+                else
+                    null,
                 .path_response => |path_response| if (self.pathResponseChallengeIndex(path_response.data) == null)
                     semanticCloseError(.protocol_violation, frame_type_value, "path response")
+                else
+                    null,
+                .handshake_done => if (self.side == .server)
+                    semanticCloseError(.protocol_violation, frame_type_value, "handshake done")
                 else
                     null,
                 else => null,
@@ -25637,6 +25645,65 @@ test "processDatagramOrClose accepts matching PATH_RESPONSE without close" {
     try std.testing.expect(conn.pending_close == null);
     try std.testing.expectEqual(@as(usize, 0), conn.outstanding_path_challenges.items.len);
     try std.testing.expectEqual(@as(u64, 1), conn.nextPeerPacketNumber(.application));
+}
+
+test "processDatagramOrClose queues protocol violation close for server NEW_TOKEN" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    var token_buf: [32]u8 = undefined;
+    var token_out = buffer.fixedWriter(&token_buf);
+    try frame.encodeFrame(token_out.writer(), .{ .new_token = .{ .token = "future" } });
+    const frame_type_value = rawFrameTypeValue(token_out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, token_out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 0), conn.stored_new_tokens.items.len);
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("new token", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramOrClose queues protocol violation close for server HANDSHAKE_DONE" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const payload = [_]u8{@intFromEnum(frame.FrameType.handshake_done)};
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, &payload));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.handshake_done)), close.frame_type);
+            try std.testing.expectEqualStrings("handshake done", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
 }
 
 test "closeConnection queues CONNECTION_CLOSE and closes after pollTx" {

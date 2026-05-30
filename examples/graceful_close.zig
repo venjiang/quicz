@@ -247,6 +247,63 @@ fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
         },
         else => return error.UnexpectedState,
     }
+
+    var token_server = try quicz.Connection.init(gpa, .server, .{});
+    defer token_server.deinit();
+    try token_server.validatePeerAddress();
+
+    var new_token_payload: [32]u8 = undefined;
+    out = fixedWriter(&new_token_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .new_token = .{ .token = "future" } });
+
+    try requireError(
+        error.InvalidPacket,
+        token_server.processDatagramOrClose(0, out.getWritten()),
+    );
+
+    var token_close_buf: [64]u8 = undefined;
+    const token_close_payload = try pollRequired(&token_server, &token_close_buf);
+    var token_close = try quicz.frame.decodeFrameSlice(token_close_payload, gpa);
+    defer quicz.frame.deinitFrame(&token_close.frame, gpa);
+    if (token_close.len != token_close_payload.len) return error.UnexpectedState;
+
+    switch (token_close.frame) {
+        .connection_close => |close| {
+            if (close.error_code != quicz.transport_error.codeValue(.protocol_violation)) return error.UnexpectedState;
+            std.debug.print(
+                "[close] semantic role auto close error={} frame_type={} reason={s} state={s}\n",
+                .{ close.error_code, close.frame_type, close.reason_phrase, @tagName(token_server.connectionState()) },
+            );
+        },
+        else => return error.UnexpectedState,
+    }
+
+    var handshake_done_server = try quicz.Connection.init(gpa, .server, .{});
+    defer handshake_done_server.deinit();
+    try handshake_done_server.validatePeerAddress();
+
+    const handshake_done_payload = [_]u8{@intFromEnum(quicz.frame.FrameType.handshake_done)};
+    try requireError(
+        error.InvalidPacket,
+        handshake_done_server.processDatagramOrClose(0, &handshake_done_payload),
+    );
+
+    var handshake_done_close_buf: [64]u8 = undefined;
+    const handshake_done_close_payload = try pollRequired(&handshake_done_server, &handshake_done_close_buf);
+    var handshake_done_close = try quicz.frame.decodeFrameSlice(handshake_done_close_payload, gpa);
+    defer quicz.frame.deinitFrame(&handshake_done_close.frame, gpa);
+    if (handshake_done_close.len != handshake_done_close_payload.len) return error.UnexpectedState;
+
+    switch (handshake_done_close.frame) {
+        .connection_close => |close| {
+            if (close.error_code != quicz.transport_error.codeValue(.protocol_violation)) return error.UnexpectedState;
+            std.debug.print(
+                "[close] semantic handshake-done auto close error={} frame_type={} reason={s} state={s}\n",
+                .{ close.error_code, close.frame_type, close.reason_phrase, @tagName(handshake_done_server.connectionState()) },
+            );
+        },
+        else => return error.UnexpectedState,
+    }
 }
 
 fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {
