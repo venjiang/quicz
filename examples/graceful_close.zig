@@ -362,6 +362,51 @@ fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
         },
         else => return error.UnexpectedState,
     }
+
+    var cid_reuse_client = try quicz.Connection.init(gpa, .client, .{});
+    defer cid_reuse_client.deinit();
+
+    const reuse_cid0 = [_]u8{ 0xd0, 0, 0, 0 };
+    const reuse_cid1 = [_]u8{ 0xd0, 0, 0, 1 };
+    const reuse_token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+
+    out = fixedWriter(&cid_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &reuse_cid0,
+        .stateless_reset_token = reuse_token,
+    } });
+    try cid_reuse_client.processDatagram(0, out.getWritten());
+
+    out = fixedWriter(&cid_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &reuse_cid1,
+        .stateless_reset_token = reuse_token,
+    } });
+    try requireError(
+        error.InvalidPacket,
+        cid_reuse_client.processDatagramOrClose(1, out.getWritten()),
+    );
+
+    var cid_reuse_close_buf: [64]u8 = undefined;
+    const cid_reuse_close_payload = try pollRequired(&cid_reuse_client, &cid_reuse_close_buf);
+    var cid_reuse_close = try quicz.frame.decodeFrameSlice(cid_reuse_close_payload, gpa);
+    defer quicz.frame.deinitFrame(&cid_reuse_close.frame, gpa);
+    if (cid_reuse_close.len != cid_reuse_close_payload.len) return error.UnexpectedState;
+
+    switch (cid_reuse_close.frame) {
+        .connection_close => |close| {
+            if (close.error_code != quicz.transport_error.codeValue(.protocol_violation)) return error.UnexpectedState;
+            std.debug.print(
+                "[close] semantic reset-token-reuse auto close error={} frame_type={} reason={s} state={s}\n",
+                .{ close.error_code, close.frame_type, close.reason_phrase, @tagName(cid_reuse_client.connectionState()) },
+            );
+        },
+        else => return error.UnexpectedState,
+    }
 }
 
 fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {

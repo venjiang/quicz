@@ -8597,7 +8597,21 @@ pub const Connection = struct {
         new_connection_id: frame.NewConnectionIdFrame,
         frame_type_value: u64,
     ) ?FramePayloadCloseError {
-        if (self.findActiveConnectionId(new_connection_id.sequence_number) != null) return null;
+        if (self.findActiveConnectionId(new_connection_id.sequence_number)) |existing| {
+            if (!std.mem.eql(u8, existing.connection_id, new_connection_id.connection_id)) {
+                return semanticCloseError(.protocol_violation, frame_type_value, "connection id sequence");
+            }
+            if (!statelessResetTokensEqual(existing.stateless_reset_token, new_connection_id.stateless_reset_token)) {
+                return semanticCloseError(.protocol_violation, frame_type_value, "reset token mismatch");
+            }
+            return null;
+        }
+        if (self.findActiveConnectionIdByValue(new_connection_id.connection_id)) |_| {
+            return semanticCloseError(.protocol_violation, frame_type_value, "connection id reuse");
+        }
+        if (self.activeStatelessResetTokenValueExists(new_connection_id.stateless_reset_token)) {
+            return semanticCloseError(.protocol_violation, frame_type_value, "reset token reuse");
+        }
         const active_after_retire = self.activeConnectionIdCountAfterRetirePriorTo(new_connection_id.retire_prior_to);
         if (active_after_retire >= self.config.active_connection_id_limit) {
             return semanticCloseError(.connection_id_limit_error, frame_type_value, "connection id limit");
@@ -11928,6 +11942,13 @@ pub const Connection = struct {
     fn findActiveConnectionId(self: *Connection, sequence_number: u64) ?*ActiveConnectionId {
         for (self.active_connection_ids.items) |*active_id| {
             if (active_id.sequence_number == sequence_number) return active_id;
+        }
+        return null;
+    }
+
+    fn findActiveConnectionIdByValue(self: *Connection, connection_id: []const u8) ?*ActiveConnectionId {
+        for (self.active_connection_ids.items) |*active_id| {
+            if (std.mem.eql(u8, active_id.connection_id, connection_id)) return active_id;
         }
         return null;
     }
@@ -25841,6 +25862,141 @@ test "processDatagramOrClose accepts NEW_CONNECTION_ID replacement under active 
     try std.testing.expect(!conn.active_connection_ids.items[2].retired);
     try std.testing.expectEqual(@as(?u64, 2), conn.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(u64, 3), conn.nextPeerPacketNumber(.application));
+}
+
+test "processDatagramOrClose accepts duplicate NEW_CONNECTION_ID without close" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const cid = [_]u8{ 0xe0, 0, 0, 0 };
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &cid,
+        .stateless_reset_token = token,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &cid,
+        .stateless_reset_token = token,
+    } });
+    try conn.processDatagramOrClose(1, out.getWritten());
+
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+    try std.testing.expect(conn.pending_close == null);
+    try std.testing.expectEqual(@as(usize, 1), conn.active_connection_ids.items.len);
+    try std.testing.expectEqual(@as(?u64, 1), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 2), conn.nextPeerPacketNumber(.application));
+}
+
+test "processDatagramOrClose queues protocol violation close for NEW_CONNECTION_ID sequence reuse" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    const cid0 = [_]u8{ 0xe1, 0, 0, 0 };
+    const cid1 = [_]u8{ 0xe1, 0, 0, 1 };
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &cid0,
+        .stateless_reset_token = token0,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &cid1,
+        .stateless_reset_token = token1,
+    } });
+    const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(1, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 1), conn.active_connection_ids.items.len);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 1), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(1, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("connection id sequence", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramOrClose queues protocol violation close for NEW_CONNECTION_ID token reuse" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const cid0 = [_]u8{ 0xe2, 0, 0, 0 };
+    const cid1 = [_]u8{ 0xe2, 0, 0, 1 };
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &cid0,
+        .stateless_reset_token = token,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &cid1,
+        .stateless_reset_token = token,
+    } });
+    const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(1, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 1), conn.active_connection_ids.items.len);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 1), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(1, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("reset token reuse", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
 }
 
 test "closeConnection queues CONNECTION_CLOSE and closes after pollTx" {
