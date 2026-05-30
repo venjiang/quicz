@@ -75,6 +75,11 @@ produce or consume TLS-owned QUIC packets over UDP.
 
 ## Progress Notes
 
+- 2026-05-29: Added socket-backed UDP installed-key 1-RTT STREAM loopback
+  coverage. `udp_one_rtt_loopback` installs connection-owned 1-RTT traffic
+  secrets, confirms the modeled handshake, delivers a protected STREAM frame
+  over real loopback UDP through `EndpointConnectionLifecycle`, and verifies
+  routed ACK cleanup for the Application packet number space.
 - 2026-05-29: Added socket-backed UDP installed-key Handshake loopback
   coverage. `udp_handshake_keys_loopback` uses connection-installed Handshake
   traffic secrets over real loopback UDP sockets through
@@ -2096,6 +2101,7 @@ run from `build.zig`.
 | `udp_protected_loopback` | Socket-backed loopback UDP lifecycle protected packet exercise: lifecycle-owned caller-keyed protected client Initial route registration, accepted protected Initial authentication before server route registration, anti-amplification budget accounting, protected server Initial response emission and routed client-side processing, routed caller-keyed 1-RTT PING processing, and routed caller-keyed 1-RTT ACK processing. | Present |
 | `udp_handshake_keys_loopback` | Socket-backed loopback UDP Handshake-key exercise: lifecycle-routed installed-key Handshake CRYPTO delivery in both directions and routed Handshake ACK cleanup. | Present |
 | `udp_zero_rtt_loopback` | Socket-backed loopback UDP 0-RTT exercise: lifecycle-routed installed-key 0-RTT STREAM delivery, explicit accept-before-process enforcement, routed 1-RTT ACK cleanup, and server-side 0-RTT key discard after successful 1-RTT receive. | Present |
+| `udp_one_rtt_loopback` | Socket-backed loopback UDP 1-RTT exercise: lifecycle-routed installed-key 1-RTT STREAM delivery after modeled handshake confirmation and routed Application-space ACK cleanup. | Present |
 | `udp_flow_control_loopback` | Socket-backed loopback UDP flow-control exercise: lifecycle-routed protected STREAM delivery to the receive limit, lifecycle-routed protected STREAM_DATA_BLOCKED routing, lifecycle-routed receive-side MAX_DATA/MAX_STREAM_DATA credit refresh delivery, lifecycle-routed resumed STREAM data with FIN, and lifecycle-routed final ACK cleanup. | Present |
 | `udp_spin_bit_loopback` | Socket-backed loopback UDP spin-bit exercise: enabled single-path spin-bit signaling, lifecycle-routed protected short PING/ACK receive paths, first false spin round, migrated second true-spin PING with `path_changed`, lifecycle-owned route update/reset, reset ACK spin, and final ACK cleanup. | Present |
 | `udp_ecn_validation_loopback` | Socket-backed loopback UDP ECN validation exercise: lifecycle-routed modeled ECT(0) protected short PING routing, lifecycle-routed protected ACK_ECN success, lifecycle-routed ACK_ECN CE-driven NewReno recovery response, lifecycle-owned endpoint ECN state update for the active UDP tuple, and migrated-path ECN isolation without claiming real IP-header ECN marking. | Present |
@@ -2172,6 +2178,7 @@ zig build run-udp-connection-ids-loopback
 zig build run-udp-protected-loopback
 zig build run-udp-handshake-keys-loopback
 zig build run-udp-zero-rtt-loopback
+zig build run-udp-one-rtt-loopback
 zig build run-udp-flow-control-loopback
 zig build run-udp-spin-bit-loopback
 zig build run-udp-ecn-validation-loopback

@@ -192,6 +192,9 @@ experimental.
   Socket-backed lifecycle-routed installed-key 0-RTT STREAM delivery,
   accept-before-process enforcement, 1-RTT ACK cleanup, and server-side
   0-RTT key discard. Run with `zig build run-udp-zero-rtt-loopback`.
+- [UDP 1-RTT loopback](examples/udp_one_rtt_loopback.zig):
+  Socket-backed lifecycle-routed installed-key 1-RTT STREAM delivery and ACK
+  cleanup. Run with `zig build run-udp-one-rtt-loopback`.
 - [UDP flow control loopback](examples/udp_flow_control_loopback.zig):
   Lifecycle-routed protected STREAM/BLOCKED/MAX flow-control exchange over
   loopback UDP. Run with `zig build run-udp-flow-control-loopback`.
