@@ -4639,6 +4639,15 @@ pub const Connection = struct {
         return count;
     }
 
+    fn localConnectionIdCountAfterRetirePriorTo(self: Connection, retire_prior_to: u64) u64 {
+        var count: u64 = 0;
+        for (self.local_connection_ids.items) |local_id| {
+            if (local_id.retired or local_id.sequence_number < retire_prior_to) continue;
+            count += 1;
+        }
+        return count;
+    }
+
     /// Return locally issued NEW_CONNECTION_ID frames still waiting to be sent.
     pub fn pendingNewConnectionIdCount(self: Connection) usize {
         var count: usize = 0;
@@ -4663,7 +4672,7 @@ pub const Connection = struct {
         if (connection_id.len == 0 or connection_id.len > max_connection_id_len) return error.InvalidPacket;
         if (self.next_local_connection_id_sequence > max_quic_varint) return error.Internal;
         if (retire_prior_to > self.next_local_connection_id_sequence) return error.InvalidPacket;
-        if (self.localConnectionIdCount() >= self.peer_active_connection_id_limit) return error.InvalidPacket;
+        if (self.localConnectionIdCountAfterRetirePriorTo(retire_prior_to) >= self.peer_active_connection_id_limit) return error.InvalidPacket;
         if (self.localConnectionIdValueExists(connection_id)) return error.InvalidPacket;
         if (self.localStatelessResetTokenValueExists(stateless_reset_token)) return error.InvalidPacket;
 
@@ -23802,6 +23811,53 @@ test "issueConnectionId rejects duplicate CIDs duplicate reset tokens and peer a
     try std.testing.expectEqual(@as(u64, 1), try conn.issueConnectionId(&cid1, token1, 0));
     try std.testing.expectError(error.InvalidPacket, conn.issueConnectionId(&cid2, token2, 0));
     try std.testing.expectEqual(@as(u64, 2), conn.localConnectionIdCount());
+}
+
+test "issueConnectionId allows replacement when retire_prior_to frees peer active limit" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    const token2 = [_]u8{0xa5} ** packet.stateless_reset_token_len;
+    const cid0 = [_]u8{ 0xa0, 0, 0, 0 };
+    const cid1 = [_]u8{ 0xa0, 0, 0, 1 };
+    const cid2 = [_]u8{ 0xa0, 0, 0, 2 };
+
+    try std.testing.expectEqual(@as(u64, 0), try conn.issueConnectionId(&cid0, token0, 0));
+    try std.testing.expectEqual(@as(u64, 1), try conn.issueConnectionId(&cid1, token1, 0));
+    try std.testing.expectEqual(@as(u64, 2), conn.localConnectionIdCount());
+
+    var tx: [64]u8 = undefined;
+    _ = (try conn.pollTx(0, &tx)) orelse return error.TestUnexpectedResult;
+    _ = (try conn.pollTx(1, &tx)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(conn.local_connection_ids.items[0].sent);
+    try std.testing.expect(conn.local_connection_ids.items[1].sent);
+
+    try std.testing.expectEqual(@as(u64, 2), try conn.issueConnectionId(&cid2, token2, 1));
+    try std.testing.expectEqual(@as(u64, 3), conn.localConnectionIdCount());
+    try std.testing.expectEqual(@as(usize, 1), conn.pendingNewConnectionIdCount());
+
+    const replacement_payload = (try conn.pollTx(2, &tx)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(replacement_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .new_connection_id => |new_id| {
+            try std.testing.expectEqual(@as(u64, 2), new_id.sequence_number);
+            try std.testing.expectEqual(@as(u64, 1), new_id.retire_prior_to);
+            try std.testing.expectEqualSlices(u8, &cid2, new_id.connection_id);
+            try std.testing.expectEqualSlices(u8, &token2, &new_id.stateless_reset_token);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var retire_buf: [16]u8 = undefined;
+    var retire_out = buffer.fixedWriter(&retire_buf);
+    try frame.encodeFrame(retire_out.writer(), .{ .retire_connection_id = .{ .sequence_number = 0 } });
+    try conn.processDatagram(10, retire_out.getWritten());
+    try std.testing.expectEqual(@as(u64, 2), conn.localConnectionIdCount());
+    try std.testing.expect(conn.local_connection_ids.items[0].retired);
 }
 
 test "RETIRE_CONNECTION_ID rejects unknown or unsent local ids" {
