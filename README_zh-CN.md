@@ -163,6 +163,8 @@ pub fn main() !void {
   运行：`zig build run-udp-zero-rtt-loopback`。
 - [UDP 1-RTT loopback](examples/udp_one_rtt_loopback.zig)：socket-backed lifecycle-routed installed-key 1-RTT STREAM delivery 和 ACK cleanup。
   运行：`zig build run-udp-one-rtt-loopback`。
+- [UDP HANDSHAKE_DONE loopback](examples/udp_handshake_done_loopback.zig)：socket-backed lifecycle-routed installed-key HANDSHAKE_DONE confirmation、Handshake key discard 和 ACK cleanup。
+  运行：`zig build run-udp-handshake-done-loopback`。
 - [UDP flow control loopback](examples/udp_flow_control_loopback.zig)：lifecycle-routed protected STREAM/BLOCKED/MAX flow-control loopback UDP 交换。
   运行：`zig build run-udp-flow-control-loopback`。
 - [UDP spin bit loopback](examples/udp_spin_bit_loopback.zig)：lifecycle-routed protected short packet 上的可配置单路径 spin-bit signaling。
