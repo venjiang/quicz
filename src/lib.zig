@@ -938,6 +938,44 @@ pub const EndpointConnectionLifecycle = struct {
         return route;
     }
 
+    /// Route and process one protected Initial datagram with close propagation.
+    ///
+    /// This preserves `processRoutedProtectedInitialDatagram()` routing and
+    /// success behavior, but authenticated plaintext frame errors queue a
+    /// transport CONNECTION_CLOSE before returning `InvalidPacket`.
+    pub fn processRoutedProtectedInitialDatagramOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        original_destination_connection_id: []const u8,
+        datagram: []const u8,
+    ) EndpointProtectedInitialError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+
+        const info = protection.peekProtectedLongPacketInfo(datagram) catch return error.InvalidPacket;
+        if (info.packet_type != .initial) return error.InvalidPacket;
+        const initial_secrets = protection.deriveInitialSecrets(
+            info.version,
+            original_destination_connection_id,
+        ) catch return error.InvalidPacket;
+        const keys = switch (connection.side) {
+            .client => initial_secrets.server,
+            .server => initial_secrets.client,
+        };
+        try self.processProtectedLongDatagramInSpaceOrClose(
+            connection_id,
+            connection,
+            .initial,
+            now_millis,
+            keys,
+            datagram,
+        );
+        return route;
+    }
+
     /// Return a retained stateless reset token for an inactive destination CID.
     ///
     /// Active routes suppress their reset token. This read-only lookup lets
@@ -1253,6 +1291,24 @@ pub const EndpointConnectionLifecycle = struct {
         return count;
     }
 
+    /// Process protected long-header packets with close propagation and refresh timers.
+    ///
+    /// This keeps `processProtectedLongDatagram()` success behavior, but uses
+    /// the connection's close-propagating protected receive path for
+    /// authenticated plaintext frame errors.
+    pub fn processProtectedLongDatagramOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        keys: ProtectedLongDatagramKeys,
+        datagram: []const u8,
+    ) Error!usize {
+        const count = try connection.processProtectedLongDatagramOrClose(now_millis, keys, datagram);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return count;
+    }
+
     /// Route and process protected long-header packets.
     ///
     /// This is the lifecycle-owned receive bridge for coalesced Initial,
@@ -1273,6 +1329,35 @@ pub const EndpointConnectionLifecycle = struct {
         const route = try self.routeDatagram(path, datagram);
         if (route.connection_id != connection_id) return error.InvalidPacket;
         const processed_packets = try self.processProtectedLongDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            keys,
+            datagram,
+        );
+        return .{
+            .route = route,
+            .processed_packets = processed_packets,
+        };
+    }
+
+    /// Route and process protected long-header packets with close propagation.
+    ///
+    /// Route selection and success behavior match
+    /// `processRoutedProtectedLongDatagram()`. Authenticated plaintext frame
+    /// errors queue CONNECTION_CLOSE before `InvalidPacket` is returned.
+    pub fn processRoutedProtectedLongDatagramOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        keys: ProtectedLongDatagramKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!EndpointProtectedLongDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        const processed_packets = try self.processProtectedLongDatagramOrClose(
             connection_id,
             connection,
             now_millis,
@@ -1330,6 +1415,23 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Process one caller-keyed Initial/Handshake datagram with close propagation.
+    ///
+    /// This keeps the single-space protected long success behavior while
+    /// queueing CONNECTION_CLOSE for authenticated plaintext frame errors.
+    pub fn processProtectedLongDatagramInSpaceOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) Error!void {
+        try connection.processProtectedLongDatagramInSpaceOrClose(space, now_millis, keys, datagram);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
     /// Route and process one caller-keyed Initial/Handshake datagram.
     ///
     /// Socket loops can use this when the endpoint owns route selection while
@@ -1350,6 +1452,33 @@ pub const EndpointConnectionLifecycle = struct {
         const route = try self.routeDatagram(path, datagram);
         if (route.connection_id != connection_id) return error.InvalidPacket;
         try self.processProtectedLongDatagramInSpace(
+            connection_id,
+            connection,
+            space,
+            now_millis,
+            keys,
+            datagram,
+        );
+        return route;
+    }
+
+    /// Route and process one caller-keyed Initial/Handshake datagram with close propagation.
+    ///
+    /// This keeps endpoint route validation on the lifecycle owner and delegates
+    /// authenticated frame-payload peer errors to the connection close path.
+    pub fn processRoutedProtectedLongDatagramInSpaceOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedLongDatagramInSpaceOrClose(
             connection_id,
             connection,
             space,
@@ -1401,6 +1530,22 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Process one caller-keyed protected 0-RTT datagram with close propagation.
+    ///
+    /// The caller still owns early-data policy. Authenticated 0-RTT plaintext
+    /// frame errors queue CONNECTION_CLOSE before `InvalidPacket` is returned.
+    pub fn processProtectedZeroRttDatagramOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) Error!void {
+        try connection.processProtectedZeroRttDatagramOrClose(now_millis, keys, datagram);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
     /// Route and process one caller-keyed protected 0-RTT datagram.
     ///
     /// Socket loops can use this when the endpoint owns route selection while
@@ -1420,6 +1565,32 @@ pub const EndpointConnectionLifecycle = struct {
         const route = try self.routeDatagram(path, datagram);
         if (route.connection_id != connection_id) return error.InvalidPacket;
         try self.processProtectedZeroRttDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            keys,
+            datagram,
+        );
+        return route;
+    }
+
+    /// Route and process one caller-keyed protected 0-RTT datagram with close propagation.
+    ///
+    /// Route ownership and success behavior match
+    /// `processRoutedProtectedZeroRttDatagram()`, while authenticated frame
+    /// payload errors use the connection close path.
+    pub fn processRoutedProtectedZeroRttDatagramOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedZeroRttDatagramOrClose(
             connection_id,
             connection,
             now_millis,
@@ -1470,6 +1641,24 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Process one caller-keyed protected 1-RTT datagram with close propagation.
+    ///
+    /// Packet authentication and success behavior match
+    /// `processProtectedShortDatagram()`. Authenticated Application plaintext
+    /// frame errors queue CONNECTION_CLOSE before `InvalidPacket` is returned.
+    pub fn processProtectedShortDatagramOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        try connection.processProtectedShortDatagramOrClose(now_millis, keys, dcid_len, datagram);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
     /// Route and process one caller-keyed protected 1-RTT datagram.
     ///
     /// Socket loops can use this when the endpoint owns route selection while
@@ -1489,6 +1678,33 @@ pub const EndpointConnectionLifecycle = struct {
         const route = try self.routeDatagram(path, datagram);
         if (route.connection_id != connection_id) return error.InvalidPacket;
         try self.processProtectedShortDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            keys,
+            route.destination_connection_id.asSlice().len,
+            datagram,
+        );
+        return route;
+    }
+
+    /// Route and process one caller-keyed protected 1-RTT datagram with close propagation.
+    ///
+    /// This validates the endpoint route, uses its destination CID length for
+    /// packet protection removal, and queues CONNECTION_CLOSE for authenticated
+    /// Application plaintext frame errors.
+    pub fn processRoutedProtectedShortDatagramOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedShortDatagramOrClose(
             connection_id,
             connection,
             now_millis,
@@ -1540,6 +1756,24 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Process one explicit key-update protected 1-RTT datagram with close propagation.
+    ///
+    /// Key selection and success behavior match
+    /// `processProtectedShortDatagramWithKeyUpdate()`, while authenticated
+    /// frame payload errors queue CONNECTION_CLOSE.
+    pub fn processProtectedShortDatagramWithKeyUpdateOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        keys: protection.ShortPacketKeyUpdateKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        try connection.processProtectedShortDatagramWithKeyUpdateOrClose(now_millis, keys, dcid_len, datagram);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
     /// Route and process one explicit key-update protected 1-RTT datagram.
     ///
     /// This keeps caller-supplied key-update state on the same endpoint-owned
@@ -1559,6 +1793,33 @@ pub const EndpointConnectionLifecycle = struct {
         const route = try self.routeDatagram(path, datagram);
         if (route.connection_id != connection_id) return error.InvalidPacket;
         try self.processProtectedShortDatagramWithKeyUpdate(
+            connection_id,
+            connection,
+            now_millis,
+            keys,
+            route.destination_connection_id.asSlice().len,
+            datagram,
+        );
+        return route;
+    }
+
+    /// Route and process one explicit key-update protected 1-RTT datagram with close propagation.
+    ///
+    /// This keeps caller-supplied key-update state on the same endpoint-owned
+    /// route boundary, and delegates authenticated frame-payload errors to the
+    /// connection close path.
+    pub fn processRoutedProtectedShortDatagramWithKeyUpdateOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        keys: protection.ShortPacketKeyUpdateKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedShortDatagramWithKeyUpdateOrClose(
             connection_id,
             connection,
             now_millis,
@@ -1609,6 +1870,24 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Process one caller-owned key-phase protected 1-RTT datagram with close propagation.
+    ///
+    /// The key-phase state advances only after authenticated frame processing
+    /// succeeds. Classified plaintext frame errors queue CONNECTION_CLOSE and
+    /// leave caller-owned key state unchanged.
+    pub fn processProtectedShortDatagramWithKeyPhaseStateOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        key_phase_state: *protection.Aes128KeyPhaseState,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        try connection.processProtectedShortDatagramWithKeyPhaseStateOrClose(now_millis, key_phase_state, dcid_len, datagram);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
     /// Route and process one caller-owned key-phase protected 1-RTT datagram.
     ///
     /// The key-phase state still advances only after packet authentication
@@ -1628,6 +1907,32 @@ pub const EndpointConnectionLifecycle = struct {
         const route = try self.routeDatagram(path, datagram);
         if (route.connection_id != connection_id) return error.InvalidPacket;
         try self.processProtectedShortDatagramWithKeyPhaseState(
+            connection_id,
+            connection,
+            now_millis,
+            key_phase_state,
+            route.destination_connection_id.asSlice().len,
+            datagram,
+        );
+        return route;
+    }
+
+    /// Route and process one caller-owned key-phase protected 1-RTT datagram with close propagation.
+    ///
+    /// This preserves endpoint route validation and only advances key-phase
+    /// state after `Connection` accepts the authenticated plaintext frames.
+    pub fn processRoutedProtectedShortDatagramWithKeyPhaseStateOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        key_phase_state: *protection.Aes128KeyPhaseState,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedShortDatagramWithKeyPhaseStateOrClose(
             connection_id,
             connection,
             now_millis,
@@ -1675,6 +1980,22 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Process one installed-key protected Handshake datagram with close propagation.
+    ///
+    /// Installed-key lookup and success behavior remain in `Connection`.
+    /// Authenticated plaintext frame errors queue CONNECTION_CLOSE before
+    /// `InvalidPacket` is returned.
+    pub fn processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+    ) Error!void {
+        try connection.processProtectedHandshakeDatagramWithInstalledKeysOrClose(now_millis, datagram);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
     /// Route and process one installed-key protected Handshake datagram.
     ///
     /// This is the endpoint event-loop receive bridge for TLS-owned Handshake
@@ -1692,6 +2013,30 @@ pub const EndpointConnectionLifecycle = struct {
         const route = try self.routeDatagram(path, datagram);
         if (route.connection_id != connection_id) return error.InvalidPacket;
         try self.processProtectedHandshakeDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+        return route;
+    }
+
+    /// Route and process one installed-key protected Handshake datagram with close propagation.
+    ///
+    /// This is the endpoint event-loop receive bridge for TLS-owned Handshake
+    /// packet protection when authenticated frame-payload peer errors should
+    /// produce CONNECTION_CLOSE.
+    pub fn processRoutedProtectedHandshakeDatagramWithInstalledKeysOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
             connection_id,
             connection,
             now_millis,
@@ -1738,6 +2083,21 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Process one installed-key protected 0-RTT datagram with close propagation.
+    ///
+    /// Explicit 0-RTT acceptance remains enforced by `Connection`; accepted
+    /// packets with authenticated plaintext frame errors queue CONNECTION_CLOSE.
+    pub fn processProtectedZeroRttDatagramWithInstalledKeysOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+    ) Error!void {
+        try connection.processProtectedZeroRttDatagramWithInstalledKeysOrClose(now_millis, datagram);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
     /// Route and process one installed-key protected 0-RTT datagram.
     ///
     /// This is the endpoint event-loop receive bridge for TLS early-data
@@ -1755,6 +2115,29 @@ pub const EndpointConnectionLifecycle = struct {
         const route = try self.routeDatagram(path, datagram);
         if (route.connection_id != connection_id) return error.InvalidPacket;
         try self.processProtectedZeroRttDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+        return route;
+    }
+
+    /// Route and process one installed-key protected 0-RTT datagram with close propagation.
+    ///
+    /// This keeps TLS early-data receive on the endpoint route boundary while
+    /// allowing authenticated frame-payload peer errors to queue CONNECTION_CLOSE.
+    pub fn processRoutedProtectedZeroRttDatagramWithInstalledKeysOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedZeroRttDatagramWithInstalledKeysOrClose(
             connection_id,
             connection,
             now_millis,
@@ -1801,6 +2184,23 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Process one installed-key protected 1-RTT datagram with close propagation.
+    ///
+    /// Connection-owned key-phase state advances only after authenticated
+    /// plaintext frame processing succeeds. Classified frame errors queue
+    /// CONNECTION_CLOSE and leave installed key state unchanged.
+    pub fn processProtectedShortDatagramWithInstalledKeysOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        try connection.processProtectedShortDatagramWithInstalledKeysOrClose(now_millis, dcid_len, datagram);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
     /// Route and process one installed-key protected 1-RTT datagram.
     ///
     /// Socket loops can use this after the connection owns 1-RTT packet
@@ -1819,6 +2219,30 @@ pub const EndpointConnectionLifecycle = struct {
         const route = try self.routeDatagram(path, datagram);
         if (route.connection_id != connection_id) return error.InvalidPacket;
         try self.processProtectedShortDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            route.destination_connection_id.asSlice().len,
+            datagram,
+        );
+        return route;
+    }
+
+    /// Route and process one installed-key protected 1-RTT datagram with close propagation.
+    ///
+    /// Socket loops can use this after the connection owns 1-RTT keys and wants
+    /// authenticated frame-payload peer errors to produce CONNECTION_CLOSE.
+    pub fn processRoutedProtectedShortDatagramWithInstalledKeysOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        try self.processProtectedShortDatagramWithInstalledKeysOrClose(
             connection_id,
             connection,
             now_millis,
@@ -16830,6 +17254,125 @@ test "EndpointConnectionLifecycle refreshes caller-keyed protected short timer l
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), client_lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle routed protected OrClose queues close after authenticated frame errors" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+
+    {
+        const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+        const invalid_short = try protection.protectShortPacketAes128(std.testing.allocator, .{
+            .dcid = &server_dcid,
+            .spin_bit = false,
+            .key_phase = false,
+            .packet_number = 0,
+        }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
+        defer std.testing.allocator.free(invalid_short);
+
+        var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+        defer lifecycle.deinit();
+        const connection_id: u64 = 42;
+        try lifecycle.registerConnectionId(connection_id, &server_dcid, server_receive_path, .{
+            .sequence_number = 0,
+        });
+
+        var client = try Connection.init(std.testing.allocator, .client, .{});
+        defer client.deinit();
+        var server = try Connection.init(std.testing.allocator, .server, .{});
+        defer server.deinit();
+        try server.validatePeerAddress();
+
+        try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedShortDatagramOrClose(
+            connection_id,
+            &server,
+            server_receive_path,
+            10,
+            secrets.client,
+            invalid_short,
+        ));
+        try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+        try std.testing.expect(server.pending_close != null);
+        try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+        try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+        const close_packet = (try lifecycle.pollProtectedShortDatagram(connection_id, &server, 11, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(close_packet);
+        try client.processProtectedShortDatagram(12, secrets.server, client_dcid.len, close_packet);
+        switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+            .connection => |close| {
+                try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+                try std.testing.expectEqual(@as(u64, 0x1f), close.frame_type);
+                try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    {
+        var plaintext: [1200]u8 = undefined;
+        @memset(&plaintext, 0);
+        plaintext[0] = @intFromEnum(frame.FrameType.handshake_done);
+        const invalid_initial = try protection.protectLongPacketAes128(std.testing.allocator, .{
+            .version = .v1,
+            .dcid = &original_dcid,
+            .scid = &client_dcid,
+            .packet_type = .initial,
+            .token = &[_]u8{},
+            .packet_number = 0,
+            .payload_length = 0,
+        }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+        defer std.testing.allocator.free(invalid_initial);
+        try std.testing.expect(invalid_initial.len >= min_initial_udp_datagram_len);
+
+        var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+        defer lifecycle.deinit();
+        const connection_id: u64 = 43;
+        try lifecycle.registerConnectionId(connection_id, &original_dcid, server_receive_path, .{
+            .sequence_number = 0,
+        });
+
+        var client = try Connection.init(std.testing.allocator, .client, .{});
+        defer client.deinit();
+        var server = try Connection.init(std.testing.allocator, .server, .{});
+        defer server.deinit();
+        try server.validatePeerAddress();
+
+        try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedInitialDatagramOrClose(
+            connection_id,
+            &server,
+            server_receive_path,
+            20,
+            &original_dcid,
+            invalid_initial,
+        ));
+        try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+        try std.testing.expect(server.pending_close != null);
+        try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.initial));
+        try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
+
+        const close_packet = (try lifecycle.pollProtectedLongDatagram(connection_id, &server, 21, &client_dcid, &server_scid, &[_]u8{}, .{ .initial = secrets.server })) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(close_packet);
+        try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(22, .{ .initial = secrets.server }, close_packet));
+        switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+            .connection => |close| {
+                try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+                try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.handshake_done)), close.frame_type);
+                try std.testing.expectEqualStrings("packet type", close.reason_phrase);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
 }
 
 test "EndpointConnectionLifecycle refreshes explicit key update short timer lifecycle" {

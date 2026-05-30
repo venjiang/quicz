@@ -19,6 +19,14 @@ fn requireUsizeError(expected: anyerror, result: anyerror!usize) !void {
     return error.UnexpectedState;
 }
 
+fn requireRouteError(expected: anyerror, result: anyerror!quicz.endpoint.RouteResult) !void {
+    _ = result catch |err| {
+        if (err == expected) return;
+        return err;
+    };
+    return error.UnexpectedState;
+}
+
 fn pollRequired(conn: *quicz.Connection, out: []u8) ![]const u8 {
     return (try conn.pollTx(0, out)) orelse error.UnexpectedState;
 }
@@ -350,6 +358,67 @@ fn protectedReceiveAutoCloseExample(gpa: std.mem.Allocator) !void {
     );
 }
 
+fn lifecycleProtectedReceiveAutoCloseExample(gpa: std.mem.Allocator) !void {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    const client_addr = quicz.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000);
+    const server_addr = quicz.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = quicz.endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+
+    var lifecycle = quicz.EndpointConnectionLifecycle.init(gpa);
+    defer lifecycle.deinit();
+    const connection_id: u64 = 7;
+    try lifecycle.registerConnectionId(connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_short = try quicz.protection.protectShortPacketAes128(gpa, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try quicz.packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
+    defer gpa.free(invalid_short);
+
+    var client = try quicz.Connection.init(gpa, .client, .{});
+    defer client.deinit();
+    var server = try quicz.Connection.init(gpa, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try requireRouteError(
+        error.InvalidPacket,
+        lifecycle.processRoutedProtectedShortDatagramOrClose(
+            connection_id,
+            &server,
+            server_receive_path,
+            16,
+            secrets.client,
+            invalid_short,
+        ),
+    );
+    const close_packet = (try lifecycle.pollProtectedShortDatagram(connection_id, &server, 17, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
+    defer gpa.free(close_packet);
+    try client.processProtectedShortDatagram(18, secrets.server, client_dcid.len, close_packet);
+    printPeerClose("lifecycle protected auto-close receiver", client.peerClose() orelse return error.UnexpectedState);
+    std.debug.print(
+        "[close] lifecycle protected short auto close bytes={} routes={} sender={s} receiver={s}\n",
+        .{
+            close_packet.len,
+            lifecycle.routeCount(),
+            @tagName(server.connectionState()),
+            @tagName(client.connectionState()),
+        },
+    );
+}
+
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
 
@@ -408,4 +477,5 @@ pub fn main() !void {
     try protectedShortCloseExample(gpa);
     try protectedLongCloseExample(gpa);
     try protectedReceiveAutoCloseExample(gpa);
+    try lifecycleProtectedReceiveAutoCloseExample(gpa);
 }
