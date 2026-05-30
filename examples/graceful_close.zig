@@ -3,6 +3,35 @@ const quicz = @import("quicz");
 
 const ExampleError = error{UnexpectedState};
 
+const FixedWriter = struct {
+    buffer: []u8,
+    pos: usize = 0,
+
+    pub fn writer(self: *FixedWriter) *FixedWriter {
+        return self;
+    }
+
+    pub fn writeByte(self: *FixedWriter, byte: u8) !void {
+        if (self.pos >= self.buffer.len) return error.NoSpaceLeft;
+        self.buffer[self.pos] = byte;
+        self.pos += 1;
+    }
+
+    pub fn writeAll(self: *FixedWriter, bytes: []const u8) !void {
+        if (self.buffer.len - self.pos < bytes.len) return error.NoSpaceLeft;
+        @memcpy(self.buffer[self.pos..][0..bytes.len], bytes);
+        self.pos += bytes.len;
+    }
+
+    pub fn getWritten(self: FixedWriter) []const u8 {
+        return self.buffer[0..self.pos];
+    }
+};
+
+fn fixedWriter(buffer: []u8) FixedWriter {
+    return .{ .buffer = buffer };
+}
+
 fn requireError(expected: anyerror, result: anyerror!void) !void {
     result catch |err| {
         if (err == expected) return;
@@ -148,6 +177,46 @@ fn packetTypeAutoCloseExample(gpa: std.mem.Allocator) !void {
         "[close] auto close state={s} after invalid 0-RTT ACK\n",
         .{@tagName(server.connectionState())},
     );
+}
+
+fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
+    var server = try quicz.Connection.init(gpa, .server, .{
+        .initial_max_data = 16,
+        .initial_max_stream_data = 0,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var stream_payload: [32]u8 = undefined;
+    var out = fixedWriter(&stream_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "x",
+    } });
+
+    try requireError(
+        error.InvalidPacket,
+        server.processDatagramOrClose(0, out.getWritten()),
+    );
+
+    var close_payload_buf: [64]u8 = undefined;
+    const close_payload = try pollRequired(&server, &close_payload_buf);
+    var decoded = try quicz.frame.decodeFrameSlice(close_payload, gpa);
+    defer quicz.frame.deinitFrame(&decoded.frame, gpa);
+    if (decoded.len != close_payload.len) return error.UnexpectedState;
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            if (close.error_code != quicz.transport_error.codeValue(.flow_control_error)) return error.UnexpectedState;
+            std.debug.print(
+                "[close] semantic auto close error={} frame_type={} reason={s} state={s}\n",
+                .{ close.error_code, close.frame_type, close.reason_phrase, @tagName(server.connectionState()) },
+            );
+        },
+        else => return error.UnexpectedState,
+    }
 }
 
 fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {
@@ -474,6 +543,7 @@ pub fn main() !void {
 
     try framePayloadAutoCloseExample(gpa);
     try packetTypeAutoCloseExample(gpa);
+    try semanticFrameAutoCloseExample(gpa);
     try protectedShortCloseExample(gpa);
     try protectedLongCloseExample(gpa);
     try protectedReceiveAutoCloseExample(gpa);

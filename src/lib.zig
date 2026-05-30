@@ -8430,14 +8430,214 @@ pub const Connection = struct {
         );
     }
 
+    fn semanticCloseError(
+        code: transport_error.TransportErrorCode,
+        frame_type_value: u64,
+        reason_phrase: []const u8,
+    ) FramePayloadCloseError {
+        return .{
+            .code = code,
+            .frame_type = frame_type_value,
+            .reason_phrase = reason_phrase,
+        };
+    }
+
+    fn classifyReceiveStreamIdCloseError(self: *Connection, stream_id: u64, frame_type_value: u64) ?FramePayloadCloseError {
+        if (stream_id > max_quic_varint) return null;
+        if (isLocalBidirectionalStream(self.side, stream_id)) {
+            if (self.findSendStream(stream_id) == null) {
+                return semanticCloseError(.stream_state_error, frame_type_value, "stream state");
+            }
+            return null;
+        }
+        if (isBidirectionalStream(stream_id)) {
+            if (streamCountForId(stream_id) > self.recv_max_streams_bidi) {
+                return semanticCloseError(.stream_limit_error, frame_type_value, "stream limit");
+            }
+            return null;
+        }
+        if (isLocalStreamInitiator(self.side, stream_id)) {
+            return semanticCloseError(.stream_state_error, frame_type_value, "stream state");
+        }
+        if (streamCountForId(stream_id) > self.recv_max_streams_uni) {
+            return semanticCloseError(.stream_limit_error, frame_type_value, "stream limit");
+        }
+        return null;
+    }
+
+    fn classifySendControlStreamIdCloseError(self: *Connection, stream_id: u64, frame_type_value: u64) ?FramePayloadCloseError {
+        if (stream_id > max_quic_varint) return null;
+        if (!isBidirectionalStream(stream_id)) {
+            if (!isLocalStreamInitiator(self.side, stream_id)) {
+                return semanticCloseError(.stream_state_error, frame_type_value, "stream state");
+            }
+            if (self.findSendStream(stream_id) == null) {
+                return semanticCloseError(.stream_state_error, frame_type_value, "stream state");
+            }
+            return null;
+        }
+        if (isLocalStreamInitiator(self.side, stream_id)) {
+            if (self.findSendStream(stream_id) == null) {
+                return semanticCloseError(.stream_state_error, frame_type_value, "stream state");
+            }
+            return null;
+        }
+        if (streamCountForId(stream_id) > self.recv_max_streams_bidi) {
+            return semanticCloseError(.stream_limit_error, frame_type_value, "stream limit");
+        }
+        return null;
+    }
+
+    fn classifyStreamFrameProcessingCloseError(
+        self: *Connection,
+        stream_frame: frame.StreamFrame,
+        frame_type_value: u64,
+    ) ?FramePayloadCloseError {
+        if (self.classifyReceiveStreamIdCloseError(stream_frame.stream_id, frame_type_value)) |close| return close;
+
+        const end_offset = streamEndOffset(stream_frame.offset, stream_frame.data.len) orelse return null;
+        const existing_state = self.findRecvStream(stream_frame.stream_id);
+        const stream_receive_limit = if (existing_state) |stream_state| stream_state.max_data else self.recv_max_stream_data;
+        if (end_offset > stream_receive_limit) {
+            return semanticCloseError(.flow_control_error, frame_type_value, "flow control");
+        }
+
+        if (existing_state) |stream_state| {
+            if (stream_state.final_size) |final_size| {
+                if (end_offset > final_size) {
+                    return semanticCloseError(.final_size_error, frame_type_value, "final size");
+                }
+                if (stream_frame.fin and end_offset != final_size) {
+                    return semanticCloseError(.final_size_error, frame_type_value, "final size");
+                }
+                const final_size_usize = std.math.cast(usize, final_size) orelse return null;
+                if (stream_state.data.items.len >= final_size_usize) return null;
+                if (stream_state.reset_error_code != null) return null;
+            } else if (stream_state.reset_error_code != null) {
+                return null;
+            } else if (stream_frame.fin) {
+                const highest_received = highestReceivedStreamEndOffset(stream_state.*) catch return null;
+                if (end_offset < highest_received) {
+                    return semanticCloseError(.final_size_error, frame_type_value, "final size");
+                }
+            }
+        }
+
+        const new_frame_data = if (existing_state) |stream_state|
+            trimAlreadyReceivedStreamData(stream_state.*, stream_frame.offset, stream_frame.data) catch return null
+        else
+            ReceiveStreamFrameData{ .offset = stream_frame.offset, .data = stream_frame.data };
+        const next_recv_total = streamEndOffset(self.recv_data_bytes, new_frame_data.data.len) orelse return null;
+        if (next_recv_total > self.recv_max_data) {
+            return semanticCloseError(.flow_control_error, frame_type_value, "flow control");
+        }
+        return null;
+    }
+
+    fn classifyResetStreamFrameProcessingCloseError(
+        self: *Connection,
+        reset: frame.ResetStreamFrame,
+        frame_type_value: u64,
+    ) ?FramePayloadCloseError {
+        if (self.classifyReceiveStreamIdCloseError(reset.stream_id, frame_type_value)) |close| return close;
+
+        const existing_state = self.findRecvStream(reset.stream_id);
+        const stream_receive_limit = if (existing_state) |stream_state| stream_state.max_data else self.recv_max_stream_data;
+        if (reset.final_size > stream_receive_limit) {
+            return semanticCloseError(.flow_control_error, frame_type_value, "flow control");
+        }
+
+        if (existing_state) |stream_state| {
+            const highest_received = highestReceivedStreamEndOffset(stream_state.*) catch return null;
+            if (reset.final_size < highest_received) {
+                return semanticCloseError(.final_size_error, frame_type_value, "final size");
+            }
+            if (stream_state.final_size) |final_size| {
+                if (final_size != reset.final_size) {
+                    return semanticCloseError(.final_size_error, frame_type_value, "final size");
+                }
+                if (stream_state.reset_error_code != null) return null;
+
+                const final_size_usize = std.math.cast(usize, final_size) orelse return null;
+                if (stream_state.data.items.len >= final_size_usize) return null;
+
+                const received_size = receivedStreamByteCount(stream_state.*) catch return null;
+                if (reset.final_size < received_size) {
+                    return semanticCloseError(.final_size_error, frame_type_value, "final size");
+                }
+                const delta = reset.final_size - received_size;
+                const next_recv_total = std.math.add(u64, self.recv_data_bytes, delta) catch return null;
+                if (next_recv_total > self.recv_max_data) {
+                    return semanticCloseError(.flow_control_error, frame_type_value, "flow control");
+                }
+                return null;
+            }
+
+            const received_size = receivedStreamByteCount(stream_state.*) catch return null;
+            if (reset.final_size < received_size) {
+                return semanticCloseError(.final_size_error, frame_type_value, "final size");
+            }
+            const delta = reset.final_size - received_size;
+            const next_recv_total = std.math.add(u64, self.recv_data_bytes, delta) catch return null;
+            if (next_recv_total > self.recv_max_data) {
+                return semanticCloseError(.flow_control_error, frame_type_value, "flow control");
+            }
+            return null;
+        }
+
+        const next_recv_total = std.math.add(u64, self.recv_data_bytes, reset.final_size) catch return null;
+        if (next_recv_total > self.recv_max_data) {
+            return semanticCloseError(.flow_control_error, frame_type_value, "flow control");
+        }
+        return null;
+    }
+
+    fn classifyFrameProcessingCloseError(
+        self: *Connection,
+        packet_type: FramePacketType,
+        datagram: []const u8,
+    ) Error!?FramePayloadCloseError {
+        var offset: usize = 0;
+        while (offset < datagram.len) {
+            const frame_type_value = rawFrameTypeValue(datagram[offset..]);
+            var decoded = frame.decodeFrameSlice(datagram[offset..], self.allocator) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return null,
+            };
+
+            if (decoded.len == 0) {
+                frame.deinitFrame(&decoded.frame, self.allocator);
+                return null;
+            }
+            if (framePacketTypeErrorCode(decoded.frame, packet_type) != null) {
+                frame.deinitFrame(&decoded.frame, self.allocator);
+                return null;
+            }
+
+            const close = switch (decoded.frame) {
+                .stream => |stream_frame| self.classifyStreamFrameProcessingCloseError(stream_frame, frame_type_value),
+                .reset_stream => |reset| self.classifyResetStreamFrameProcessingCloseError(reset, frame_type_value),
+                .stream_data_blocked => |blocked| self.classifyReceiveStreamIdCloseError(blocked.stream_id, frame_type_value),
+                .max_stream_data => |max_stream_data| self.classifySendControlStreamIdCloseError(max_stream_data.stream_id, frame_type_value),
+                .stop_sending => |stop_sending| self.classifySendControlStreamIdCloseError(stop_sending.stream_id, frame_type_value),
+                else => null,
+            };
+            const decoded_len = decoded.len;
+            frame.deinitFrame(&decoded.frame, self.allocator);
+            if (close) |classified| return classified;
+            offset += decoded_len;
+        }
+        return null;
+    }
+
     /// Process one frame-payload datagram and queue CONNECTION_CLOSE on classified peer errors.
     ///
     /// The input and success output match `processDatagramForPacketType()`. On
-    /// malformed/unknown frame payloads or frames that are invalid for the
-    /// selected packet type, this wrapper queues a transport CONNECTION_CLOSE
-    /// with the RFC 9000 close code before returning `InvalidPacket`. Existing
-    /// callers that need pure rollback behavior can continue using
-    /// `processDatagramForPacketType()`.
+    /// malformed/unknown frame payloads, frames that are invalid for the
+    /// selected packet type, or classified semantic frame-processing failures,
+    /// this wrapper queues a transport CONNECTION_CLOSE with the RFC 9000 close
+    /// code before returning `InvalidPacket`. Existing callers that need pure
+    /// rollback behavior can continue using `processDatagramForPacketType()`.
     pub fn processDatagramForPacketTypeOrClose(
         self: *Connection,
         packet_type: FramePacketType,
@@ -8457,7 +8657,22 @@ pub const Connection = struct {
             return error.InvalidPacket;
         }
 
-        return self.processDatagramForPacketType(packet_type, now_millis, datagram);
+        self.processDatagramForPacketType(packet_type, now_millis, datagram) catch |err| {
+            switch (err) {
+                error.InvalidPacket, error.InvalidStream => {
+                    if (try self.classifyFrameProcessingCloseError(packet_type, datagram)) |close| {
+                        try self.closeConnection(
+                            transport_error.codeValue(close.code),
+                            close.frame_type,
+                            close.reason_phrase,
+                        );
+                        return error.InvalidPacket;
+                    }
+                },
+                else => {},
+            }
+            return err;
+        };
     }
 
     fn processDatagramInSpaceWithPacketTypeMaybeClose(
@@ -25240,6 +25455,127 @@ test "processDatagramInSpaceOrClose queues protocol violation close" {
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
             try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.handshake_done)), close.frame_type);
             try std.testing.expectEqualStrings("packet type", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramOrClose queues flow-control close for STREAM receive limit" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 16,
+        .initial_max_stream_data = 0,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "x",
+    } });
+    const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.flow_control_error), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("flow control", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramOrClose queues stream-limit close for peer stream count" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_streams_bidi = 0,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "x",
+    } });
+    const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.stream_limit_error), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("stream limit", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramOrClose queues final-size close for RESET_STREAM inconsistency" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "abc",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = 0,
+        .application_error_code = 7,
+        .final_size = 2,
+    } });
+    const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(1, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 1), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(1, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.final_size_error), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("final size", close.reason_phrase);
         },
         else => return error.InvalidPacket,
     }
