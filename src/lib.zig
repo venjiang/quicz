@@ -12056,6 +12056,7 @@ pub const Connection = struct {
             return;
         }
 
+        if (self.findActiveConnectionIdByValue(new_connection_id.connection_id)) |_| return error.InvalidPacket;
         if (self.activeStatelessResetTokenValueExists(new_connection_id.stateless_reset_token)) return error.InvalidPacket;
         if (self.activeConnectionIdCount() >= self.config.active_connection_id_limit) return error.InvalidPacket;
 
@@ -23985,6 +23986,41 @@ test "NEW_CONNECTION_ID enforces active id limit and duplicate consistency" {
     try std.testing.expectEqual(@as(usize, 2), conn.active_connection_ids.items.len);
     try std.testing.expectEqual(@as(u64, 2), conn.activeConnectionIdCount());
     try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+}
+
+test "NEW_CONNECTION_ID rejects reused peer CID value across sequence numbers" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    const cid = [_]u8{ 0xc1, 0, 0, 0 };
+
+    var datagram: [96]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &cid,
+        .stateless_reset_token = token0,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &cid,
+        .stateless_reset_token = token1,
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1, out.getWritten()));
+
+    try std.testing.expectEqual(@as(usize, 1), conn.active_connection_ids.items.len);
+    try std.testing.expectEqual(@as(u64, 1), conn.activeConnectionIdCount());
+    try std.testing.expectEqual(@as(u64, 0), conn.active_connection_ids.items[0].sequence_number);
+    try std.testing.expectEqualSlices(u8, &cid, conn.active_connection_ids.items[0].connection_id);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 1), conn.next_peer_packet_number);
 }
 
 test "NEW_CONNECTION_ID retire_prior_to rolls back when payload is invalid" {
