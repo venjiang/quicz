@@ -125,8 +125,8 @@ experimental.
 - [STOP_SENDING](examples/stop_sending.zig): STOP_SENDING receive handling and
   RESET_STREAM response. Run with `zig build run-stop-sending`.
 - [CRYPTO streams](examples/crypto_stream.zig): Per-space CRYPTO buffering,
-  mock backend handoff, and protected CRYPTO flow. Run with
-  `zig build run-crypto-stream`.
+  mock backend handoff, backend transport-parameter auto-close, and protected
+  CRYPTO flow. Run with `zig build run-crypto-stream`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, draining
   behavior, and close-triggered validation. Run with `zig build run-graceful-close`.
 - [Idle timeout](examples/idle_timeout.zig): Modeled idle timeout export,

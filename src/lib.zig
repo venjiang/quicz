@@ -8546,6 +8546,33 @@ pub const Connection = struct {
         backend: CryptoBackend,
         scratch: []u8,
     ) Error!CryptoBackendProgress {
+        return self.driveCryptoBackendInSpaceWithPeerParameterPolicy(space, backend, scratch, false);
+    }
+
+    /// Drive a pluggable TLS/crypto backend and queue CONNECTION_CLOSE on peer
+    /// transport-parameter errors.
+    ///
+    /// This preserves the success behavior of `driveCryptoBackendInSpace()`,
+    /// but malformed or semantically invalid peer transport-parameter
+    /// extension bytes returned by `backend` are handled through
+    /// `applyPeerTransportParameterBytesOrClose()`. Backend output is not pulled
+    /// after such an error, so the close frame is the next observable send.
+    pub fn driveCryptoBackendInSpaceOrClose(
+        self: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!CryptoBackendProgress {
+        return self.driveCryptoBackendInSpaceWithPeerParameterPolicy(space, backend, scratch, true);
+    }
+
+    fn driveCryptoBackendInSpaceWithPeerParameterPolicy(
+        self: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        close_on_peer_transport_parameter_error: bool,
+    ) Error!CryptoBackendProgress {
         if (scratch.len == 0) return error.BufferTooSmall;
 
         var progress = CryptoBackendProgress{};
@@ -8565,7 +8592,11 @@ pub const Connection = struct {
         }
 
         if (try backend.pullPeerTransportParameters(scratch)) |peer_transport_parameters| {
-            try self.applyPeerTransportParameterBytes(peer_transport_parameters);
+            if (close_on_peer_transport_parameter_error) {
+                try self.applyPeerTransportParameterBytesOrClose(peer_transport_parameters);
+            } else {
+                try self.applyPeerTransportParameterBytes(peer_transport_parameters);
+            }
             progress.peer_transport_parameters_bytes = peer_transport_parameters.len;
             progress.peer_transport_parameters_applied = true;
         }
@@ -13347,6 +13378,66 @@ test "driveCryptoBackendInSpace rejects invalid peer transport parameters before
     try conn.validatePeerAddress();
     var payload_buf: [16]u8 = undefined;
     try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTxInSpace(.handshake, 1, &payload_buf));
+}
+
+test "driveCryptoBackendInSpaceOrClose queues close for invalid peer transport parameters before output" {
+    const BadBackend = struct {
+        output_pulled: bool = false,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(error.InvalidPacket, conn.driveCryptoBackendInSpaceOrClose(.handshake, backend.backend(), &scratch));
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(@as(u64, 65_536), conn.peer_max_data);
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+
+    var close_buf: [96]u8 = undefined;
+    const payload = (try conn.pollTx(1, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
 }
 
 test "pollTx coalesces pending ACK with queued CRYPTO payload" {

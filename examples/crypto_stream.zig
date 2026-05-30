@@ -371,6 +371,39 @@ pub fn main() !void {
         confirmed_no_output.hasHandshakeProtectionKeys(),
     });
 
+    var close_on_bad_tp = try quicz.Connection.init(gpa, .server, .{});
+    defer close_on_bad_tp.deinit();
+    try close_on_bad_tp.validatePeerAddress();
+    var invalid_peer_tp = [_]u8{0x04};
+    var closing_backend = MockCryptoBackend{
+        .outbound = "blocked backend output",
+        .peer_transport_parameters = &invalid_peer_tp,
+    };
+    if (close_on_bad_tp.driveCryptoBackendInSpaceOrClose(.handshake, closing_backend.backend(), &backend_scratch)) |_| {
+        return error.UnexpectedState;
+    } else |err| {
+        if (err != error.InvalidPacket) return err;
+    }
+    if (closing_backend.outbound_offset != 0) return error.UnexpectedState;
+    var close_payload_buf: [96]u8 = undefined;
+    const close_payload = (try close_on_bad_tp.pollTx(110, &close_payload_buf)) orelse return error.UnexpectedState;
+    var decoded_close = try quicz.frame.decodeFrameSlice(close_payload, gpa);
+    defer quicz.frame.deinitFrame(&decoded_close.frame, gpa);
+    switch (decoded_close.frame) {
+        .connection_close => |close| {
+            if (close.error_code != quicz.transport_error.codeValue(.transport_parameter_error)) return error.UnexpectedState;
+            if (close.frame_type != @intFromEnum(quicz.frame.FrameType.crypto)) return error.UnexpectedState;
+            std.debug.print("[crypto] backend_tp_close error={} frame_type={} reason={s} output_pulled={} state={s}\n", .{
+                close.error_code,
+                close.frame_type,
+                close.reason_phrase,
+                closing_backend.outbound_offset != 0,
+                @tagName(close_on_bad_tp.connectionState()),
+            });
+        },
+        else => return error.UnexpectedState,
+    }
+
     var installed_client = try quicz.Connection.init(gpa, .client, .{});
     defer installed_client.deinit();
     var installed_server = try quicz.Connection.init(gpa, .server, .{});
