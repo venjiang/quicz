@@ -115,7 +115,7 @@ pub fn main() !void {
   运行：`zig build run-stop-sending`。
 - [CRYPTO streams](examples/crypto_stream.zig)：按 packet number space 隔离的 CRYPTO buffering、mock backend handoff、protected backend transport-parameter auto-close 和 protected CRYPTO flow。
   运行：`zig build run-crypto-stream`。
-- [Graceful close](examples/graceful_close.zig)：本端/对端关闭、protected long/short close、draining 行为和关闭触发校验。
+- [Graceful close](examples/graceful_close.zig)：本端/对端关闭、protected long/short close、protected receive auto-close、draining 行为和关闭触发校验。
   运行：`zig build run-graceful-close`。
 - [Idle timeout](examples/idle_timeout.zig)：建模 idle timeout 导出、刷新和关闭行为。
   运行：`zig build run-idle-timeout`。

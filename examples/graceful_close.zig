@@ -11,6 +11,14 @@ fn requireError(expected: anyerror, result: anyerror!void) !void {
     return error.UnexpectedState;
 }
 
+fn requireUsizeError(expected: anyerror, result: anyerror!usize) !void {
+    _ = result catch |err| {
+        if (err == expected) return;
+        return err;
+    };
+    return error.UnexpectedState;
+}
+
 fn pollRequired(conn: *quicz.Connection, out: []u8) ![]const u8 {
     return (try conn.pollTx(0, out)) orelse error.UnexpectedState;
 }
@@ -254,6 +262,94 @@ fn protectedLongCloseExample(gpa: std.mem.Allocator) !void {
     );
 }
 
+fn protectedReceiveAutoCloseExample(gpa: std.mem.Allocator) !void {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var initial_plaintext: [1200]u8 = undefined;
+    @memset(&initial_plaintext, 0);
+    initial_plaintext[0] = @intFromEnum(quicz.frame.FrameType.handshake_done);
+
+    const invalid_initial = try quicz.protection.protectLongPacketAes128(gpa, .{
+        .version = .v1,
+        .dcid = &original_dcid,
+        .scid = &client_scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try quicz.packet.encodePacketNumberForHeader(0, null), secrets.client, &initial_plaintext);
+    defer gpa.free(invalid_initial);
+    if (invalid_initial.len < 1200) return error.UnexpectedState;
+
+    var initial_client = try quicz.Connection.init(gpa, .client, .{});
+    defer initial_client.deinit();
+    var initial_server = try quicz.Connection.init(gpa, .server, .{});
+    defer initial_server.deinit();
+    try initial_server.validatePeerAddress();
+
+    try requireUsizeError(
+        error.InvalidPacket,
+        initial_server.processProtectedLongDatagramOrClose(10, .{ .initial = secrets.client }, invalid_initial),
+    );
+    const initial_close = (try initial_server.pollProtectedLongDatagram(
+        11,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.UnexpectedState;
+    defer gpa.free(initial_close);
+    if (try initial_client.processProtectedLongDatagram(12, .{ .initial = secrets.server }, initial_close) != 1) {
+        return error.UnexpectedState;
+    }
+    printPeerClose("protected initial auto-close receiver", initial_client.peerClose() orelse return error.UnexpectedState);
+    std.debug.print(
+        "[close] protected initial auto close bytes={} sender={s} receiver={s}\n",
+        .{
+            initial_close.len,
+            @tagName(initial_server.connectionState()),
+            @tagName(initial_client.connectionState()),
+        },
+    );
+
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_short = try quicz.protection.protectShortPacketAes128(gpa, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try quicz.packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
+    defer gpa.free(invalid_short);
+
+    var short_client = try quicz.Connection.init(gpa, .client, .{});
+    defer short_client.deinit();
+    var short_server = try quicz.Connection.init(gpa, .server, .{});
+    defer short_server.deinit();
+    try short_server.validatePeerAddress();
+
+    try requireError(
+        error.InvalidPacket,
+        short_server.processProtectedShortDatagramOrClose(13, secrets.client, server_dcid.len, invalid_short),
+    );
+    const short_close = (try short_server.pollProtectedShortDatagram(14, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
+    defer gpa.free(short_close);
+    try short_client.processProtectedShortDatagram(15, secrets.server, client_dcid.len, short_close);
+    printPeerClose("protected short auto-close receiver", short_client.peerClose() orelse return error.UnexpectedState);
+    std.debug.print(
+        "[close] protected short auto close bytes={} sender={s} receiver={s}\n",
+        .{
+            short_close.len,
+            @tagName(short_server.connectionState()),
+            @tagName(short_client.connectionState()),
+        },
+    );
+}
+
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
 
@@ -311,4 +407,5 @@ pub fn main() !void {
     try packetTypeAutoCloseExample(gpa);
     try protectedShortCloseExample(gpa);
     try protectedLongCloseExample(gpa);
+    try protectedReceiveAutoCloseExample(gpa);
 }

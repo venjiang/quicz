@@ -5194,6 +5194,32 @@ pub const Connection = struct {
         keys: ProtectedLongDatagramKeys,
         datagram: []const u8,
     ) Error!usize {
+        return self.processProtectedLongDatagramWithFrameErrorPolicy(now_millis, keys, datagram, false);
+    }
+
+    /// Process coalesced protected long-header packets and queue CONNECTION_CLOSE on frame errors.
+    ///
+    /// Packet parsing, version/key routing, packet-number validation, and
+    /// success behavior match `processProtectedLongDatagram()`. After a packet
+    /// authenticates, malformed/unknown frame payloads or frames forbidden for
+    /// that long-header packet type queue a transport CONNECTION_CLOSE before
+    /// returning `InvalidPacket`.
+    pub fn processProtectedLongDatagramOrClose(
+        self: *Connection,
+        now_millis: i64,
+        keys: ProtectedLongDatagramKeys,
+        datagram: []const u8,
+    ) Error!usize {
+        return self.processProtectedLongDatagramWithFrameErrorPolicy(now_millis, keys, datagram, true);
+    }
+
+    fn processProtectedLongDatagramWithFrameErrorPolicy(
+        self: *Connection,
+        now_millis: i64,
+        keys: ProtectedLongDatagramKeys,
+        datagram: []const u8,
+        close_on_frame_payload_error: bool,
+    ) Error!usize {
         if (datagram.len == 0) return error.InvalidPacket;
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return 0;
 
@@ -5219,6 +5245,7 @@ pub const Connection = struct {
                 now_millis,
                 datagram.len,
                 datagram[offset..][0..info.len],
+                close_on_frame_payload_error,
             );
             offset += info.len;
             processed_count += 1;
@@ -5246,6 +5273,33 @@ pub const Connection = struct {
         keys: protection.Aes128PacketProtectionKeys,
         datagram: []const u8,
     ) Error!void {
+        try self.processProtectedLongDatagramInSpaceWithFrameErrorPolicy(space, now_millis, keys, datagram, false);
+    }
+
+    /// Remove long-header protection and queue CONNECTION_CLOSE on frame errors.
+    ///
+    /// This opt-in wrapper preserves `processProtectedLongDatagramInSpace()`
+    /// success behavior, but authenticated plaintext frame encoding failures
+    /// and packet-type violations queue a transport CONNECTION_CLOSE before
+    /// returning `InvalidPacket`.
+    pub fn processProtectedLongDatagramInSpaceOrClose(
+        self: *Connection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) Error!void {
+        try self.processProtectedLongDatagramInSpaceWithFrameErrorPolicy(space, now_millis, keys, datagram, true);
+    }
+
+    fn processProtectedLongDatagramInSpaceWithFrameErrorPolicy(
+        self: *Connection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        close_on_frame_payload_error: bool,
+    ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
 
         const long_space = protectedLongPacketSpaceFor(space) orelse return error.InvalidPacket;
@@ -5257,7 +5311,7 @@ pub const Connection = struct {
             .packet_type = long_space.packet_type,
             .frame_packet_type = long_space.frame_packet_type,
             .keys = keys,
-        }, now_millis, datagram.len, datagram);
+        }, now_millis, datagram.len, datagram, close_on_frame_payload_error);
     }
 
     /// Remove Handshake long-header protection using installed peer keys.
@@ -5275,12 +5329,28 @@ pub const Connection = struct {
         try self.processProtectedLongDatagramInSpace(.handshake, now_millis, keys, datagram);
     }
 
+    /// Remove installed-key Handshake protection and queue CONNECTION_CLOSE on frame errors.
+    ///
+    /// This keeps the installed-key lookup and success path of
+    /// `processProtectedHandshakeDatagramWithInstalledKeys()`, while applying
+    /// the close-propagating protected long-packet receive policy after packet
+    /// authentication succeeds.
+    pub fn processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+        self: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+    ) Error!void {
+        const keys = self.peer_handshake_keys orelse return error.InvalidPacket;
+        try self.processProtectedLongDatagramInSpaceOrClose(.handshake, now_millis, keys, datagram);
+    }
+
     fn processProtectedLongDatagramWithRoute(
         self: *Connection,
         route: ProtectedLongPacketRoute,
         now_millis: i64,
         udp_datagram_len: usize,
         datagram: []const u8,
+        close_on_frame_payload_error: bool,
     ) Error!void {
         const packet_space = self.packetNumberSpace(route.space);
         if (packet_space.discarded.*) return error.InvalidPacket;
@@ -5320,11 +5390,12 @@ pub const Connection = struct {
             null;
         errdefer if (pending_peer_initial_scid) |cid| self.allocator.free(cid);
 
-        try self.processDatagramInSpaceWithPacketType(
+        try self.processDatagramInSpaceWithPacketTypeMaybeClose(
             route.space,
             route.frame_packet_type,
             now_millis,
             decoded.packet.plaintext,
+            close_on_frame_payload_error,
         );
         const packet_space_after = self.packetNumberSpace(route.space);
         if (packet_space_after.next_peer_packet_number.* == expected_packet_number) {
@@ -5351,6 +5422,31 @@ pub const Connection = struct {
         keys: protection.Aes128PacketProtectionKeys,
         datagram: []const u8,
     ) Error!void {
+        try self.processProtectedZeroRttDatagramWithFrameErrorPolicy(now_millis, keys, datagram, false);
+    }
+
+    /// Remove 0-RTT protection and queue CONNECTION_CLOSE on frame errors.
+    ///
+    /// This opt-in wrapper keeps the packet-number and success behavior of
+    /// `processProtectedZeroRttDatagram()`, but authenticated 0-RTT plaintext
+    /// frame encoding failures or 0-RTT-forbidden frames queue a transport
+    /// CONNECTION_CLOSE before returning `InvalidPacket`.
+    pub fn processProtectedZeroRttDatagramOrClose(
+        self: *Connection,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) Error!void {
+        try self.processProtectedZeroRttDatagramWithFrameErrorPolicy(now_millis, keys, datagram, true);
+    }
+
+    fn processProtectedZeroRttDatagramWithFrameErrorPolicy(
+        self: *Connection,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        close_on_frame_payload_error: bool,
+    ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
 
         try self.processProtectedLongDatagramWithRoute(.{
@@ -5358,7 +5454,7 @@ pub const Connection = struct {
             .packet_type = .zero_rtt,
             .frame_packet_type = .zero_rtt,
             .keys = keys,
-        }, now_millis, datagram.len, datagram);
+        }, now_millis, datagram.len, datagram, close_on_frame_payload_error);
     }
 
     /// Remove 0-RTT long-header protection using installed peer early-data keys.
@@ -5375,6 +5471,21 @@ pub const Connection = struct {
         const keys = self.peer_zero_rtt_keys orelse return error.InvalidPacket;
         if (!self.peer_zero_rtt_accepted) return error.InvalidPacket;
         try self.processProtectedZeroRttDatagram(now_millis, keys, datagram);
+    }
+
+    /// Remove installed-key 0-RTT protection and queue CONNECTION_CLOSE on frame errors.
+    ///
+    /// This keeps installed-key lookup and explicit 0-RTT acceptance unchanged,
+    /// while using the close-propagating protected 0-RTT receive policy after
+    /// packet authentication succeeds.
+    pub fn processProtectedZeroRttDatagramWithInstalledKeysOrClose(
+        self: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+    ) Error!void {
+        const keys = self.peer_zero_rtt_keys orelse return error.InvalidPacket;
+        if (!self.peer_zero_rtt_accepted) return error.InvalidPacket;
+        try self.processProtectedZeroRttDatagramOrClose(now_millis, keys, datagram);
     }
 
     /// Remove Initial packet protection and process the decrypted frame payload.
@@ -5410,6 +5521,34 @@ pub const Connection = struct {
         dcid_len: usize,
         datagram: []const u8,
     ) Error!void {
+        try self.processProtectedShortDatagramWithFrameErrorPolicy(now_millis, keys, dcid_len, datagram, false);
+    }
+
+    /// Remove 1-RTT short-header protection and queue CONNECTION_CLOSE on frame errors.
+    ///
+    /// Packet authentication, packet-number validation, and success behavior
+    /// match `processProtectedShortDatagram()`. After authentication succeeds,
+    /// malformed/unknown frame payloads queue FRAME_ENCODING_ERROR and
+    /// 1-RTT-forbidden frames queue PROTOCOL_VIOLATION before returning
+    /// `InvalidPacket`.
+    pub fn processProtectedShortDatagramOrClose(
+        self: *Connection,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        try self.processProtectedShortDatagramWithFrameErrorPolicy(now_millis, keys, dcid_len, datagram, true);
+    }
+
+    fn processProtectedShortDatagramWithFrameErrorPolicy(
+        self: *Connection,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+        close_on_frame_payload_error: bool,
+    ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
 
         const packet_space = self.packetNumberSpace(.application);
@@ -5428,7 +5567,7 @@ pub const Connection = struct {
         };
         defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
 
-        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number);
+        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number, close_on_frame_payload_error);
     }
 
     /// Remove 1-RTT short-header packet protection with current/next key phases.
@@ -5448,6 +5587,32 @@ pub const Connection = struct {
         dcid_len: usize,
         datagram: []const u8,
     ) Error!void {
+        try self.processProtectedShortDatagramWithKeyUpdateAndFrameErrorPolicy(now_millis, keys, dcid_len, datagram, false);
+    }
+
+    /// Remove 1-RTT protection with current/next keys and queue close on frame errors.
+    ///
+    /// This preserves `processProtectedShortDatagramWithKeyUpdate()` success
+    /// behavior and key selection, but uses the close-propagating receive path
+    /// for authenticated plaintext frame payload errors.
+    pub fn processProtectedShortDatagramWithKeyUpdateOrClose(
+        self: *Connection,
+        now_millis: i64,
+        keys: protection.ShortPacketKeyUpdateKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        try self.processProtectedShortDatagramWithKeyUpdateAndFrameErrorPolicy(now_millis, keys, dcid_len, datagram, true);
+    }
+
+    fn processProtectedShortDatagramWithKeyUpdateAndFrameErrorPolicy(
+        self: *Connection,
+        now_millis: i64,
+        keys: protection.ShortPacketKeyUpdateKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+        close_on_frame_payload_error: bool,
+    ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
 
         const packet_space = self.packetNumberSpace(.application);
@@ -5466,7 +5631,7 @@ pub const Connection = struct {
         };
         defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
 
-        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number);
+        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number, close_on_frame_payload_error);
     }
 
     /// Remove 1-RTT short-header packet protection with caller-owned key state.
@@ -5483,6 +5648,33 @@ pub const Connection = struct {
         key_phase_state: *protection.Aes128KeyPhaseState,
         dcid_len: usize,
         datagram: []const u8,
+    ) Error!void {
+        try self.processProtectedShortDatagramWithKeyPhaseStateAndFrameErrorPolicy(now_millis, key_phase_state, dcid_len, datagram, false);
+    }
+
+    /// Remove 1-RTT protection with caller-owned key state and queue close on frame errors.
+    ///
+    /// The key-phase state still advances only after packet authentication and
+    /// plaintext frame processing succeed. Authenticated frame payload errors
+    /// queue a transport CONNECTION_CLOSE and leave the key-phase state
+    /// unchanged.
+    pub fn processProtectedShortDatagramWithKeyPhaseStateOrClose(
+        self: *Connection,
+        now_millis: i64,
+        key_phase_state: *protection.Aes128KeyPhaseState,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        try self.processProtectedShortDatagramWithKeyPhaseStateAndFrameErrorPolicy(now_millis, key_phase_state, dcid_len, datagram, true);
+    }
+
+    fn processProtectedShortDatagramWithKeyPhaseStateAndFrameErrorPolicy(
+        self: *Connection,
+        now_millis: i64,
+        key_phase_state: *protection.Aes128KeyPhaseState,
+        dcid_len: usize,
+        datagram: []const u8,
+        close_on_frame_payload_error: bool,
     ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
 
@@ -5502,7 +5694,7 @@ pub const Connection = struct {
         };
         defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
 
-        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number);
+        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number, close_on_frame_payload_error);
         _ = key_phase_state.updateAfterReceiving(decoded.packet.header.key_phase);
     }
 
@@ -5524,20 +5716,39 @@ pub const Connection = struct {
         self.peer_one_rtt_key_phase_state = state;
     }
 
+    /// Remove installed-key 1-RTT protection and queue CONNECTION_CLOSE on frame errors.
+    ///
+    /// This preserves connection-owned key-phase state semantics, advancing the
+    /// installed state only after authenticated plaintext frame processing
+    /// succeeds. Classified frame payload errors queue a transport
+    /// CONNECTION_CLOSE and leave the installed key state unchanged.
+    pub fn processProtectedShortDatagramWithInstalledKeysOrClose(
+        self: *Connection,
+        now_millis: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!void {
+        var state = self.peer_one_rtt_key_phase_state orelse return error.InvalidPacket;
+        try self.processProtectedShortDatagramWithKeyPhaseStateOrClose(now_millis, &state, dcid_len, datagram);
+        self.peer_one_rtt_key_phase_state = state;
+    }
+
     fn processDecodedProtectedShortDatagram(
         self: *Connection,
         now_millis: i64,
         decoded: *const protection.DecodedProtectedShortPacket,
         datagram_len: usize,
         expected_packet_number: u64,
+        close_on_frame_payload_error: bool,
     ) Error!void {
         if (decoded.len != datagram_len) return error.InvalidPacket;
         if (decoded.packet.header.packet_number != expected_packet_number) return error.InvalidPacket;
-        try self.processDatagramInSpaceWithPacketType(
+        try self.processDatagramInSpaceWithPacketTypeMaybeClose(
             .application,
             .one_rtt,
             now_millis,
             decoded.packet.plaintext,
+            close_on_frame_payload_error,
         );
         const packet_space_after = self.packetNumberSpace(.application);
         if (packet_space_after.next_peer_packet_number.* == expected_packet_number) {
@@ -7823,6 +8034,20 @@ pub const Connection = struct {
         }
 
         return self.processDatagramForPacketType(packet_type, now_millis, datagram);
+    }
+
+    fn processDatagramInSpaceWithPacketTypeMaybeClose(
+        self: *Connection,
+        space: PacketNumberSpace,
+        packet_type: FramePacketType,
+        now_millis: i64,
+        datagram: []const u8,
+        close_on_frame_payload_error: bool,
+    ) Error!void {
+        if (close_on_frame_payload_error) {
+            return self.processDatagramForPacketTypeOrClose(packet_type, now_millis, datagram);
+        }
+        return self.processDatagramInSpaceWithPacketType(space, packet_type, now_millis, datagram);
     }
 
     fn processDatagramInSpaceWithPacketType(
@@ -21529,6 +21754,106 @@ test "pollProtectedLongDatagram emits protected Handshake CONNECTION_CLOSE with 
     );
     try std.testing.expectEqual(ConnectionState.closed, server.connectionState());
     try std.testing.expect(server.pending_close == null);
+}
+
+test "processProtectedLongDatagramOrClose queues protected Initial protocol violation close" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var plaintext: [1200]u8 = undefined;
+    @memset(&plaintext, 0);
+    plaintext[0] = @intFromEnum(frame.FrameType.handshake_done);
+
+    const invalid_initial = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &original_dcid,
+        .scid = &client_scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(invalid_initial);
+    try std.testing.expect(invalid_initial.len >= min_initial_udp_datagram_len);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedLongDatagramOrClose(10, .{ .initial = secrets.client }, invalid_initial),
+    );
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
+
+    const close_packet = (try server.pollProtectedLongDatagram(
+        11,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(12, .{ .initial = secrets.server }, close_packet));
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.handshake_done)), close.frame_type);
+            try std.testing.expectEqualStrings("packet type", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "processProtectedShortDatagramOrClose queues protected frame encoding close" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+
+    const invalid_short = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
+    defer std.testing.allocator.free(invalid_short);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedShortDatagramOrClose(10, secrets.client, server_dcid.len, invalid_short),
+    );
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    const close_packet = (try server.pollProtectedShortDatagram(11, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+    try client.processProtectedShortDatagram(12, secrets.server, client_dcid.len, close_packet);
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, 0x1f), close.frame_type);
+            try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "pollProtectedLongDatagram emits protected ACK-only without bytes in flight" {
