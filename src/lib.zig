@@ -8620,6 +8620,10 @@ pub const Connection = struct {
                 .stream_data_blocked => |blocked| self.classifyReceiveStreamIdCloseError(blocked.stream_id, frame_type_value),
                 .max_stream_data => |max_stream_data| self.classifySendControlStreamIdCloseError(max_stream_data.stream_id, frame_type_value),
                 .stop_sending => |stop_sending| self.classifySendControlStreamIdCloseError(stop_sending.stream_id, frame_type_value),
+                .path_response => |path_response| if (self.pathResponseChallengeIndex(path_response.data) == null)
+                    semanticCloseError(.protocol_violation, frame_type_value, "path response")
+                else
+                    null,
                 else => null,
             };
             const decoded_len = decoded.len;
@@ -12115,15 +12119,16 @@ pub const Connection = struct {
         self.pending_path_responses.append(self.allocator, path_challenge.data) catch return error.OutOfMemory;
     }
 
-    fn receivePathResponseFrame(self: *Connection, path_response: frame.PathResponseFrame) Error!void {
+    fn pathResponseChallengeIndex(self: *Connection, data: [8]u8) ?usize {
         for (self.outstanding_path_challenges.items, 0..) |challenge, i| {
-            if (std.mem.eql(u8, &challenge.data, &path_response.data)) {
-                _ = self.outstanding_path_challenges.orderedRemove(i);
-                return;
-            }
+            if (std.mem.eql(u8, &challenge.data, &data)) return i;
         }
+        return null;
+    }
 
-        return error.InvalidPacket;
+    fn receivePathResponseFrame(self: *Connection, path_response: frame.PathResponseFrame) Error!void {
+        const challenge_index = self.pathResponseChallengeIndex(path_response.data) orelse return error.InvalidPacket;
+        _ = self.outstanding_path_challenges.orderedRemove(challenge_index);
     }
 
     fn receiveStopSendingFrame(self: *Connection, stop_sending: frame.StopSendingFrame) Error!void {
@@ -25579,6 +25584,59 @@ test "processDatagramOrClose queues final-size close for RESET_STREAM inconsiste
         },
         else => return error.InvalidPacket,
     }
+}
+
+test "processDatagramOrClose queues protocol violation close for unmatched PATH_RESPONSE" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    var datagram: [16]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .path_response = .{ .data = [_]u8{ 7, 6, 5, 4, 3, 2, 1, 0 } } });
+    const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("path response", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramOrClose accepts matching PATH_RESPONSE without close" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const challenge_data = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
+    try conn.sendPathChallenge(challenge_data);
+    var challenge_out: [64]u8 = undefined;
+    _ = (try conn.pollTx(0, &challenge_out)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), conn.outstanding_path_challenges.items.len);
+
+    var datagram: [16]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .path_response = .{ .data = challenge_data } });
+
+    try conn.processDatagramOrClose(0, out.getWritten());
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+    try std.testing.expect(conn.pending_close == null);
+    try std.testing.expectEqual(@as(usize, 0), conn.outstanding_path_challenges.items.len);
+    try std.testing.expectEqual(@as(u64, 1), conn.nextPeerPacketNumber(.application));
 }
 
 test "closeConnection queues CONNECTION_CLOSE and closes after pollTx" {

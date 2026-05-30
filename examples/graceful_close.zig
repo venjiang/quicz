@@ -217,6 +217,36 @@ fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
         },
         else => return error.UnexpectedState,
     }
+
+    var path_server = try quicz.Connection.init(gpa, .server, .{});
+    defer path_server.deinit();
+    try path_server.validatePeerAddress();
+
+    var path_response_payload: [16]u8 = undefined;
+    out = fixedWriter(&path_response_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .path_response = .{ .data = [_]u8{ 7, 6, 5, 4, 3, 2, 1, 0 } } });
+
+    try requireError(
+        error.InvalidPacket,
+        path_server.processDatagramOrClose(0, out.getWritten()),
+    );
+
+    var path_close_payload_buf: [64]u8 = undefined;
+    const path_close_payload = try pollRequired(&path_server, &path_close_payload_buf);
+    var path_close = try quicz.frame.decodeFrameSlice(path_close_payload, gpa);
+    defer quicz.frame.deinitFrame(&path_close.frame, gpa);
+    if (path_close.len != path_close_payload.len) return error.UnexpectedState;
+
+    switch (path_close.frame) {
+        .connection_close => |close| {
+            if (close.error_code != quicz.transport_error.codeValue(.protocol_violation)) return error.UnexpectedState;
+            std.debug.print(
+                "[close] semantic path-response auto close error={} frame_type={} reason={s} state={s}\n",
+                .{ close.error_code, close.frame_type, close.reason_phrase, @tagName(path_server.connectionState()) },
+            );
+        },
+        else => return error.UnexpectedState,
+    }
 }
 
 fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {
