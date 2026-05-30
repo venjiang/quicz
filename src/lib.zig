@@ -5731,15 +5731,16 @@ pub const Connection = struct {
     ///
     /// The returned datagram is allocated with the connection allocator and must
     /// be freed by the caller. For each Initial/Handshake space, the method can
-    /// emit one protected CRYPTO packet, PING packet with an optional ACK, or
-    /// ACK-only packet. When `keys.zero_rtt` is supplied by a client, it can
-    /// also emit one 0-RTT Application STREAM, RESET_STREAM, or STOP_SENDING
-    /// packet. The method coalesces eligible long packets into one UDP datagram
-    /// when the result fits `max_udp_payload_size`. It prebuilds packets and
-    /// checks congestion plus anti-amplification budget before committing
-    /// packet-number, sent-packet, recovery, ACK/PING, CRYPTO, and 0-RTT queue
-    /// state. Endpoint DCID switching, real TLS transcript ownership, key
-    /// discard, and key update remain endpoint/TLS integration work.
+    /// emit one protected CRYPTO packet, PING packet with an optional ACK,
+    /// ACK-only packet, or pending transport `CONNECTION_CLOSE`. When
+    /// `keys.zero_rtt` is supplied by a client, it can also emit one 0-RTT
+    /// Application STREAM, RESET_STREAM, or STOP_SENDING packet. The method
+    /// coalesces eligible long packets into one UDP datagram when the result
+    /// fits `max_udp_payload_size`. It prebuilds packets and checks congestion
+    /// plus anti-amplification budget before committing packet-number,
+    /// sent-packet, recovery, ACK/PING, CRYPTO, close, and 0-RTT queue state.
+    /// Endpoint DCID switching, real TLS transcript ownership, key discard, and
+    /// key update remain endpoint/TLS integration work.
     pub fn pollProtectedLongDatagram(
         self: *Connection,
         now_millis: i64,
@@ -5750,7 +5751,6 @@ pub const Connection = struct {
     ) Error!?[]u8 {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
-        if (self.isClosingOrClosed()) return error.ConnectionClosed;
 
         var initial_packet: ?BuiltProtectedLongPacket = null;
         var zero_rtt_packet: ?BuiltProtectedLongPacket = null;
@@ -5761,40 +5761,65 @@ pub const Connection = struct {
             self.deinitBuiltProtectedLongPacketIfPresent(&handshake_packet);
         }
 
-        if (self.initial_packet_space.crypto_send_queue.items.len != 0 or
-            self.initial_packet_space.pending_ping_count != 0 or
-            self.initial_packet_space.pending_ack_largest != null)
-        {
-            initial_packet = try self.buildNextProtectedLongPacketInSpace(
-                .initial,
-                dcid,
-                scid,
-                initial_token,
-                keys.initial orelse return error.InvalidPacket,
-                0,
-            );
-        }
-        if (keys.zero_rtt) |zero_rtt_keys| {
-            if (self.hasPendingProtectedZeroRttFrames()) {
-                zero_rtt_packet = try self.buildNextProtectedZeroRttPacket(
+        if (self.pending_close != null) {
+            if (keys.handshake) |handshake_keys| {
+                handshake_packet = try self.buildProtectedLongClosePacketInSpace(
+                    .handshake,
                     dcid,
                     scid,
-                    zero_rtt_keys,
+                    &[_]u8{},
+                    handshake_keys,
+                    0,
+                );
+            } else if (keys.initial) |initial_keys| {
+                initial_packet = try self.buildProtectedLongClosePacketInSpace(
+                    .initial,
+                    dcid,
+                    scid,
+                    initial_token,
+                    initial_keys,
+                    0,
+                );
+            } else {
+                return error.InvalidPacket;
+            }
+        } else {
+            if (self.isClosingOrClosed()) return error.ConnectionClosed;
+            if (self.initial_packet_space.crypto_send_queue.items.len != 0 or
+                self.initial_packet_space.pending_ping_count != 0 or
+                self.initial_packet_space.pending_ack_largest != null)
+            {
+                initial_packet = try self.buildNextProtectedLongPacketInSpace(
+                    .initial,
+                    dcid,
+                    scid,
+                    initial_token,
+                    keys.initial orelse return error.InvalidPacket,
+                    0,
                 );
             }
-        }
-        if (self.handshake_packet_space.crypto_send_queue.items.len != 0 or
-            self.handshake_packet_space.pending_ping_count != 0 or
-            self.handshake_packet_space.pending_ack_largest != null)
-        {
-            handshake_packet = try self.buildNextProtectedLongPacketInSpace(
-                .handshake,
-                dcid,
-                scid,
-                &[_]u8{},
-                keys.handshake orelse return error.InvalidPacket,
-                0,
-            );
+            if (keys.zero_rtt) |zero_rtt_keys| {
+                if (self.hasPendingProtectedZeroRttFrames()) {
+                    zero_rtt_packet = try self.buildNextProtectedZeroRttPacket(
+                        dcid,
+                        scid,
+                        zero_rtt_keys,
+                    );
+                }
+            }
+            if (self.handshake_packet_space.crypto_send_queue.items.len != 0 or
+                self.handshake_packet_space.pending_ping_count != 0 or
+                self.handshake_packet_space.pending_ack_largest != null)
+            {
+                handshake_packet = try self.buildNextProtectedLongPacketInSpace(
+                    .handshake,
+                    dcid,
+                    scid,
+                    &[_]u8{},
+                    keys.handshake orelse return error.InvalidPacket,
+                    0,
+                );
+            }
         }
 
         if (initial_packet == null and zero_rtt_packet == null and handshake_packet == null) return null;
@@ -5822,16 +5847,27 @@ pub const Connection = struct {
         if (initial_packet) |built| {
             const required_initial_datagram_len = self.minimumOutgoingInitialDatagramLen(.initial, built.ack_eliciting);
             if (required_initial_datagram_len != 0 and total_len < required_initial_datagram_len) {
+                const initial_was_close = built.close_packet;
                 const target_initial_len = try addWireLen(built.datagram.len, required_initial_datagram_len - total_len);
                 self.deinitBuiltProtectedLongPacketIfPresent(&initial_packet);
-                initial_packet = try self.buildNextProtectedLongPacketInSpace(
-                    .initial,
-                    dcid,
-                    scid,
-                    initial_token,
-                    keys.initial orelse return error.InvalidPacket,
-                    target_initial_len,
-                );
+                initial_packet = if (initial_was_close)
+                    try self.buildProtectedLongClosePacketInSpace(
+                        .initial,
+                        dcid,
+                        scid,
+                        initial_token,
+                        keys.initial orelse return error.InvalidPacket,
+                        target_initial_len,
+                    )
+                else
+                    try self.buildNextProtectedLongPacketInSpace(
+                        .initial,
+                        dcid,
+                        scid,
+                        initial_token,
+                        keys.initial orelse return error.InvalidPacket,
+                        target_initial_len,
+                    );
 
                 total_len = 0;
                 if (initial_packet) |expanded_initial| total_len = expanded_initial.datagram.len;
@@ -5842,14 +5878,24 @@ pub const Connection = struct {
                     self.deinitBuiltProtectedLongPacketIfPresent(&zero_rtt_packet);
                     self.deinitBuiltProtectedLongPacketIfPresent(&handshake_packet);
                     self.deinitBuiltProtectedLongPacketIfPresent(&initial_packet);
-                    initial_packet = try self.buildNextProtectedLongPacketInSpace(
-                        .initial,
-                        dcid,
-                        scid,
-                        initial_token,
-                        keys.initial orelse return error.InvalidPacket,
-                        required_initial_datagram_len,
-                    );
+                    initial_packet = if (initial_was_close)
+                        try self.buildProtectedLongClosePacketInSpace(
+                            .initial,
+                            dcid,
+                            scid,
+                            initial_token,
+                            keys.initial orelse return error.InvalidPacket,
+                            required_initial_datagram_len,
+                        )
+                    else
+                        try self.buildNextProtectedLongPacketInSpace(
+                            .initial,
+                            dcid,
+                            scid,
+                            initial_token,
+                            keys.initial orelse return error.InvalidPacket,
+                            required_initial_datagram_len,
+                        );
                     total_len = if (initial_packet) |single_initial| single_initial.datagram.len else 0;
                 }
             }
@@ -21380,6 +21426,109 @@ test "pollProtectedShortDatagram preserves close frame when anti-amplification b
     try std.testing.expectEqual(@as(?i64, null), server.closeDeadlineMillis());
     try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.application));
     try std.testing.expect(server.pending_close != null);
+}
+
+test "pollProtectedLongDatagram emits protected Initial CONNECTION_CLOSE with caller keys" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    defer server.deinit();
+
+    try client.closeConnection(transport_error.codeValue(.no_error), @intFromEnum(frame.FrameType.crypto), "initial close");
+    const close_packet = (try client.pollProtectedLongDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        .{ .initial = secrets.client },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+    try std.testing.expect(close_packet.len >= min_initial_udp_datagram_len);
+    try std.testing.expect(client.closed);
+    try std.testing.expectEqual(ConnectionState.closing, client.connectionState());
+    try std.testing.expect(client.closeDeadlineMillis().? > 10);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPacketNumber(.initial));
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.initial));
+
+    try std.testing.expectEqual(@as(usize, 1), try server.processProtectedLongDatagram(11, .{ .initial = secrets.client }, close_packet));
+    try std.testing.expect(server.closed);
+    try std.testing.expectEqual(ConnectionState.draining, server.connectionState());
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.initial));
+    switch (server.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.no_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("initial close", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "pollProtectedLongDatagram emits protected Handshake CONNECTION_CLOSE with caller keys" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    var client = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer client.deinit();
+
+    try server.closeConnection(transport_error.codeValue(.internal_error), @intFromEnum(frame.FrameType.crypto), "handshake close");
+    const close_packet = (try server.pollProtectedLongDatagram(
+        10,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .handshake = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+    try std.testing.expect(server.closed);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.closeDeadlineMillis().? > 10);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.handshake));
+
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(11, .{ .handshake = secrets.server }, close_packet));
+    try std.testing.expect(client.closed);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(.handshake));
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.internal_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("handshake close", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const retransmit = (try server.pollProtectedLongDatagram(
+        12,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .handshake = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(retransmit);
+    try std.testing.expectEqual(@as(u64, 2), server.nextPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.handshake));
+
+    const deadline = server.closeDeadlineMillis().?;
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        server.pollProtectedLongDatagram(deadline, &client_scid, &server_scid, &[_]u8{}, .{ .handshake = secrets.server }),
+    );
+    try std.testing.expectEqual(ConnectionState.closed, server.connectionState());
+    try std.testing.expect(server.pending_close == null);
 }
 
 test "pollProtectedLongDatagram emits protected ACK-only without bytes in flight" {

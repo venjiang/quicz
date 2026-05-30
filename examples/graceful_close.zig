@@ -187,6 +187,73 @@ fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {
     );
 }
 
+fn protectedLongCloseExample(gpa: std.mem.Allocator) !void {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var initial_client = try quicz.Connection.init(gpa, .client, .{});
+    defer initial_client.deinit();
+    var initial_server = try quicz.Connection.init(gpa, .server, .{});
+    defer initial_server.deinit();
+
+    try initial_client.closeConnection(
+        quicz.transport_error.codeValue(.no_error),
+        @intFromEnum(quicz.frame.FrameType.crypto),
+        "protected initial close",
+    );
+    const initial_close = (try initial_client.pollProtectedLongDatagram(
+        6,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        .{ .initial = secrets.client },
+    )) orelse return error.UnexpectedState;
+    defer gpa.free(initial_close);
+    if (initial_close.len < 1200) return error.UnexpectedState;
+    if (try initial_server.processProtectedLongDatagram(7, .{ .initial = secrets.client }, initial_close) != 1) return error.UnexpectedState;
+    printPeerClose("protected initial receiver", initial_server.peerClose() orelse return error.UnexpectedState);
+    std.debug.print(
+        "[close] protected long initial close bytes={} sender={s} receiver={s}\n",
+        .{
+            initial_close.len,
+            @tagName(initial_client.connectionState()),
+            @tagName(initial_server.connectionState()),
+        },
+    );
+
+    var handshake_server = try quicz.Connection.init(gpa, .server, .{});
+    defer handshake_server.deinit();
+    try handshake_server.validatePeerAddress();
+    var handshake_client = try quicz.Connection.init(gpa, .client, .{});
+    defer handshake_client.deinit();
+
+    try handshake_server.closeConnection(
+        quicz.transport_error.codeValue(.internal_error),
+        @intFromEnum(quicz.frame.FrameType.crypto),
+        "protected handshake close",
+    );
+    const handshake_close = (try handshake_server.pollProtectedLongDatagram(
+        8,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .handshake = secrets.server },
+    )) orelse return error.UnexpectedState;
+    defer gpa.free(handshake_close);
+    if (try handshake_client.processProtectedLongDatagram(9, .{ .handshake = secrets.server }, handshake_close) != 1) return error.UnexpectedState;
+    printPeerClose("protected handshake receiver", handshake_client.peerClose() orelse return error.UnexpectedState);
+    std.debug.print(
+        "[close] protected long handshake close bytes={} sender={s} receiver={s}\n",
+        .{
+            handshake_close.len,
+            @tagName(handshake_server.connectionState()),
+            @tagName(handshake_client.connectionState()),
+        },
+    );
+}
+
 pub fn main() !void {
     const gpa = std.heap.page_allocator;
 
@@ -243,4 +310,5 @@ pub fn main() !void {
     try framePayloadAutoCloseExample(gpa);
     try packetTypeAutoCloseExample(gpa);
     try protectedShortCloseExample(gpa);
+    try protectedLongCloseExample(gpa);
 }
