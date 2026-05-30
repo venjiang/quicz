@@ -145,7 +145,8 @@ experimental.
   Endpoint-owned recovery timer scheduling and routed protected receive refresh
   across connection handles. Run with `zig build run-endpoint-recovery-timers`.
 - [Path validation](examples/path_validation.zig): PATH_CHALLENGE/PATH_RESPONSE
-  retry and route update modeling. Run with `zig build run-path-validation`.
+  retry, 1200-byte protected path-validation datagrams, and route update
+  modeling. Run with `zig build run-path-validation`.
 - [Address validation](examples/address_validation.zig): HMAC address-validation
   tokens, version binding, secret rotation, replay snapshots, and
   lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery. Run with

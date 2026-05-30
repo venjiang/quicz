@@ -2825,6 +2825,35 @@ fn protectedLongPlaintextLenForMinDatagram(
     return expanded_len;
 }
 
+fn protectedShortDatagramWireLen(
+    dcid_len: usize,
+    packet_number_len: u8,
+    plaintext_len: usize,
+) Error!usize {
+    if (packet_number_len == 0 or packet_number_len > 4) return error.InvalidPacket;
+    var len: usize = 1;
+    len = try addWireLen(len, dcid_len);
+    len = try addWireLen(len, packet_number_len);
+    len = try addWireLen(len, plaintext_len);
+    len = try addWireLen(len, protection.aead_tag_len);
+    return len;
+}
+
+fn protectedShortPlaintextLenForMinDatagram(
+    dcid_len: usize,
+    packet_number_len: u8,
+    plaintext_len: usize,
+    min_datagram_len: usize,
+) Error!usize {
+    if (min_datagram_len == 0) return plaintext_len;
+    var expanded_len = plaintext_len;
+    while (try protectedShortDatagramWireLen(dcid_len, packet_number_len, expanded_len) < min_datagram_len) {
+        const current_len = try protectedShortDatagramWireLen(dcid_len, packet_number_len, expanded_len);
+        expanded_len = try addWireLen(expanded_len, min_datagram_len - current_len);
+    }
+    return expanded_len;
+}
+
 fn addWireLen(current: usize, extra: usize) Error!usize {
     return std.math.add(usize, current, extra) catch return error.Internal;
 }
@@ -6285,6 +6314,23 @@ pub const Connection = struct {
         return self.pollProtectedShortDatagramWithKeyPhaseState(now_millis, dcid, &state);
     }
 
+    fn protectedPathValidationPlaintextLen(
+        self: Connection,
+        dcid_len: usize,
+        packet_number_len: u8,
+        plaintext_len: usize,
+    ) Error!usize {
+        if (self.maxTxDatagramSize() < min_initial_udp_datagram_len) return plaintext_len;
+        if (!self.canSendToPeerAddress(min_initial_udp_datagram_len)) return plaintext_len;
+
+        return protectedShortPlaintextLenForMinDatagram(
+            dcid_len,
+            packet_number_len,
+            plaintext_len,
+            min_initial_udp_datagram_len,
+        );
+    }
+
     fn pollProtectedShortCloseDatagram(
         self: *Connection,
         now_millis: i64,
@@ -7500,7 +7546,11 @@ pub const Connection = struct {
         ) catch return error.Internal;
 
         const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
-        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        const plaintext_len = try self.protectedPathValidationPlaintextLen(
+            dcid.len,
+            packet_number_encoding.len,
+            @max(encoded_frame_len, min_payload_len),
+        );
         if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
 
         const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
@@ -7953,7 +8003,11 @@ pub const Connection = struct {
         ) catch return error.Internal;
 
         const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
-        const plaintext_len = @max(encoded_frame_len, min_payload_len);
+        const plaintext_len = try self.protectedPathValidationPlaintextLen(
+            dcid.len,
+            packet_number_encoding.len,
+            @max(encoded_frame_len, min_payload_len),
+        );
         if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
 
         const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
@@ -21768,6 +21822,7 @@ test "pollProtectedShortDatagram emits protected PATH_CHALLENGE and PATH_RESPONS
     try client.sendPathChallenge(challenge_data);
     const challenge = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(challenge);
+    try std.testing.expect(challenge.len >= min_initial_udp_datagram_len);
     try std.testing.expectEqual(@as(usize, 0), client.pending_path_challenges.items.len);
     try std.testing.expectEqual(@as(usize, 1), client.outstanding_path_challenges.items.len);
     try std.testing.expectEqualSlices(u8, &challenge_data, &client.outstanding_path_challenges.items[0].data);
@@ -21780,6 +21835,7 @@ test "pollProtectedShortDatagram emits protected PATH_CHALLENGE and PATH_RESPONS
 
     const response = (try server.pollProtectedShortDatagram(12, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(response);
+    try std.testing.expect(response.len >= min_initial_udp_datagram_len);
     try std.testing.expectEqual(@as(usize, 0), server.pending_path_responses.items.len);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 1), server.sentPacketCount(.application));
@@ -21798,6 +21854,32 @@ test "pollProtectedShortDatagram emits protected PATH_CHALLENGE and PATH_RESPONS
     try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.application));
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+}
+
+test "pollProtectedShortDatagram does not expand PATH_RESPONSE past anti-amplification budget" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    const challenge_data = [_]u8{ 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28 };
+    var challenge_buf: [24]u8 = undefined;
+    var challenge_out = buffer.fixedWriter(&challenge_buf);
+    try frame.encodeFrame(challenge_out.writer(), .{ .path_challenge = .{ .data = challenge_data } });
+    try server.processDatagram(0, challenge_out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), server.pending_path_responses.items.len);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+
+    try server.recordPeerAddressBytesReceived(16);
+    const response = (try server.pollProtectedShortDatagram(1, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response);
+
+    try std.testing.expect(response.len < min_initial_udp_datagram_len);
+    try std.testing.expectEqual(@as(usize, 0), server.pending_path_responses.items.len);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(response.len, server.bytesInFlight(.application));
 }
 
 test "endpoint route path update follows protected PATH_RESPONSE validation" {

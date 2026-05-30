@@ -138,6 +138,7 @@ fn protectedShortRoundtrip(allocator: std.mem.Allocator) !void {
 
     const challenge = (try client.pollProtectedShortDatagram(0, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer allocator.free(challenge);
+    try require(challenge.len >= 1200);
     try require(client.pendingPathChallengeCount() == 0);
     try require(client.outstandingPathChallengeCount() == 1);
 
@@ -145,6 +146,7 @@ fn protectedShortRoundtrip(allocator: std.mem.Allocator) !void {
 
     const response = (try server.pollProtectedShortDatagram(2, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
     defer allocator.free(response);
+    try require(response.len >= 1200);
     const migrated_route = try lifecycle.routeDatagram(new_path, response);
     try require(migrated_route.path_changed);
 
