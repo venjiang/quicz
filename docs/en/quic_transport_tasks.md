@@ -75,6 +75,11 @@ produce or consume TLS-owned QUIC packets over UDP.
 
 ## Progress Notes
 
+- 2026-05-30: Added socket-backed UDP CryptoBackend 1-RTT handoff coverage.
+  `udp_crypto_backend_loopback` drives a mock `CryptoBackend` to install
+  connection-owned 1-RTT traffic secrets and mark the modeled handshake
+  confirmed, then uses `EndpointConnectionLifecycle` over real loopback UDP to
+  route a protected STREAM and ACK cleanup.
 - 2026-05-30: Added socket-backed UDP installed-key HANDSHAKE_DONE loopback
   coverage. `udp_handshake_done_loopback` delivers a server HANDSHAKE_DONE
   frame with connection-owned 1-RTT keys over real loopback UDP through
@@ -2108,6 +2113,7 @@ run from `build.zig`.
 | `udp_handshake_keys_loopback` | Socket-backed loopback UDP Handshake-key exercise: lifecycle-routed installed-key Handshake CRYPTO delivery in both directions and routed Handshake ACK cleanup. | Present |
 | `udp_zero_rtt_loopback` | Socket-backed loopback UDP 0-RTT exercise: lifecycle-routed installed-key 0-RTT STREAM delivery, explicit accept-before-process enforcement, routed 1-RTT ACK cleanup, and server-side 0-RTT key discard after successful 1-RTT receive. | Present |
 | `udp_one_rtt_loopback` | Socket-backed loopback UDP 1-RTT exercise: lifecycle-routed installed-key 1-RTT STREAM delivery after modeled handshake confirmation and routed Application-space ACK cleanup. | Present |
+| `udp_crypto_backend_loopback` | Socket-backed loopback UDP CryptoBackend exercise: mock `CryptoBackend` 1-RTT traffic-secret handoff, modeled handshake confirmation, lifecycle-routed installed-key STREAM delivery, and routed ACK cleanup. | Present |
 | `udp_handshake_done_loopback` | Socket-backed loopback UDP HANDSHAKE_DONE exercise: lifecycle-routed installed-key HANDSHAKE_DONE confirmation, client-side Handshake key discard, and routed ACK cleanup. | Present |
 | `udp_flow_control_loopback` | Socket-backed loopback UDP flow-control exercise: lifecycle-routed protected STREAM delivery to the receive limit, lifecycle-routed protected STREAM_DATA_BLOCKED routing, lifecycle-routed receive-side MAX_DATA/MAX_STREAM_DATA credit refresh delivery, lifecycle-routed resumed STREAM data with FIN, and lifecycle-routed final ACK cleanup. | Present |
 | `udp_spin_bit_loopback` | Socket-backed loopback UDP spin-bit exercise: enabled single-path spin-bit signaling, lifecycle-routed protected short PING/ACK receive paths, first false spin round, migrated second true-spin PING with `path_changed`, lifecycle-owned route update/reset, reset ACK spin, and final ACK cleanup. | Present |
@@ -2186,6 +2192,7 @@ zig build run-udp-protected-loopback
 zig build run-udp-handshake-keys-loopback
 zig build run-udp-zero-rtt-loopback
 zig build run-udp-one-rtt-loopback
+zig build run-udp-crypto-backend-loopback
 zig build run-udp-handshake-done-loopback
 zig build run-udp-flow-control-loopback
 zig build run-udp-spin-bit-loopback
