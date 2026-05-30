@@ -7,6 +7,14 @@ fn require(condition: bool) ExampleError!void {
     if (!condition) return error.UnexpectedState;
 }
 
+fn requireInvalidRoutePacket(result: anyerror!quicz.endpoint.RouteResult) !void {
+    _ = result catch |err| {
+        if (err == error.InvalidPacket) return;
+        return err;
+    };
+    return error.UnexpectedState;
+}
+
 fn receiveTimeout() std.Io.Timeout {
     return .{
         .duration = .{
@@ -38,6 +46,95 @@ fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.e
     };
 }
 
+fn runProtectedAutoClose(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    client_socket: *std.Io.net.Socket,
+    server_socket: *std.Io.net.Socket,
+) !void {
+    const original_dcid = [_]u8{ 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28 };
+    const client_dcid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const server_dcid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const connection_handle: u64 = 72;
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try quicz.Connection.init(allocator, .client, .{});
+    defer client.deinit();
+    var server = try quicz.Connection.init(allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+
+    const client_path = try udp4Tuple(client_socket.*.address, server_socket.*.address);
+    const server_path = try udp4Tuple(server_socket.*.address, client_socket.*.address);
+    try client_lifecycle.registerConnectionId(connection_handle, &client_dcid, client_path, .{});
+    try server_lifecycle.registerConnectionId(connection_handle, &server_dcid, server_path, .{});
+
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_short = try quicz.protection.protectShortPacketAes128(allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try quicz.packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
+    defer allocator.free(invalid_short);
+
+    try client_socket.*.send(io, &server_socket.*.address, invalid_short);
+
+    var server_receive_buf: [1500]u8 = undefined;
+    const invalid_received = try server_socket.*.receiveTimeout(io, &server_receive_buf, receiveTimeout());
+    const invalid_path = try udp4Tuple(server_socket.*.address, invalid_received.from);
+    try requireInvalidRoutePacket(server_lifecycle.processRoutedProtectedShortDatagramOrClose(
+        connection_handle,
+        &server,
+        invalid_path,
+        30,
+        secrets.client,
+        invalid_received.data,
+    ));
+    try require(server.connectionState() == .closing);
+
+    const close_packet = (try server_lifecycle.pollProtectedShortDatagram(connection_handle, &server, 31, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
+    defer allocator.free(close_packet);
+    try server_socket.*.send(io, &invalid_received.from, close_packet);
+
+    var client_receive_buf: [1500]u8 = undefined;
+    const close_received = try client_socket.*.receiveTimeout(io, &client_receive_buf, receiveTimeout());
+    const close_path = try udp4Tuple(client_socket.*.address, close_received.from);
+    const close_route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        connection_handle,
+        &client,
+        close_path,
+        32,
+        secrets.server,
+        close_received.data,
+    );
+    try require(close_route.connection_id == connection_handle);
+    try require(std.mem.eql(u8, close_route.destination_connection_id.asSlice(), &client_dcid));
+    try require(client.connectionState() == .draining);
+
+    switch (client.peerClose() orelse return error.UnexpectedState) {
+        .connection => |close| {
+            try require(close.error_code == quicz.transport_error.codeValue(.frame_encoding_error));
+            try require(close.frame_type == 0x1f);
+            try require(std.mem.eql(u8, close.reason_phrase, "frame encoding"));
+            std.debug.print("[udp-close] auto_close invalid_bytes={} close_bytes={} error={} frame_type={} server_state={s} client_state={s}\n", .{
+                invalid_received.data.len,
+                close_received.data.len,
+                close.error_code,
+                close.frame_type,
+                @tagName(server.connectionState()),
+                @tagName(client.connectionState()),
+            });
+        },
+        else => return error.UnexpectedState,
+    }
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -63,6 +160,8 @@ pub fn main() !void {
     const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
     const connection_handle: u64 = 71;
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    try runProtectedAutoClose(allocator, io, &client_socket, &server_socket);
 
     var client = try quicz.Connection.init(allocator, .client, .{});
     defer client.deinit();
