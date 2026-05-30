@@ -407,6 +407,36 @@ fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
         },
         else => return error.UnexpectedState,
     }
+
+    var retire_server = try quicz.Connection.init(gpa, .server, .{});
+    defer retire_server.deinit();
+    try retire_server.validatePeerAddress();
+
+    var retire_payload: [16]u8 = undefined;
+    out = fixedWriter(&retire_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .retire_connection_id = .{ .sequence_number = 99 } });
+
+    try requireError(
+        error.InvalidPacket,
+        retire_server.processDatagramOrClose(0, out.getWritten()),
+    );
+
+    var retire_close_buf: [64]u8 = undefined;
+    const retire_close_payload = try pollRequired(&retire_server, &retire_close_buf);
+    var retire_close = try quicz.frame.decodeFrameSlice(retire_close_payload, gpa);
+    defer quicz.frame.deinitFrame(&retire_close.frame, gpa);
+    if (retire_close.len != retire_close_payload.len) return error.UnexpectedState;
+
+    switch (retire_close.frame) {
+        .connection_close => |close| {
+            if (close.error_code != quicz.transport_error.codeValue(.protocol_violation)) return error.UnexpectedState;
+            std.debug.print(
+                "[close] semantic retire-cid auto close error={} frame_type={} reason={s} state={s}\n",
+                .{ close.error_code, close.frame_type, close.reason_phrase, @tagName(retire_server.connectionState()) },
+            );
+        },
+        else => return error.UnexpectedState,
+    }
 }
 
 fn protectedShortCloseExample(gpa: std.mem.Allocator) !void {

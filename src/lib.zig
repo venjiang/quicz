@@ -8619,6 +8619,20 @@ pub const Connection = struct {
         return null;
     }
 
+    fn classifyRetireConnectionIdFrameProcessingCloseError(
+        self: *Connection,
+        retire_connection_id: frame.RetireConnectionIdFrame,
+        frame_type_value: u64,
+    ) ?FramePayloadCloseError {
+        const local_id = self.findLocalConnectionId(retire_connection_id.sequence_number) orelse {
+            return semanticCloseError(.protocol_violation, frame_type_value, "retire connection id");
+        };
+        if (!local_id.sent) {
+            return semanticCloseError(.protocol_violation, frame_type_value, "retire connection id");
+        }
+        return null;
+    }
+
     fn classifyFrameProcessingCloseError(
         self: *Connection,
         packet_type: FramePacketType,
@@ -8652,6 +8666,7 @@ pub const Connection = struct {
                 else
                     null,
                 .new_connection_id => |new_connection_id| self.classifyNewConnectionIdFrameProcessingCloseError(new_connection_id, frame_type_value),
+                .retire_connection_id => |retire_connection_id| self.classifyRetireConnectionIdFrameProcessingCloseError(retire_connection_id, frame_type_value),
                 .path_response => |path_response| if (self.pathResponseChallengeIndex(path_response.data) == null)
                     semanticCloseError(.protocol_violation, frame_type_value, "path response")
                 else
@@ -25748,6 +25763,102 @@ test "processDatagramOrClose queues protocol violation close for server HANDSHAK
         },
         else => return error.InvalidPacket,
     }
+}
+
+test "processDatagramOrClose queues protocol violation close for unknown RETIRE_CONNECTION_ID" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    var retire_buf: [16]u8 = undefined;
+    var retire_out = buffer.fixedWriter(&retire_buf);
+    try frame.encodeFrame(retire_out.writer(), .{ .retire_connection_id = .{ .sequence_number = 99 } });
+    const frame_type_value = rawFrameTypeValue(retire_out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, retire_out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(u64, 0), conn.localConnectionIdCount());
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("retire connection id", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramOrClose queues protocol violation close for unsent RETIRE_CONNECTION_ID" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const cid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    try std.testing.expectEqual(@as(u64, 0), try conn.issueConnectionId(&cid, token, 0));
+    try std.testing.expect(!conn.local_connection_ids.items[0].sent);
+
+    var retire_buf: [16]u8 = undefined;
+    var retire_out = buffer.fixedWriter(&retire_buf);
+    try frame.encodeFrame(retire_out.writer(), .{ .retire_connection_id = .{ .sequence_number = 0 } });
+    const frame_type_value = rawFrameTypeValue(retire_out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, retire_out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(u64, 1), conn.localConnectionIdCount());
+    try std.testing.expect(!conn.local_connection_ids.items[0].retired);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("retire connection id", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramOrClose accepts sent RETIRE_CONNECTION_ID without close" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const cid = [_]u8{ 0xba, 0xdc, 0x1d, 0x00 };
+    try std.testing.expectEqual(@as(u64, 0), try conn.issueConnectionId(&cid, token, 0));
+
+    var tx: [64]u8 = undefined;
+    _ = (try conn.pollTx(0, &tx)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(conn.local_connection_ids.items[0].sent);
+
+    var retire_buf: [16]u8 = undefined;
+    var retire_out = buffer.fixedWriter(&retire_buf);
+    try frame.encodeFrame(retire_out.writer(), .{ .retire_connection_id = .{ .sequence_number = 0 } });
+
+    try conn.processDatagramOrClose(0, retire_out.getWritten());
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+    try std.testing.expect(conn.pending_close == null);
+    try std.testing.expectEqual(@as(u64, 0), conn.localConnectionIdCount());
+    try std.testing.expect(conn.local_connection_ids.items[0].retired);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 1), conn.nextPeerPacketNumber(.application));
 }
 
 test "processDatagramOrClose queues connection-id-limit close for NEW_CONNECTION_ID overflow" {
