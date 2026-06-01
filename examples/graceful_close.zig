@@ -953,6 +953,62 @@ fn protectedReceiveAutoCloseExample(gpa: std.mem.Allocator) !void {
     );
 }
 
+fn protectedClosedStateDiscardExample(gpa: std.mem.Allocator) !void {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+    const invalid_protected = [_]u8{0xff};
+
+    var closing = try quicz.Connection.init(gpa, .client, .{});
+    defer closing.deinit();
+
+    try closing.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "closing discard");
+    const closing_initial_next = closing.nextPeerPacketNumber(.initial);
+    const closing_application_next = closing.nextPeerPacketNumber(.application);
+    if (try closing.processProtectedLongDatagramOrClose(19, .{
+        .initial = secrets.server,
+        .zero_rtt = secrets.server,
+    }, &invalid_protected) != 0) return error.UnexpectedState;
+    try closing.processProtectedZeroRttDatagramOrClose(20, secrets.server, &invalid_protected);
+    if (closing.nextPeerPacketNumber(.initial) != closing_initial_next) return error.UnexpectedState;
+    if (closing.nextPeerPacketNumber(.application) != closing_application_next) return error.UnexpectedState;
+    std.debug.print(
+        "[close] protected long/0-rtt closing discard initial_next={} application_next={} state={s}\n",
+        .{
+            closing_initial_next,
+            closing_application_next,
+            @tagName(closing.connectionState()),
+        },
+    );
+
+    var close_payload: [64]u8 = undefined;
+    var out = fixedWriter(&close_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .application_close = .{
+        .error_code = 0,
+        .reason_phrase = "drain discard",
+    } });
+
+    var draining = try quicz.Connection.init(gpa, .server, .{});
+    defer draining.deinit();
+    try draining.processDatagram(21, out.getWritten());
+    const draining_initial_next = draining.nextPeerPacketNumber(.initial);
+    const draining_application_next = draining.nextPeerPacketNumber(.application);
+    if (try draining.processProtectedLongDatagramOrClose(22, .{
+        .initial = secrets.client,
+        .zero_rtt = secrets.client,
+    }, &invalid_protected) != 0) return error.UnexpectedState;
+    try draining.processProtectedZeroRttDatagramOrClose(23, secrets.client, &invalid_protected);
+    if (draining.nextPeerPacketNumber(.initial) != draining_initial_next) return error.UnexpectedState;
+    if (draining.nextPeerPacketNumber(.application) != draining_application_next) return error.UnexpectedState;
+    std.debug.print(
+        "[close] protected long/0-rtt draining discard initial_next={} application_next={} state={s}\n",
+        .{
+            draining_initial_next,
+            draining_application_next,
+            @tagName(draining.connectionState()),
+        },
+    );
+}
+
 fn lifecycleProtectedReceiveAutoCloseExample(gpa: std.mem.Allocator) !void {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
@@ -1073,5 +1129,6 @@ pub fn main() !void {
     try protectedShortCloseExample(gpa);
     try protectedLongCloseExample(gpa);
     try protectedReceiveAutoCloseExample(gpa);
+    try protectedClosedStateDiscardExample(gpa);
     try lifecycleProtectedReceiveAutoCloseExample(gpa);
 }

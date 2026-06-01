@@ -21266,6 +21266,57 @@ test "processProtectedShortDatagram discards packets while draining" {
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
 }
 
+test "protected long and zero RTT datagrams discard while closing or draining" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const invalid_protected = [_]u8{0xff};
+
+    var closing = try Connection.init(std.testing.allocator, .client, .{});
+    defer closing.deinit();
+
+    try closing.closeConnection(0, @intFromEnum(frame.FrameType.stream), "closing");
+    try std.testing.expectEqual(ConnectionState.closing, closing.connectionState());
+    try std.testing.expect(closing.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), try closing.processProtectedLongDatagramOrClose(10, .{
+        .initial = secrets.server,
+        .zero_rtt = secrets.server,
+    }, &invalid_protected));
+    try closing.processProtectedZeroRttDatagramOrClose(11, secrets.server, &invalid_protected);
+    try std.testing.expectEqual(ConnectionState.closing, closing.connectionState());
+    try std.testing.expectEqual(@as(u64, 0), closing.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(u64, 0), closing.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), closing.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?u64, null), closing.pendingAckLargest(.application));
+    try std.testing.expect(closing.pending_close != null);
+
+    var close_buf: [64]u8 = undefined;
+    var close_out = buffer.fixedWriter(&close_buf);
+    try frame.encodeFrame(close_out.writer(), .{ .application_close = .{
+        .error_code = 0,
+        .reason_phrase = "drain",
+    } });
+
+    var draining = try Connection.init(std.testing.allocator, .server, .{});
+    defer draining.deinit();
+    try draining.processDatagram(20, close_out.getWritten());
+    try std.testing.expectEqual(ConnectionState.draining, draining.connectionState());
+
+    try std.testing.expectEqual(@as(usize, 0), try draining.processProtectedLongDatagramOrClose(21, .{
+        .initial = secrets.client,
+        .zero_rtt = secrets.client,
+    }, &invalid_protected));
+    try draining.processProtectedZeroRttDatagramOrClose(22, secrets.client, &invalid_protected);
+    try std.testing.expectEqual(ConnectionState.draining, draining.connectionState());
+    try std.testing.expectEqual(@as(u64, 0), draining.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(u64, 0), draining.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), draining.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(?u64, null), draining.pendingAckLargest(.application));
+    switch (draining.peerClose() orelse return error.TestUnexpectedResult) {
+        .application => |close| try std.testing.expectEqualStrings("drain", close.reason_phrase),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "protected short datagram spin bit follows enabled single-path policy" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };

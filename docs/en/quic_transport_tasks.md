@@ -721,6 +721,12 @@ produce or consume TLS-owned QUIC packets over UDP.
   draining peer close, invalid-payload discard, protected short-packet receive
   after close, and `graceful_close` now prints the preserved packet-number
   evidence for discarded packets.
+- 2026-06-01: Extended close-state discard coverage to protected long-header
+  and 0-RTT receive entry points. The close-path tests now exercise the
+  close-propagating long/0-RTT wrappers while both locally `closing` and peer
+  `draining`, proving invalid protected bytes are not parsed, do not generate
+  ACKs, and do not advance Initial or Application peer packet numbers;
+  `graceful_close` prints the matching long/0-RTT discard evidence.
 - 2026-05-27: Added ACK_ECN ECN-CE congestion response. Valid ACK_ECN
   CE counter increases now enter the same NewReno recovery period used for
   loss without treating the acknowledged packet as lost, and repeated CE
@@ -2298,7 +2304,7 @@ run from `build.zig`.
 | `stream_reset` | Current local RESET_STREAM emission, final-size observability, unsent STREAM drop behavior, and late STREAM ignore after reset. | Present |
 | `stop_sending` | Current local STOP_SENDING emission, peer RESET_STREAM response, Data Recvd suppression, pre-STREAM STOP_SENDING on peer-initiated bidirectional streams, implicit lower-numbered receive stream creation, and ACK-loss STREAM suppression after reset. | Present |
 | `flow_control` | Connection, stream, stream-count, receive-side MAX, MAX_STREAMS overflow rejection, configurable target receive windows, completed-stream MAX_STREAMS, peer-BLOCKED MAX retransmission/growth, pre-STREAM MAX_STREAM_DATA on peer-initiated bidirectional streams with implicit lower-numbered receive stream creation, final-size MAX_STREAM_DATA suppression, stale STREAM_DATA_BLOCKED suppression, and caller-keyed protected short MAX/BLOCKED exchange behavior. | Present |
-| `graceful_close` | Current in-memory, caller-keyed protected long Initial/Handshake CONNECTION_CLOSE, caller-keyed protected short CONNECTION_CLOSE/APPLICATION_CLOSE send/receive, invalid ACK/ACK_ECN-range close, invalid STREAMS_BLOCKED limit close, semantic frame-error auto-close including flow-control, ACK/ACK_ECN frames that acknowledge unsent packet numbers, conflicting STREAM data, invalid stream-control frames, unmatched PATH_RESPONSE, NEW_CONNECTION_ID limit/reuse, RETIRE_CONNECTION_ID unknown-CID, and role-specific NEW_TOKEN/HANDSHAKE_DONE cases, protected receive auto-close, lifecycle-routed protected receive auto-close, peer close diagnostics, default/space/packet-type invalid frame-payload auto-close, retransmission, and closing/draining state behavior. | Present |
+| `graceful_close` | Current in-memory, caller-keyed protected long Initial/Handshake CONNECTION_CLOSE, caller-keyed protected short CONNECTION_CLOSE/APPLICATION_CLOSE send/receive, invalid ACK/ACK_ECN-range close, invalid STREAMS_BLOCKED limit close, semantic frame-error auto-close including flow-control, ACK/ACK_ECN frames that acknowledge unsent packet numbers, conflicting STREAM data, invalid stream-control frames, unmatched PATH_RESPONSE, NEW_CONNECTION_ID limit/reuse, RETIRE_CONNECTION_ID unknown-CID, and role-specific NEW_TOKEN/HANDSHAKE_DONE cases, protected receive auto-close, lifecycle-routed protected receive auto-close, protected long/0-RTT close-state discard, peer close diagnostics, default/space/packet-type invalid frame-payload auto-close, retransmission, and closing/draining state behavior. | Present |
 | `idle_timeout` | Current max_idle_timeout transport parameter application, activity deadline refresh, and active-to-closed expiry. | Present |
 | `packet_spaces` | Current frame-payload Initial/Handshake/Application ACK/recovery isolation, RFC 9001 Initial discard, Initial/Handshake discard cleanup including ECN state, 0-RTT packet-type filtering, and caller-keyed protected 0-RTT STREAM/RESET_STREAM/STOP_SENDING delivery plus ACK-loss retransmission. | Present |
 | `path_validation` | Current frame-payload PATH_CHALLENGE timeout retry, success, retry exhaustion, duplicate pending PATH_RESPONSE suppression, caller-keyed protected 1-RTT PATH_CHALLENGE/PATH_RESPONSE exchange with 1200-byte datagram expansion and anti-amplification fallback, and `EndpointConnectionLifecycle` route path update after protected PATH_RESPONSE validation. | Present |

@@ -134,8 +134,9 @@ experimental.
   auto-close including invalid ACK/ACK_ECN, 0-RTT ACK/ACK_ECN packet-type
   violations, invalid STREAMS_BLOCKED limits, conflicting STREAM data, and
   invalid stream control frames, protected receive auto-close, lifecycle-routed
-  protected auto-close, draining behavior, and close-triggered validation. Run
-  with `zig build run-graceful-close`.
+  protected auto-close, protected long/0-RTT close-state discard, draining
+  behavior, and close-triggered validation. Run with
+  `zig build run-graceful-close`.
 - [Idle timeout](examples/idle_timeout.zig): Modeled idle timeout export,
   refresh, and close behavior. Run with `zig build run-idle-timeout`.
 - [Packet spaces](examples/packet_spaces.zig): Initial, Handshake, 0-RTT, and
