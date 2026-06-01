@@ -135,6 +135,28 @@ fn framePayloadAutoCloseExample(gpa: std.mem.Allocator) !void {
         .{@tagName(default_server.connectionState())},
     );
 
+    var ack_range_server = try quicz.Connection.init(gpa, .server, .{});
+    defer ack_range_server.deinit();
+    try ack_range_server.validatePeerAddress();
+
+    const invalid_ack_range_payload = [_]u8{
+        @intFromEnum(quicz.frame.FrameType.ack),
+        0x00, // largest acknowledged
+        0x00, // ack delay
+        0x00, // no additional ACK ranges
+        0x01, // first ACK range larger than largest acknowledged
+    };
+    try requireError(
+        error.InvalidPacket,
+        ack_range_server.processDatagramOrClose(0, &invalid_ack_range_payload),
+    );
+    const ack_range_close = try pollRequired(&ack_range_server, &close_payload_buf);
+    try printConnectionClose(gpa, ack_range_close);
+    std.debug.print(
+        "[close] default auto close state={s} after invalid ACK range\n",
+        .{@tagName(ack_range_server.connectionState())},
+    );
+
     var initial_server = try quicz.Connection.init(gpa, .server, .{});
     defer initial_server.deinit();
     try initial_server.validatePeerAddress();

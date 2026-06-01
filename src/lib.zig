@@ -25858,6 +25858,41 @@ test "processDatagramOrClose queues frame encoding close" {
     }
 }
 
+test "processDatagramOrClose queues frame encoding close for invalid ACK range" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const invalid_ack = [_]u8{
+        @intFromEnum(frame.FrameType.ack),
+        0x00, // largest acknowledged
+        0x00, // ack delay
+        0x00, // no additional ACK ranges
+        0x01, // first ACK range larger than largest acknowledged
+    };
+    const frame_type_value = rawFrameTypeValue(&invalid_ack);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, &invalid_ack));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
 test "processDatagramOrClose queues frame encoding close for MAX_STREAMS overflow" {
     var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
