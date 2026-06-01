@@ -3511,6 +3511,11 @@ fn refreshSendDataAckedStates(conn: *Connection) void {
     }
 }
 
+fn resetStreamFrameAlreadyAcked(conn: *Connection, reset: frame.ResetStreamFrame) bool {
+    const stream_state = conn.findSendStream(reset.stream_id) orelse return false;
+    return stream_state.reset_acked;
+}
+
 const RecvStreamState = struct {
     stream_id: u64,
     max_data: u64,
@@ -10930,6 +10935,7 @@ pub const Connection = struct {
                 retransmit_crypto_frames.append(self.allocator, cloned) catch return error.OutOfMemory;
             }
             if (sent_packet.reset_stream_frame) |reset| {
+                if (resetStreamFrameAlreadyAcked(self, reset)) continue;
                 retransmit_reset_stream_frames.append(self.allocator, reset) catch return error.OutOfMemory;
             }
             if (sent_packet.stop_sending_frame) |stop_sending| {
@@ -11139,6 +11145,7 @@ pub const Connection = struct {
         const packet_space = self.packetNumberSpace(space);
         for (packet_space.sent_packets.items) |sent_packet| {
             if (sent_packet.reset_stream_frame) |reset| {
+                if (resetStreamFrameAlreadyAcked(self, reset)) continue;
                 self.pending_reset_streams.append(self.allocator, reset) catch return error.OutOfMemory;
                 return true;
             }
@@ -21019,6 +21026,61 @@ test "checkPtoTimeouts retransmits protected 0-RTT control frames before PING" {
         1,
         .{ .stop_sending = stop_frame },
     ));
+}
+
+test "ACKed RESET_STREAM suppresses obsolete control retransmission" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "bye", false);
+    try client.resetStream(stream_id, 19);
+
+    const original = (try client.pollProtectedZeroRttDatagram(
+        10,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(original);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_reset_streams.items.len);
+    try std.testing.expect(client.sent_packets.items[0].reset_stream_frame != null);
+
+    const reset_deadline = client.ptoDeadlineMillis(.application) orelse return error.TestUnexpectedResult;
+    try client.checkPtoTimeouts(reset_deadline);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_reset_streams.items.len);
+
+    const retransmit = (try client.pollProtectedZeroRttDatagram(
+        reset_deadline + 1,
+        &server_scid,
+        &client_scid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(retransmit);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 2), client.sent_packets.items.len);
+
+    try client.receiveAckInSpace(.application, reset_deadline + 10_000, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(StreamSendState.reset_acked, (try client.streamState(stream_id)).?.send);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 1), client.sent_packets.items.len);
+
+    try client.checkLossDetectionTimeouts(reset_deadline + 100_000);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.sent_packets.items.len);
+    try std.testing.expectEqual(StreamSendState.reset_acked, (try client.streamState(stream_id)).?.send);
 }
 
 test "invalid ACK payload rolls back protected 0-RTT control-frame requeue" {

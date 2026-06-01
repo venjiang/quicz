@@ -213,6 +213,45 @@ pub fn main() !void {
         .{retransmit_payload.len},
     );
 
+    var reset_probe = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer reset_probe.deinit();
+    try reset_probe.confirmHandshake();
+    const reset_stream_id = try reset_probe.openStream();
+    try reset_probe.sendOnStream(reset_stream_id, "rst", false);
+    try reset_probe.resetStream(reset_stream_id, 21);
+    _ = (try reset_probe.pollTx(10, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
+    const reset_probe_deadline = reset_probe.ptoDeadlineMillis(.application) orelse return error.PtoRecoveryExampleFailed;
+    try reset_probe.checkPtoTimeouts(reset_probe_deadline);
+    if (reset_probe.pending_reset_streams.items.len != 1) return error.PtoRecoveryExampleFailed;
+    const reset_retransmit = (try reset_probe.pollTx(reset_probe_deadline + 1, &out_buf)) orelse return error.PtoRecoveryExampleFailed;
+    var reset_retransmit_decoded = try quicz.frame.decodeFrameSlice(reset_retransmit, allocator);
+    defer quicz.frame.deinitFrame(&reset_retransmit_decoded.frame, allocator);
+    switch (reset_retransmit_decoded.frame) {
+        .reset_stream => |reset| {
+            if (reset.stream_id != reset_stream_id) return error.PtoRecoveryExampleFailed;
+            if (reset.application_error_code != 21) return error.PtoRecoveryExampleFailed;
+            if (reset.final_size != 3) return error.PtoRecoveryExampleFailed;
+        },
+        else => return error.PtoRecoveryExampleFailed,
+    }
+    try reset_probe.receiveAckInSpace(.application, reset_probe_deadline + 10_000, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const reset_probe_state = (try reset_probe.streamState(reset_stream_id)) orelse return error.PtoRecoveryExampleFailed;
+    if (reset_probe_state.send != .reset_acked) return error.PtoRecoveryExampleFailed;
+    if (reset_probe.pending_reset_streams.items.len != 0) return error.PtoRecoveryExampleFailed;
+    if (reset_probe.sentPacketCount(.application) != 1) return error.PtoRecoveryExampleFailed;
+    try reset_probe.checkLossDetectionTimeouts(reset_probe_deadline + 100_000);
+    if (reset_probe.pending_reset_streams.items.len != 0) return error.PtoRecoveryExampleFailed;
+    if (reset_probe.sentPacketCount(.application) != 0) return error.PtoRecoveryExampleFailed;
+
+    std.debug.print(
+        "[pto] acked RESET_STREAM suppressed obsolete retransmission state={s}\n",
+        .{@tagName(reset_probe_state.send)},
+    );
+
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
