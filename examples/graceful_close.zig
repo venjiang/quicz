@@ -218,6 +218,42 @@ fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
         else => return error.UnexpectedState,
     }
 
+    var ack_client = try quicz.Connection.init(gpa, .client, .{});
+    defer ack_client.deinit();
+    const ack_stream_id = try ack_client.openStream();
+    try ack_client.sendOnStream(ack_stream_id, "hello", false);
+    var sent_payload_buf: [128]u8 = undefined;
+    _ = try pollRequired(&ack_client, &sent_payload_buf);
+
+    var ack_payload: [32]u8 = undefined;
+    out = fixedWriter(&ack_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .ack = .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+    try requireError(
+        error.InvalidPacket,
+        ack_client.processDatagramOrClose(60, out.getWritten()),
+    );
+
+    var ack_close_buf: [64]u8 = undefined;
+    const ack_close_payload = try pollRequired(&ack_client, &ack_close_buf);
+    var ack_close = try quicz.frame.decodeFrameSlice(ack_close_payload, gpa);
+    defer quicz.frame.deinitFrame(&ack_close.frame, gpa);
+    if (ack_close.len != ack_close_payload.len) return error.UnexpectedState;
+
+    switch (ack_close.frame) {
+        .connection_close => |close| {
+            if (close.error_code != quicz.transport_error.codeValue(.protocol_violation)) return error.UnexpectedState;
+            std.debug.print(
+                "[close] semantic ack auto close error={} frame_type={} reason={s} state={s}\n",
+                .{ close.error_code, close.frame_type, close.reason_phrase, @tagName(ack_client.connectionState()) },
+            );
+        },
+        else => return error.UnexpectedState,
+    }
+
     var conflict_server = try quicz.Connection.init(gpa, .server, .{});
     defer conflict_server.deinit();
     try conflict_server.validatePeerAddress();

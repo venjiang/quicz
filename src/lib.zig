@@ -8680,6 +8680,20 @@ pub const Connection = struct {
         return null;
     }
 
+    fn classifyAckFrameProcessingCloseError(
+        self: *Connection,
+        packet_type: FramePacketType,
+        ack: frame.AckFrame,
+        frame_type_value: u64,
+    ) ?FramePayloadCloseError {
+        const packet_space = self.packetNumberSpace(packetNumberSpaceForFramePacketType(packet_type));
+        if (packet_space.discarded.*) return null;
+        if (ack.largest_acknowledged >= packet_space.next_packet_number.*) {
+            return semanticCloseError(.protocol_violation, frame_type_value, "ack");
+        }
+        return null;
+    }
+
     fn classifyNewConnectionIdFrameProcessingCloseError(
         self: *Connection,
         new_connection_id: frame.NewConnectionIdFrame,
@@ -8744,6 +8758,8 @@ pub const Connection = struct {
             }
 
             const close = switch (decoded.frame) {
+                .ack => |ack| self.classifyAckFrameProcessingCloseError(packet_type, ack, frame_type_value),
+                .ack_ecn => |ack_ecn| self.classifyAckFrameProcessingCloseError(packet_type, ack_ecn.ack, frame_type_value),
                 .stream => |stream_frame| self.classifyStreamFrameProcessingCloseError(stream_frame, frame_type_value),
                 .crypto => |crypto| self.classifyCryptoFrameProcessingCloseError(crypto, frame_type_value),
                 .reset_stream => |reset| self.classifyResetStreamFrameProcessingCloseError(reset, frame_type_value),
@@ -28319,6 +28335,50 @@ test "processDatagramOrClose queues protocol violation close for conflicting STR
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
             try std.testing.expectEqual(frame_type_value, close.frame_type);
             try std.testing.expectEqualStrings("stream data", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramOrClose queues protocol violation close for ACK of unsent packet" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "hello", false);
+
+    var out_buf: [128]u8 = undefined;
+    const payload = (try conn.pollTx(10, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 1), conn.next_packet_number);
+
+    var ack_buf: [32]u8 = undefined;
+    var ack_out = buffer.fixedWriter(&ack_buf);
+    try frame.encodeFrame(ack_out.writer(), .{ .ack = .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+    const frame_type_value = rawFrameTypeValue(ack_out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(60, ack_out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 1), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.sent_packets.items[0].packet_number);
+    try std.testing.expectEqual(payload.len, conn.recovery_state.bytes_in_flight);
+    try std.testing.expectEqual(@as(?u64, null), conn.recovery_state.latest_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+
+    var close_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(61, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("ack", close.reason_phrase);
         },
         else => return error.InvalidPacket,
     }
