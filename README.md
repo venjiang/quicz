@@ -122,8 +122,8 @@ experimental.
 - [Unidirectional streams](examples/uni_stream.zig): Local and peer
   unidirectional stream opening and validation. Run with `zig build run-uni-stream`.
 - [Stream reset](examples/stream_reset.zig): RESET_STREAM send/receive behavior,
-  retransmission boundaries, stream-state snapshots, and send-credit closure
-  after reset. Run with `zig build run-stream-reset`.
+  retransmission boundaries, stream-state snapshots with reset-read evidence,
+  and send-credit closure after reset. Run with `zig build run-stream-reset`.
 - [STOP_SENDING](examples/stop_sending.zig): STOP_SENDING receive handling and
   stream-state snapshot evidence for the RESET_STREAM response. Run with
   `zig build run-stop-sending`.

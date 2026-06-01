@@ -109,7 +109,7 @@ pub fn main() !void {
   运行：`zig build run-flow-control`。
 - [Unidirectional streams](examples/uni_stream.zig)：本端与对端 unidirectional stream 打开和校验。
   运行：`zig build run-uni-stream`。
-- [Stream reset](examples/stream_reset.zig)：RESET_STREAM 发送/接收行为、重传边界、stream 状态快照，以及 reset 后发送 credit 关闭。
+- [Stream reset](examples/stream_reset.zig)：RESET_STREAM 发送/接收行为、重传边界、带 reset-read 证据的 stream 状态快照，以及 reset 后发送 credit 关闭。
   运行：`zig build run-stream-reset`。
 - [STOP_SENDING](examples/stop_sending.zig)：STOP_SENDING 接收处理，以及 RESET_STREAM 响应的 stream 状态快照证据。
   运行：`zig build run-stop-sending`。

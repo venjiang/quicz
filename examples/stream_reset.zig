@@ -77,9 +77,12 @@ pub fn main() !void {
 
     var recv_buf: [16]u8 = undefined;
     try requireError(error.StreamClosed, server.recvOnStream(stream_id, &recv_buf));
-    std.debug.print("[stream-reset] client reset stream={} receive={s} final_size={?}\n", .{
+    const server_read_state = (try server.streamState(stream_id)) orelse return error.UnexpectedState;
+    if (server_read_state.receive != .reset_read) return error.UnexpectedState;
+    std.debug.print("[stream-reset] client reset stream={} receive={s} observed={s} final_size={?}\n", .{
         stream_id,
         @tagName(server_state.receive),
+        @tagName(server_read_state.receive),
         try server.recvStreamFinalSize(stream_id),
     });
 
