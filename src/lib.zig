@@ -18515,6 +18515,41 @@ test "ACK-driven losses establish persistent congestion after prior RTT sample" 
     try std.testing.expectEqual(recovery.minimumCongestionWindow(1200), conn.congestionWindow(.application));
 }
 
+test "ACK-driven non-contiguous losses do not establish persistent congestion" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 0, 100);
+    try conn.receiveAckInSpace(.application, 100, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 1000, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 1100, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 1200, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 1300, 100);
+
+    const ack_ranges = [_]frame.AckRange{
+        .{ .gap = 0, .ack_range = 0 },
+    };
+    try conn.receiveAckInSpace(.application, 1400, .{
+        .largest_acknowledged = 5,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &ack_ranges,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
+    try std.testing.expect(conn.congestionWindow(.application) > recovery.minimumCongestionWindow(1200));
+}
+
 test "ACK-driven persistent congestion duration ignores PTO backoff" {
     var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,

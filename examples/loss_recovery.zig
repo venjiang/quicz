@@ -205,6 +205,40 @@ pub fn main() !void {
         .{ persistent_duration, persistent.congestionWindow(.application) },
     );
 
+    var non_contiguous_persistent = try quicz.Connection.init(allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer non_contiguous_persistent.deinit();
+
+    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 0, 100);
+    try non_contiguous_persistent.receiveAckInSpace(.application, 100, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 10, 100);
+    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 1000, 100);
+    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 1100, 100);
+    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 1200, 100);
+    _ = try non_contiguous_persistent.recordPacketSentInSpace(.application, 1300, 100);
+    const non_contiguous_ack_ranges = [_]quicz.frame.AckRange{
+        .{ .gap = 0, .ack_range = 0 },
+    };
+    try non_contiguous_persistent.receiveAckInSpace(.application, 1400, .{
+        .largest_acknowledged = 5,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &non_contiguous_ack_ranges,
+    });
+    if (non_contiguous_persistent.congestionWindow(.application) <= quicz.recovery.minimumCongestionWindow(1200)) {
+        return error.LossRecoveryExampleFailed;
+    }
+    std.debug.print(
+        "[loss] non_contiguous_persistent suppressed cwnd={d} minimum={d}\n",
+        .{ non_contiguous_persistent.congestionWindow(.application), quicz.recovery.minimumCongestionWindow(1200) },
+    );
+
     var recovery_period = try quicz.Connection.init(allocator, .client, .{
         .max_datagram_size = 1200,
         .initial_rtt_ms = 100,
