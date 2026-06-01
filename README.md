@@ -117,7 +117,8 @@ experimental.
   export, parsing, application, and close-on-error behavior. Run with
   `zig build run-transport-parameters`.
 - [Flow control](examples/flow_control.zig): Connection, stream, stream-count,
-  and BLOCKED/MAX frame behavior. Run with `zig build run-flow-control`.
+  MAX_STREAMS overflow rejection, and BLOCKED/MAX frame behavior. Run with
+  `zig build run-flow-control`.
 - [Unidirectional streams](examples/uni_stream.zig): Local and peer
   unidirectional stream opening and validation. Run with `zig build run-uni-stream`.
 - [Stream reset](examples/stream_reset.zig): RESET_STREAM send/receive behavior

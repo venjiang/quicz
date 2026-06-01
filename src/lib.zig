@@ -8723,6 +8723,14 @@ pub const Connection = struct {
                 .reset_stream => |reset| self.classifyResetStreamFrameProcessingCloseError(reset, frame_type_value),
                 .stream_data_blocked => |blocked| self.classifyReceiveStreamIdCloseError(blocked.stream_id, frame_type_value),
                 .max_stream_data => |max_stream_data| self.classifySendControlStreamIdCloseError(max_stream_data.stream_id, frame_type_value),
+                .max_streams_bidi => |max_streams| if (max_streams.maximum_streams > max_stream_count)
+                    semanticCloseError(.frame_encoding_error, frame_type_value, "frame encoding")
+                else
+                    null,
+                .max_streams_uni => |max_streams| if (max_streams.maximum_streams > max_stream_count)
+                    semanticCloseError(.frame_encoding_error, frame_type_value, "frame encoding")
+                else
+                    null,
                 .stop_sending => |stop_sending| self.classifySendControlStreamIdCloseError(stop_sending.stream_id, frame_type_value),
                 .new_token => if (self.side == .server)
                     semanticCloseError(.protocol_violation, frame_type_value, "new token")
@@ -9017,8 +9025,8 @@ pub const Connection = struct {
                 .ack_ecn => |ack_ecn| try self.receiveAckFrame(space, now_millis, ack_ecn.ack, ack_ecn.ecn_counts),
                 .max_data => |max_data| self.receiveMaxDataFrame(max_data),
                 .max_stream_data => |max_stream_data| try self.receiveMaxStreamDataFrame(max_stream_data),
-                .max_streams_bidi => |max_streams| self.receiveMaxStreamsBidiFrame(max_streams),
-                .max_streams_uni => |max_streams| self.receiveMaxStreamsUniFrame(max_streams),
+                .max_streams_bidi => |max_streams| try self.receiveMaxStreamsBidiFrame(max_streams),
+                .max_streams_uni => |max_streams| try self.receiveMaxStreamsUniFrame(max_streams),
                 .data_blocked => |data_blocked| try self.receiveDataBlockedFrame(data_blocked),
                 .stream_data_blocked => |stream_data_blocked| try self.receiveStreamDataBlockedFrame(stream_data_blocked),
                 .streams_blocked_bidi => |streams_blocked| try self.receiveStreamsBlockedBidiFrame(streams_blocked),
@@ -12238,11 +12246,13 @@ pub const Connection = struct {
         applyMaxStreamDataToSendStream(stream_state, max_stream_data.maximum_stream_data);
     }
 
-    fn receiveMaxStreamsBidiFrame(self: *Connection, max_streams: frame.MaxStreamsBidiFrame) void {
+    fn receiveMaxStreamsBidiFrame(self: *Connection, max_streams: frame.MaxStreamsBidiFrame) Error!void {
+        if (max_streams.maximum_streams > max_stream_count) return error.InvalidPacket;
         self.peer_max_streams_bidi = @max(self.peer_max_streams_bidi, max_streams.maximum_streams);
     }
 
-    fn receiveMaxStreamsUniFrame(self: *Connection, max_streams: frame.MaxStreamsUniFrame) void {
+    fn receiveMaxStreamsUniFrame(self: *Connection, max_streams: frame.MaxStreamsUniFrame) Error!void {
+        if (max_streams.maximum_streams > max_stream_count) return error.InvalidPacket;
         self.peer_max_streams_uni = @max(self.peer_max_streams_uni, max_streams.maximum_streams);
     }
 
@@ -25699,6 +25709,38 @@ test "processDatagramOrClose queues frame encoding close" {
     }
 }
 
+test "processDatagramOrClose queues frame encoding close for MAX_STREAMS overflow" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try out.writer().writeByte(@intFromEnum(frame.FrameType.max_streams_bidi));
+    try packet.encodeVarInt(out.writer(), max_stream_count + 1);
+    const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
 test "processDatagramInSpaceOrClose queues protocol violation close" {
     var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
@@ -27693,6 +27735,37 @@ test "peer BLOCKED receive-window growth rolls back when payload is invalid" {
     try std.testing.expectEqual(@as(usize, 0), conn.pending_max_frames.items.len);
     try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
     try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
+}
+
+test "MAX_STREAMS rejects values above stream count limit" {
+    var bidi = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_streams_bidi = 2,
+    });
+    defer bidi.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try out.writer().writeByte(@intFromEnum(frame.FrameType.max_streams_bidi));
+    try packet.encodeVarInt(out.writer(), max_stream_count + 1);
+
+    try std.testing.expectError(error.InvalidPacket, bidi.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(u64, 2), bidi.peer_max_streams_bidi);
+    try std.testing.expectEqual(@as(?u64, null), bidi.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), bidi.next_peer_packet_number);
+
+    var uni = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_streams_uni = 1,
+    });
+    defer uni.deinit();
+
+    out = buffer.fixedWriter(&datagram);
+    try out.writer().writeByte(@intFromEnum(frame.FrameType.max_streams_uni));
+    try packet.encodeVarInt(out.writer(), max_stream_count + 1);
+
+    try std.testing.expectError(error.InvalidPacket, uni.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(u64, 1), uni.peer_max_streams_uni);
+    try std.testing.expectEqual(@as(?u64, null), uni.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), uni.next_peer_packet_number);
 }
 
 test "MAX_STREAM_DATA rejects unopened local and receive-only streams" {

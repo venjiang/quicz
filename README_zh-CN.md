@@ -105,7 +105,7 @@ pub fn main() !void {
   运行：`zig build run-codec`。
 - [Transport parameters](examples/transport_parameters.zig)：transport parameter 导出、解析、应用和错误关闭行为。
   运行：`zig build run-transport-parameters`。
-- [Flow control](examples/flow_control.zig)：connection、stream、stream-count 和 BLOCKED/MAX frame 行为。
+- [Flow control](examples/flow_control.zig)：connection、stream、stream-count、MAX_STREAMS overflow 拒绝和 BLOCKED/MAX frame 行为。
   运行：`zig build run-flow-control`。
 - [Unidirectional streams](examples/uni_stream.zig)：本端与对端 unidirectional stream 打开和校验。
   运行：`zig build run-uni-stream`。
