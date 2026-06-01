@@ -276,6 +276,77 @@ fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
         else => return error.UnexpectedState,
     }
 
+    var stop_server = try quicz.Connection.init(gpa, .server, .{});
+    defer stop_server.deinit();
+    try stop_server.validatePeerAddress();
+
+    var stop_payload: [32]u8 = undefined;
+    out = fixedWriter(&stop_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .stop_sending = .{
+        .stream_id = 2,
+        .application_error_code = 1,
+    } });
+    try requireError(
+        error.InvalidPacket,
+        stop_server.processDatagramOrClose(0, out.getWritten()),
+    );
+
+    var stop_close_buf: [64]u8 = undefined;
+    const stop_close_payload = try pollRequired(&stop_server, &stop_close_buf);
+    try printConnectionClose(gpa, stop_close_payload);
+    std.debug.print(
+        "[close] semantic stop-sending auto close state={s}\n",
+        .{@tagName(stop_server.connectionState())},
+    );
+
+    var max_stream_data_server = try quicz.Connection.init(gpa, .server, .{});
+    defer max_stream_data_server.deinit();
+    try max_stream_data_server.validatePeerAddress();
+
+    var max_stream_data_payload: [32]u8 = undefined;
+    out = fixedWriter(&max_stream_data_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .max_stream_data = .{
+        .stream_id = 2,
+        .maximum_stream_data = 32,
+    } });
+    try requireError(
+        error.InvalidPacket,
+        max_stream_data_server.processDatagramOrClose(0, out.getWritten()),
+    );
+
+    var max_stream_data_close_buf: [64]u8 = undefined;
+    const max_stream_data_close_payload = try pollRequired(&max_stream_data_server, &max_stream_data_close_buf);
+    try printConnectionClose(gpa, max_stream_data_close_payload);
+    std.debug.print(
+        "[close] semantic max-stream-data auto close state={s}\n",
+        .{@tagName(max_stream_data_server.connectionState())},
+    );
+
+    var blocked_server = try quicz.Connection.init(gpa, .server, .{
+        .initial_max_streams_bidi = 0,
+    });
+    defer blocked_server.deinit();
+    try blocked_server.validatePeerAddress();
+
+    var blocked_payload: [32]u8 = undefined;
+    out = fixedWriter(&blocked_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .stream_data_blocked = .{
+        .stream_id = 0,
+        .maximum_stream_data = 0,
+    } });
+    try requireError(
+        error.InvalidPacket,
+        blocked_server.processDatagramOrClose(0, out.getWritten()),
+    );
+
+    var blocked_close_buf: [64]u8 = undefined;
+    const blocked_close_payload = try pollRequired(&blocked_server, &blocked_close_buf);
+    try printConnectionClose(gpa, blocked_close_payload);
+    std.debug.print(
+        "[close] semantic stream-data-blocked auto close state={s}\n",
+        .{@tagName(blocked_server.connectionState())},
+    );
+
     var conflict_server = try quicz.Connection.init(gpa, .server, .{});
     defer conflict_server.deinit();
     try conflict_server.validatePeerAddress();
