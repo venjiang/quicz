@@ -96,10 +96,18 @@ pub fn main() !void {
     var datagram: [128]u8 = undefined;
     try server.processDatagram(0, try pollRequired(&client, &datagram));
     try server.stopSending(stream_id, 23);
+    const stop_state = (try server.streamState(stream_id)) orelse return error.UnexpectedState;
+    if (stop_state.receive != .receiving or stop_state.receive_stop_sending_sent != @as(?bool, true)) {
+        return error.UnexpectedState;
+    }
 
     const stop_payload = try pollRequired(&server, &datagram);
     try client.processDatagram(1, stop_payload);
-    std.debug.print("[stop] receiver requested stop stream={} error=23\n", .{stream_id});
+    std.debug.print("[stop] receiver requested stop stream={} state={s} stop_sent={} error=23\n", .{
+        stream_id,
+        @tagName(stop_state.receive),
+        stop_state.receive_stop_sending_sent.?,
+    });
 
     const reset_payload = try pollRequired(&client, &datagram);
     try server.processDatagram(2, reset_payload);

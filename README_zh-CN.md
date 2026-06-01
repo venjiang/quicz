@@ -111,7 +111,7 @@ pub fn main() !void {
   运行：`zig build run-uni-stream`。
 - [Stream reset](examples/stream_reset.zig)：RESET_STREAM 发送/接收行为、重传边界、stream 状态快照，以及 reset 后发送 credit 关闭。
   运行：`zig build run-stream-reset`。
-- [STOP_SENDING](examples/stop_sending.zig)：STOP_SENDING 接收处理和 RESET_STREAM 响应。
+- [STOP_SENDING](examples/stop_sending.zig)：STOP_SENDING 接收处理，以及 RESET_STREAM 响应的 stream 状态快照证据。
   运行：`zig build run-stop-sending`。
 - [CRYPTO streams](examples/crypto_stream.zig)：按 packet number space 隔离的 CRYPTO buffering、接收缓冲超限 auto-close、mock backend handoff、protected backend transport-parameter auto-close 和 protected CRYPTO flow。
   运行：`zig build run-crypto-stream`。

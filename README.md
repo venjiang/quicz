@@ -125,7 +125,8 @@ experimental.
   retransmission boundaries, stream-state snapshots, and send-credit closure
   after reset. Run with `zig build run-stream-reset`.
 - [STOP_SENDING](examples/stop_sending.zig): STOP_SENDING receive handling and
-  RESET_STREAM response. Run with `zig build run-stop-sending`.
+  stream-state snapshot evidence for the RESET_STREAM response. Run with
+  `zig build run-stop-sending`.
 - [CRYPTO streams](examples/crypto_stream.zig): Per-space CRYPTO buffering,
   receive-buffer overflow auto-close, mock backend handoff, protected backend
   transport-parameter auto-close, and protected CRYPTO flow. Run with

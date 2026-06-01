@@ -364,6 +364,8 @@ pub const StreamState = struct {
     receive_buffered: ?u64,
     /// Application read offset for the contiguous receive buffer.
     receive_read_offset: ?u64,
+    /// Whether this endpoint has queued or sent STOP_SENDING for the receive side.
+    receive_stop_sending_sent: ?bool,
     /// Final size learned from STREAM FIN or RESET_STREAM, if any.
     receive_final_size: ?u64,
     /// Application error code from peer RESET_STREAM, if any.
@@ -3882,6 +3884,7 @@ pub const Connection = struct {
             .send_max_data = if (send_state) |state| state.max_data else null,
             .receive_buffered = if (recv_state) |state| receiveBufferedByteCountForSnapshot(state) else null,
             .receive_read_offset = if (recv_state) |state| receiveReadOffsetForSnapshot(state) else null,
+            .receive_stop_sending_sent = if (recv_state) |state| state.stop_sending_sent else null,
             .receive_final_size = if (recv_state) |state| state.final_size else null,
             .receive_reset_error_code = if (recv_state) |state| state.reset_error_code else null,
         };
@@ -24843,6 +24846,38 @@ test "streamState reports reset send and receive snapshots" {
     try std.testing.expectEqual(@as(?u64, 0), server_state.receive_read_offset);
     try std.testing.expectEqual(@as(?u64, 5), server_state.receive_final_size);
     try std.testing.expectEqual(@as(?u64, 7), server_state.receive_reset_error_code);
+}
+
+test "streamState reports STOP_SENDING receive-side request" {
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", false);
+
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(0, (try client.pollTx(0, &datagram)).?);
+    try server.stopSending(stream_id, 11);
+
+    const stopped_state = (try server.streamState(stream_id)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(StreamSendState.none, stopped_state.send);
+    try std.testing.expectEqual(StreamReceiveState.receiving, stopped_state.receive);
+    try std.testing.expectEqual(@as(?bool, true), stopped_state.receive_stop_sending_sent);
+    try std.testing.expectEqual(@as(?u64, 5), stopped_state.receive_buffered);
+    try std.testing.expectEqual(@as(?u64, 0), stopped_state.receive_read_offset);
+    try std.testing.expectEqual(@as(?u64, null), stopped_state.receive_final_size);
+
+    try client.processDatagram(1, (try server.pollTx(1, &datagram)).?);
+    try server.processDatagram(2, (try client.pollTx(2, &datagram)).?);
+
+    const reset_state = (try server.streamState(stream_id)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(StreamReceiveState.reset_received, reset_state.receive);
+    try std.testing.expectEqual(@as(?bool, true), reset_state.receive_stop_sending_sent);
+    try std.testing.expectEqual(@as(?u64, 5), reset_state.receive_final_size);
+    try std.testing.expectEqual(@as(?u64, 11), reset_state.receive_reset_error_code);
 }
 
 test "stopSending queues STOP_SENDING and peer responds with RESET_STREAM" {
