@@ -23191,6 +23191,18 @@ test "0-RTT packet type rejects forbidden frames and rolls back earlier state" {
     try expectFramePacketTypeRejected(.zero_rtt, .{ .new_token = .{ .token = "token" } });
     try expectFramePacketTypeRejected(.zero_rtt, .{ .path_response = .{ .data = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 } } });
     try expectFramePacketTypeRejected(.zero_rtt, .{ .retire_connection_id = .{ .sequence_number = 0 } });
+    try expectFramePacketTypeRejected(.zero_rtt, .{ .ack_ecn = .{
+        .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 0,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
+    } });
 }
 
 test "processDatagramForPacketTypeOrClose queues protocol violation close" {
@@ -23224,6 +23236,50 @@ test "processDatagramForPacketTypeOrClose queues protocol violation close" {
         .connection_close => |close| {
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
             try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.ack)), close.frame_type);
+            try std.testing.expectEqualStrings("packet type", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramForPacketTypeOrClose queues protocol violation close for ACK_ECN" {
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .ack_ecn = .{
+        .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 0,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
+    } });
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processDatagramForPacketTypeOrClose(.zero_rtt, 0, out.getWritten()),
+    );
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+
+    var close_buf: [64]u8 = undefined;
+    const payload = (try server.pollTx(1, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.ack_ecn)), close.frame_type);
             try std.testing.expectEqualStrings("packet type", close.reason_phrase);
         },
         else => return error.InvalidPacket,

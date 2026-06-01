@@ -221,6 +221,37 @@ fn packetTypeAutoCloseExample(gpa: std.mem.Allocator) !void {
         "[close] auto close state={s} after invalid 0-RTT ACK\n",
         .{@tagName(server.connectionState())},
     );
+
+    var ack_ecn_server = try quicz.Connection.init(gpa, .server, .{});
+    defer ack_ecn_server.deinit();
+    try ack_ecn_server.validatePeerAddress();
+
+    var ack_ecn_payload_buf: [32]u8 = undefined;
+    var ack_ecn_out = fixedWriter(&ack_ecn_payload_buf);
+    try quicz.frame.encodeFrame(ack_ecn_out.writer(), .{ .ack_ecn = .{
+        .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 0,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
+    } });
+
+    try requireError(
+        error.InvalidPacket,
+        ack_ecn_server.processDatagramForPacketTypeOrClose(.zero_rtt, 0, ack_ecn_out.getWritten()),
+    );
+
+    const ack_ecn_close_payload = try pollRequired(&ack_ecn_server, &close_payload_buf);
+    try printConnectionClose(gpa, ack_ecn_close_payload);
+    std.debug.print(
+        "[close] auto close state={s} after invalid 0-RTT ACK_ECN\n",
+        .{@tagName(ack_ecn_server.connectionState())},
+    );
 }
 
 fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
