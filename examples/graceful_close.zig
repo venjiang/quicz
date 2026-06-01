@@ -179,6 +179,44 @@ fn framePayloadAutoCloseExample(gpa: std.mem.Allocator) !void {
         .{@tagName(ack_ecn_range_server.connectionState())},
     );
 
+    var streams_blocked_bidi_server = try quicz.Connection.init(gpa, .server, .{});
+    defer streams_blocked_bidi_server.deinit();
+    try streams_blocked_bidi_server.validatePeerAddress();
+
+    var invalid_streams_blocked_bidi: [16]u8 = undefined;
+    var streams_blocked_bidi_out = fixedWriter(&invalid_streams_blocked_bidi);
+    try streams_blocked_bidi_out.writer().writeByte(@intFromEnum(quicz.frame.FrameType.streams_blocked_bidi));
+    try quicz.packet.encodeVarInt(streams_blocked_bidi_out.writer(), (@as(u64, 1) << 60) + 1);
+    try requireError(
+        error.InvalidPacket,
+        streams_blocked_bidi_server.processDatagramOrClose(0, streams_blocked_bidi_out.getWritten()),
+    );
+    const streams_blocked_bidi_close = try pollRequired(&streams_blocked_bidi_server, &close_payload_buf);
+    try printConnectionClose(gpa, streams_blocked_bidi_close);
+    std.debug.print(
+        "[close] default auto close state={s} after invalid STREAMS_BLOCKED_BIDI limit\n",
+        .{@tagName(streams_blocked_bidi_server.connectionState())},
+    );
+
+    var streams_blocked_uni_server = try quicz.Connection.init(gpa, .server, .{});
+    defer streams_blocked_uni_server.deinit();
+    try streams_blocked_uni_server.validatePeerAddress();
+
+    var invalid_streams_blocked_uni: [16]u8 = undefined;
+    var streams_blocked_uni_out = fixedWriter(&invalid_streams_blocked_uni);
+    try streams_blocked_uni_out.writer().writeByte(@intFromEnum(quicz.frame.FrameType.streams_blocked_uni));
+    try quicz.packet.encodeVarInt(streams_blocked_uni_out.writer(), (@as(u64, 1) << 60) + 1);
+    try requireError(
+        error.InvalidPacket,
+        streams_blocked_uni_server.processDatagramOrClose(0, streams_blocked_uni_out.getWritten()),
+    );
+    const streams_blocked_uni_close = try pollRequired(&streams_blocked_uni_server, &close_payload_buf);
+    try printConnectionClose(gpa, streams_blocked_uni_close);
+    std.debug.print(
+        "[close] default auto close state={s} after invalid STREAMS_BLOCKED_UNI limit\n",
+        .{@tagName(streams_blocked_uni_server.connectionState())},
+    );
+
     var initial_server = try quicz.Connection.init(gpa, .server, .{});
     defer initial_server.deinit();
     try initial_server.validatePeerAddress();

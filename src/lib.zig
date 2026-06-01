@@ -26016,6 +26016,74 @@ test "processDatagramOrClose queues frame encoding close for MAX_STREAMS overflo
     }
 }
 
+test "processDatagramOrClose queues frame encoding close for STREAMS_BLOCKED overflow" {
+    {
+        var conn = try Connection.init(std.testing.allocator, .client, .{});
+        defer conn.deinit();
+        try conn.validatePeerAddress();
+
+        var datagram: [32]u8 = undefined;
+        var out = buffer.fixedWriter(&datagram);
+        try out.writer().writeByte(@intFromEnum(frame.FrameType.streams_blocked_bidi));
+        try packet.encodeVarInt(out.writer(), max_stream_count + 1);
+        const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+        try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, out.getWritten()));
+        try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+        try std.testing.expect(conn.pending_close != null);
+        try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+        try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+        try std.testing.expectEqual(@as(?u64, null), conn.peerStreamsBlockedBidiLimit());
+
+        var out_buf: [64]u8 = undefined;
+        const payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+        var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+        defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+        switch (decoded.frame) {
+            .connection_close => |close| {
+                try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+                try std.testing.expectEqual(frame_type_value, close.frame_type);
+                try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
+            },
+            else => return error.InvalidPacket,
+        }
+    }
+
+    {
+        var conn = try Connection.init(std.testing.allocator, .client, .{});
+        defer conn.deinit();
+        try conn.validatePeerAddress();
+
+        var datagram: [32]u8 = undefined;
+        var out = buffer.fixedWriter(&datagram);
+        try out.writer().writeByte(@intFromEnum(frame.FrameType.streams_blocked_uni));
+        try packet.encodeVarInt(out.writer(), max_stream_count + 1);
+        const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+        try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, out.getWritten()));
+        try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+        try std.testing.expect(conn.pending_close != null);
+        try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+        try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+        try std.testing.expectEqual(@as(?u64, null), conn.peerStreamsBlockedUniLimit());
+
+        var out_buf: [64]u8 = undefined;
+        const payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+        var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+        defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+        switch (decoded.frame) {
+            .connection_close => |close| {
+                try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+                try std.testing.expectEqual(frame_type_value, close.frame_type);
+                try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
+            },
+            else => return error.InvalidPacket,
+        }
+    }
+}
+
 test "processDatagramInSpaceOrClose queues protocol violation close" {
     var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
@@ -28123,7 +28191,7 @@ test "peer BLOCKED receive-window growth rolls back when payload is invalid" {
     try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
 }
 
-test "MAX_STREAMS rejects values above stream count limit" {
+test "MAX_STREAMS and STREAMS_BLOCKED reject values above stream count limit" {
     var bidi = try Connection.init(std.testing.allocator, .client, .{
         .initial_max_streams_bidi = 2,
     });
@@ -28152,6 +28220,30 @@ test "MAX_STREAMS rejects values above stream count limit" {
     try std.testing.expectEqual(@as(u64, 1), uni.peer_max_streams_uni);
     try std.testing.expectEqual(@as(?u64, null), uni.pending_ack_largest);
     try std.testing.expectEqual(@as(u64, 0), uni.next_peer_packet_number);
+
+    var blocked_bidi = try Connection.init(std.testing.allocator, .client, .{});
+    defer blocked_bidi.deinit();
+
+    out = buffer.fixedWriter(&datagram);
+    try out.writer().writeByte(@intFromEnum(frame.FrameType.streams_blocked_bidi));
+    try packet.encodeVarInt(out.writer(), max_stream_count + 1);
+
+    try std.testing.expectError(error.InvalidPacket, blocked_bidi.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(?u64, null), blocked_bidi.peerStreamsBlockedBidiLimit());
+    try std.testing.expectEqual(@as(?u64, null), blocked_bidi.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), blocked_bidi.next_peer_packet_number);
+
+    var blocked_uni = try Connection.init(std.testing.allocator, .client, .{});
+    defer blocked_uni.deinit();
+
+    out = buffer.fixedWriter(&datagram);
+    try out.writer().writeByte(@intFromEnum(frame.FrameType.streams_blocked_uni));
+    try packet.encodeVarInt(out.writer(), max_stream_count + 1);
+
+    try std.testing.expectError(error.InvalidPacket, blocked_uni.processDatagram(0, out.getWritten()));
+    try std.testing.expectEqual(@as(?u64, null), blocked_uni.peerStreamsBlockedUniLimit());
+    try std.testing.expectEqual(@as(?u64, null), blocked_uni.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), blocked_uni.next_peer_packet_number);
 }
 
 test "MAX_STREAM_DATA rejects unopened local and receive-only streams" {
