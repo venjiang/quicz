@@ -218,6 +218,49 @@ fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
         else => return error.UnexpectedState,
     }
 
+    var conflict_server = try quicz.Connection.init(gpa, .server, .{});
+    defer conflict_server.deinit();
+    try conflict_server.validatePeerAddress();
+
+    var conflict_payload: [64]u8 = undefined;
+    out = fixedWriter(&conflict_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "hello",
+    } });
+    try conflict_server.processDatagram(0, out.getWritten());
+
+    out = fixedWriter(&conflict_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 3,
+        .fin = false,
+        .data = "xx",
+    } });
+    try requireError(
+        error.InvalidPacket,
+        conflict_server.processDatagramOrClose(1, out.getWritten()),
+    );
+
+    var conflict_close_buf: [64]u8 = undefined;
+    const conflict_close_payload = try pollRequired(&conflict_server, &conflict_close_buf);
+    var conflict_close = try quicz.frame.decodeFrameSlice(conflict_close_payload, gpa);
+    defer quicz.frame.deinitFrame(&conflict_close.frame, gpa);
+    if (conflict_close.len != conflict_close_payload.len) return error.UnexpectedState;
+
+    switch (conflict_close.frame) {
+        .connection_close => |close| {
+            if (close.error_code != quicz.transport_error.codeValue(.protocol_violation)) return error.UnexpectedState;
+            std.debug.print(
+                "[close] semantic stream-conflict auto close error={} frame_type={} reason={s} state={s}\n",
+                .{ close.error_code, close.frame_type, close.reason_phrase, @tagName(conflict_server.connectionState()) },
+            );
+        },
+        else => return error.UnexpectedState,
+    }
+
     var path_server = try quicz.Connection.init(gpa, .server, .{});
     defer path_server.deinit();
     try path_server.validatePeerAddress();

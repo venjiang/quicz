@@ -130,9 +130,10 @@ experimental.
   transport-parameter auto-close, and protected CRYPTO flow. Run with
   `zig build run-crypto-stream`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
-  long/short close, semantic frame-error auto-close, protected receive
-  auto-close, lifecycle-routed protected auto-close, draining behavior, and
-  close-triggered validation. Run with `zig build run-graceful-close`.
+  long/short close, semantic frame-error auto-close including conflicting
+  STREAM data, protected receive auto-close, lifecycle-routed protected
+  auto-close, draining behavior, and close-triggered validation. Run with
+  `zig build run-graceful-close`.
 - [Idle timeout](examples/idle_timeout.zig): Modeled idle timeout export,
   refresh, and close behavior. Run with `zig build run-idle-timeout`.
 - [Packet spaces](examples/packet_spaces.zig): Initial, Handshake, 0-RTT, and

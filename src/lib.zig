@@ -8593,6 +8593,10 @@ pub const Connection = struct {
                     return semanticCloseError(.final_size_error, frame_type_value, "final size");
                 }
             }
+
+            if (streamFrameHasConflictingOverlap(stream_state.*, stream_frame.offset, stream_frame.data) catch return null) {
+                return semanticCloseError(.protocol_violation, frame_type_value, "stream data");
+            }
         }
 
         const new_frame_data = if (existing_state) |stream_state|
@@ -12405,6 +12409,50 @@ pub const Connection = struct {
         offset: u64,
         data: []const u8,
     };
+
+    fn streamFrameHasConflictingOverlap(
+        stream_state: RecvStreamState,
+        offset: u64,
+        data: []const u8,
+    ) Error!bool {
+        if (data.len == 0) return false;
+
+        // Only proven byte conflicts are semantic protocol errors here. Overlaps
+        // that remain unsupported or ambiguous still fall through to the
+        // rollback-only STREAM receive path.
+        const end_offset = streamEndOffset(offset, data.len) orelse return error.InvalidPacket;
+        const contiguous_len = std.math.cast(u64, stream_state.data.items.len) orelse return error.Internal;
+        const contiguous_overlap_start = offset;
+        const contiguous_overlap_end = @min(end_offset, contiguous_len);
+        if (contiguous_overlap_start < contiguous_overlap_end) {
+            const incoming_start = std.math.cast(usize, contiguous_overlap_start - offset) orelse return error.InvalidPacket;
+            const existing_start = std.math.cast(usize, contiguous_overlap_start) orelse return error.InvalidPacket;
+            const overlap_len = std.math.cast(usize, contiguous_overlap_end - contiguous_overlap_start) orelse return error.InvalidPacket;
+            if (!std.mem.eql(
+                u8,
+                stream_state.data.items[existing_start..][0..overlap_len],
+                data[incoming_start..][0..overlap_len],
+            )) return true;
+        }
+
+        for (stream_state.pending.items) |pending| {
+            const pending_end = streamEndOffset(pending.offset, pending.data.len) orelse return error.InvalidPacket;
+            const overlap_start = @max(offset, pending.offset);
+            const overlap_end = @min(end_offset, pending_end);
+            if (overlap_start >= overlap_end) continue;
+
+            const incoming_start = std.math.cast(usize, overlap_start - offset) orelse return error.InvalidPacket;
+            const pending_start = std.math.cast(usize, overlap_start - pending.offset) orelse return error.InvalidPacket;
+            const overlap_len = std.math.cast(usize, overlap_end - overlap_start) orelse return error.InvalidPacket;
+            if (!std.mem.eql(
+                u8,
+                pending.data[pending_start..][0..overlap_len],
+                data[incoming_start..][0..overlap_len],
+            )) return true;
+        }
+
+        return false;
+    }
 
     fn trimAlreadyReceivedStreamData(
         stream_state: RecvStreamState,
@@ -28227,6 +28275,53 @@ test "processDatagram rejects conflicting duplicate STREAM bytes" {
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1, out.getWritten()));
     try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
     try std.testing.expectEqualStrings("hello", conn.recv_streams.items[0].data.items);
+}
+
+test "processDatagramOrClose queues protocol violation close for conflicting STREAM data" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "hello",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 3,
+        .fin = false,
+        .data = "xx",
+    } });
+    const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(1, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+    try std.testing.expectEqualStrings("hello", conn.recv_streams.items[0].data.items);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 1), conn.nextPeerPacketNumber(.application));
+
+    var close_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(1, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("stream data", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
 }
 
 test "processDatagram enforces receive stream flow control" {
