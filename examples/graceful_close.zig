@@ -157,6 +157,28 @@ fn framePayloadAutoCloseExample(gpa: std.mem.Allocator) !void {
         .{@tagName(ack_range_server.connectionState())},
     );
 
+    var ack_ecn_range_server = try quicz.Connection.init(gpa, .server, .{});
+    defer ack_ecn_range_server.deinit();
+    try ack_ecn_range_server.validatePeerAddress();
+
+    const invalid_ack_ecn_range_payload = [_]u8{
+        @intFromEnum(quicz.frame.FrameType.ack_ecn),
+        0x00, // largest acknowledged
+        0x00, // ack delay
+        0x00, // no additional ACK ranges
+        0x01, // first ACK range larger than largest acknowledged
+    };
+    try requireError(
+        error.InvalidPacket,
+        ack_ecn_range_server.processDatagramOrClose(0, &invalid_ack_ecn_range_payload),
+    );
+    const ack_ecn_range_close = try pollRequired(&ack_ecn_range_server, &close_payload_buf);
+    try printConnectionClose(gpa, ack_ecn_range_close);
+    std.debug.print(
+        "[close] default auto close state={s} after invalid ACK_ECN range\n",
+        .{@tagName(ack_ecn_range_server.connectionState())},
+    );
+
     var initial_server = try quicz.Connection.init(gpa, .server, .{});
     defer initial_server.deinit();
     try initial_server.validatePeerAddress();
@@ -271,6 +293,49 @@ fn semanticFrameAutoCloseExample(gpa: std.mem.Allocator) !void {
             std.debug.print(
                 "[close] semantic ack auto close error={} frame_type={} reason={s} state={s}\n",
                 .{ close.error_code, close.frame_type, close.reason_phrase, @tagName(ack_client.connectionState()) },
+            );
+        },
+        else => return error.UnexpectedState,
+    }
+
+    var ack_ecn_client = try quicz.Connection.init(gpa, .client, .{});
+    defer ack_ecn_client.deinit();
+    const ack_ecn_stream_id = try ack_ecn_client.openStream();
+    try ack_ecn_client.sendOnStream(ack_ecn_stream_id, "hello", false);
+    var ack_ecn_sent_payload_buf: [128]u8 = undefined;
+    _ = try pollRequired(&ack_ecn_client, &ack_ecn_sent_payload_buf);
+
+    var ack_ecn_payload: [32]u8 = undefined;
+    out = fixedWriter(&ack_ecn_payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .ack_ecn = .{
+        .ack = .{
+            .largest_acknowledged = 1,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 0,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
+    } });
+    try requireError(
+        error.InvalidPacket,
+        ack_ecn_client.processDatagramOrClose(60, out.getWritten()),
+    );
+
+    var ack_ecn_close_buf: [64]u8 = undefined;
+    const ack_ecn_close_payload = try pollRequired(&ack_ecn_client, &ack_ecn_close_buf);
+    var ack_ecn_close = try quicz.frame.decodeFrameSlice(ack_ecn_close_payload, gpa);
+    defer quicz.frame.deinitFrame(&ack_ecn_close.frame, gpa);
+    if (ack_ecn_close.len != ack_ecn_close_payload.len) return error.UnexpectedState;
+
+    switch (ack_ecn_close.frame) {
+        .connection_close => |close| {
+            if (close.error_code != quicz.transport_error.codeValue(.protocol_violation)) return error.UnexpectedState;
+            std.debug.print(
+                "[close] semantic ack-ecn auto close error={} frame_type={} reason={s} state={s}\n",
+                .{ close.error_code, close.frame_type, close.reason_phrase, @tagName(ack_ecn_client.connectionState()) },
             );
         },
         else => return error.UnexpectedState,

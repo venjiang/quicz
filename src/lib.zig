@@ -25893,6 +25893,41 @@ test "processDatagramOrClose queues frame encoding close for invalid ACK range" 
     }
 }
 
+test "processDatagramOrClose queues frame encoding close for invalid ACK_ECN range" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const invalid_ack_ecn = [_]u8{
+        @intFromEnum(frame.FrameType.ack_ecn),
+        0x00, // largest acknowledged
+        0x00, // ack delay
+        0x00, // no additional ACK ranges
+        0x01, // first ACK range larger than largest acknowledged
+    };
+    const frame_type_value = rawFrameTypeValue(&invalid_ack_ecn);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, &invalid_ack_ecn));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
 test "processDatagramOrClose queues frame encoding close for MAX_STREAMS overflow" {
     var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
@@ -28503,6 +28538,57 @@ test "processDatagramOrClose queues protocol violation close for ACK of unsent p
         .largest_acknowledged = 1,
         .ack_delay = 0,
         .first_ack_range = 0,
+    } });
+    const frame_type_value = rawFrameTypeValue(ack_out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(60, ack_out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 1), conn.sent_packets.items.len);
+    try std.testing.expectEqual(@as(u64, 0), conn.sent_packets.items[0].packet_number);
+    try std.testing.expectEqual(payload.len, conn.recovery_state.bytes_in_flight);
+    try std.testing.expectEqual(@as(?u64, null), conn.recovery_state.latest_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+
+    var close_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(61, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("ack", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramOrClose queues protocol violation close for ACK_ECN of unsent packet" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "hello", false);
+
+    var out_buf: [128]u8 = undefined;
+    const payload = (try conn.pollTx(10, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 1), conn.next_packet_number);
+
+    var ack_buf: [32]u8 = undefined;
+    var ack_out = buffer.fixedWriter(&ack_buf);
+    try frame.encodeFrame(ack_out.writer(), .{ .ack_ecn = .{
+        .ack = .{
+            .largest_acknowledged = 1,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 0,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
     } });
     const frame_type_value = rawFrameTypeValue(ack_out.getWritten());
 
