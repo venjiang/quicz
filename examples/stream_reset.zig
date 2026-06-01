@@ -60,15 +60,26 @@ pub fn main() !void {
     const stream_id = try client.openStream();
     try client.sendOnStream(stream_id, "hello", false);
     try client.resetStream(stream_id, 7);
+    const client_state = (try client.streamState(stream_id)) orelse return error.UnexpectedState;
+    if (client_state.send != .reset_sent or client_state.send_offset != @as(?u64, 5)) return error.UnexpectedState;
+    std.debug.print("[stream-reset] client state send={s} offset={?}\n", .{
+        @tagName(client_state.send),
+        client_state.send_offset,
+    });
 
     var datagram: [128]u8 = undefined;
     const client_reset = try pollRequired(&client, &datagram);
     try server.processDatagram(0, client_reset);
+    const server_state = (try server.streamState(stream_id)) orelse return error.UnexpectedState;
+    if (server_state.receive != .reset_received or server_state.receive_final_size != @as(?u64, 5)) {
+        return error.UnexpectedState;
+    }
 
     var recv_buf: [16]u8 = undefined;
     try requireError(error.StreamClosed, server.recvOnStream(stream_id, &recv_buf));
-    std.debug.print("[stream-reset] client reset stream={} final_size={?}\n", .{
+    std.debug.print("[stream-reset] client reset stream={} receive={s} final_size={?}\n", .{
         stream_id,
+        @tagName(server_state.receive),
         try server.recvStreamFinalSize(stream_id),
     });
 

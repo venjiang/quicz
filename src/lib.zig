@@ -317,6 +317,59 @@ pub const HandshakeState = enum {
     confirmed,
 };
 
+/// Modeled send-side lifecycle for a QUIC stream.
+pub const StreamSendState = enum {
+    /// The connection has no local send-side state for this stream.
+    none,
+    /// The send side is open and can queue STREAM data when flow control permits.
+    ready,
+    /// The send side has sent FIN and is closed for further writes.
+    data_sent,
+    /// The send side has queued RESET_STREAM and is closed for further writes.
+    reset_sent,
+};
+
+/// Modeled receive-side lifecycle for a QUIC stream.
+pub const StreamReceiveState = enum {
+    /// The connection has no receive-side state for this stream.
+    none,
+    /// The receive side is open and has not learned a final size.
+    receiving,
+    /// The receive side knows a final size but still has gaps before that offset.
+    size_known,
+    /// All bytes through the final size are buffered for the application.
+    data_received,
+    /// The peer reset the receive side and the final size is known.
+    reset_received,
+};
+
+/// Read-only snapshot of the modeled send and receive state for one stream.
+///
+/// Null fields mean that side of the stream is not currently open or observed
+/// in this connection. The snapshot is informational; callers still use
+/// `sendOnStream()`, `recvOnStream()`, `resetStream()`, and `stopSending()` for
+/// state transitions.
+pub const StreamState = struct {
+    /// Stream ID covered by this snapshot.
+    stream_id: u64,
+    /// Current modeled send-side lifecycle.
+    send: StreamSendState,
+    /// Current modeled receive-side lifecycle.
+    receive: StreamReceiveState,
+    /// Next send offset, or null when no send side exists.
+    send_offset: ?u64,
+    /// Current peer-advertised send credit for this stream, or null when absent.
+    send_max_data: ?u64,
+    /// Bytes currently buffered on the receive side, including pending ranges.
+    receive_buffered: ?u64,
+    /// Application read offset for the contiguous receive buffer.
+    receive_read_offset: ?u64,
+    /// Final size learned from STREAM FIN or RESET_STREAM, if any.
+    receive_final_size: ?u64,
+    /// Application error code from peer RESET_STREAM, if any.
+    receive_reset_error_code: ?u64,
+};
+
 /// QUIC packet number spaces from RFC 9000 Section 12.3.
 pub const PacketNumberSpace = enum {
     /// Initial packets and ACKs for Initial packets.
@@ -3396,6 +3449,12 @@ fn sendStreamClosed(stream_state: *const SendStreamState) bool {
     return stream_state.fin_sent or stream_state.reset_sent;
 }
 
+fn publicSendStreamState(stream_state: *const SendStreamState) StreamSendState {
+    if (stream_state.reset_sent) return .reset_sent;
+    if (stream_state.fin_sent) return .data_sent;
+    return .ready;
+}
+
 const RecvStreamState = struct {
     stream_id: u64,
     max_data: u64,
@@ -3426,6 +3485,28 @@ const RecvStreamSnapshot = struct {
     stop_sending_sent: bool,
     stream_count_credit_released: bool,
 };
+
+fn receiveBufferedByteCountForSnapshot(stream_state: *const RecvStreamState) u64 {
+    var received = std.math.cast(u64, stream_state.data.items.len) orelse return std.math.maxInt(u64);
+    for (stream_state.pending.items) |pending| {
+        const pending_len = std.math.cast(u64, pending.data.len) orelse return std.math.maxInt(u64);
+        received = saturatingAddU64(received, pending_len);
+    }
+    return received;
+}
+
+fn receiveReadOffsetForSnapshot(stream_state: *const RecvStreamState) u64 {
+    return std.math.cast(u64, stream_state.read_offset) orelse std.math.maxInt(u64);
+}
+
+fn publicReceiveStreamState(stream_state: *const RecvStreamState) StreamReceiveState {
+    if (stream_state.reset_error_code != null) return .reset_received;
+
+    const final_size = stream_state.final_size orelse return .receiving;
+    const final_size_usize = std.math.cast(usize, final_size) orelse return .size_known;
+    if (stream_state.data.items.len >= final_size_usize) return .data_received;
+    return .size_known;
+}
 
 const PeerStreamDataBlockedState = struct {
     stream_id: u64,
@@ -3764,6 +3845,46 @@ pub const Connection = struct {
     /// Return the peer close frame that moved this connection into draining, if any.
     pub fn peerClose(self: Connection) ?PeerClose {
         return self.peer_close;
+    }
+
+    /// Return a read-only stream state snapshot, or null if the stream is unknown.
+    ///
+    /// The `stream_id` must fit QUIC's variable-length integer space. This API
+    /// does not create stream state and does not validate whether an unopened ID
+    /// would be legal for this endpoint; it only reports state already observed
+    /// or opened by the connection.
+    pub fn streamState(self: Connection, stream_id: u64) Error!?StreamState {
+        if (stream_id > max_quic_varint) return error.InvalidStream;
+
+        var send_state: ?*const SendStreamState = null;
+        for (self.send_streams.items) |*stream| {
+            if (stream.stream_id == stream_id) {
+                send_state = stream;
+                break;
+            }
+        }
+
+        var recv_state: ?*const RecvStreamState = null;
+        for (self.recv_streams.items) |*stream| {
+            if (stream.stream_id == stream_id) {
+                recv_state = stream;
+                break;
+            }
+        }
+
+        if (send_state == null and recv_state == null) return null;
+
+        return .{
+            .stream_id = stream_id,
+            .send = if (send_state) |state| publicSendStreamState(state) else .none,
+            .receive = if (recv_state) |state| publicReceiveStreamState(state) else .none,
+            .send_offset = if (send_state) |state| state.next_offset else null,
+            .send_max_data = if (send_state) |state| state.max_data else null,
+            .receive_buffered = if (recv_state) |state| receiveBufferedByteCountForSnapshot(state) else null,
+            .receive_read_offset = if (recv_state) |state| receiveReadOffsetForSnapshot(state) else null,
+            .receive_final_size = if (recv_state) |state| state.final_size else null,
+            .receive_reset_error_code = if (recv_state) |state| state.reset_error_code else null,
+        };
     }
 
     /// Return the effective max idle timeout in milliseconds, or null when disabled.
@@ -24653,6 +24774,75 @@ test "duplicate resetStream does not queue duplicate RESET_STREAM" {
 
     try std.testing.expectEqual(@as(usize, 1), conn.pending_reset_streams.items.len);
     try std.testing.expectEqual(@as(u64, 1), conn.pending_reset_streams.items[0].application_error_code);
+}
+
+test "streamState reports FIN send and receive final-size snapshots" {
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try std.testing.expect((try client.streamState(0)) == null);
+    try std.testing.expectError(error.InvalidStream, client.streamState(max_quic_varint + 1));
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", true);
+
+    const client_state = (try client.streamState(stream_id)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(stream_id, client_state.stream_id);
+    try std.testing.expectEqual(StreamSendState.data_sent, client_state.send);
+    try std.testing.expectEqual(StreamReceiveState.none, client_state.receive);
+    try std.testing.expectEqual(@as(?u64, 5), client_state.send_offset);
+    try std.testing.expect(client_state.send_max_data != null);
+    try std.testing.expectEqual(@as(?u64, null), client_state.receive_buffered);
+
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(0, (try client.pollTx(0, &datagram)).?);
+
+    const server_received = (try server.streamState(stream_id)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(StreamSendState.none, server_received.send);
+    try std.testing.expectEqual(StreamReceiveState.data_received, server_received.receive);
+    try std.testing.expectEqual(@as(?u64, 5), server_received.receive_buffered);
+    try std.testing.expectEqual(@as(?u64, 0), server_received.receive_read_offset);
+    try std.testing.expectEqual(@as(?u64, 5), server_received.receive_final_size);
+    try std.testing.expectEqual(@as(?u64, null), server_received.receive_reset_error_code);
+
+    var read_buf: [5]u8 = undefined;
+    const n = (try server.recvOnStream(stream_id, &read_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("hello", read_buf[0..n]);
+
+    const server_read = (try server.streamState(stream_id)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(StreamReceiveState.data_received, server_read.receive);
+    try std.testing.expectEqual(@as(?u64, 5), server_read.receive_read_offset);
+}
+
+test "streamState reports reset send and receive snapshots" {
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", false);
+    try client.resetStream(stream_id, 7);
+
+    const client_state = (try client.streamState(stream_id)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(StreamSendState.reset_sent, client_state.send);
+    try std.testing.expectEqual(StreamReceiveState.none, client_state.receive);
+    try std.testing.expectEqual(@as(?u64, 5), client_state.send_offset);
+
+    var datagram: [128]u8 = undefined;
+    try server.processDatagram(0, (try client.pollTx(0, &datagram)).?);
+
+    const server_state = (try server.streamState(stream_id)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(StreamSendState.none, server_state.send);
+    try std.testing.expectEqual(StreamReceiveState.reset_received, server_state.receive);
+    try std.testing.expectEqual(@as(?u64, 0), server_state.receive_buffered);
+    try std.testing.expectEqual(@as(?u64, 0), server_state.receive_read_offset);
+    try std.testing.expectEqual(@as(?u64, 5), server_state.receive_final_size);
+    try std.testing.expectEqual(@as(?u64, 7), server_state.receive_reset_error_code);
 }
 
 test "stopSending queues STOP_SENDING and peer responds with RESET_STREAM" {
