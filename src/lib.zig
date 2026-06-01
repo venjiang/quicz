@@ -25,6 +25,7 @@ const min_initial_destination_connection_id_len = 8;
 const min_initial_udp_datagram_len = 1200;
 const min_active_connection_id_limit = 2;
 const default_max_stored_new_tokens: usize = 4;
+const default_max_crypto_buffer_size: u64 = 1 << 20;
 const close_state_pto_multiplier: u64 = 3;
 const max_path_challenge_transmissions: u8 = 3;
 const packet_threshold_loss_gap: u64 = 3;
@@ -122,6 +123,11 @@ pub const PreferredAddress = struct {
 pub const Config = struct {
     /// Maximum frame payload bytes accepted or emitted by the in-memory API.
     max_datagram_size: u16 = 1350,
+    /// Maximum received CRYPTO stream end offset buffered per packet number space.
+    ///
+    /// Peers that exceed this limit are rejected; close-on-error receive APIs
+    /// map that rejection to RFC 9000 `CRYPTO_BUFFER_EXCEEDED`.
+    max_crypto_buffer_size: u64 = default_max_crypto_buffer_size,
     /// Initial RTT estimate used by recovery before the first ACK sample.
     initial_rtt_ms: u32 = 333,
     /// Local max_idle_timeout transport parameter in milliseconds. Zero disables the local side.
@@ -3547,6 +3553,9 @@ pub const Connection = struct {
             return error.InvalidPacket;
         }
         if (config.max_ack_delay_ms >= (@as(u32, 1) << 14)) {
+            return error.InvalidPacket;
+        }
+        if (config.max_crypto_buffer_size > max_quic_varint) {
             return error.InvalidPacket;
         }
         if (config.receive_connection_window) |window| {
@@ -8655,6 +8664,18 @@ pub const Connection = struct {
         return null;
     }
 
+    fn classifyCryptoFrameProcessingCloseError(
+        self: *Connection,
+        crypto: frame.CryptoFrame,
+        frame_type_value: u64,
+    ) ?FramePayloadCloseError {
+        const end_offset = streamEndOffset(crypto.offset, crypto.data.len) orelse return null;
+        if (end_offset > self.config.max_crypto_buffer_size) {
+            return semanticCloseError(.crypto_buffer_exceeded, frame_type_value, "crypto buffer");
+        }
+        return null;
+    }
+
     fn classifyNewConnectionIdFrameProcessingCloseError(
         self: *Connection,
         new_connection_id: frame.NewConnectionIdFrame,
@@ -8720,6 +8741,7 @@ pub const Connection = struct {
 
             const close = switch (decoded.frame) {
                 .stream => |stream_frame| self.classifyStreamFrameProcessingCloseError(stream_frame, frame_type_value),
+                .crypto => |crypto| self.classifyCryptoFrameProcessingCloseError(crypto, frame_type_value),
                 .reset_stream => |reset| self.classifyResetStreamFrameProcessingCloseError(reset, frame_type_value),
                 .stream_data_blocked => |blocked| self.classifyReceiveStreamIdCloseError(blocked.stream_id, frame_type_value),
                 .max_stream_data => |max_stream_data| self.classifySendControlStreamIdCloseError(max_stream_data.stream_id, frame_type_value),
@@ -12591,7 +12613,8 @@ pub const Connection = struct {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
 
-        _ = streamEndOffset(crypto.offset, crypto.data.len) orelse return error.InvalidPacket;
+        const end_offset = streamEndOffset(crypto.offset, crypto.data.len) orelse return error.InvalidPacket;
+        if (end_offset > self.config.max_crypto_buffer_size) return error.InvalidPacket;
         const new_frame_data = try trimAlreadyReceivedCryptoData(packet_space, crypto.offset, crypto.data);
         if (new_frame_data.data.len == 0) return;
 
@@ -14146,6 +14169,68 @@ test "processDatagram rejects conflicting CRYPTO overlap and rolls back pending 
     } });
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(2, out.getWritten()));
     try std.testing.expectEqualStrings("hello", conn.crypto_recv_buffer.items);
+}
+
+test "processDatagram enforces CRYPTO receive buffer limit" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{ .max_crypto_buffer_size = 5 });
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "hello",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqualStrings("hello", conn.crypto_recv_buffer.items);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 5,
+        .data = "!",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1, out.getWritten()));
+    try std.testing.expectEqualStrings("hello", conn.crypto_recv_buffer.items);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 1), conn.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+    try std.testing.expect(conn.pending_close == null);
+}
+
+test "processDatagramOrClose queues crypto buffer exceeded close" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{ .max_crypto_buffer_size = 5 });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 3,
+        .data = "abc",
+    } });
+    const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_buffer.items.len);
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_pending.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.crypto_buffer_exceeded), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("crypto buffer", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
 }
 
 test "CRYPTO streams are isolated by packet number space" {

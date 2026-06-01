@@ -230,6 +230,37 @@ pub fn main() !void {
         reassembly.pendingAckLargest(.handshake),
     });
 
+    var crypto_limit = try quicz.Connection.init(gpa, .server, .{ .max_crypto_buffer_size = 5 });
+    defer crypto_limit.deinit();
+    try crypto_limit.validatePeerAddress();
+    var limit_payload_buf: [32]u8 = undefined;
+    var limit_out = fixedWriter(&limit_payload_buf);
+    try quicz.frame.encodeFrame(limit_out.writer(), .{ .crypto = .{
+        .offset = 3,
+        .data = "abc",
+    } });
+    if (crypto_limit.processDatagramInSpaceOrClose(.handshake, 110, limit_out.getWritten())) |_| {
+        return error.UnexpectedState;
+    } else |err| {
+        if (err != error.InvalidPacket) return err;
+    }
+    var limit_close_buf: [64]u8 = undefined;
+    const limit_close_payload = (try crypto_limit.pollTx(111, &limit_close_buf)) orelse return error.UnexpectedState;
+    var limit_close = try quicz.frame.decodeFrameSlice(limit_close_payload, gpa);
+    defer quicz.frame.deinitFrame(&limit_close.frame, gpa);
+    switch (limit_close.frame) {
+        .connection_close => |close| {
+            if (close.error_code != quicz.transport_error.codeValue(.crypto_buffer_exceeded)) return error.UnexpectedState;
+            std.debug.print("[crypto] buffer_limit close_error={} frame_type={} reason={s} state={s}\n", .{
+                close.error_code,
+                close.frame_type,
+                close.reason_phrase,
+                @tagName(crypto_limit.connectionState()),
+            });
+        },
+        else => return error.UnexpectedState,
+    }
+
     var crypto_loss = try quicz.Connection.init(gpa, .client, .{});
     defer crypto_loss.deinit();
     try crypto_loss.sendCryptoInSpace(.handshake, "lost crypto");

@@ -113,7 +113,7 @@ pub fn main() !void {
   运行：`zig build run-stream-reset`。
 - [STOP_SENDING](examples/stop_sending.zig)：STOP_SENDING 接收处理和 RESET_STREAM 响应。
   运行：`zig build run-stop-sending`。
-- [CRYPTO streams](examples/crypto_stream.zig)：按 packet number space 隔离的 CRYPTO buffering、mock backend handoff、protected backend transport-parameter auto-close 和 protected CRYPTO flow。
+- [CRYPTO streams](examples/crypto_stream.zig)：按 packet number space 隔离的 CRYPTO buffering、接收缓冲超限 auto-close、mock backend handoff、protected backend transport-parameter auto-close 和 protected CRYPTO flow。
   运行：`zig build run-crypto-stream`。
 - [Graceful close](examples/graceful_close.zig)：本端/对端关闭、protected long/short close、语义 frame 错误 auto-close、protected receive auto-close、lifecycle-routed protected auto-close、draining 行为和关闭触发校验。
   运行：`zig build run-graceful-close`。
