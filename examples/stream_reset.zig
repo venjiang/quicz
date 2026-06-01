@@ -102,8 +102,11 @@ pub fn main() !void {
     try server.resetStream(stream_id, 9);
     const server_reset = try pollRequired(&server, &datagram);
     try client.processDatagram(1, server_reset);
-    std.debug.print("[stream-reset] server reset reply side stream={} final_size={?}\n", .{
+    const client_acked_state = (try client.streamState(stream_id)) orelse return error.UnexpectedState;
+    if (client_acked_state.send != .reset_acked) return error.UnexpectedState;
+    std.debug.print("[stream-reset] server reset reply side stream={} client_send={s} final_size={?}\n", .{
         stream_id,
+        @tagName(client_acked_state.send),
         try client.recvStreamFinalSize(stream_id),
     });
 

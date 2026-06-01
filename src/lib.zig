@@ -325,8 +325,12 @@ pub const StreamSendState = enum {
     ready,
     /// The send side has sent FIN and is closed for further writes.
     data_sent,
+    /// All STREAM frames through FIN have been acknowledged by the peer.
+    data_acked,
     /// The send side has queued RESET_STREAM and is closed for further writes.
     reset_sent,
+    /// The RESET_STREAM frame has been acknowledged by the peer.
+    reset_acked,
 };
 
 /// Modeled receive-side lifecycle for a QUIC stream.
@@ -2582,6 +2586,8 @@ const BuiltProtectedShortPacket = struct {
     datagram: []u8,
     ack_eliciting: bool,
     sent_stream_frame: ?PendingStreamFrame = null,
+    sent_reset_stream_frame: ?frame.ResetStreamFrame = null,
+    sent_stop_sending_frame: ?frame.StopSendingFrame = null,
     clear_ack: bool = false,
     consume_ping: bool = false,
     consume_crypto: bool = false,
@@ -3448,7 +3454,10 @@ const SendStreamState = struct {
     next_offset: u64 = 0,
     max_data: u64,
     fin_sent: bool = false,
+    fin_acked: bool = false,
+    data_acked: bool = false,
     reset_sent: bool = false,
+    reset_acked: bool = false,
 };
 
 fn sendStreamClosed(stream_state: *const SendStreamState) bool {
@@ -3456,9 +3465,50 @@ fn sendStreamClosed(stream_state: *const SendStreamState) bool {
 }
 
 fn publicSendStreamState(stream_state: *const SendStreamState) StreamSendState {
+    if (stream_state.reset_acked) return .reset_acked;
     if (stream_state.reset_sent) return .reset_sent;
+    if (stream_state.data_acked) return .data_acked;
     if (stream_state.fin_sent) return .data_sent;
     return .ready;
+}
+
+fn markSentPacketAckedOnStreams(conn: *Connection, sent_packet: SentPacket) void {
+    if (sent_packet.stream_frame) |pending| {
+        if (pending.fin) {
+            if (conn.findSendStream(pending.stream_id)) |stream_state| {
+                stream_state.fin_acked = true;
+            }
+        }
+    }
+    if (sent_packet.reset_stream_frame) |reset| {
+        if (conn.findSendStream(reset.stream_id)) |stream_state| {
+            stream_state.reset_acked = true;
+        }
+    }
+}
+
+fn streamHasQueuedSendData(conn: *const Connection, stream_id: u64) bool {
+    for (conn.send_queue.items) |pending| {
+        if (pending.stream_id == stream_id) return true;
+    }
+    return false;
+}
+
+fn streamHasOutstandingSendData(conn: *const Connection, stream_id: u64) bool {
+    for (conn.sent_packets.items) |sent_packet| {
+        if (sent_packet.stream_frame) |pending| {
+            if (pending.stream_id == stream_id) return true;
+        }
+    }
+    return false;
+}
+
+fn refreshSendDataAckedStates(conn: *Connection) void {
+    for (conn.send_streams.items) |*stream_state| {
+        if (!stream_state.fin_acked or stream_state.reset_sent) continue;
+        stream_state.data_acked = !streamHasQueuedSendData(conn, stream_state.stream_id) and
+            !streamHasOutstandingSendData(conn, stream_state.stream_id);
+    }
 }
 
 const RecvStreamState = struct {
@@ -7816,6 +7866,7 @@ pub const Connection = struct {
             .packet_number = packet_number,
             .datagram = datagram,
             .ack_eliciting = true,
+            .sent_reset_stream_frame = reset,
             .clear_ack = ack_to_send != null,
             .consume_reset_stream = true,
         };
@@ -7880,6 +7931,7 @@ pub const Connection = struct {
             .packet_number = packet_number,
             .datagram = datagram,
             .ack_eliciting = true,
+            .sent_stop_sending_frame = stop_sending,
             .clear_ack = ack_to_send != null,
             .consume_stop_sending = true,
         };
@@ -8587,6 +8639,8 @@ pub const Connection = struct {
                 .bytes = built.datagram.len,
                 .stream_frame = built.sent_stream_frame,
                 .crypto_frame = sent_crypto_frame,
+                .reset_stream_frame = built.sent_reset_stream_frame,
+                .stop_sending_frame = built.sent_stop_sending_frame,
             });
             sent_crypto_frame = null;
         }
@@ -10670,6 +10724,7 @@ pub const Connection = struct {
                 .ect0 => newly_acked_ect0 += 1,
                 .ect1 => newly_acked_ect1 += 1,
             }
+            markSentPacketAckedOnStreams(self, removed);
             removed.deinit(self.allocator);
         }
 
@@ -10703,6 +10758,7 @@ pub const Connection = struct {
             latest_rtt_sample,
             now_millis,
         );
+        refreshSendDataAckedStates(self);
         var congestion_probe_needed = false;
         if (ecn_result.ce_congestion_event) {
             if (largest_acked_packet) |acked_packet| {
@@ -11336,6 +11392,7 @@ pub const Connection = struct {
             .packet_number = packet_number,
             .sent_time_millis = now_millis,
             .bytes = encoded_len,
+            .reset_stream_frame = reset,
         }) catch return error.OutOfMemory;
         appended_sent_packet = true;
 
@@ -11405,6 +11462,7 @@ pub const Connection = struct {
             .packet_number = packet_number,
             .sent_time_millis = now_millis,
             .bytes = encoded_len,
+            .stop_sending_frame = stop_sending,
         }) catch return error.OutOfMemory;
         appended_sent_packet = true;
 
@@ -12524,6 +12582,7 @@ pub const Connection = struct {
         }) catch return error.OutOfMemory;
         stream_state.fin_sent = true;
         stream_state.reset_sent = true;
+        stream_state.reset_acked = false;
     }
 
     fn queueStopSending(
@@ -24846,6 +24905,38 @@ test "streamState reports FIN send and receive final-size snapshots" {
     try std.testing.expectEqual(StreamReceiveState.data_read, server_read.receive);
     try std.testing.expectEqual(@as(?u64, 5), server_read.receive_read_offset);
 
+    try client.receiveAckInSpace(.application, 2, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const client_acked = (try client.streamState(stream_id)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(StreamSendState.data_acked, client_acked.send);
+
+    var split_client = try Connection.init(std.testing.allocator, .client, .{});
+    defer split_client.deinit();
+    const split_stream_id = try split_client.openStream();
+    try split_client.sendOnStream(split_stream_id, "a", false);
+    try split_client.sendOnStream(split_stream_id, "b", true);
+    _ = (try split_client.pollTx(0, &datagram)).?;
+    _ = (try split_client.pollTx(1, &datagram)).?;
+
+    try split_client.receiveAckInSpace(.application, 2, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const split_fin_acked = (try split_client.streamState(split_stream_id)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(StreamSendState.data_sent, split_fin_acked.send);
+
+    try split_client.receiveAckInSpace(.application, 3, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const split_data_acked = (try split_client.streamState(split_stream_id)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(StreamSendState.data_acked, split_data_acked.send);
+
     var zero_client = try Connection.init(std.testing.allocator, .client, .{});
     defer zero_client.deinit();
     var zero_server = try Connection.init(std.testing.allocator, .server, .{});
@@ -24902,6 +24993,14 @@ test "streamState reports reset send and receive snapshots" {
     try std.testing.expectEqual(StreamReceiveState.reset_read, server_read.receive);
     try std.testing.expectEqual(@as(?u64, 5), server_read.receive_final_size);
     try std.testing.expectEqual(@as(?u64, 7), server_read.receive_reset_error_code);
+
+    try client.receiveAckInSpace(.application, 2, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const client_acked = (try client.streamState(stream_id)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(StreamSendState.reset_acked, client_acked.send);
 }
 
 test "streamState reports STOP_SENDING receive-side request" {
