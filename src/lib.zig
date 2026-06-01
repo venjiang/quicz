@@ -3392,6 +3392,10 @@ const SendStreamState = struct {
     reset_sent: bool = false,
 };
 
+fn sendStreamClosed(stream_state: *const SendStreamState) bool {
+    return stream_state.fin_sent or stream_state.reset_sent;
+}
+
 const RecvStreamState = struct {
     stream_id: u64,
     max_data: u64,
@@ -9454,7 +9458,7 @@ pub const Connection = struct {
 
         const existing_state = self.findSendStream(stream_id);
         if (existing_state) |state| {
-            if (state.fin_sent) return error.StreamClosed;
+            if (sendStreamClosed(state)) return error.StreamClosed;
         } else if (isLocalBidirectionalStream(self.side, stream_id) or isLocalUnidirectionalStream(self.side, stream_id)) {
             return error.InvalidStream;
         } else if (self.findRecvStream(stream_id) == null) {
@@ -10393,7 +10397,7 @@ pub const Connection = struct {
 
     fn streamDataBlockedFrameIsObsolete(self: *Connection, stream_data: frame.StreamDataBlockedFrame) bool {
         if (self.findSendStream(stream_data.stream_id)) |stream_state| {
-            if (stream_state.reset_sent or stream_state.fin_sent) return true;
+            if (sendStreamClosed(stream_state)) return true;
             return stream_state.max_data > stream_data.maximum_stream_data;
         }
         return self.initialPeerStreamDataLimit(stream_data.stream_id) > stream_data.maximum_stream_data;
@@ -12248,7 +12252,7 @@ pub const Connection = struct {
     }
 
     fn applyMaxStreamDataToSendStream(stream_state: *SendStreamState, maximum_stream_data: u64) void {
-        if (stream_state.fin_sent) return;
+        if (sendStreamClosed(stream_state)) return;
         stream_state.max_data = @max(stream_state.max_data, maximum_stream_data);
     }
 
@@ -28430,6 +28434,30 @@ test "MAX_STREAM_DATA is ignored after send side sends FIN" {
     const stream_id = try conn.openStream();
     try conn.sendOnStream(stream_id, "hello", true);
     try std.testing.expect(conn.findSendStream(stream_id).?.fin_sent);
+
+    var update_buf: [32]u8 = undefined;
+    var update_out = buffer.fixedWriter(&update_buf);
+    try frame.encodeFrame(update_out.writer(), .{ .max_stream_data = .{
+        .stream_id = stream_id,
+        .maximum_stream_data = 10,
+    } });
+    try conn.processDatagram(0, update_out.getWritten());
+
+    try std.testing.expectEqual(@as(u64, 5), conn.findSendStream(stream_id).?.max_data);
+    try std.testing.expectError(error.StreamClosed, conn.sendOnStream(stream_id, "!", false));
+}
+
+test "MAX_STREAM_DATA is ignored after send side resets" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 10,
+        .initial_max_stream_data = 5,
+    });
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    try conn.sendOnStream(stream_id, "hello", false);
+    try conn.resetStream(stream_id, 7);
+    try std.testing.expect(conn.findSendStream(stream_id).?.reset_sent);
 
     var update_buf: [32]u8 = undefined;
     var update_out = buffer.fixedWriter(&update_buf);

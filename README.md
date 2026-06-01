@@ -121,8 +121,9 @@ experimental.
   `zig build run-flow-control`.
 - [Unidirectional streams](examples/uni_stream.zig): Local and peer
   unidirectional stream opening and validation. Run with `zig build run-uni-stream`.
-- [Stream reset](examples/stream_reset.zig): RESET_STREAM send/receive behavior
-  and retransmission boundaries. Run with `zig build run-stream-reset`.
+- [Stream reset](examples/stream_reset.zig): RESET_STREAM send/receive behavior,
+  retransmission boundaries, and send-credit closure after reset. Run with
+  `zig build run-stream-reset`.
 - [STOP_SENDING](examples/stop_sending.zig): STOP_SENDING receive handling and
   RESET_STREAM response. Run with `zig build run-stop-sending`.
 - [CRYPTO streams](examples/crypto_stream.zig): Per-space CRYPTO buffering,

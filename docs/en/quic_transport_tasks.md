@@ -1286,6 +1286,12 @@ produce or consume TLS-owned QUIC packets over UDP.
   sent FIN. The send credit no longer changes in Data Sent/closed send states,
   while unfinished send sides still apply larger limits. Tests cover the FIN
   boundary and post-FIN `StreamClosed` send behavior.
+- 2026-06-01: Ignored inbound MAX_STREAM_DATA after the local send side has
+  reset. `Connection` now uses one send-side closed predicate for FIN and
+  RESET_STREAM, so later credit updates cannot reopen a reset sender and pending
+  STREAM_DATA_BLOCKED frames use the same closure boundary. Tests cover the
+  reset boundary, and `examples/stream_reset.zig` demonstrates the ignored
+  credit update.
 - 2026-05-22: Added receive-side MAX_STREAMS_BIDI/UNI refresh for fully
   consumed peer-initiated FIN streams, including zero-length FIN streams observed
   through `recvOnStream()`. The connection releases one receive stream-count
@@ -2301,7 +2307,7 @@ run from `build.zig`.
 | `udp_stateless_reset_loopback` | Socket-backed loopback UDP stateless reset exercise: lifecycle-owned retired-CID route retirement, trigger datagram classification, server reset datagram send, and client token match. | Present |
 | `udp_echo_client` / `udp_echo_server` | Real QUIC-over-UDP/TLS stream echo. | Planned |
 | `uni_stream` | Current in-memory unidirectional stream send/receive, direction validation, duplicate STREAM retransmission discard, and FIN completion observability. | Present |
-| `stream_reset` | Current local RESET_STREAM emission, final-size observability, unsent STREAM drop behavior, and late STREAM ignore after reset. | Present |
+| `stream_reset` | Current local RESET_STREAM emission, final-size observability, unsent STREAM drop behavior, ignored MAX_STREAM_DATA after reset, and late STREAM ignore after reset. | Present |
 | `stop_sending` | Current local STOP_SENDING emission, peer RESET_STREAM response, Data Recvd suppression, pre-STREAM STOP_SENDING on peer-initiated bidirectional streams, implicit lower-numbered receive stream creation, and ACK-loss STREAM suppression after reset. | Present |
 | `flow_control` | Connection, stream, stream-count, receive-side MAX, MAX_STREAMS overflow rejection, configurable target receive windows, completed-stream MAX_STREAMS, peer-BLOCKED MAX retransmission/growth, pre-STREAM MAX_STREAM_DATA on peer-initiated bidirectional streams with implicit lower-numbered receive stream creation, final-size MAX_STREAM_DATA suppression, stale STREAM_DATA_BLOCKED suppression, and caller-keyed protected short MAX/BLOCKED exchange behavior. | Present |
 | `graceful_close` | Current in-memory, caller-keyed protected long Initial/Handshake CONNECTION_CLOSE, caller-keyed protected short CONNECTION_CLOSE/APPLICATION_CLOSE send/receive, invalid ACK/ACK_ECN-range close, invalid STREAMS_BLOCKED limit close, semantic frame-error auto-close including flow-control, ACK/ACK_ECN frames that acknowledge unsent packet numbers, conflicting STREAM data, invalid stream-control frames, unmatched PATH_RESPONSE, NEW_CONNECTION_ID limit/reuse, RETIRE_CONNECTION_ID unknown-CID, and role-specific NEW_TOKEN/HANDSHAKE_DONE cases, protected receive auto-close, lifecycle-routed protected receive auto-close, protected long/0-RTT close-state discard, peer close diagnostics, default/space/packet-type invalid frame-payload auto-close, retransmission, and closing/draining state behavior. | Present |

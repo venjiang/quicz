@@ -32,7 +32,7 @@ fn fixedWriter(buffer: []u8) FixedWriter {
     return .{ .buffer = buffer };
 }
 
-fn requireError(expected: anyerror, result: anyerror!?usize) !void {
+fn requireError(expected: anyerror, result: anytype) !void {
     _ = result catch |err| {
         if (err == expected) return;
         return err;
@@ -74,6 +74,16 @@ pub fn main() !void {
 
     try expectIdle(&client, &datagram);
     std.debug.print("[stream-reset] unsent STREAM data dropped after reset\n", .{});
+
+    var max_stream_after_reset_raw: [32]u8 = undefined;
+    var max_stream_after_reset_out = fixedWriter(&max_stream_after_reset_raw);
+    try quicz.frame.encodeFrame(max_stream_after_reset_out.writer(), .{ .max_stream_data = .{
+        .stream_id = stream_id,
+        .maximum_stream_data = 64,
+    } });
+    try client.processDatagram(2, max_stream_after_reset_out.getWritten());
+    try requireError(error.StreamClosed, client.sendOnStream(stream_id, "after-reset", false));
+    std.debug.print("[stream-reset] MAX_STREAM_DATA after reset did not reopen send side\n", .{});
 
     try server.resetStream(stream_id, 9);
     const server_reset = try pollRequired(&server, &datagram);
