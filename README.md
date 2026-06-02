@@ -222,8 +222,9 @@ experimental.
   `zig build run-udp-crypto-stream-loopback`.
 - [UDP 0-RTT loopback](examples/udp_zero_rtt_loopback.zig):
   Socket-backed lifecycle-routed installed-key 0-RTT STREAM delivery,
-  accept-before-process enforcement, accepted early ACK evidence, 1-RTT ACK
-  cleanup, and client/server 0-RTT key discard evidence. Run with
+  accept-before-process enforcement, rejection-driven key discard, accepted
+  early ACK evidence, 1-RTT ACK cleanup, and client/server 0-RTT key discard
+  evidence. Run with
   `zig build run-udp-zero-rtt-loopback`.
 - [UDP 1-RTT loopback](examples/udp_one_rtt_loopback.zig):
   Socket-backed lifecycle-routed installed-key 1-RTT STREAM delivery and ACK

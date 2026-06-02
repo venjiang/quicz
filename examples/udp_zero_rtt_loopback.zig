@@ -146,6 +146,11 @@ pub fn main() !void {
     );
     try require(rejecting_server.nextPeerPacketNumber(.application) == 0);
     try require(rejecting_server.pendingAckLargest(.application) == null);
+    try rejecting_server.rejectZeroRtt();
+    try require(!rejecting_server.hasPeerZeroRttProtectionKey());
+    try require(!rejecting_server.zeroRttAccepted());
+    try expectError(error.InvalidPacket, rejecting_server.acceptZeroRtt());
+    const rejected_zero_keys_discarded = !rejecting_server.hasPeerZeroRttProtectionKey();
 
     try client_socket.send(io, &server_socket.address, early);
 
@@ -232,7 +237,7 @@ pub fn main() !void {
     try require(server.pendingAckLargest(.application) == 1);
     try require(!server.hasPeerZeroRttProtectionKey());
 
-    std.debug.print("[udp-zero-rtt] client_port={} server_port={} early_bytes={} ack_bytes={} ping_bytes={} stream_id={} received=\"{s}\" post_ack_inflight={} rejected_before_accept={} accepted_after_accept={} server_early_ack_largest={} client_zero_keys_discarded={} server_zero_keys_before_1rtt={} server_zero_keys_discarded={}\n", .{
+    std.debug.print("[udp-zero-rtt] client_port={} server_port={} early_bytes={} ack_bytes={} ping_bytes={} stream_id={} received=\"{s}\" post_ack_inflight={} rejected_before_accept={} rejected_zero_keys_discarded={} accepted_after_accept={} server_early_ack_largest={} client_zero_keys_discarded={} server_zero_keys_before_1rtt={} server_zero_keys_discarded={}\n", .{
         client_local.port,
         server_local.port,
         early.len,
@@ -242,6 +247,7 @@ pub fn main() !void {
         read_buf[0..read_len],
         post_ack_inflight,
         rejecting_server.nextPeerPacketNumber(.application) == 0,
+        rejected_zero_keys_discarded,
         server_accepted_early_packet,
         server_early_ack_largest,
         client_zero_keys_discarded,
