@@ -135,7 +135,7 @@ pub fn main() !void {
   运行：`zig build run-address-validation`。
 - [UDP address validation loopback](examples/udp_address_validation_loopback.zig)：socket-backed lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery、NEW_TOKEN path/version binding、replay rejection 和 future address-validation unblocking。
   运行：`zig build run-udp-address-validation-loopback`。
-- [Retry token](examples/retry_token.zig)：Retry datagram 处理、token 复用和 Retry CID 校验。
+- [Retry token](examples/retry_token.zig)：Retry datagram 处理、token 复用和 Retry CID transport-parameter byte 校验。
   运行：`zig build run-retry-token`。
 - [Connection IDs](examples/connection_ids.zig)：NEW_CONNECTION_ID、RETIRE_CONNECTION_ID、lifecycle-owned issue/register route bridge 和 replacement state。
   运行：`zig build run-connection-ids`。

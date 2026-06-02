@@ -85,7 +85,9 @@ pub fn main() !void {
     client.applyPeerTransportParameters(.{}) catch |err| {
         if (err != error.InvalidPacket) return err;
     };
-    try client.applyPeerTransportParameters(server.localTransportParameters());
+    var server_transport_parameter_buf: [128]u8 = undefined;
+    const server_transport_parameter_bytes = try server.encodeLocalTransportParameters(&server_transport_parameter_buf);
+    try client.applyPeerTransportParameterBytes(server_transport_parameter_bytes);
 
     try server.sendPing();
     var tx: [16]u8 = undefined;
@@ -111,8 +113,8 @@ pub fn main() !void {
     };
 
     std.debug.print(
-        "[retry] token_len={} original_dcid_len={} retry_scid_len={} server_retry_scid_len={} address_bound={} path_bound={} tp_validated={} integrity={} v2_integrity={} address_validated={} ping_bytes={}\n",
-        .{ accepted_retry_token.len, accepted_original_dcid.len, accepted_retry_scid.len, server_retry_scid.len, true, true, true, retry_integrity_valid, v2_retry_integrity_valid, server.peerAddressValidated(), payload.len },
+        "[retry] token_len={} original_dcid_len={} retry_scid_len={} server_retry_scid_len={} address_bound={} path_bound={} tp_validated={} server_tp_bytes={} integrity={} v2_integrity={} address_validated={} ping_bytes={}\n",
+        .{ accepted_retry_token.len, accepted_original_dcid.len, accepted_retry_scid.len, server_retry_scid.len, true, true, true, server_transport_parameter_bytes.len, retry_integrity_valid, v2_retry_integrity_valid, server.peerAddressValidated(), payload.len },
     );
     std.debug.print("[retry] consumed token is not reusable\n", .{});
 }

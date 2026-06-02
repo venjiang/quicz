@@ -174,7 +174,8 @@ experimental.
   path/version binding, replay rejection, and future address-validation
   unblocking. Run with `zig build run-udp-address-validation-loopback`.
 - [Retry token](examples/retry_token.zig): Retry datagram processing, token
-  reuse, and Retry CID validation. Run with `zig build run-retry-token`.
+  reuse, and Retry CID transport-parameter byte validation. Run with
+  `zig build run-retry-token`.
 - [Connection IDs](examples/connection_ids.zig): NEW_CONNECTION_ID,
   RETIRE_CONNECTION_ID, lifecycle-owned issue/register route bridging, and
   replacement state. Run with `zig build run-connection-ids`.
