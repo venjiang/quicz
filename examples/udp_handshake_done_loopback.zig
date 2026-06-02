@@ -126,6 +126,7 @@ pub fn main() !void {
     try require(server.handshakeConfirmed());
     try require(server.packetNumberSpaceDiscarded(.handshake));
     try require(!server.hasHandshakeProtectionKeys());
+    const server_handshake_keys_discarded = !server.hasHandshakeProtectionKeys();
 
     const done_datagram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
@@ -153,6 +154,7 @@ pub fn main() !void {
     try require(client.packetNumberSpaceDiscarded(.handshake));
     try require(!client.hasHandshakeProtectionKeys());
     try require(client.pendingAckLargest(.application) == 0);
+    const client_ack_largest = client.pendingAckLargest(.application).?;
 
     const ack_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         client_handle,
@@ -161,7 +163,8 @@ pub fn main() !void {
         &server_dcid,
     )) orelse return error.UnexpectedState;
     defer allocator.free(ack_datagram);
-    try require(client.pendingAckLargest(.application) == null);
+    const client_ack_cleared = client.pendingAckLargest(.application) == null;
+    try require(client_ack_cleared);
     try client_socket.send(io, &server_socket.address, ack_datagram);
 
     const ack_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
@@ -177,13 +180,17 @@ pub fn main() !void {
     try require(server.bytesInFlight(.application) == 0);
     try require(server_lifecycle.recoveryTimerCount() == 0);
 
-    std.debug.print("[udp-handshake-done] client_port={} server_port={} done_bytes={} ack_bytes={} client_confirmed={} client_handshake_keys={} server_inflight={} server_timers={}\n", .{
+    std.debug.print("[udp-handshake-done] client_port={} server_port={} done_bytes={} ack_bytes={} server_confirmed={} server_handshake_keys_discarded={} client_confirmed={} client_handshake_keys={} client_ack_largest={} client_ack_cleared={} server_inflight={} server_timers={}\n", .{
         client_local.port,
         server_local.port,
         done_datagram.len,
         ack_datagram.len,
+        server.handshakeConfirmed(),
+        server_handshake_keys_discarded,
         client.handshakeConfirmed(),
         client.hasHandshakeProtectionKeys(),
+        client_ack_largest,
+        client_ack_cleared,
         server.bytesInFlight(.application),
         server_lifecycle.recoveryTimerCount(),
     });
