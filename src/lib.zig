@@ -18106,7 +18106,9 @@ test "EndpointConnectionLifecycle emits protected Version Negotiation follow-up 
     defer std.testing.allocator.free(server_initial);
     try result.handoff.followup_connection.processInitialProtectedDatagram(13, secrets.server, server_initial);
     try std.testing.expectEqualStrings(&server_scid, result.handoff.followup_connection.peerInitialSourceConnectionId().?);
-    try result.handoff.followup_connection.applyPeerTransportParameters(server.localTransportParameters());
+    var server_tp_buf: [256]u8 = undefined;
+    const server_tp = try server.encodeLocalTransportParameters(&server_tp_buf);
+    try result.handoff.followup_connection.applyPeerTransportParameterBytes(server_tp);
     const peer_version_information = result.handoff.followup_connection.peerVersionInformation() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(packet.Version.v2, peer_version_information.chosen_version);
 }

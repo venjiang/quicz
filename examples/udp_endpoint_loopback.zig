@@ -278,7 +278,9 @@ pub fn main() !void {
     var client_initial_crypto_buf: [64]u8 = undefined;
     const client_crypto_len = (try version_negotiation_initial.handoff.followup_connection.recvCryptoInSpace(.initial, &client_initial_crypto_buf)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, client_initial_crypto_buf[0..client_crypto_len], server_followup_crypto));
-    try version_negotiation_initial.handoff.followup_connection.applyPeerTransportParameters(version_negotiation_server.localTransportParameters());
+    var server_transport_parameter_buf: [256]u8 = undefined;
+    const server_transport_parameter_bytes = try version_negotiation_server.encodeLocalTransportParameters(&server_transport_parameter_buf);
+    try version_negotiation_initial.handoff.followup_connection.applyPeerTransportParameterBytes(server_transport_parameter_bytes);
     const followup_peer_version = version_negotiation_initial.handoff.followup_connection.peerVersionInformation() orelse return error.UnexpectedState;
     try require(followup_peer_version.chosen_version == selected_version);
 
@@ -290,13 +292,14 @@ pub fn main() !void {
     try require(server_route.connection_id == 21);
     try require(std.mem.eql(u8, server_route.destination_connection_id.asSlice(), &server_initial_scid));
 
-    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} followup_odcid_len={} server_tp_version=0x{x} accepted={} client_route={} server_route={} vn_response_bytes={} followup_initial_bytes={} server_initial_bytes={}\n", .{
+    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} followup_odcid_len={} server_tp_version=0x{x} server_tp_bytes={} accepted={} client_route={} server_route={} vn_response_bytes={} followup_initial_bytes={} server_initial_bytes={}\n", .{
         client_local.port,
         server_local.port,
         parsed_version_negotiation.versions.len,
         @intFromEnum(selected_version),
         followup_original_dcid.len,
         @intFromEnum(followup_peer_version.chosen_version),
+        server_transport_parameter_bytes.len,
         accepted_route.server_source_route.connection_id,
         client_route.connection_id,
         server_route.connection_id,
