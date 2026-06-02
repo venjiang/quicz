@@ -163,6 +163,8 @@ pub fn main() !void {
     try require(std.mem.eql(u8, early_route.destination_connection_id.asSlice(), &server_dcid));
     try require(server.pendingAckLargest(.application) == 0);
     try require(server.nextPeerPacketNumber(.application) == 1);
+    const server_accepted_early_packet = server.nextPeerPacketNumber(.application) == 1;
+    const server_early_ack_largest = server.pendingAckLargest(.application).?;
 
     var read_buf: [32]u8 = undefined;
     const read_len = (try server.recvOnStream(stream_id, &read_buf)) orelse return error.UnexpectedState;
@@ -180,7 +182,9 @@ pub fn main() !void {
     try client.confirmHandshake();
     try server.confirmHandshake();
     try require(!client.hasLocalZeroRttProtectionKey());
+    const client_zero_keys_discarded = !client.hasLocalZeroRttProtectionKey();
     try require(server.hasPeerZeroRttProtectionKey());
+    const server_zero_keys_before_1rtt = server.hasPeerZeroRttProtectionKey();
 
     const ack = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
@@ -228,7 +232,7 @@ pub fn main() !void {
     try require(server.pendingAckLargest(.application) == 1);
     try require(!server.hasPeerZeroRttProtectionKey());
 
-    std.debug.print("[udp-zero-rtt] client_port={} server_port={} early_bytes={} ack_bytes={} ping_bytes={} stream_id={} received=\"{s}\" post_ack_inflight={} rejected_before_accept={} server_zero_keys_discarded={}\n", .{
+    std.debug.print("[udp-zero-rtt] client_port={} server_port={} early_bytes={} ack_bytes={} ping_bytes={} stream_id={} received=\"{s}\" post_ack_inflight={} rejected_before_accept={} accepted_after_accept={} server_early_ack_largest={} client_zero_keys_discarded={} server_zero_keys_before_1rtt={} server_zero_keys_discarded={}\n", .{
         client_local.port,
         server_local.port,
         early.len,
@@ -238,6 +242,10 @@ pub fn main() !void {
         read_buf[0..read_len],
         post_ack_inflight,
         rejecting_server.nextPeerPacketNumber(.application) == 0,
+        server_accepted_early_packet,
+        server_early_ack_largest,
+        client_zero_keys_discarded,
+        server_zero_keys_before_1rtt,
         !server.hasPeerZeroRttProtectionKey(),
     });
 }
