@@ -94,6 +94,30 @@ pub fn main() !void {
     const current_path = try udp4Tuple(client_socket.address, server_socket.address);
     const preferred_path = try udp4Tuple(client_socket.address, preferred_server_socket.address);
     const stray_path = try udp4Tuple(client_socket.address, stray_server_socket.address);
+
+    const advertised_preferred_address = try quicz.PreferredAddress.init(
+        preferred_server_local.octets,
+        preferred_server_local.port,
+        .{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 },
+        preferred_server_local.port,
+        &preferred_cid,
+        preferred_token,
+    );
+    var preferred_server = try quicz.Connection.init(allocator, .server, .{
+        .preferred_address = advertised_preferred_address,
+    });
+    defer preferred_server.deinit();
+    var preferred_client = try quicz.Connection.init(allocator, .client, .{});
+    defer preferred_client.deinit();
+    var preferred_transport_parameter_buf: [256]u8 = undefined;
+    const preferred_transport_parameter_bytes = try preferred_server.encodeLocalTransportParameters(&preferred_transport_parameter_buf);
+    try preferred_client.applyPeerTransportParameterBytes(preferred_transport_parameter_bytes);
+    const learned_preferred_address = preferred_client.peerPreferredAddress() orelse return error.UnexpectedState;
+    try require(std.mem.eql(u8, &learned_preferred_address.ipv4_address, &preferred_server_local.octets));
+    try require(learned_preferred_address.ipv4_port == preferred_server_local.port);
+    try require(std.mem.eql(u8, learned_preferred_address.connectionId(), &preferred_cid));
+    try require(std.mem.eql(u8, &learned_preferred_address.stateless_reset_token, &preferred_token));
+
     try lifecycle.registerConnectionId(connection_handle, &current_cid, current_path, .{
         .active_migration_disabled = true,
     });
@@ -111,9 +135,9 @@ pub fn main() !void {
     const preferred_route = try lifecycle.commitPreferredAddressMigration(
         &current_cid,
         current_path,
-        &preferred_cid,
+        learned_preferred_address.connectionId(),
         preferred_path,
-        preferred_token,
+        learned_preferred_address.stateless_reset_token,
     );
     try require(preferred_route.connection_id == connection_handle);
     try require(std.mem.eql(u8, preferred_route.destination_connection_id.asSlice(), &preferred_cid));
@@ -142,7 +166,7 @@ pub fn main() !void {
     const reset_token = (try lifecycle.statelessResetTokenForDatagram(preferred_path, &preferred_datagram)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, &reset_token, &preferred_token));
 
-    std.debug.print("[udp-preferred] client_port={} old_server_port={} preferred_server_port={} stray_server_port={} current_route={} preferred_route={} confirmed_route={} active_migration_disabled=true reset_token_retained=true\n", .{
+    std.debug.print("[udp-preferred] client_port={} old_server_port={} preferred_server_port={} stray_server_port={} current_route={} preferred_route={} confirmed_route={} preferred_tp_bytes={} active_migration_disabled=true reset_token_retained=true\n", .{
         client_local.port,
         server_local.port,
         preferred_server_local.port,
@@ -150,5 +174,6 @@ pub fn main() !void {
         current_route.connection_id,
         preferred_route.connection_id,
         confirmed_route.connection_id,
+        preferred_transport_parameter_bytes.len,
     });
 }

@@ -196,8 +196,9 @@ experimental.
 - [UDP zero-CID loopback](examples/udp_zero_cid_loopback.zig): Zero-length CID
   tuple routing over loopback UDP. Run with `zig build run-udp-zero-cid-loopback`.
 - [UDP preferred address loopback](examples/udp_preferred_address_loopback.zig):
-  Preferred-address route migration and active-migration-disabled handling. Run
-  with `zig build run-udp-preferred-address-loopback`.
+  Preferred-address transport-parameter byte handoff, route migration, and
+  active-migration-disabled handling. Run with
+  `zig build run-udp-preferred-address-loopback`.
 - [UDP replacement CID loopback](examples/udp_replacement_cid_loopback.zig):
   Replacement CID registration, retire_prior_to handling, and reset-token
   retention. Run with `zig build run-udp-replacement-cid-loopback`.

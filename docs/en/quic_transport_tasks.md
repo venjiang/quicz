@@ -1078,11 +1078,12 @@ produce or consume TLS-owned QUIC packets over UDP.
 - 2026-05-26: Added `examples/udp_preferred_address_loopback.zig` and the
   `run-udp-preferred-address-loopback` build step. The example registers a
   current server route through `EndpointConnectionLifecycle` on one loopback UDP
-  address, commits a caller-validated preferred-address CID on a second server
-  address through the lifecycle owner, proves the old route is retired, routes
-  the preferred CID on the preferred path, rejects the same CID on a stray path
-  under active-migration-disabled policy, and verifies the preferred-address
-  reset token remains available after retirement.
+  address, learns the preferred-address CID/token through server
+  transport-parameter bytes, commits that caller-validated preferred-address CID
+  on a second server address through the lifecycle owner, proves the old route
+  is retired, routes the preferred CID on the preferred path, rejects the same
+  CID on a stray path under active-migration-disabled policy, and verifies the
+  preferred-address reset token remains available after retirement.
 - 2026-05-25: Added `examples/udp_zero_cid_loopback.zig` and the
   `run-udp-zero-cid-loopback` build step. The example registers two
   zero-length destination CID routes through `EndpointConnectionLifecycle` on
@@ -2000,7 +2001,9 @@ produce or consume TLS-owned QUIC packets over UDP.
   rejection, zero-length preferred CID rejection, old-route retirement, active
   route reset-token suppression, retired preferred-CID reset-token lookup, and
   route preservation of active-migration-disabled policy. Automatic
-  socket-backed preferred-address migration remains pending.
+  socket-backed preferred-address migration remains pending; the UDP loopback
+  now learns the preferred CID/token through server preferred_address
+  transport-parameter bytes before committing the caller-validated route.
 - 2026-05-23: `applyPeerTransportParameters()` now validates the server's
   `original_destination_connection_id` against the DCID used by the first sent
   client Initial, and validates `retry_source_connection_id` against the Retry
@@ -2469,7 +2472,7 @@ run from `build.zig`.
 | `endpoint_recovery_timers` | Endpoint-owned recovery timer scheduling across caller-owned connection handles: endpoint lifecycle route ownership, earliest aggregate timer selection, before-deadline no-op refresh, PTO service/re-arm, ACK-driven disarm, loss-time service, final timer disarm, connection-handle route retirement, routed protected long-header receive timer refresh with processed-count preservation, client Initial ACK anti-deadlock Handshake PTO preservation, caller-keyed and installed-key Handshake/0-RTT protected long-header recovery timer service plus PTO probe polling, protected long-header send timer refresh, routed caller-keyed Handshake CRYPTO-space and 0-RTT long-packet receive timer refresh, caller-keyed Initial/Handshake CRYPTO-space and 0-RTT long-packet send timer refresh, caller-keyed protected 1-RTT short-packet receive timer refresh, caller-keyed protected 1-RTT short-packet send timer refresh, installed-key protected 1-RTT recovery timer service plus PTO probe polling, routed explicit key-phase/key-update short-packet receive timer refresh, caller-owned key-phase-state short-packet send timer refresh, routed installed-key Handshake/0-RTT long-packet receive timer refresh, installed-key Handshake/0-RTT long-packet send timer refresh, and installed-key protected 1-RTT short-packet send/receive timer refresh. | Present |
 | `udp_endpoint_loopback` | Socket-backed loopback UDP exercise for endpoint routing: lifecycle-owned unsupported-version Initial to Version Negotiation response delivery, client-side VN selection, protected follow-up Initial emission with follow-up Original DCID and recovery-timer evidence, lifecycle-owned accepted protected Initial processing, protected server Initial response emission and routed client-side processing, server transport-parameter byte validation plus malformed-byte `TRANSPORT_PARAMETER_ERROR` close classification on the follow-up client, server-side follow-up Initial CRYPTO receive, client Initial Source CID response routing, accepted server Initial Source CID registration, and short-header registered-CID routing. | Present |
 | `udp_zero_cid_loopback` | Socket-backed loopback UDP zero-length CID exercise: lifecycle-owned short and long datagram routing by UDP tuple identity, path-specific zero-CID retirement, and route path update to a new tuple. | Present |
-| `udp_preferred_address_loopback` | Socket-backed loopback UDP preferred-address exercise: lifecycle-owned caller-validated preferred route commit, old-route retirement, preferred CID routing on the preferred server address, active-migration-disabled rejection on a stray path, and retained reset-token lookup after retirement. | Present |
+| `udp_preferred_address_loopback` | Socket-backed loopback UDP preferred-address exercise: server preferred_address transport-parameter byte handoff, lifecycle-owned caller-validated preferred route commit, old-route retirement, preferred CID routing on the preferred server address, active-migration-disabled rejection on a stray path, and retained reset-token lookup after retirement. | Present |
 | `udp_replacement_cid_loopback` | Socket-backed loopback UDP replacement CID exercise: lifecycle-owned NEW_CONNECTION_ID-style replacement route registration, retire_prior_to route retirement, inactive old-CID reset-token lookup, active replacement token suppression, invalid retire_prior_to rejection, and active-migration-disabled stray-path rejection. | Present |
 | `udp_connection_ids_loopback` | Socket-backed loopback UDP connection ID exercise: lifecycle-routed protected NEW_CONNECTION_ID delivery, lifecycle-owned issue/register endpoint route update, inactive old-CID reset-token lookup, lifecycle-routed protected RETIRE_CONNECTION_ID through the active replacement CID, lifecycle-routed ACK cleanup, and server-side local CID retirement. | Present |
 | `udp_protected_loopback` | Socket-backed loopback UDP lifecycle protected packet exercise: lifecycle-owned caller-keyed protected client Initial route registration, accepted protected Initial authentication before server route registration, anti-amplification budget accounting, protected server Initial response emission and routed client-side processing, routed caller-keyed 1-RTT PING processing, and routed caller-keyed 1-RTT ACK processing. | Present |

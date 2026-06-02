@@ -149,7 +149,7 @@ pub fn main() !void {
   运行：`zig build run-udp-endpoint-loopback`。
 - [UDP zero-CID loopback](examples/udp_zero_cid_loopback.zig)：基于 loopback UDP 的 zero-length CID tuple routing。
   运行：`zig build run-udp-zero-cid-loopback`。
-- [UDP preferred address loopback](examples/udp_preferred_address_loopback.zig)：preferred-address route migration 和 active-migration-disabled 处理。
+- [UDP preferred address loopback](examples/udp_preferred_address_loopback.zig)：preferred-address transport-parameter byte handoff、route migration 和 active-migration-disabled 处理。
   运行：`zig build run-udp-preferred-address-loopback`。
 - [UDP replacement CID loopback](examples/udp_replacement_cid_loopback.zig)：replacement CID 注册、retire_prior_to 处理和 reset-token 保留。
   运行：`zig build run-udp-replacement-cid-loopback`。
