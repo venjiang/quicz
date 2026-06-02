@@ -195,7 +195,60 @@ pub fn main() !void {
     const second_update_ack_threshold = client.pendingOneRttKeyUpdateAckThreshold() orelse return error.UnexpectedState;
     try require(second_update_ack_threshold == 1);
 
-    std.debug.print("[udp-key-update] client_port={} server_port={} ping_bytes={} ack_bytes={} first_update_count={} first_ack_threshold={} server_peer_update_count={} server_peer_retains_initial={} ack_gate_cleared={} second_update_count={} second_ack_threshold={} client_retains_first_update={} client_retains_current={} ping_key_phase={} ack_key_phase={} server_peer_phase={} client_next_phase={} client_inflight={}\n", .{
+    try client.sendPing();
+    const second_update_ping = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        41,
+        &client,
+        4,
+        &server_dcid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(second_update_ping);
+    const second_ping_key_phase = try quicz.protection.peekShortPacketKeyPhaseAes128(secrets.client.hp, second_update_ping, server_dcid.len);
+    try require(!second_ping_key_phase);
+    try client_socket.send(io, &server_socket.address, second_update_ping);
+
+    const second_ping_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const second_ping_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        51,
+        &server,
+        second_ping_received.path,
+        5,
+        second_ping_received.data,
+    );
+    try require(second_ping_route.connection_id == 51);
+    try require(std.mem.eql(u8, second_ping_route.destination_connection_id.asSlice(), &server_dcid));
+    try require(server.peerOneRttKeyPhase().? == false);
+    const server_peer_second_update_count = server.peerOneRttKeyUpdateCount() orelse return error.UnexpectedState;
+    try require(server_peer_second_update_count == 2);
+    const server_peer_retains_first_update = server.peerOneRttRetainsKeyGeneration(1) orelse return error.UnexpectedState;
+    try require(!server_peer_retains_first_update);
+
+    const second_ack = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        51,
+        &server,
+        6,
+        &client_dcid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(second_ack);
+    const second_ack_key_phase = try quicz.protection.peekShortPacketKeyPhaseAes128(secrets.server.hp, second_ack, client_dcid.len);
+    try require(!second_ack_key_phase);
+    try server_socket.send(io, &client_socket.address, second_ack);
+
+    const second_ack_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+    const second_ack_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        41,
+        &client,
+        second_ack_received.path,
+        7,
+        second_ack_received.data,
+    );
+    try require(second_ack_route.connection_id == 41);
+    try require(std.mem.eql(u8, second_ack_route.destination_connection_id.asSlice(), &client_dcid));
+    try require(client.bytesInFlight(.application) == 0);
+    try require(client.pendingOneRttKeyUpdateAckThreshold() == null);
+    const second_ack_gate_cleared = client.pendingOneRttKeyUpdateAckThreshold() == null;
+
+    std.debug.print("[udp-key-update] client_port={} server_port={} ping_bytes={} ack_bytes={} first_update_count={} first_ack_threshold={} server_peer_update_count={} server_peer_retains_initial={} ack_gate_cleared={} second_update_count={} second_ack_threshold={} client_retains_first_update={} client_retains_current={} second_ping_bytes={} second_ack_bytes={} server_peer_second_update_count={} server_peer_retains_first_update={} second_ack_gate_cleared={} ping_key_phase={} ack_key_phase={} second_ping_key_phase={} second_ack_key_phase={} server_peer_phase={} client_next_phase={} client_inflight={}\n", .{
         client_local.port,
         server_local.port,
         key_update_ping.len,
@@ -209,8 +262,15 @@ pub fn main() !void {
         second_update_ack_threshold,
         client_retains_first_update,
         client_retains_current,
+        second_update_ping.len,
+        second_ack.len,
+        server_peer_second_update_count,
+        server_peer_retains_first_update,
+        second_ack_gate_cleared,
         ping_key_phase,
         ack_key_phase,
+        second_ping_key_phase,
+        second_ack_key_phase,
         server.peerOneRttKeyPhase().?,
         client.localOneRttKeyPhase().?,
         client.bytesInFlight(.application),

@@ -24149,6 +24149,26 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(2));
     try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(3));
     try std.testing.expectEqual(@as(?u64, 1), client.pendingOneRttKeyUpdateAckThreshold());
+
+    try client.sendPing();
+    const second_ping = (try client.pollProtectedShortDatagramWithInstalledKeys(
+        14,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_ping);
+    try server.processProtectedShortDatagramWithInstalledKeys(15, server_dcid.len, second_ping);
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttKeyPhase());
+    try std.testing.expectEqual(@as(?u64, 2), server.peerOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(1));
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(2));
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(3));
+    const second_ack = (try server.pollProtectedShortDatagramWithInstalledKeys(
+        16,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_ack);
+    try client.processProtectedShortDatagramWithInstalledKeys(17, client_dcid.len, second_ack);
+    try std.testing.expectEqual(@as(?u64, null), client.pendingOneRttKeyUpdateAckThreshold());
 }
 
 test "installed one RTT key update ACK confirmation rolls back with invalid payload" {
