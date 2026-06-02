@@ -187,6 +187,21 @@ pub const Aes128KeyPhaseState = struct {
         return self.key_update_count;
     }
 
+    /// Current retained key generation.
+    pub fn currentKeyGeneration(self: Aes128KeyPhaseState) u64 {
+        return self.key_update_count;
+    }
+
+    /// Next retained key generation.
+    pub fn nextKeyGeneration(self: Aes128KeyPhaseState) u64 {
+        return self.key_update_count +| 1;
+    }
+
+    /// Return whether the state still retains keys for `generation`.
+    pub fn retainsKeyGeneration(self: Aes128KeyPhaseState, generation: u64) bool {
+        return generation == self.currentKeyGeneration() or generation == self.nextKeyGeneration();
+    }
+
     /// Current and next keys for opening a packet that might use either phase.
     pub fn keyUpdateKeys(self: Aes128KeyPhaseState) ShortPacketKeyUpdateKeys {
         return .{
@@ -997,6 +1012,11 @@ test "Aes128KeyPhaseState advances send and receive phases" {
     const first_next = state.next;
     try std.testing.expect(!state.currentKeyPhase());
     try std.testing.expectEqual(@as(u64, 0), state.keyUpdateCount());
+    try std.testing.expectEqual(@as(u64, 0), state.currentKeyGeneration());
+    try std.testing.expectEqual(@as(u64, 1), state.nextKeyGeneration());
+    try std.testing.expect(state.retainsKeyGeneration(0));
+    try std.testing.expect(state.retainsKeyGeneration(1));
+    try std.testing.expect(!state.retainsKeyGeneration(2));
     const first_current = state.currentKeys();
     try std.testing.expectEqualSlices(u8, &secrets.client.secret, &first_current.secret);
     try std.testing.expectEqualSlices(u8, &first_next.secret, &state.keyUpdateKeys().next.secret);
@@ -1004,6 +1024,9 @@ test "Aes128KeyPhaseState advances send and receive phases" {
     state.initiateKeyUpdate();
     try std.testing.expect(state.currentKeyPhase());
     try std.testing.expectEqual(@as(u64, 1), state.keyUpdateCount());
+    try std.testing.expect(!state.retainsKeyGeneration(0));
+    try std.testing.expect(state.retainsKeyGeneration(1));
+    try std.testing.expect(state.retainsKeyGeneration(2));
     const updated_current = state.currentKeys();
     const updated_keys = state.keyUpdateKeys();
     try std.testing.expectEqualSlices(u8, &first_next.secret, &updated_current.secret);
@@ -1016,6 +1039,9 @@ test "Aes128KeyPhaseState advances send and receive phases" {
     try std.testing.expect(state.updateAfterReceiving(false));
     try std.testing.expect(!state.currentKeyPhase());
     try std.testing.expectEqual(@as(u64, 2), state.keyUpdateCount());
+    try std.testing.expect(!state.retainsKeyGeneration(1));
+    try std.testing.expect(state.retainsKeyGeneration(2));
+    try std.testing.expect(state.retainsKeyGeneration(3));
     try std.testing.expectEqual(false, state.keyUpdateKeys().current_key_phase);
 }
 

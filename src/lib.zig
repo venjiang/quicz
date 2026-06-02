@@ -4918,6 +4918,18 @@ pub const Connection = struct {
         return null;
     }
 
+    /// Return whether local 1-RTT send keys still retain `generation`.
+    pub fn localOneRttRetainsKeyGeneration(self: Connection, generation: u64) ?bool {
+        if (self.local_one_rtt_key_phase_state) |state| return state.retainsKeyGeneration(generation);
+        return null;
+    }
+
+    /// Return whether peer 1-RTT receive keys still retain `generation`.
+    pub fn peerOneRttRetainsKeyGeneration(self: Connection, generation: u64) ?bool {
+        if (self.peer_one_rtt_key_phase_state) |state| return state.retainsKeyGeneration(generation);
+        return null;
+    }
+
     /// Return the packet-number threshold that must be ACKed before another
     /// local installed-key 1-RTT key update can be initiated.
     ///
@@ -24100,9 +24112,14 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     try std.testing.expectEqual(@as(?u64, null), client.pendingOneRttKeyUpdateAckThreshold());
     try std.testing.expectEqual(@as(?u64, 0), client.localOneRttKeyUpdateCount());
     try std.testing.expectEqual(@as(?u64, 0), server.peerOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(1));
     try client.initiateOneRttKeyUpdate();
     try std.testing.expectEqual(@as(?bool, true), client.localOneRttKeyPhase());
     try std.testing.expectEqual(@as(?u64, 1), client.localOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?bool, false), client.localOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(1));
+    try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(2));
     try std.testing.expectEqual(@as(?u64, 0), client.pendingOneRttKeyUpdateAckThreshold());
     try std.testing.expectError(error.InvalidPacket, client.initiateOneRttKeyUpdate());
 
@@ -24114,6 +24131,9 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     defer std.testing.allocator.free(ping);
     try server.processProtectedShortDatagramWithInstalledKeys(11, server_dcid.len, ping);
     try std.testing.expectEqual(@as(?u64, 1), server.peerOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(1));
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(2));
     const ack = (try server.pollProtectedShortDatagramWithInstalledKeys(
         12,
         &client_dcid,
@@ -24125,6 +24145,9 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     try client.initiateOneRttKeyUpdate();
     try std.testing.expectEqual(@as(?bool, false), client.localOneRttKeyPhase());
     try std.testing.expectEqual(@as(?u64, 2), client.localOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?bool, false), client.localOneRttRetainsKeyGeneration(1));
+    try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(2));
+    try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(3));
     try std.testing.expectEqual(@as(?u64, 1), client.pendingOneRttKeyUpdateAckThreshold());
 }
 
