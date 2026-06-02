@@ -127,7 +127,7 @@ pub fn main() !void {
   运行：`zig build run-loss-recovery`。
 - [PTO recovery](examples/pto_recovery.zig)：PTO timer、probe selection、backoff、client anti-deadlock PTO、anti-amplification gating/unblock service 和已 ACK 的 RESET_STREAM 重传抑制。
   运行：`zig build run-pto-recovery`。
-- [Endpoint recovery timers](examples/endpoint_recovery_timers.zig)：跨 connection handle 的 endpoint-owned recovery timer 调度、long/short protected probe polling 和 routed protected receive refresh。
+- [Endpoint recovery timers](examples/endpoint_recovery_timers.zig)：跨 connection handle 的 endpoint-owned recovery timer 调度、caller-keyed/installed-key protected probe polling 和 routed protected receive refresh。
   运行：`zig build run-endpoint-recovery-timers`。
 - [Path validation](examples/path_validation.zig)：PATH_CHALLENGE/PATH_RESPONSE 重试、重复 pending response 抑制、1200 字节 protected path-validation datagram 和验证驱动的 lifecycle route update。
   运行：`zig build run-path-validation`。
