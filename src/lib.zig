@@ -4906,6 +4906,16 @@ pub const Connection = struct {
         return null;
     }
 
+    /// Return the packet-number threshold that must be ACKed before another
+    /// local installed-key 1-RTT key update can be initiated.
+    ///
+    /// Null means no local key update is currently waiting for ACK
+    /// confirmation. Endpoint/TLS loops can use this read-only hook to observe
+    /// the ACK gate without mutating key-phase state.
+    pub fn pendingOneRttKeyUpdateAckThreshold(self: Connection) ?u64 {
+        return self.local_one_rtt_key_update_ack_threshold;
+    }
+
     /// Advance the installed local 1-RTT send keys before the next packet.
     ///
     /// This models endpoint-owned key update initiation after handshake
@@ -24075,8 +24085,10 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     try std.testing.expectError(error.InvalidPacket, client.initiateOneRttKeyUpdate());
     try client.confirmHandshake();
     try server.confirmHandshake();
+    try std.testing.expectEqual(@as(?u64, null), client.pendingOneRttKeyUpdateAckThreshold());
     try client.initiateOneRttKeyUpdate();
     try std.testing.expectEqual(@as(?bool, true), client.localOneRttKeyPhase());
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingOneRttKeyUpdateAckThreshold());
     try std.testing.expectError(error.InvalidPacket, client.initiateOneRttKeyUpdate());
 
     try client.sendPing();
@@ -24092,9 +24104,11 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(ack);
     try client.processProtectedShortDatagramWithInstalledKeys(13, client_dcid.len, ack);
+    try std.testing.expectEqual(@as(?u64, null), client.pendingOneRttKeyUpdateAckThreshold());
 
     try client.initiateOneRttKeyUpdate();
     try std.testing.expectEqual(@as(?bool, false), client.localOneRttKeyPhase());
+    try std.testing.expectEqual(@as(?u64, 1), client.pendingOneRttKeyUpdateAckThreshold());
 }
 
 test "installed one RTT key update ACK confirmation rolls back with invalid payload" {

@@ -121,6 +121,8 @@ pub fn main() !void {
 
     try client.initiateOneRttKeyUpdate();
     try require(client.localOneRttKeyPhase().?);
+    const first_update_ack_threshold = client.pendingOneRttKeyUpdateAckThreshold() orelse return error.UnexpectedState;
+    try require(first_update_ack_threshold == 0);
     try expectInvalidSecondUpdate(&client);
 
     try client.sendPing();
@@ -173,15 +175,22 @@ pub fn main() !void {
     try require(ack_route.connection_id == 41);
     try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &client_dcid));
     try require(client.bytesInFlight(.application) == 0);
+    try require(client.pendingOneRttKeyUpdateAckThreshold() == null);
+    const ack_gate_cleared = client.pendingOneRttKeyUpdateAckThreshold() == null;
 
     try client.initiateOneRttKeyUpdate();
     try require(client.localOneRttKeyPhase().? == false);
+    const second_update_ack_threshold = client.pendingOneRttKeyUpdateAckThreshold() orelse return error.UnexpectedState;
+    try require(second_update_ack_threshold == 1);
 
-    std.debug.print("[udp-key-update] client_port={} server_port={} ping_bytes={} ack_bytes={} ping_key_phase={} ack_key_phase={} server_peer_phase={} client_next_phase={} client_inflight={}\n", .{
+    std.debug.print("[udp-key-update] client_port={} server_port={} ping_bytes={} ack_bytes={} first_ack_threshold={} ack_gate_cleared={} second_ack_threshold={} ping_key_phase={} ack_key_phase={} server_peer_phase={} client_next_phase={} client_inflight={}\n", .{
         client_local.port,
         server_local.port,
         key_update_ping.len,
         ack.len,
+        first_update_ack_threshold,
+        ack_gate_cleared,
+        second_update_ack_threshold,
         ping_key_phase,
         ack_key_phase,
         server.peerOneRttKeyPhase().?,
