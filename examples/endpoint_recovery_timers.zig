@@ -226,6 +226,44 @@ pub fn main() !void {
     try require(installed_pto_client.pending_ping_count == 0);
     try require(installed_pto_lifecycle.recoveryTimerCount() == 1);
 
+    var installed_handshake_pto_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer installed_handshake_pto_lifecycle.deinit();
+    var installed_handshake_pto_client = try quicz.Connection.init(allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer installed_handshake_pto_client.deinit();
+    _ = try installed_handshake_pto_client.recordPacketSentInSpace(.initial, 10, 100);
+    try installed_handshake_pto_client.receiveAckInSpace(.initial, 70, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try installed_handshake_pto_client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try installed_handshake_pto_lifecycle.armRecoveryTimerFromConnection(protected_client_id, &installed_handshake_pto_client);
+    const installed_handshake_pto_timer = installed_handshake_pto_lifecycle.earliestRecoveryDeadline() orelse return error.EndpointRecoveryTimerExampleFailed;
+    try require(installed_handshake_pto_timer.connection_id == protected_client_id);
+    try require(installed_handshake_pto_timer.timer.space == .handshake);
+    try require(installed_handshake_pto_timer.timer.kind == .pto);
+    const installed_handshake_pto_probe_result = try installed_handshake_pto_lifecycle.serviceRecoveryTimerAndPollProtectedHandshakeDatagramWithInstalledKeys(
+        protected_client_id,
+        &installed_handshake_pto_client,
+        installed_handshake_pto_timer.timer.deadline_millis,
+        &server_dcid,
+        &client_dcid,
+    );
+    const installed_handshake_pto_serviced = installed_handshake_pto_probe_result.serviced orelse return error.EndpointRecoveryTimerExampleFailed;
+    try require(installed_handshake_pto_serviced.connection_id == protected_client_id);
+    try require(installed_handshake_pto_serviced.timer.space == .handshake);
+    const installed_handshake_pto_probe = installed_handshake_pto_probe_result.datagram orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(installed_handshake_pto_probe);
+    const installed_handshake_pto_bytes = installed_handshake_pto_probe.len;
+    try require(installed_handshake_pto_client.sentPacketCount(.handshake) == 1);
+    try require(installed_handshake_pto_client.packetNumberSpaceDiscarded(.initial));
+    try require(installed_handshake_pto_lifecycle.recoveryTimerCount() == 1);
+
     var protected_client = try quicz.Connection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });
@@ -697,7 +735,7 @@ pub fn main() !void {
     try require(protected_client.bytesInFlight(.application) == 0);
     const protected_timers_remaining = protected_client_lifecycle.recoveryTimerCount() + protected_server_lifecycle.recoveryTimerCount();
 
-    std.debug.print("[endpoint-timers] first_connection={} first_kind={s} first_deadline={} second_connection={} second_kind={s} second_deadline={} pto_ping={} loss_remaining={} close_disarmed={} timers_remaining={} routes_remaining={} long_pto_bytes={} installed_pto_bytes={} protected_bytes={} protected_timers={}\n", .{
+    std.debug.print("[endpoint-timers] first_connection={} first_kind={s} first_deadline={} second_connection={} second_kind={s} second_deadline={} pto_ping={} loss_remaining={} close_disarmed={} timers_remaining={} routes_remaining={} long_pto_bytes={} installed_pto_bytes={} installed_handshake_pto_bytes={} protected_bytes={} protected_timers={}\n", .{
         first.connection_id,
         @tagName(first.timer.kind),
         first.timer.deadline_millis,
@@ -711,6 +749,7 @@ pub fn main() !void {
         endpoint_lifecycle.routeCount(),
         long_pto_bytes,
         installed_pto_bytes,
+        installed_handshake_pto_bytes,
         long_initial.len + long_ack.len + caller_handshake.len + caller_handshake_ack.len + installed_handshake.len + installed_handshake_ack.len + caller_zero.len + caller_zero_ack.len + installed_zero.len + caller_short.len + caller_short_ack.len + ping.len + ack.len + explicit_key_phase_ping.len + explicit_key_phase_ack.len + key_phase_ping.len + key_phase_ack.len,
         protected_timers_remaining,
     });

@@ -1465,6 +1465,39 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Service a due Handshake recovery timer and poll an installed-key probe.
+    ///
+    /// This is the TLS-owned-key variant of the long-header recovery wakeup
+    /// bridge. The connection owns installed Handshake packet-protection state,
+    /// while the endpoint lifecycle owns the recovery timer wakeup and refresh.
+    pub fn serviceRecoveryTimerAndPollProtectedHandshakeDatagramWithInstalledKeys(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+    ) Error!EndpointProtectedLongRecoveryPollResult {
+        const serviced = try self.serviceRecoveryTimer(connection_id, connection, now_millis);
+        const deadline = serviced orelse return .{
+            .serviced = null,
+            .datagram = null,
+        };
+        if (deadline.timer.space != .handshake) return error.InvalidPacket;
+
+        const datagram = try self.pollProtectedHandshakeDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+            scid,
+        );
+        return .{
+            .serviced = deadline,
+            .datagram = datagram,
+        };
+    }
+
     /// Service a due Application recovery timer and poll a protected 1-RTT probe.
     ///
     /// This is the caller-keyed short-packet endpoint event-loop bridge for
@@ -19430,6 +19463,91 @@ test "EndpointConnectionLifecycle services and polls protected long Handshake PT
     // Sending the Handshake probe discards Initial state, which resets the
     // shared PTO backoff while preserving the newly in-flight Handshake packet.
     try std.testing.expectEqual(@as(u8, 0), client.handshake_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expect(client.packetNumberSpaceDiscarded(.initial));
+
+    var opened = try protection.unprotectLongPacketAes128(
+        std.testing.allocator,
+        secrets.client,
+        probe,
+        0,
+    );
+    defer protection.deinitProtectedLongPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqual(packet.PacketType.handshake, opened.packet.header.packet_type);
+
+    var payload_offset: usize = 0;
+    var found_ping = false;
+    while (payload_offset < opened.packet.plaintext.len) {
+        var decoded = try frame.decodeFrameSlice(opened.packet.plaintext[payload_offset..], std.testing.allocator);
+        defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+        switch (decoded.frame) {
+            .ping => found_ping = true,
+            .padding => {},
+            else => return error.TestUnexpectedResult,
+        }
+        payload_offset += decoded.len;
+    }
+    try std.testing.expect(found_ping);
+}
+
+test "EndpointConnectionLifecycle services and polls installed-key protected Handshake PTO probe" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+
+    _ = try client.recordPacketSentInSpace(.initial, 10, 100);
+    try client.receiveAckInSpace(.initial, 70, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try lifecycle.armRecoveryTimerFromConnection(41, &client);
+
+    const deadline = lifecycle.earliestRecoveryDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 41), deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.handshake, deadline.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline.timer.kind);
+
+    const early = try lifecycle.serviceRecoveryTimerAndPollProtectedHandshakeDatagramWithInstalledKeys(
+        41,
+        &client,
+        deadline.timer.deadline_millis - 1,
+        &server_dcid,
+        &client_dcid,
+    );
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), early.serviced);
+    try std.testing.expectEqual(@as(?[]u8, null), early.datagram);
+    try std.testing.expectEqual(@as(usize, 0), client.handshake_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const due = try lifecycle.serviceRecoveryTimerAndPollProtectedHandshakeDatagramWithInstalledKeys(
+        41,
+        &client,
+        deadline.timer.deadline_millis,
+        &server_dcid,
+        &client_dcid,
+    );
+    const serviced = due.serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 41), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.handshake, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    const probe = due.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), client.handshake_packet_space.pending_ping_count);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
     try std.testing.expect(client.packetNumberSpaceDiscarded(.initial));
 
