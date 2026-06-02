@@ -38,7 +38,9 @@
   该 transport error code，供后续 Compatible Version Negotiation 状态机使用。
   `VersionCompatibility` 与 `selectCompatibleVersion()` 会用显式、directional
   first-flight compatibility 建模 compatible selection，不默认假设任意两个 QUIC
-  version 兼容。
+  version 兼容。`Connection` 在成功应用对端 transport parameter 后保存 peer
+  Version Information，并提供 server-side compatible-version apply helper，要求
+  selected version 必须等于该连接配置的 chosen version。
 - Client 连接现在可以校验一个 RFC 8999 Version Negotiation packet，忽略包含
   Original Version 或 CID 不匹配的不安全 packet，从本端 `available_versions`
   中选择非 reserved 的 mutual version，通过

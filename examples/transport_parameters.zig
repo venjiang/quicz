@@ -109,6 +109,39 @@ pub fn main() !void {
     try require(parsed_server.disable_active_migration);
     try client.applyPeerTransportParameterBytes(server_bytes);
 
+    const compatible_client_versions = [_]quicz.packet.Version{ .v1, .v2 };
+    const compatible_server_versions = [_]quicz.packet.Version{ .v2, .v1 };
+    const compatibilities = [_]quicz.VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+    var compatible_server = try quicz.Connection.init(allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &compatible_server_versions,
+    });
+    defer compatible_server.deinit();
+
+    var compatible_raw: [128]u8 = undefined;
+    var compatible_writer = fixedWriter(&compatible_raw);
+    try quicz.transport_parameters.encode(compatible_writer.writer(), .{
+        .initial_max_data = 333,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &compatible_client_versions,
+        },
+    });
+    const compatible_selected = try compatible_server.applyPeerTransportParameterBytesWithCompatibleVersion(
+        compatible_writer.getWritten(),
+        &compatibilities,
+    );
+    try require(compatible_selected == .v2);
+    try require(compatible_server.peer_max_data == 333);
+    const compatible_peer = compatible_server.peerVersionInformation() orelse return error.TransportParameterExampleFailed;
+    try require(compatible_peer.chosen_version == .v1);
+    try require(compatible_peer.available_versions.len == compatible_client_versions.len);
+    const compatible_read_selected = (try compatible_server.selectPeerCompatibleVersion(&compatibilities)) orelse return error.TransportParameterExampleFailed;
+    try require(compatible_read_selected == compatible_selected);
+
     try require(client.effectiveIdleTimeoutMillis() == 200);
     try require(client.recovery_state.max_datagram_size == 1200);
     try require(client.congestionWindow(.application) == quicz.recovery.initialCongestionWindow(1200));
@@ -154,10 +187,12 @@ pub fn main() !void {
     }
 
     std.debug.print(
-        "[transport-parameters] client_bytes={} server_bytes={} effective_idle_ms={} recovery_mds={} recovery_cwnd={} preferred_cid_len={} reserved_ignored=true stream_limit_blocked=true invalid_client_server_only_rejected=true auto_close_code={} auto_close_frame_type={}\n",
+        "[transport-parameters] client_bytes={} server_bytes={} compatible_selected=0x{x} compatible_peer_versions={} effective_idle_ms={} recovery_mds={} recovery_cwnd={} preferred_cid_len={} reserved_ignored=true stream_limit_blocked=true invalid_client_server_only_rejected=true auto_close_code={} auto_close_frame_type={}\n",
         .{
             greased_client_bytes.len,
             server_bytes.len,
+            @intFromEnum(compatible_selected),
+            compatible_peer.available_versions.len,
             client.effectiveIdleTimeoutMillis().?,
             client.recovery_state.max_datagram_size,
             client.congestionWindow(.application),

@@ -103,7 +103,7 @@ pub fn main() !void {
   运行：`zig build run-client`。
 - [Codec roundtrip](examples/codec_roundtrip.zig)：varint、packet header、Version Negotiation（含显式 compatible-version selection 和 RFC 9368 downgrade close-code 证据）、frame、transport parameter 和 error codec 往返。
   运行：`zig build run-codec`。
-- [Transport parameters](examples/transport_parameters.zig)：transport parameter 导出、解析、应用和错误关闭行为。
+- [Transport parameters](examples/transport_parameters.zig)：transport parameter 导出、解析、应用（含 compatible-version selection）和错误关闭行为。
   运行：`zig build run-transport-parameters`。
 - [Flow control](examples/flow_control.zig)：connection、stream、stream-count、MAX_STREAMS overflow 拒绝和 BLOCKED/MAX frame 行为。
   运行：`zig build run-flow-control`。

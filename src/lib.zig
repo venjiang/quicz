@@ -4037,6 +4037,8 @@ pub const Connection = struct {
     peer_disable_active_migration: bool,
     peer_stateless_reset_token: ?[packet.stateless_reset_token_len]u8,
     peer_preferred_address: ?PreferredAddress,
+    peer_version_information_chosen_version: ?packet.Version,
+    peer_version_information_available_versions: ?[]packet.Version,
     last_packet_activity_millis: ?i64,
     next_stream_id: u64,
     next_uni_stream_id: u64,
@@ -4177,6 +4179,8 @@ pub const Connection = struct {
             .peer_disable_active_migration = false,
             .peer_stateless_reset_token = null,
             .peer_preferred_address = null,
+            .peer_version_information_chosen_version = null,
+            .peer_version_information_available_versions = null,
             .last_packet_activity_millis = null,
             .next_stream_id = switch (side) {
                 .client => 0,
@@ -4320,6 +4324,7 @@ pub const Connection = struct {
         if (self.retry_token) |token| self.allocator.free(token);
         if (self.peer_initial_source_connection_id) |cid| self.allocator.free(cid);
         if (self.retry_source_connection_id) |cid| self.allocator.free(cid);
+        if (self.peer_version_information_available_versions) |versions| self.allocator.free(versions);
         for (self.retry_tokens.items) |token| {
             self.allocator.free(token);
         }
@@ -4444,6 +4449,33 @@ pub const Connection = struct {
     /// endpoint migration policy; it does not automatically migrate sockets.
     pub fn peerPreferredAddress(self: Connection) ?PreferredAddress {
         return self.peer_preferred_address;
+    }
+
+    /// Return the peer's authenticated Version Information, if applied.
+    ///
+    /// The returned Available Versions slice is connection-owned and remains
+    /// valid until the next peer transport-parameter application or deinit.
+    pub fn peerVersionInformation(self: Connection) ?transport_parameters.VersionInformation {
+        const chosen_version = self.peer_version_information_chosen_version orelse return null;
+        const available_versions = self.peer_version_information_available_versions orelse return null;
+        return .{
+            .chosen_version = chosen_version,
+            .available_versions = available_versions,
+        };
+    }
+
+    /// Select the server's compatible version from stored peer Version Information.
+    ///
+    /// This is a read-only convenience around `selectCompatibleVersion()`.
+    /// Callers must provide the explicit directional first-flight compatibility
+    /// relation; this helper does not assume any non-identity compatibility.
+    pub fn selectPeerCompatibleVersion(
+        self: Connection,
+        compatibilities: []const VersionCompatibility,
+    ) Error!?packet.Version {
+        if (self.side != .server) return error.InvalidPacket;
+        const version_information = self.peerVersionInformation() orelse return null;
+        return selectCompatibleVersion(self.config.available_versions, version_information, compatibilities);
     }
 
     /// Return whether the peer address is considered validated for send limits.
@@ -5649,6 +5681,30 @@ pub const Connection = struct {
         try self.applyValidatedPeerTransportParameters(params);
     }
 
+    /// Apply peer parameters while accepting RFC 9368 compatible negotiation.
+    ///
+    /// This server-only path validates the peer's authenticated Version
+    /// Information against explicit directional first-flight compatibility
+    /// rules. The selected compatible version must match this connection's
+    /// configured `chosen_version`; on success the peer parameters are applied
+    /// and the selected version is returned.
+    pub fn applyPeerTransportParametersWithCompatibleVersion(
+        self: *Connection,
+        params: transport_parameters.TransportParameters,
+        compatibilities: []const VersionCompatibility,
+    ) Error!packet.Version {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        const selected = self.validatePeerTransportParametersWithCompatibleVersion(
+            params,
+            compatibilities,
+        ) catch |err| switch (err) {
+            error.VersionNegotiationError => return error.InvalidPacket,
+            else => return peerTransportParameterValidationErrorAsPublic(err),
+        };
+        try self.applyValidatedPeerTransportParameters(params);
+        return selected;
+    }
+
     fn applyValidatedPeerTransportParameters(
         self: *Connection,
         params: transport_parameters.TransportParameters,
@@ -5657,6 +5713,14 @@ pub const Connection = struct {
             try PreferredAddress.fromTransportParameter(preferred)
         else
             null;
+        var peer_available_versions: ?[]packet.Version = null;
+        if (params.version_information) |version_information| {
+            const owned_available_versions = self.allocator.alloc(packet.Version, version_information.available_versions.len) catch return error.OutOfMemory;
+            errdefer self.allocator.free(owned_available_versions);
+            @memcpy(owned_available_versions, version_information.available_versions);
+            peer_available_versions = owned_available_versions;
+        }
+        errdefer if (peer_available_versions) |versions| self.allocator.free(versions);
 
         self.peer_max_udp_payload_size = std.math.cast(usize, params.max_udp_payload_size) orelse std.math.maxInt(usize);
         self.peer_max_data = params.initial_max_data;
@@ -5670,6 +5734,10 @@ pub const Connection = struct {
         self.peer_disable_active_migration = params.disable_active_migration;
         self.peer_stateless_reset_token = params.stateless_reset_token;
         self.peer_preferred_address = peer_preferred_address;
+        if (self.peer_version_information_available_versions) |old_versions| self.allocator.free(old_versions);
+        self.peer_version_information_chosen_version = if (params.version_information) |version_information| version_information.chosen_version else null;
+        self.peer_version_information_available_versions = peer_available_versions;
+        peer_available_versions = null;
         self.peer_active_connection_id_limit = params.active_connection_id_limit;
         self.recovery_state.max_ack_delay_ms = params.max_ack_delay;
         self.syncRecoveryMaxDatagramSize();
@@ -5694,6 +5762,20 @@ pub const Connection = struct {
         };
         defer params.deinit(self.allocator);
         try self.applyPeerTransportParameters(params);
+    }
+
+    /// Parse and apply peer parameters with explicit compatible-version rules.
+    pub fn applyPeerTransportParameterBytesWithCompatibleVersion(
+        self: *Connection,
+        data: []const u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!packet.Version {
+        var params = transport_parameters.parse(data, self.allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidPacket,
+        };
+        defer params.deinit(self.allocator);
+        return try self.applyPeerTransportParametersWithCompatibleVersion(params, compatibilities);
     }
 
     /// Apply peer transport-parameter bytes and queue CONNECTION_CLOSE on peer errors.
@@ -5750,6 +5832,61 @@ pub const Connection = struct {
         try self.applyValidatedPeerTransportParameters(params);
     }
 
+    /// Apply compatible-version peer parameter bytes and queue close on errors.
+    ///
+    /// Parsed RFC 9368 version-negotiation failures use
+    /// `VERSION_NEGOTIATION_ERROR`; malformed transport parameters and other
+    /// semantic failures use `TRANSPORT_PARAMETER_ERROR`.
+    pub fn applyPeerTransportParameterBytesWithCompatibleVersionOrClose(
+        self: *Connection,
+        data: []const u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!packet.Version {
+        if (self.isClosingOrClosed()) return self.applyPeerTransportParameterBytesWithCompatibleVersion(data, compatibilities);
+
+        var params = transport_parameters.parse(data, self.allocator) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                if (transport_error.transportParameterErrorCode(err)) |code| {
+                    try self.closeConnection(
+                        transport_error.codeValue(code),
+                        @intFromEnum(frame.FrameType.crypto),
+                        "transport parameters",
+                    );
+                    return error.InvalidPacket;
+                }
+                return error.InvalidPacket;
+            },
+        };
+        defer params.deinit(self.allocator);
+
+        const selected = self.validatePeerTransportParametersWithCompatibleVersion(
+            params,
+            compatibilities,
+        ) catch |err| switch (err) {
+            error.VersionNegotiationError => {
+                try self.closeConnection(
+                    transport_error.codeValue(.version_negotiation_error),
+                    @intFromEnum(frame.FrameType.crypto),
+                    "version negotiation",
+                );
+                return error.InvalidPacket;
+            },
+            error.InvalidPacket => {
+                try self.closeConnection(
+                    transport_error.codeValue(.transport_parameter_error),
+                    @intFromEnum(frame.FrameType.crypto),
+                    "transport parameters",
+                );
+                return error.InvalidPacket;
+            },
+            else => return peerTransportParameterValidationErrorAsPublic(err),
+        };
+
+        try self.applyValidatedPeerTransportParameters(params);
+        return selected;
+    }
+
     fn validateConnectionIdParameter(cid: ?[]const u8) Error!void {
         if (cid) |value| {
             if (value.len > max_connection_id_len) return error.InvalidPacket;
@@ -5760,11 +5897,7 @@ pub const Connection = struct {
         self: Connection,
         version_information: transport_parameters.VersionInformation,
     ) PeerTransportParameterValidationError!void {
-        if (isZeroVersion(version_information.chosen_version)) return error.InvalidPacket;
-        if (packet.isReservedVersion(version_information.chosen_version)) return error.VersionNegotiationError;
-        for (version_information.available_versions) |available| {
-            if (isZeroVersion(available)) return error.InvalidPacket;
-        }
+        try validatePeerVersionInformationSyntax(version_information);
 
         switch (self.side) {
             .server => {
@@ -5799,7 +5932,17 @@ pub const Connection = struct {
         }
     }
 
-    fn validatePeerTransportParameters(
+    fn validatePeerVersionInformationSyntax(
+        version_information: transport_parameters.VersionInformation,
+    ) PeerTransportParameterValidationError!void {
+        if (isZeroVersion(version_information.chosen_version)) return error.InvalidPacket;
+        if (packet.isReservedVersion(version_information.chosen_version)) return error.VersionNegotiationError;
+        for (version_information.available_versions) |available| {
+            if (isZeroVersion(available)) return error.InvalidPacket;
+        }
+    }
+
+    fn validatePeerTransportParameterValues(
         self: Connection,
         params: transport_parameters.TransportParameters,
     ) PeerTransportParameterValidationError!void {
@@ -5829,6 +5972,36 @@ pub const Connection = struct {
         if (params.preferred_address) |preferred| {
             _ = try PreferredAddress.fromTransportParameter(preferred);
         }
+    }
+
+    fn validatePeerTransportParametersWithCompatibleVersion(
+        self: Connection,
+        params: transport_parameters.TransportParameters,
+        compatibilities: []const VersionCompatibility,
+    ) PeerTransportParameterValidationError!packet.Version {
+        if (self.side != .server) return error.InvalidPacket;
+        try self.validatePeerTransportParameterValues(params);
+        const version_information = params.version_information orelse return error.InvalidPacket;
+        try validatePeerVersionInformationSyntax(version_information);
+        if (!version_information.containsAvailableVersion(version_information.chosen_version)) {
+            return error.InvalidPacket;
+        }
+        const selected = selectCompatibleVersion(
+            self.config.available_versions,
+            version_information,
+            compatibilities,
+        ) orelse return error.VersionNegotiationError;
+        if (@intFromEnum(selected) != @intFromEnum(self.config.chosen_version)) {
+            return error.VersionNegotiationError;
+        }
+        return selected;
+    }
+
+    fn validatePeerTransportParameters(
+        self: Connection,
+        params: transport_parameters.TransportParameters,
+    ) PeerTransportParameterValidationError!void {
+        try self.validatePeerTransportParameterValues(params);
         if (params.version_information) |version_information| {
             try self.validatePeerVersionInformation(version_information);
         } else if (self.side == .client) {
@@ -13877,6 +14050,97 @@ test "selectCompatibleVersion requires explicit directional first-flight compati
         @as(?packet.Version, null),
         selectCompatibleVersion(&[_]packet.Version{.v2}, client_version_information, &[_]VersionCompatibility{}),
     );
+}
+
+test "compatible version transport parameter apply selects and stores peer version information" {
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var strict_server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer strict_server.deinit();
+    try std.testing.expectError(error.InvalidPacket, strict_server.applyPeerTransportParameters(.{
+        .initial_max_data = 9,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    }));
+    try std.testing.expect(strict_server.peerVersionInformation() == null);
+    try std.testing.expectEqual(@as(u64, 65_536), strict_server.peer_max_data);
+
+    var compatible_server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer compatible_server.deinit();
+
+    const selected = try compatible_server.applyPeerTransportParametersWithCompatibleVersion(.{
+        .initial_max_data = 10,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    }, &compatibilities);
+    try std.testing.expectEqual(packet.Version.v2, selected);
+    try std.testing.expectEqual(@as(u64, 10), compatible_server.peer_max_data);
+
+    const peer_version_information = compatible_server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
+    try std.testing.expectEqual(
+        @as(?packet.Version, packet.Version.v2),
+        try compatible_server.selectPeerCompatibleVersion(&compatibilities),
+    );
+}
+
+test "compatible version transport parameter bytes OrClose reports version negotiation error" {
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try transport_parameters.encode(out.writer(), .{
+        .initial_max_data = 10,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.applyPeerTransportParameterBytesWithCompatibleVersionOrClose(out.getWritten(), &[_]VersionCompatibility{}),
+    );
+    try std.testing.expectEqual(@as(u64, 65_536), server.peer_max_data);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+
+    var close_buf: [96]u8 = undefined;
+    const payload = (try server.pollTx(0, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.version_negotiation_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("version negotiation", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
 }
 
 test "version_information transport parameter validation follows endpoint role" {

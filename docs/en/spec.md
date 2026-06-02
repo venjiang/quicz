@@ -42,7 +42,10 @@ current implementation shape.
   that build the remaining Compatible Version Negotiation state machine.
   `VersionCompatibility` and `selectCompatibleVersion()` model explicit,
   directional first-flight compatibility without assuming compatibility between
-  any two QUIC versions.
+  any two QUIC versions. `Connection` stores peer Version Information after
+  successful transport-parameter application and provides server-side
+  compatible-version apply helpers that require the selected version to match
+  the connection's configured chosen version.
 - Client connections can validate one RFC 8999 Version Negotiation packet, ignore
   unsafe packets that contain the Original Version or mismatched CIDs, select a
   non-reserved mutual version from local `available_versions`, carry that

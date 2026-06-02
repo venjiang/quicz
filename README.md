@@ -115,8 +115,8 @@ experimental.
   9368 downgrade close-code evidence, frames, transport parameters, and error
   codecs. Run with `zig build run-codec`.
 - [Transport parameters](examples/transport_parameters.zig): Transport-parameter
-  export, parsing, application, and close-on-error behavior. Run with
-  `zig build run-transport-parameters`.
+  export, parsing, application including compatible-version selection, and
+  close-on-error behavior. Run with `zig build run-transport-parameters`.
 - [Flow control](examples/flow_control.zig): Connection, stream, stream-count,
   MAX_STREAMS overflow rejection, and BLOCKED/MAX frame behavior. Run with
   `zig build run-flow-control`.
