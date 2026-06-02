@@ -241,8 +241,9 @@ experimental.
   Lifecycle-routed NewReno recovery-period and persistent-congestion behavior
   over loopback UDP. Run with `zig build run-udp-congestion-recovery-loopback`.
 - [UDP PTO recovery loopback](examples/udp_pto_recovery_loopback.zig):
-  Endpoint lifecycle PTO probing, routed receive processing, and retransmission
-  choices over loopback UDP. Run with `zig build run-udp-pto-recovery-loopback`.
+  Endpoint lifecycle timer service, protected PTO probe polling, routed receive
+  processing, and retransmission choices over loopback UDP. Run with
+  `zig build run-udp-pto-recovery-loopback`.
 - [UDP STREAM retransmission loopback](examples/udp_stream_retransmission_loopback.zig):
   ACK-loss-triggered STREAM retransmission through lifecycle-routed protected
   receives. Run with `zig build run-udp-stream-retransmission-loopback`.

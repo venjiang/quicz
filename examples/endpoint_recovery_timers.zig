@@ -224,7 +224,11 @@ pub fn main() !void {
     try require(std.mem.eql(u8, long_ack_result.route.destination_connection_id.asSlice(), &client_dcid));
     try require(long_ack_result.processed_packets == 1);
     try require(protected_client.bytesInFlight(.initial) == 0);
-    try require(protected_client_lifecycle.recoveryTimerCount() == 0);
+    const initial_ack_anti_deadlock = protected_client_lifecycle.earliestRecoveryDeadline() orelse return error.EndpointRecoveryTimerExampleFailed;
+    try require(protected_client_lifecycle.recoveryTimerCount() == 1);
+    try require(initial_ack_anti_deadlock.connection_id == protected_client_id);
+    try require(initial_ack_anti_deadlock.timer.space == .handshake);
+    try require(initial_ack_anti_deadlock.timer.kind == .pto);
 
     try protected_server.sendCryptoInSpace(.handshake, "caller handshake");
     const caller_handshake = (try protected_server_lifecycle.pollProtectedLongCryptoDatagramInSpace(

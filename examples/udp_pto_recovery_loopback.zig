@@ -262,14 +262,20 @@ pub fn main() !void {
     try require(client.sentPacketCount(.application) == 1);
     try require(client_lifecycle.recoveryTimerCount() == 1);
 
-    const ping_serviced = (try client_lifecycle.serviceRecoveryTimer(client_connection_id, &client, ping_deadline)) orelse return error.UnexpectedState;
+    const ping_probe_result = try client_lifecycle.serviceRecoveryTimerAndPollProtectedShortDatagram(
+        client_connection_id,
+        &client,
+        ping_deadline,
+        &server_dcid,
+        secrets.client,
+    );
+    const ping_serviced = ping_probe_result.serviced orelse return error.UnexpectedState;
     try require(ping_serviced.connection_id == client_connection_id);
     try require(ping_serviced.timer.space == .application);
     try require(ping_serviced.timer.kind == .pto);
-    const pto_ping = (try client.pollProtectedShortDatagram(ping_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
+    const pto_ping = ping_probe_result.datagram orelse return error.UnexpectedState;
     defer allocator.free(pto_ping);
     try require(client.sentPacketCount(.application) == 2);
-    try client_lifecycle.armRecoveryTimerFromConnection(client_connection_id, &client);
     try require(client_lifecycle.recoveryTimerCount() == 1);
     try sendClientPacket(
         io,
@@ -329,14 +335,20 @@ pub fn main() !void {
     try require(stream_timer.timer.space == .application);
     try require(stream_timer.timer.kind == .pto);
     const stream_deadline = stream_timer.timer.deadline_millis;
-    const stream_serviced = (try client_lifecycle.serviceRecoveryTimer(client_connection_id, &client, stream_deadline)) orelse return error.UnexpectedState;
+    const stream_probe_result = try client_lifecycle.serviceRecoveryTimerAndPollProtectedShortDatagram(
+        client_connection_id,
+        &client,
+        stream_deadline,
+        &server_dcid,
+        secrets.client,
+    );
+    const stream_serviced = stream_probe_result.serviced orelse return error.UnexpectedState;
     try require(stream_serviced.connection_id == client_connection_id);
     try require(stream_serviced.timer.space == .application);
     try require(stream_serviced.timer.kind == .pto);
-    const stream_probe = (try client.pollProtectedShortDatagram(stream_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
+    const stream_probe = stream_probe_result.datagram orelse return error.UnexpectedState;
     defer allocator.free(stream_probe);
     try require(client.sentPacketCount(.application) == 2);
-    try client_lifecycle.armRecoveryTimerFromConnection(client_connection_id, &client);
     try require(client_lifecycle.recoveryTimerCount() == 1);
     try sendClientPacket(
         io,
@@ -403,14 +415,20 @@ pub fn main() !void {
     try require(retransmit_timer.timer.space == .application);
     try require(retransmit_timer.timer.kind == .pto);
     const retransmit_deadline = retransmit_timer.timer.deadline_millis;
-    const retransmit_serviced = (try client_lifecycle.serviceRecoveryTimer(client_connection_id, &client, retransmit_deadline)) orelse return error.UnexpectedState;
+    const retransmit_probe_result = try client_lifecycle.serviceRecoveryTimerAndPollProtectedShortDatagram(
+        client_connection_id,
+        &client,
+        retransmit_deadline,
+        &server_dcid,
+        secrets.client,
+    );
+    const retransmit_serviced = retransmit_probe_result.serviced orelse return error.UnexpectedState;
     try require(retransmit_serviced.connection_id == client_connection_id);
     try require(retransmit_serviced.timer.space == .application);
     try require(retransmit_serviced.timer.kind == .pto);
-    const retransmit_probe = (try client.pollProtectedShortDatagram(retransmit_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
+    const retransmit_probe = retransmit_probe_result.datagram orelse return error.UnexpectedState;
     defer allocator.free(retransmit_probe);
     try require(client.sentPacketCount(.application) == 2);
-    try client_lifecycle.armRecoveryTimerFromConnection(client_connection_id, &client);
     try require(client_lifecycle.recoveryTimerCount() == 1);
     try require(try packetContainsStream(
         allocator,
@@ -481,14 +499,20 @@ pub fn main() !void {
     try require(crypto_timer.timer.space == .application);
     try require(crypto_timer.timer.kind == .pto);
     const crypto_deadline = crypto_timer.timer.deadline_millis;
-    const crypto_serviced = (try client_lifecycle.serviceRecoveryTimer(client_connection_id, &client, crypto_deadline)) orelse return error.UnexpectedState;
+    const crypto_probe_result = try client_lifecycle.serviceRecoveryTimerAndPollProtectedShortDatagram(
+        client_connection_id,
+        &client,
+        crypto_deadline,
+        &server_dcid,
+        secrets.client,
+    );
+    const crypto_serviced = crypto_probe_result.serviced orelse return error.UnexpectedState;
     try require(crypto_serviced.connection_id == client_connection_id);
     try require(crypto_serviced.timer.space == .application);
     try require(crypto_serviced.timer.kind == .pto);
-    const crypto_probe = (try client.pollProtectedShortDatagram(crypto_deadline + 1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
+    const crypto_probe = crypto_probe_result.datagram orelse return error.UnexpectedState;
     defer allocator.free(crypto_probe);
     try require(client.sentPacketCount(.application) == 2);
-    try client_lifecycle.armRecoveryTimerFromConnection(client_connection_id, &client);
     try require(client_lifecycle.recoveryTimerCount() == 1);
     try require(try packetContainsCrypto(
         allocator,
