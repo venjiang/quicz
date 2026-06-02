@@ -146,6 +146,46 @@ pub fn main() !void {
     const protected_client_id: u64 = 3003;
     const protected_server_id: u64 = 4004;
 
+    var long_pto_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer long_pto_lifecycle.deinit();
+    var long_pto_client = try quicz.Connection.init(allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer long_pto_client.deinit();
+    _ = try long_pto_client.recordPacketSentInSpace(.initial, 10, 100);
+    try long_pto_client.receiveAckInSpace(.initial, 70, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try long_pto_client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try long_pto_lifecycle.armRecoveryTimerFromConnection(protected_client_id, &long_pto_client);
+    const long_pto_timer = long_pto_lifecycle.earliestRecoveryDeadline() orelse return error.EndpointRecoveryTimerExampleFailed;
+    try require(long_pto_timer.connection_id == protected_client_id);
+    try require(long_pto_timer.timer.space == .handshake);
+    try require(long_pto_timer.timer.kind == .pto);
+    const long_pto_probe_result = try long_pto_lifecycle.serviceRecoveryTimerAndPollProtectedLongDatagram(
+        protected_client_id,
+        &long_pto_client,
+        long_pto_timer.timer.deadline_millis,
+        &server_dcid,
+        &client_dcid,
+        &[_]u8{},
+        .{ .handshake = secrets.client },
+    );
+    const long_pto_serviced = long_pto_probe_result.serviced orelse return error.EndpointRecoveryTimerExampleFailed;
+    try require(long_pto_serviced.connection_id == protected_client_id);
+    try require(long_pto_serviced.timer.space == .handshake);
+    const long_pto_probe = long_pto_probe_result.datagram orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(long_pto_probe);
+    const long_pto_bytes = long_pto_probe.len;
+    try require(long_pto_client.sentPacketCount(.handshake) == 1);
+    try require(long_pto_client.packetNumberSpaceDiscarded(.initial));
+    try require(long_pto_lifecycle.recoveryTimerCount() == 1);
+
     var protected_client = try quicz.Connection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });
@@ -617,7 +657,7 @@ pub fn main() !void {
     try require(protected_client.bytesInFlight(.application) == 0);
     const protected_timers_remaining = protected_client_lifecycle.recoveryTimerCount() + protected_server_lifecycle.recoveryTimerCount();
 
-    std.debug.print("[endpoint-timers] first_connection={} first_kind={s} first_deadline={} second_connection={} second_kind={s} second_deadline={} pto_ping={} loss_remaining={} close_disarmed={} timers_remaining={} routes_remaining={} protected_bytes={} protected_timers={}\n", .{
+    std.debug.print("[endpoint-timers] first_connection={} first_kind={s} first_deadline={} second_connection={} second_kind={s} second_deadline={} pto_ping={} loss_remaining={} close_disarmed={} timers_remaining={} routes_remaining={} long_pto_bytes={} protected_bytes={} protected_timers={}\n", .{
         first.connection_id,
         @tagName(first.timer.kind),
         first.timer.deadline_millis,
@@ -629,6 +669,7 @@ pub fn main() !void {
         closing_disarmed,
         endpoint_lifecycle.recoveryTimerCount(),
         endpoint_lifecycle.routeCount(),
+        long_pto_bytes,
         long_initial.len + long_ack.len + caller_handshake.len + caller_handshake_ack.len + installed_handshake.len + installed_handshake_ack.len + caller_zero.len + caller_zero_ack.len + installed_zero.len + caller_short.len + caller_short_ack.len + ping.len + ack.len + explicit_key_phase_ping.len + explicit_key_phase_ack.len + key_phase_ping.len + key_phase_ack.len,
         protected_timers_remaining,
     });

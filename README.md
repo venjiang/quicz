@@ -155,8 +155,9 @@ experimental.
   and ACKed RESET_STREAM retransmission suppression. Run with
   `zig build run-pto-recovery`.
 - [Endpoint recovery timers](examples/endpoint_recovery_timers.zig):
-  Endpoint-owned recovery timer scheduling and routed protected receive refresh
-  across connection handles. Run with `zig build run-endpoint-recovery-timers`.
+  Endpoint-owned recovery timer scheduling, long/short protected probe polling,
+  and routed protected receive refresh across connection handles. Run with
+  `zig build run-endpoint-recovery-timers`.
 - [Path validation](examples/path_validation.zig): PATH_CHALLENGE/PATH_RESPONSE
   retry, duplicate pending-response suppression, 1200-byte protected
   path-validation datagrams, and validation-driven lifecycle route updates. Run with
