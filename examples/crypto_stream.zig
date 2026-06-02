@@ -380,6 +380,45 @@ pub fn main() !void {
         @tagName(bridged.handshakeState()),
     });
 
+    const compatible_client_versions = [_]quicz.packet.Version{ .v1, .v2 };
+    const compatible_server_versions = [_]quicz.packet.Version{ .v2, .v1 };
+    const compatibilities = [_]quicz.VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+    var compatible_peer_tp_buf: [128]u8 = undefined;
+    var compatible_peer_tp_out = fixedWriter(&compatible_peer_tp_buf);
+    try quicz.transport_parameters.encode(compatible_peer_tp_out.writer(), .{
+        .initial_max_data = 8192,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &compatible_client_versions,
+        },
+    });
+    var compatible_server = try quicz.Connection.init(gpa, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &compatible_server_versions,
+    });
+    defer compatible_server.deinit();
+    var compatible_backend = MockCryptoBackend{
+        .outbound = "",
+        .peer_transport_parameters = compatible_peer_tp_out.getWritten(),
+    };
+    const compatible_progress = try compatible_server.driveCryptoBackendInSpaceWithCompatibleVersion(
+        .handshake,
+        compatible_backend.backend(),
+        &backend_scratch,
+        &compatibilities,
+    );
+    const compatible_selected = (try compatible_server.selectPeerCompatibleVersion(&compatibilities)) orelse return error.UnexpectedState;
+    const compatible_peer = compatible_server.peerVersionInformation() orelse return error.UnexpectedState;
+    std.debug.print("[crypto] backend_compatible_version selected=0x{x} peer_versions={} peer_tp_applied={} peer_max_data={}\n", .{
+        @intFromEnum(compatible_selected),
+        compatible_peer.available_versions.len,
+        compatible_progress.peer_transport_parameters_applied,
+        compatible_server.peer_max_data,
+    });
+
     var confirmed_no_output = try quicz.Connection.init(gpa, .server, .{});
     defer confirmed_no_output.deinit();
     try processCryptoFrame(&confirmed_no_output, .handshake, 106, 0, "client hello");

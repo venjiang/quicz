@@ -45,7 +45,11 @@ current implementation shape.
   any two QUIC versions. `Connection` stores peer Version Information after
   successful transport-parameter application and provides server-side
   compatible-version apply helpers that require the selected version to match
-  the connection's configured chosen version.
+  the connection's configured chosen version. The
+  `driveCryptoBackendInSpaceWithCompatibleVersion()` and
+  `driveCryptoBackendInSpaceWithCompatibleVersionOrClose()` wrappers route the
+  same compatible Version Information policy through `CryptoBackend` peer
+  transport-parameter bytes before backend output is pulled.
 - Client connections can validate one RFC 8999 Version Negotiation packet, ignore
   unsafe packets that contain the Original Version or mismatched CIDs, select a
   non-reserved mutual version from local `available_versions`, carry that

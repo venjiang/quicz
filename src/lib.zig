@@ -4021,6 +4021,13 @@ const PeerStreamDataBlockedState = struct {
     maximum_stream_data: u64,
 };
 
+const PeerTransportParameterDrivePolicy = union(enum) {
+    strict,
+    close_on_error,
+    compatible: []const VersionCompatibility,
+    compatible_close_on_error: []const VersionCompatibility,
+};
+
 /// Experimental QUIC connection handle.
 ///
 /// The current implementation only moves unencrypted frame payload bytes through
@@ -10602,7 +10609,7 @@ pub const Connection = struct {
         backend: CryptoBackend,
         scratch: []u8,
     ) Error!CryptoBackendProgress {
-        return self.driveCryptoBackendInSpaceWithPeerParameterPolicy(space, backend, scratch, false);
+        return self.driveCryptoBackendInSpaceWithPeerParameterPolicy(space, backend, scratch, .strict);
     }
 
     /// Drive a pluggable TLS/crypto backend and queue CONNECTION_CLOSE on peer
@@ -10619,7 +10626,37 @@ pub const Connection = struct {
         backend: CryptoBackend,
         scratch: []u8,
     ) Error!CryptoBackendProgress {
-        return self.driveCryptoBackendInSpaceWithPeerParameterPolicy(space, backend, scratch, true);
+        return self.driveCryptoBackendInSpaceWithPeerParameterPolicy(space, backend, scratch, .close_on_error);
+    }
+
+    /// Drive a crypto backend while accepting explicit compatible version negotiation.
+    ///
+    /// Peer transport parameters returned by `backend` are applied with
+    /// `applyPeerTransportParameterBytesWithCompatibleVersion()`. This is the
+    /// server-side backend bridge for RFC 9368 compatible Version Information;
+    /// callers must pass every allowed directional first-flight conversion.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersion(
+        self: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!CryptoBackendProgress {
+        return self.driveCryptoBackendInSpaceWithPeerParameterPolicy(space, backend, scratch, .{ .compatible = compatibilities });
+    }
+
+    /// Drive a compatible-version backend and queue CONNECTION_CLOSE on errors.
+    ///
+    /// Parsed RFC 9368 negotiation failures use `VERSION_NEGOTIATION_ERROR`.
+    /// Backend output is not pulled after a peer transport-parameter error.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionOrClose(
+        self: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!CryptoBackendProgress {
+        return self.driveCryptoBackendInSpaceWithPeerParameterPolicy(space, backend, scratch, .{ .compatible_close_on_error = compatibilities });
     }
 
     fn driveCryptoBackendInSpaceWithPeerParameterPolicy(
@@ -10627,7 +10664,7 @@ pub const Connection = struct {
         space: PacketNumberSpace,
         backend: CryptoBackend,
         scratch: []u8,
-        close_on_peer_transport_parameter_error: bool,
+        peer_transport_parameter_policy: PeerTransportParameterDrivePolicy,
     ) Error!CryptoBackendProgress {
         if (scratch.len == 0) return error.BufferTooSmall;
 
@@ -10648,10 +10685,17 @@ pub const Connection = struct {
         }
 
         if (try backend.pullPeerTransportParameters(scratch)) |peer_transport_parameters| {
-            if (close_on_peer_transport_parameter_error) {
-                try self.applyPeerTransportParameterBytesOrClose(peer_transport_parameters);
-            } else {
-                try self.applyPeerTransportParameterBytes(peer_transport_parameters);
+            switch (peer_transport_parameter_policy) {
+                .strict => try self.applyPeerTransportParameterBytes(peer_transport_parameters),
+                .close_on_error => try self.applyPeerTransportParameterBytesOrClose(peer_transport_parameters),
+                .compatible => |compatibilities| _ = try self.applyPeerTransportParameterBytesWithCompatibleVersion(
+                    peer_transport_parameters,
+                    compatibilities,
+                ),
+                .compatible_close_on_error => |compatibilities| _ = try self.applyPeerTransportParameterBytesWithCompatibleVersionOrClose(
+                    peer_transport_parameters,
+                    compatibilities,
+                ),
             }
             progress.peer_transport_parameters_bytes = peer_transport_parameters.len;
             progress.peer_transport_parameters_applied = true;
@@ -15896,6 +15940,162 @@ test "driveCryptoBackendInSpace exchanges transport parameter bytes with backend
     try std.testing.expectEqual(@as(u64, 88), conn.peer_max_idle_timeout_ms);
     try std.testing.expectEqual(@as(usize, 1400), conn.peer_max_udp_payload_size);
     try std.testing.expectEqual(@as(u64, 33), conn.recovery_state.max_ack_delay_ms);
+}
+
+test "driveCryptoBackendInSpaceWithCompatibleVersion applies backend peer Version Information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    const progress = try server.driveCryptoBackendInSpaceWithCompatibleVersion(
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+    );
+
+    try std.testing.expectEqual(peer_params_out.getWritten().len, progress.peer_transport_parameters_bytes);
+    try std.testing.expect(progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(u64, 4321), server.peer_max_data);
+    const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
+    try std.testing.expectEqual(
+        @as(?packet.Version, packet.Version.v2),
+        try server.selectPeerCompatibleVersion(&compatibilities),
+    );
+}
+
+test "driveCryptoBackendInSpaceWithCompatibleVersionOrClose queues version negotiation close before output" {
+    const Backend = struct {
+        output_pulled: bool = false,
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.driveCryptoBackendInSpaceWithCompatibleVersionOrClose(
+            .handshake,
+            backend.backend(),
+            &scratch,
+            &[_]VersionCompatibility{},
+        ),
+    );
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+
+    var close_buf: [96]u8 = undefined;
+    const payload = (try server.pollTx(0, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.version_negotiation_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("version negotiation", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
 }
 
 test "driveCryptoBackendInSpace rejects invalid peer transport parameters before output" {
