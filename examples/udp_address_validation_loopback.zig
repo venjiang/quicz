@@ -154,6 +154,16 @@ pub fn main() !void {
 
     const validation = try token_policy.validateTokenForPath(.new_token, 16, server_path, stored_token);
     try require(validation.originating_version == .v1);
+    var secret_set = try token_policy.exportSecretSet(allocator);
+    defer secret_set.deinit(allocator);
+    var replay_snapshot = try token_policy.exportReplayFilter(allocator);
+    defer replay_snapshot.deinit(allocator);
+    var restored_policy = try quicz.endpoint.AddressValidationPolicy.initWithSecretSetAndReplayFilter(allocator, secret_set, replay_snapshot, .{
+        .max_previous_secrets = 1,
+        .max_replay_entries = 8,
+    });
+    defer restored_policy.deinit();
+    try require(restored_policy.replayFilterEntryCount() == 1);
 
     var future_server = try quicz.Connection.init(allocator, .server, .{});
     defer future_server.deinit();
@@ -164,7 +174,7 @@ pub fn main() !void {
     const future_ping = (try future_server.pollTx(18, &future_out)) orelse return error.UnexpectedState;
 
     var replay_rejected = false;
-    if (token_policy.validateTokenForPath(.new_token, 19, server_path, stored_token)) |_| {
+    if (restored_policy.validateTokenForPath(.new_token, 19, server_path, stored_token)) |_| {
         return error.UnexpectedState;
     } else |err| switch (err) {
         error.TokenReplay => replay_rejected = true,
@@ -193,7 +203,7 @@ pub fn main() !void {
     const v2_validation = try token_policy.validateTokenForPathForVersion(.new_token, .v2, 22, server_path, v2_token);
     try require(v2_validation.originating_version == .v2);
 
-    std.debug.print("[udp-address] client_port={} server_port={} handshake_bytes={} token_bytes={} stored_token_len={} route={} future_ping_bytes={} replay_rejected={} version_rejected={} v2_validated={}\n", .{
+    std.debug.print("[udp-address] client_port={} server_port={} handshake_bytes={} token_bytes={} stored_token_len={} route={} future_ping_bytes={} replay_entries={} replay_rejected={} version_rejected={} v2_validated={}\n", .{
         client_local.port,
         server_local.port,
         handshake_done.len,
@@ -201,6 +211,7 @@ pub fn main() !void {
         stored_token.len,
         token_route.connection_id,
         future_ping.len,
+        replay_snapshot.fingerprints.len,
         replay_rejected,
         version_rejected,
         v2_validation.originating_version == .v2,
