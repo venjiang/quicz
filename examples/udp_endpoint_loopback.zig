@@ -284,6 +284,30 @@ pub fn main() !void {
     const followup_peer_version = version_negotiation_initial.handoff.followup_connection.peerVersionInformation() orelse return error.UnexpectedState;
     try require(followup_peer_version.chosen_version == selected_version);
 
+    var malformed_transport_parameter_client = try quicz.Connection.init(std.heap.page_allocator, .client, .{
+        .chosen_version = selected_version,
+        .available_versions = &supported_versions,
+    });
+    defer malformed_transport_parameter_client.deinit();
+    try malformed_transport_parameter_client.validatePeerAddress();
+    malformed_transport_parameter_client.applyPeerTransportParameterBytesOrClose(&[_]u8{0x04}) catch |err| switch (err) {
+        error.InvalidPacket => {},
+        else => return err,
+    };
+    try require(malformed_transport_parameter_client.connectionState() == .closing);
+    var malformed_close_buf: [96]u8 = undefined;
+    const malformed_close_payload = (try malformed_transport_parameter_client.pollTx(3, &malformed_close_buf)) orelse return error.UnexpectedState;
+    var malformed_close = try quicz.frame.decodeFrameSlice(malformed_close_payload, std.heap.page_allocator);
+    defer quicz.frame.deinitFrame(&malformed_close.frame, std.heap.page_allocator);
+    switch (malformed_close.frame) {
+        .connection_close => |close| {
+            try require(close.error_code == quicz.transport_error.codeValue(.transport_parameter_error));
+            try require(close.frame_type == @intFromEnum(quicz.frame.FrameType.crypto));
+            try require(std.mem.eql(u8, close.reason_phrase, "transport parameters"));
+        },
+        else => return error.UnexpectedState,
+    }
+
     const short_followup = [_]u8{ 0x40, 0xb1, 0xb2, 0xb3, 0xb4, 0x01 };
     try client_socket.send(io, &server_socket.address, &short_followup);
     const short_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
@@ -292,7 +316,7 @@ pub fn main() !void {
     try require(server_route.connection_id == 21);
     try require(std.mem.eql(u8, server_route.destination_connection_id.asSlice(), &server_initial_scid));
 
-    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} followup_odcid_len={} server_tp_version=0x{x} server_tp_bytes={} accepted={} client_route={} server_route={} vn_response_bytes={} followup_initial_bytes={} server_initial_bytes={}\n", .{
+    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} followup_odcid_len={} server_tp_version=0x{x} server_tp_bytes={} malformed_tp_close={} accepted={} client_route={} server_route={} vn_response_bytes={} followup_initial_bytes={} server_initial_bytes={}\n", .{
         client_local.port,
         server_local.port,
         parsed_version_negotiation.versions.len,
@@ -300,6 +324,7 @@ pub fn main() !void {
         followup_original_dcid.len,
         @intFromEnum(followup_peer_version.chosen_version),
         server_transport_parameter_bytes.len,
+        quicz.transport_error.codeValue(.transport_parameter_error),
         accepted_route.server_source_route.connection_id,
         client_route.connection_id,
         server_route.connection_id,
