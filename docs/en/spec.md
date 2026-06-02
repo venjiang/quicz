@@ -36,9 +36,10 @@ current implementation shape.
   Connections export the configured chosen and available versions, validate
   peer values according to endpoint role, allow reserved versions only in
   Available Versions, enforce server Version Information
-  downgrade checks after a client reacts to Version Negotiation, and expose the
-  `VERSION_NEGOTIATION_ERROR` transport error code for callers that build the
-  remaining Compatible Version Negotiation state machine.
+  downgrade checks after a client reacts to Version Negotiation, classify
+  parsed version-negotiation semantic close failures as
+  `VERSION_NEGOTIATION_ERROR`, and expose the transport error code for callers
+  that build the remaining Compatible Version Negotiation state machine.
 - Client connections can validate one RFC 8999 Version Negotiation packet, ignore
   unsafe packets that contain the Original Version or mismatched CIDs, select a
   non-reserved mutual version from local `available_versions`, carry that

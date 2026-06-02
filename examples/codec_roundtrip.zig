@@ -323,11 +323,44 @@ fn versionNegotiationRoundtrip(allocator: std.mem.Allocator) !void {
         },
     });
 
-    std.debug.print("[codec] version negotiation versions={} selected=0x{x} reserved_skipped={} downgrade_checked={}\n", .{
+    const downgrade_server_versions = [_]quicz.packet.Version{ .v1, .v2 };
+    var downgraded = try quicz.Connection.init(allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+        .version_negotiation_selected_version = .v1,
+    });
+    defer downgraded.deinit();
+    try downgraded.validatePeerAddress();
+
+    var downgrade_tp_raw: [64]u8 = undefined;
+    var downgrade_tp_writer = fixedWriter(&downgrade_tp_raw);
+    try quicz.transport_parameters.encode(downgrade_tp_writer.writer(), .{
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &downgrade_server_versions,
+        },
+    });
+    downgraded.applyPeerTransportParameterBytesOrClose(downgrade_tp_writer.getWritten()) catch |err| switch (err) {
+        error.InvalidPacket => {},
+        else => return err,
+    };
+
+    var close_buf: [96]u8 = undefined;
+    const close_payload = (try downgraded.pollTx(0, &close_buf)) orelse return error.UnexpectedRoundtrip;
+    var close_decoded = try quicz.frame.decodeFrameSlice(close_payload, allocator);
+    defer quicz.frame.deinitFrame(&close_decoded.frame, allocator);
+    const downgrade_close_code = switch (close_decoded.frame) {
+        .connection_close => |close| close.error_code,
+        else => return error.UnexpectedRoundtrip,
+    };
+    try require(downgrade_close_code == quicz.transport_error.codeValue(.version_negotiation_error));
+
+    std.debug.print("[codec] version negotiation versions={} selected=0x{x} reserved_skipped={} downgrade_checked={} downgrade_close=0x{x}\n", .{
         parsed.versions.len,
         @intFromEnum(selected),
         selected != reserved_version,
         followup.versionNegotiationSelectedVersion() == .v2,
+        downgrade_close_code,
     });
 }
 

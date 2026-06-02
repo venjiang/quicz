@@ -33,9 +33,9 @@
 - RFC 9368 `version_information` 已作为类型化 transport parameter 表达。连接会导出
   已配置的 chosen/available versions，按 endpoint 角色校验对端值，在 client 响应
   Version Negotiation 后执行 server Version Information downgrade checks，只允许
-  reserved version 出现在 Available Versions 而不能作为 Chosen Version，并暴露
-  `VERSION_NEGOTIATION_ERROR` transport error code，供后续 Compatible Version
-  Negotiation 状态机使用。
+  reserved version 出现在 Available Versions 而不能作为 Chosen Version，把已解析的
+  version-negotiation 语义 close 失败分类为 `VERSION_NEGOTIATION_ERROR`，并暴露
+  该 transport error code，供后续 Compatible Version Negotiation 状态机使用。
 - Client 连接现在可以校验一个 RFC 8999 Version Negotiation packet，忽略包含
   Original Version 或 CID 不匹配的不安全 packet，从本端 `available_versions`
   中选择非 reserved 的 mutual version，通过
