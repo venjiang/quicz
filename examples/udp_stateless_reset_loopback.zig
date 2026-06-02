@@ -90,6 +90,28 @@ pub fn main() !void {
         else => return error.UnexpectedState,
     }
 
+    const unknown_trigger = [_]u8{
+        0x40, 0x55, 0x66, 0x77, 0x88, 0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+        0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13,
+        0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+    };
+    try client_socket.send(io, &server_socket.address, &unknown_trigger);
+
+    const unknown_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
+    const unknown_path = try udp4Tuple(server_socket.address, unknown_received.from);
+    var unknown_out: [64]u8 = undefined;
+    const unknown_action = try lifecycle.handleDatagram(
+        &unknown_out,
+        unknown_path,
+        unknown_received.data,
+        &[_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde },
+    );
+    switch (unknown_action) {
+        .dropped => {},
+        else => return error.UnexpectedState,
+    }
+
     const retired = lifecycle.retireConnection(7);
     try require(retired.routes_retired == 1);
     try require(!retired.recovery_timer_disarmed);
@@ -118,7 +140,7 @@ pub fn main() !void {
     const reset_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     try require(quicz.packet.matchesStatelessReset(reset_received.data, token));
 
-    std.debug.print("[udp-reset] client_port={} server_port={} active_routed=true trigger_bytes={} reset_bytes={} matched=true\n", .{
+    std.debug.print("[udp-reset] client_port={} server_port={} active_routed=true unknown_dropped=true trigger_bytes={} reset_bytes={} matched=true\n", .{
         client_local.port,
         server_local.port,
         trigger.len,
