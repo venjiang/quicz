@@ -12,7 +12,7 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 ### Implemented / In Progress
 
 - [x] Buildable Zig package with `Connection`, frame-payload examples, and runnable loopback examples.
-- [x] Core codec coverage for varints, packet headers, packet numbers, frames, transport parameters, transport errors including RFC 9368 version-negotiation close classification, Version Negotiation, Retry, stateless reset, and QUIC v2 packet/key/token primitives.
+- [x] Core codec coverage for varints, packet headers, packet numbers, frames, transport parameters, transport errors including RFC 9368 version-negotiation close classification, Version Negotiation and compatible-version selection helpers, Retry, stateless reset, and QUIC v2 packet/key/token primitives.
 - [x] Experimental in-memory transport state for streams, CRYPTO byte streams, flow control, connection IDs, Retry/tokens, path validation, close/idle timers, packet number spaces, and rollback on invalid frame payloads.
 - [x] Packet protection helpers for QUIC v1/v2 Initial keys, Retry integrity, protected long/short packets, configured v2 protected long-packet/Retry wire versions, installed-key mock TLS handoff, and key update state.
 - [x] Simplified RFC 9002-style ACK, loss, PTO, NewReno congestion, ECN, retransmission, and endpoint recovery-timer models with socket-backed UDP loopback coverage.
@@ -111,8 +111,9 @@ experimental.
 - [Echo client](examples/echo_client.zig): Minimal frame-payload echo client skeleton.
   Run with `zig build run-client`.
 - [Codec roundtrip](examples/codec_roundtrip.zig): Varints, packet headers,
-  version negotiation including RFC 9368 downgrade close-code evidence, frames,
-  transport parameters, and error codecs. Run with `zig build run-codec`.
+  version negotiation including explicit compatible-version selection and RFC
+  9368 downgrade close-code evidence, frames, transport parameters, and error
+  codecs. Run with `zig build run-codec`.
 - [Transport parameters](examples/transport_parameters.zig): Transport-parameter
   export, parsing, application, and close-on-error behavior. Run with
   `zig build run-transport-parameters`.

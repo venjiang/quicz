@@ -323,6 +323,22 @@ fn versionNegotiationRoundtrip(allocator: std.mem.Allocator) !void {
         },
     });
 
+    const compatible_client_versions = [_]quicz.packet.Version{ .v1, .v2 };
+    const compatible_server_preference = [_]quicz.packet.Version{ .v2, .v1 };
+    const compatibility = [_]quicz.VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+    const compatible_selected = quicz.selectCompatibleVersion(
+        &compatible_server_preference,
+        .{
+            .chosen_version = .v1,
+            .available_versions = &compatible_client_versions,
+        },
+        &compatibility,
+    ) orelse return error.UnexpectedRoundtrip;
+    try require(compatible_selected == .v2);
+
     const downgrade_server_versions = [_]quicz.packet.Version{ .v1, .v2 };
     var downgraded = try quicz.Connection.init(allocator, .client, .{
         .chosen_version = .v1,
@@ -355,9 +371,10 @@ fn versionNegotiationRoundtrip(allocator: std.mem.Allocator) !void {
     };
     try require(downgrade_close_code == quicz.transport_error.codeValue(.version_negotiation_error));
 
-    std.debug.print("[codec] version negotiation versions={} selected=0x{x} reserved_skipped={} downgrade_checked={} downgrade_close=0x{x}\n", .{
+    std.debug.print("[codec] version negotiation versions={} selected=0x{x} compatible_selected=0x{x} reserved_skipped={} downgrade_checked={} downgrade_close=0x{x}\n", .{
         parsed.versions.len,
         @intFromEnum(selected),
+        @intFromEnum(compatible_selected),
         selected != reserved_version,
         followup.versionNegotiationSelectedVersion() == .v2,
         downgrade_close_code,

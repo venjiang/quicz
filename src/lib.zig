@@ -225,6 +225,17 @@ pub const Config = struct {
 /// Endpoint role. It determines the locally initiated stream IDs.
 pub const ConnectionSide = enum { client, server };
 
+/// Directional RFC 9368 first-flight compatibility relation.
+///
+/// `original_version` is the version used by the client's first flight.
+/// `negotiated_version` is the version a server can select after converting
+/// that first flight. Compatibility is directional; callers must list every
+/// explicitly specified direction they are willing to use.
+pub const VersionCompatibility = struct {
+    original_version: packet.Version,
+    negotiated_version: packet.Version,
+};
+
 fn isZeroVersion(version: packet.Version) bool {
     return @intFromEnum(version) == 0;
 }
@@ -261,6 +272,53 @@ fn selectMutualVersionWithExtra(
         if (@intFromEnum(preferred) == @intFromEnum(extra_version) or versionListContains(offered_versions, preferred)) {
             return preferred;
         }
+    }
+    return null;
+}
+
+/// Return whether `negotiated_version` can use `original_version`'s first flight.
+///
+/// The identity transformation is always compatible. All non-identity
+/// conversions require a caller-provided, directional `VersionCompatibility`
+/// entry so the library never assumes compatibility between QUIC versions.
+pub fn canConvertFirstFlightVersion(
+    original_version: packet.Version,
+    negotiated_version: packet.Version,
+    compatibilities: []const VersionCompatibility,
+) bool {
+    if (@intFromEnum(original_version) == @intFromEnum(negotiated_version)) return true;
+    for (compatibilities) |compatibility| {
+        if (@intFromEnum(compatibility.original_version) == @intFromEnum(original_version) and
+            @intFromEnum(compatibility.negotiated_version) == @intFromEnum(negotiated_version))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Select a compatible QUIC version from authenticated client Version Information.
+///
+/// `preferred_versions` is the server's preference order. The selected version
+/// must be advertised by the client, must not be a reserved/zero version, and
+/// must either be the client's chosen version or appear in `compatibilities` as
+/// a directional first-flight conversion from the client's chosen version.
+pub fn selectCompatibleVersion(
+    preferred_versions: []const packet.Version,
+    client_version_information: transport_parameters.VersionInformation,
+    compatibilities: []const VersionCompatibility,
+) ?packet.Version {
+    if (isZeroVersion(client_version_information.chosen_version)) return null;
+    if (packet.isReservedVersion(client_version_information.chosen_version)) return null;
+
+    for (preferred_versions) |preferred| {
+        if (isZeroVersion(preferred) or packet.isReservedVersion(preferred)) continue;
+        if (!client_version_information.containsAvailableVersion(preferred)) continue;
+        if (canConvertFirstFlightVersion(
+            client_version_information.chosen_version,
+            preferred,
+            compatibilities,
+        )) return preferred;
     }
     return null;
 }
@@ -13781,6 +13839,44 @@ test "localTransportParameters exposes configured receive limits" {
     const version_information = params.version_information orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(packet.Version.v1, version_information.chosen_version);
     try std.testing.expectEqualSlices(packet.Version, &available_versions, version_information.available_versions);
+}
+
+test "selectCompatibleVersion requires explicit directional first-flight compatibility" {
+    const reserved_version: packet.Version = @enumFromInt(0x1a2a3a4a);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const preferred_versions = [_]packet.Version{ reserved_version, .v2, .v1 };
+    const client_version_information = transport_parameters.VersionInformation{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+    };
+
+    try std.testing.expectEqual(
+        @as(?packet.Version, packet.Version.v1),
+        selectCompatibleVersion(&preferred_versions, client_version_information, &[_]VersionCompatibility{}),
+    );
+
+    const forward_compatibility = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+    try std.testing.expectEqual(
+        @as(?packet.Version, packet.Version.v2),
+        selectCompatibleVersion(&preferred_versions, client_version_information, &forward_compatibility),
+    );
+
+    const reverse_only_compatibility = [_]VersionCompatibility{.{
+        .original_version = .v2,
+        .negotiated_version = .v1,
+    }};
+    try std.testing.expectEqual(
+        @as(?packet.Version, packet.Version.v1),
+        selectCompatibleVersion(&preferred_versions, client_version_information, &reverse_only_compatibility),
+    );
+
+    try std.testing.expectEqual(
+        @as(?packet.Version, null),
+        selectCompatibleVersion(&[_]packet.Version{.v2}, client_version_information, &[_]VersionCompatibility{}),
+    );
 }
 
 test "version_information transport parameter validation follows endpoint role" {

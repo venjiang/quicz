@@ -36,6 +36,9 @@
   reserved version 出现在 Available Versions 而不能作为 Chosen Version，把已解析的
   version-negotiation 语义 close 失败分类为 `VERSION_NEGOTIATION_ERROR`，并暴露
   该 transport error code，供后续 Compatible Version Negotiation 状态机使用。
+  `VersionCompatibility` 与 `selectCompatibleVersion()` 会用显式、directional
+  first-flight compatibility 建模 compatible selection，不默认假设任意两个 QUIC
+  version 兼容。
 - Client 连接现在可以校验一个 RFC 8999 Version Negotiation packet，忽略包含
   Original Version 或 CID 不匹配的不安全 packet，从本端 `available_versions`
   中选择非 reserved 的 mutual version，通过

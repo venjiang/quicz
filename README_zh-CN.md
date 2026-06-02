@@ -12,7 +12,7 @@
 ### 已实现 / 正在进行
 
 - [x] 可构建的 Zig package，包含 `Connection`、frame-payload 示例和可运行 loopback 示例。
-- [x] varint、packet header、packet number、frame、transport parameter、transport error（含 RFC 9368 version-negotiation close 分类）、Version Negotiation、Retry、stateless reset、QUIC v2 packet/key/token primitive 的核心 codec 覆盖。
+- [x] varint、packet header、packet number、frame、transport parameter、transport error（含 RFC 9368 version-negotiation close 分类）、Version Negotiation 和 compatible-version selection helper、Retry、stateless reset、QUIC v2 packet/key/token primitive 的核心 codec 覆盖。
 - [x] 面向 stream、CRYPTO byte stream、flow control、connection ID、Retry/token、path validation、close/idle timer、packet number space 和 invalid frame payload rollback 的实验性内存态 transport state。
 - [x] QUIC v1/v2 Initial key、Retry integrity、protected long/short packet、配置驱动 v2 protected long-packet/Retry wire version、installed-key mock TLS handoff 和 key update state helper。
 - [x] 简化 RFC 9002 风格 ACK、loss、PTO、NewReno congestion、ECN、retransmission 和 endpoint recovery-timer 模型，并有 socket-backed UDP loopback 覆盖。
@@ -101,7 +101,7 @@ pub fn main() !void {
   运行：`zig build run-server`。
 - [Echo client](examples/echo_client.zig)：最小 frame-payload echo client 骨架。
   运行：`zig build run-client`。
-- [Codec roundtrip](examples/codec_roundtrip.zig)：varint、packet header、Version Negotiation（含 RFC 9368 downgrade close-code 证据）、frame、transport parameter 和 error codec 往返。
+- [Codec roundtrip](examples/codec_roundtrip.zig)：varint、packet header、Version Negotiation（含显式 compatible-version selection 和 RFC 9368 downgrade close-code 证据）、frame、transport parameter 和 error codec 往返。
   运行：`zig build run-codec`。
 - [Transport parameters](examples/transport_parameters.zig)：transport parameter 导出、解析、应用和错误关闭行为。
   运行：`zig build run-transport-parameters`。
