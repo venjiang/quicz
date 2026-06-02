@@ -438,7 +438,8 @@ produce or consume TLS-owned QUIC packets over UDP.
   endpoint lifecycle helper. `udp_spin_bit_loopback` now uses
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagram()` for the
   first false-spin PING/ACK, migrated true-spin PING, and reset-spin ACK
-  receive paths while keeping route-update spin reset on the lifecycle owner.
+  receive paths while keeping server/client route-update spin reset on the
+  lifecycle owner.
 - 2026-05-29: Routed UDP connection-ID loopback protected receives through the
   endpoint lifecycle helper. `udp_connection_ids_loopback` now uses
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagram()` for
@@ -806,7 +807,8 @@ produce or consume TLS-owned QUIC packets over UDP.
   pre-update true spin state, `path_changed` routing on the migrated tuple,
   committed no-change routing after update, and reset next-spin state;
   `udp_spin_bit_loopback` now sends the second PING from a migrated client
-  port and proves the lifecycle route update clears the server ACK spin bit.
+  port and proves the lifecycle route update clears both server and client
+  next-spin state.
 - 2026-05-28: Added lifecycle-owned replacement-CID route registration.
   `EndpointConnectionLifecycle.registerReplacementConnectionId()` now commits
   NEW_CONNECTION_ID-style replacement routes, applies `retire_prior_to`, and
@@ -1051,7 +1053,8 @@ produce or consume TLS-owned QUIC packets over UDP.
   single-path spin-bit policy on both endpoints, sends protected short PING/ACK
   exchanges over loopback UDP, verifies the first round stays `spin=false`,
   sends the second true-spin PING from a migrated client port, and proves
-  lifecycle-owned route update/reset clears the next server ACK spin bit.
+  lifecycle-owned route update/reset clears the next server ACK and client
+  outgoing spin bits.
 - 2026-05-26: Added `examples/udp_flow_control_loopback.zig` and the
   `run-udp-flow-control-loopback` build step. The example sends protected
   STREAM data to the receive limit over loopback UDP, reports
@@ -2492,7 +2495,7 @@ run from `build.zig`.
 | `udp_crypto_backend_loopback` | Socket-backed loopback UDP CryptoBackend exercise: mock `CryptoBackend` 1-RTT traffic-secret handoff, modeled handshake confirmation, lifecycle-routed installed-key STREAM delivery, and routed ACK cleanup. | Present |
 | `udp_handshake_done_loopback` | Socket-backed loopback UDP HANDSHAKE_DONE exercise: lifecycle-routed installed-key HANDSHAKE_DONE confirmation, client-side Handshake key discard, and routed ACK cleanup. | Present |
 | `udp_flow_control_loopback` | Socket-backed loopback UDP flow-control exercise: lifecycle-routed protected STREAM delivery to the receive limit, lifecycle-routed protected STREAM_DATA_BLOCKED routing, lifecycle-routed receive-side MAX_DATA/MAX_STREAM_DATA credit refresh delivery, lifecycle-routed resumed STREAM data with FIN final-size evidence, and lifecycle-routed final ACK cleanup. | Present |
-| `udp_spin_bit_loopback` | Socket-backed loopback UDP spin-bit exercise: enabled single-path spin-bit signaling, lifecycle-routed protected short PING/ACK receive paths, first false spin round, migrated second true-spin PING with `path_changed`, lifecycle-owned route update/reset, reset ACK spin, and final ACK cleanup. | Present |
+| `udp_spin_bit_loopback` | Socket-backed loopback UDP spin-bit exercise: enabled single-path spin-bit signaling, lifecycle-routed protected short PING/ACK receive paths, first false spin round, migrated second true-spin PING with `path_changed`, lifecycle-owned route update/reset, reset server ACK/client outgoing spin evidence, and final ACK cleanup. | Present |
 | `udp_ecn_validation_loopback` | Socket-backed loopback UDP ECN validation exercise: lifecycle-routed modeled ECT(0) protected short PING routing, lifecycle-routed protected ACK_ECN success, lifecycle-routed ACK_ECN CE-driven NewReno recovery response, lifecycle-owned endpoint ECN state update for the active UDP tuple, and migrated-path ECN isolation without claiming real IP-header ECN marking. | Present |
 | `udp_loss_recovery_loopback` | Socket-backed loopback UDP lifecycle loss-recovery exercise: lifecycle-routed protected short PING/ACK receive paths, protected ACK-driven packet-threshold loss, lifecycle timer-driven time-threshold cleanup, and final timer disarm. | Present |
 | `udp_congestion_recovery_loopback` | Socket-backed loopback UDP lifecycle congestion-recovery exercise: lifecycle-routed protected short PING/ACK receive paths, explicit NewReno recovery-period repeated-loss suppression evidence, and explicit persistent congestion reduction to the minimum congestion window. | Present |

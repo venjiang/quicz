@@ -184,6 +184,8 @@ pub fn main() !void {
     const updated_client_route = try client_lifecycle.updateRoutePathAndResetSpinBit(&client_dcid, client_path, migrated_client_path, &client);
     try require(updated_client_route.connection_id == 41);
     try require(!updated_client_route.path_changed);
+    const client_spin_after_reset = client.nextOutgoingSpinBit();
+    try require(!client_spin_after_reset);
 
     const second_ack = (try server.pollProtectedShortDatagram(6, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
     defer allocator.free(second_ack);
@@ -206,7 +208,7 @@ pub fn main() !void {
     try require(std.mem.eql(u8, second_ack_route.destination_connection_id.asSlice(), &client_dcid));
     try require(client.bytesInFlight(.application) == 0);
 
-    std.debug.print("[udp-spin] client_port={} migrated_client_port={} server_port={} first_ping={} first_ack={} second_ping={} second_ack={} first_spin={} first_ack_spin={} second_spin={} path_changed={} server_spin_before_reset={} second_ack_spin={} server_reset={} client_inflight={}\n", .{
+    std.debug.print("[udp-spin] client_port={} migrated_client_port={} server_port={} first_ping={} first_ack={} second_ping={} second_ack={} first_spin={} first_ack_spin={} second_spin={} path_changed={} server_spin_before_reset={} second_ack_spin={} server_reset={} client_reset={} client_inflight={}\n", .{
         client_local.port,
         migrated_client_local.port,
         server_local.port,
@@ -221,6 +223,7 @@ pub fn main() !void {
         server_spin_before_reset,
         second_ack_spin,
         server.nextOutgoingSpinBit(),
+        client_spin_after_reset,
         client.bytesInFlight(.application),
     });
 }
