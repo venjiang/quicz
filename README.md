@@ -147,8 +147,8 @@ experimental.
 - [ECN validation](examples/ecn_validation.zig): ACK_ECN validation and
   CE-driven congestion response. Run with `zig build run-ecn-validation`.
 - [Loss recovery](examples/loss_recovery.zig): ACK-driven loss, RTT sampling,
-  NewReno, persistent congestion, and non-contiguous persistent-congestion
-  suppression. Run with `zig build run-loss-recovery`.
+  NewReno, persistent-congestion min-RTT refresh, and non-contiguous
+  persistent-congestion suppression. Run with `zig build run-loss-recovery`.
 - [PTO recovery](examples/pto_recovery.zig): PTO timers, probe selection,
   backoff, client anti-deadlock PTO, anti-amplification gating, and ACKed
   RESET_STREAM retransmission suppression. Run with

@@ -237,6 +237,15 @@ pub const Recovery = struct {
         self.congestion_recovery_start_time_millis = null;
     }
 
+    /// Apply the persistent congestion response and refresh min_rtt when the
+    /// same ACK produced the newest RTT sample.
+    pub fn onPersistentCongestionWithRttSample(self: *Recovery, latest_rtt_ms: ?u64) void {
+        self.onPersistentCongestion();
+        if (latest_rtt_ms) |latest| {
+            self.min_rtt_ms = latest;
+        }
+    }
+
     fn inCongestionRecovery(self: Recovery, sent_time_millis: i64) bool {
         const recovery_start = self.congestion_recovery_start_time_millis orelse return false;
         return sent_time_millis <= recovery_start;
@@ -533,6 +542,24 @@ test "persistent congestion duration and response follow RFC 9002 bounds" {
     try std.testing.expectEqual(minimumCongestionWindow(1200), recovery.congestion_window);
     try std.testing.expectEqual(@as(usize, 6_000), recovery.ssthresh);
     try std.testing.expectEqual(@as(?i64, null), recovery.congestion_recovery_start_time_millis);
+}
+
+test "persistent congestion refreshes min RTT from newest sample when present" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+
+    recovery.onPacketSent(1200);
+    recovery.onPacketAcked(1200, 0, 50, 0);
+    try std.testing.expectEqual(@as(?u64, 50), recovery.min_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, 50), recovery.latest_rtt_ms);
+
+    recovery.onPacketSent(1200);
+    recovery.onPacketAcked(1200, 100, 500, 0);
+    try std.testing.expectEqual(@as(?u64, 50), recovery.min_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, 500), recovery.latest_rtt_ms);
+
+    recovery.onPersistentCongestionWithRttSample(recovery.latest_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, 500), recovery.min_rtt_ms);
+    try std.testing.expectEqual(minimumCongestionWindow(1200), recovery.congestion_window);
 }
 
 test "recovery arithmetic saturates at numeric extremes" {

@@ -10843,7 +10843,10 @@ pub const Connection = struct {
             self.restorePtoBackoffSnapshot(pto_backoff_before_ack);
         }
         if (persistent_congestion_established) {
-            packet_space.recovery_state.onPersistentCongestion();
+            packet_space.recovery_state.onPersistentCongestionWithRttSample(latest_rtt_sample);
+            if (latest_rtt_sample != null) {
+                self.syncRttEstimatesFromSpace(space);
+            }
         }
         self.refreshAntiDeadlockPtoTimer(space, now_millis);
     }
@@ -18965,6 +18968,43 @@ test "ACK-driven persistent congestion duration ignores PTO backoff" {
     try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
     try std.testing.expectEqual(recovery.minimumCongestionWindow(1200), conn.congestionWindow(.application));
+}
+
+test "ACK-driven persistent congestion refreshes min RTT from newest sample across spaces" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 0, 100);
+    try conn.receiveAckInSpace(.application, 50, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(?u64, 50), conn.recovery_state.min_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, 50), conn.initial_packet_space.recovery_state.min_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, 50), conn.handshake_packet_space.recovery_state.min_rtt_ms);
+
+    _ = try conn.recordPacketSentInSpace(.application, 100, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 1000, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 1100, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 1200, 100);
+
+    try conn.receiveAckInSpace(.application, 1700, .{
+        .largest_acknowledged = 4,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(recovery.minimumCongestionWindow(1200), conn.congestionWindow(.application));
+    try std.testing.expectEqual(@as(?u64, 500), conn.recovery_state.latest_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, 500), conn.recovery_state.min_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, 500), conn.initial_packet_space.recovery_state.min_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, 500), conn.handshake_packet_space.recovery_state.min_rtt_ms);
 }
 
 test "ACK-driven losses do not establish persistent congestion before first RTT sample" {

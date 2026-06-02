@@ -180,19 +180,20 @@ pub fn main() !void {
     defer persistent.deinit();
 
     _ = try persistent.recordPacketSentInSpace(.application, 0, 100);
-    try persistent.receiveAckInSpace(.application, 100, .{
+    try persistent.receiveAckInSpace(.application, 50, .{
         .largest_acknowledged = 0,
         .ack_delay = 0,
         .first_ack_range = 0,
     });
+    if (persistent.recovery_state.min_rtt_ms != 50) return error.LossRecoveryExampleFailed;
     persistent.recovery_state.onPtoExpired();
     persistent.recovery_state.onPtoExpired();
     const persistent_duration = persistent.recovery_state.persistentCongestionDurationMs();
-    _ = try persistent.recordPacketSentInSpace(.application, 10, 100);
+    _ = try persistent.recordPacketSentInSpace(.application, 100, 100);
     _ = try persistent.recordPacketSentInSpace(.application, 1000, 100);
     _ = try persistent.recordPacketSentInSpace(.application, 1100, 100);
     _ = try persistent.recordPacketSentInSpace(.application, 1200, 100);
-    try persistent.receiveAckInSpace(.application, 1300, .{
+    try persistent.receiveAckInSpace(.application, 1700, .{
         .largest_acknowledged = 4,
         .ack_delay = 0,
         .first_ack_range = 0,
@@ -200,9 +201,11 @@ pub fn main() !void {
     if (persistent.congestionWindow(.application) != quicz.recovery.minimumCongestionWindow(1200)) {
         return error.LossRecoveryExampleFailed;
     }
+    const refreshed_min_rtt = persistent.recovery_state.min_rtt_ms orelse return error.LossRecoveryExampleFailed;
+    if (refreshed_min_rtt != 500) return error.LossRecoveryExampleFailed;
     std.debug.print(
-        "[loss] persistent congestion duration={d} reduced cwnd={d}\n",
-        .{ persistent_duration, persistent.congestionWindow(.application) },
+        "[loss] persistent congestion duration={d} reduced cwnd={d} refreshed_min_rtt={d}\n",
+        .{ persistent_duration, persistent.congestionWindow(.application), refreshed_min_rtt },
     );
 
     var non_contiguous_persistent = try quicz.Connection.init(allocator, .client, .{
