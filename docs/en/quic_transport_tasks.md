@@ -75,6 +75,12 @@ produce or consume TLS-owned QUIC packets over UDP.
 
 ## Progress Notes
 
+- 2026-06-02: Routed long-header Handshake PTO service through the
+  socket-backed UDP PTO loopback. `udp_pto_recovery_loopback` now performs an
+  Initial CRYPTO/ACK exchange over loopback UDP, services the resulting
+  Handshake anti-deadlock PTO through `EndpointConnectionLifecycle`, delivers
+  the protected long-header PING to the server, returns a Handshake ACK, and
+  prints `long_pto_bytes=36` plus `long_ack_bytes=38`.
 - 2026-06-02: Added
   `EndpointConnectionLifecycle.serviceRecoveryTimerAndPollProtectedLongDatagram()`.
   The endpoint lifecycle can now service a due Initial/Handshake recovery timer
@@ -2394,7 +2400,7 @@ run from `build.zig`.
 | `udp_ecn_validation_loopback` | Socket-backed loopback UDP ECN validation exercise: lifecycle-routed modeled ECT(0) protected short PING routing, lifecycle-routed protected ACK_ECN success, lifecycle-routed ACK_ECN CE-driven NewReno recovery response, lifecycle-owned endpoint ECN state update for the active UDP tuple, and migrated-path ECN isolation without claiming real IP-header ECN marking. | Present |
 | `udp_loss_recovery_loopback` | Socket-backed loopback UDP lifecycle loss-recovery exercise: lifecycle-routed protected short PING/ACK receive paths, protected ACK-driven packet-threshold loss, lifecycle timer-driven time-threshold cleanup, and final timer disarm. | Present |
 | `udp_congestion_recovery_loopback` | Socket-backed loopback UDP lifecycle congestion-recovery exercise: lifecycle-routed protected short PING/ACK receive paths, NewReno recovery-period repeated-loss suppression, and persistent congestion reduction to the minimum congestion window. | Present |
-| `udp_pto_recovery_loopback` | Socket-backed loopback UDP lifecycle PTO recovery exercise: lifecycle-routed protected short receive paths, lifecycle timer service plus protected short probe polling for ACK-loss PTO, protected PING fallback probe delivery, queued STREAM data as a protected PTO probe, in-flight STREAM/CRYPTO data as protected PTO probes, duplicate receive/CRYPTO range discard, ACK cleanup, and final timer disarm. | Present |
+| `udp_pto_recovery_loopback` | Socket-backed loopback UDP lifecycle PTO recovery exercise: lifecycle-routed protected long/short receive paths, lifecycle timer service plus protected long Handshake PTO probe polling and protected short probe polling for ACK-loss PTO, protected long-header PING/ACK delivery, protected short PING fallback probe delivery, queued STREAM data as a protected PTO probe, in-flight STREAM/CRYPTO data as protected PTO probes, duplicate receive/CRYPTO range discard, ACK cleanup, and final timer disarm. | Present |
 | `udp_stream_retransmission_loopback` | Socket-backed loopback UDP lifecycle STREAM retransmission exercise: lifecycle-routed sparse protected ACK receive marks a 1-RTT STREAM packet lost, the sender emits a new protected STREAM retransmission packet, the receiver discards the duplicate stream range idempotently, and a final ACK clears bytes in flight. | Present |
 | `udp_key_update_loopback` | Socket-backed loopback UDP key-update exercise: lifecycle-owned route selection and protected receive processing with installed 1-RTT traffic secrets, local key update initiation, next key-phase PING routing, authenticated peer key-phase advancement, ACK delivery, and ACK-gated second-update re-enable. | Present |
 | `udp_path_validation_loopback` | Socket-backed loopback UDP path-validation exercise: lifecycle-routed protected PATH_CHALLENGE delivery to a new peer port, lifecycle-routed PATH_RESPONSE routing with `path_changed`, validation-driven `EndpointConnectionLifecycle` route path update after PATH_RESPONSE consumes an outstanding challenge, and confirmed routing on the new path. | Present |

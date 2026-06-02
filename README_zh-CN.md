@@ -179,7 +179,7 @@ pub fn main() !void {
   运行：`zig build run-udp-loss-recovery-loopback`。
 - [UDP congestion recovery loopback](examples/udp_congestion_recovery_loopback.zig)：loopback UDP 上 lifecycle-routed NewReno recovery-period 和 persistent-congestion 行为。
   运行：`zig build run-udp-congestion-recovery-loopback`。
-- [UDP PTO recovery loopback](examples/udp_pto_recovery_loopback.zig)：endpoint lifecycle timer service、protected PTO probe polling、routed receive processing 和 retransmission choice。
+- [UDP PTO recovery loopback](examples/udp_pto_recovery_loopback.zig)：endpoint lifecycle timer service、protected long/short PTO probe polling、routed receive processing 和 retransmission choice。
   运行：`zig build run-udp-pto-recovery-loopback`。
 - [UDP STREAM retransmission loopback](examples/udp_stream_retransmission_loopback.zig)：通过 lifecycle-routed protected receive 执行 ACK-loss-triggered STREAM retransmission。
   运行：`zig build run-udp-stream-retransmission-loopback`。

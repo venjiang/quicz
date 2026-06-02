@@ -110,6 +110,64 @@ fn sendServerPacket(
     try require(std.mem.eql(u8, route.destination_connection_id.asSlice(), client_dcid));
 }
 
+fn sendClientLongPacket(
+    io: std.Io,
+    client_socket: *std.Io.net.Socket,
+    server_socket: *std.Io.net.Socket,
+    server_lifecycle: *quicz.EndpointConnectionLifecycle,
+    server: *quicz.Connection,
+    packet: []const u8,
+    now_millis: i64,
+    server_connection_id: u64,
+    server_dcid: []const u8,
+    receive_buf: []u8,
+    keys: quicz.ProtectedLongDatagramKeys,
+) !quicz.EndpointProtectedLongDatagramResult {
+    try client_socket.send(io, &server_socket.address, packet);
+
+    const received = try receiveDatagram(io, server_socket, receive_buf);
+    const result = try server_lifecycle.processRoutedProtectedLongDatagram(
+        server_connection_id,
+        server,
+        received.path,
+        now_millis,
+        keys,
+        received.data,
+    );
+    try require(result.route.connection_id == server_connection_id);
+    try require(std.mem.eql(u8, result.route.destination_connection_id.asSlice(), server_dcid));
+    return result;
+}
+
+fn sendServerLongPacket(
+    io: std.Io,
+    server_socket: *std.Io.net.Socket,
+    client_socket: *std.Io.net.Socket,
+    client_lifecycle: *quicz.EndpointConnectionLifecycle,
+    client: *quicz.Connection,
+    packet: []const u8,
+    now_millis: i64,
+    client_connection_id: u64,
+    client_dcid: []const u8,
+    receive_buf: []u8,
+    keys: quicz.ProtectedLongDatagramKeys,
+) !quicz.EndpointProtectedLongDatagramResult {
+    try server_socket.send(io, &client_socket.address, packet);
+
+    const received = try receiveDatagram(io, client_socket, receive_buf);
+    const result = try client_lifecycle.processRoutedProtectedLongDatagram(
+        client_connection_id,
+        client,
+        received.path,
+        now_millis,
+        keys,
+        received.data,
+    );
+    try require(result.route.connection_id == client_connection_id);
+    try require(std.mem.eql(u8, result.route.destination_connection_id.asSlice(), client_dcid));
+    return result;
+}
+
 fn packetContainsStream(
     allocator: std.mem.Allocator,
     packet: []const u8,
@@ -204,6 +262,8 @@ pub fn main() !void {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const long_client_dcid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const long_server_dcid = [_]u8{ 0xba, 0xdb, 0xee, 0xf0 };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
     var client = try quicz.Connection.init(allocator, .client, .{
@@ -234,6 +294,165 @@ pub fn main() !void {
 
     var server_receive_buf: [1500]u8 = undefined;
     var client_receive_buf: [1500]u8 = undefined;
+
+    const long_client_connection_id: u64 = 141;
+    const long_server_connection_id: u64 = 151;
+    var long_client = try quicz.Connection.init(allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer long_client.deinit();
+    var long_server = try quicz.Connection.init(allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer long_server.deinit();
+    try long_server.validatePeerAddress();
+    var long_client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer long_client_lifecycle.deinit();
+    var long_server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer long_server_lifecycle.deinit();
+    try long_client_lifecycle.registerConnectionId(long_client_connection_id, &long_client_dcid, client_path, .{
+        .active_migration_disabled = true,
+    });
+    try long_server_lifecycle.registerConnectionId(long_server_connection_id, &original_dcid, server_path, .{
+        .sequence_number = 0,
+        .active_migration_disabled = true,
+    });
+    try long_server_lifecycle.registerConnectionId(long_server_connection_id, &long_server_dcid, server_path, .{
+        .sequence_number = 1,
+        .active_migration_disabled = true,
+    });
+
+    try long_client.sendCryptoInSpace(.initial, "long pto initial");
+    const long_initial = (try long_client_lifecycle.pollProtectedLongDatagram(
+        long_client_connection_id,
+        &long_client,
+        5,
+        &original_dcid,
+        &long_client_dcid,
+        &[_]u8{},
+        .{ .initial = secrets.client },
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(long_initial);
+    const long_initial_result = try sendClientLongPacket(
+        io,
+        &client_socket,
+        &server_socket,
+        &long_server_lifecycle,
+        &long_server,
+        long_initial,
+        6,
+        long_server_connection_id,
+        &original_dcid,
+        &server_receive_buf,
+        .{ .initial = secrets.client },
+    );
+    try require(long_initial_result.processed_packets == 1);
+    try require(long_server.pendingAckLargest(.initial) == 0);
+
+    const long_initial_ack = (try long_server_lifecycle.pollProtectedLongDatagram(
+        long_server_connection_id,
+        &long_server,
+        7,
+        &long_client_dcid,
+        &long_server_dcid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(long_initial_ack);
+    const long_initial_ack_result = try sendServerLongPacket(
+        io,
+        &server_socket,
+        &client_socket,
+        &long_client_lifecycle,
+        &long_client,
+        long_initial_ack,
+        8,
+        long_client_connection_id,
+        &long_client_dcid,
+        &client_receive_buf,
+        .{ .initial = secrets.server },
+    );
+    try require(long_initial_ack_result.processed_packets == 1);
+    try require(long_client.bytesInFlight(.initial) == 0);
+
+    try long_client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try long_server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try long_client_lifecycle.armRecoveryTimerFromConnection(long_client_connection_id, &long_client);
+    const long_pto_timer = long_client_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
+    try require(long_pto_timer.connection_id == long_client_connection_id);
+    try require(long_pto_timer.timer.space == .handshake);
+    try require(long_pto_timer.timer.kind == .pto);
+    const long_pto_deadline = long_pto_timer.timer.deadline_millis;
+    const long_pto_result = try long_client_lifecycle.serviceRecoveryTimerAndPollProtectedLongDatagram(
+        long_client_connection_id,
+        &long_client,
+        long_pto_deadline,
+        &long_server_dcid,
+        &long_client_dcid,
+        &[_]u8{},
+        .{ .handshake = secrets.client },
+    );
+    const long_pto_serviced = long_pto_result.serviced orelse return error.UnexpectedState;
+    try require(long_pto_serviced.connection_id == long_client_connection_id);
+    try require(long_pto_serviced.timer.space == .handshake);
+    try require(long_pto_serviced.timer.kind == .pto);
+    const long_pto_probe = long_pto_result.datagram orelse return error.UnexpectedState;
+    defer allocator.free(long_pto_probe);
+    try require(long_client.sentPacketCount(.handshake) == 1);
+    try require(long_client.packetNumberSpaceDiscarded(.initial));
+    try require(long_client_lifecycle.recoveryTimerCount() == 1);
+
+    const long_pto_probe_result = try sendClientLongPacket(
+        io,
+        &client_socket,
+        &server_socket,
+        &long_server_lifecycle,
+        &long_server,
+        long_pto_probe,
+        long_pto_deadline + 2,
+        long_server_connection_id,
+        &long_server_dcid,
+        &server_receive_buf,
+        .{ .handshake = secrets.client },
+    );
+    try require(long_pto_probe_result.processed_packets == 1);
+    try require(long_server.pendingAckLargest(.handshake) == 0);
+    try require(long_server.packetNumberSpaceDiscarded(.initial));
+
+    const long_pto_ack = (try long_server_lifecycle.pollProtectedLongDatagram(
+        long_server_connection_id,
+        &long_server,
+        long_pto_deadline + 3,
+        &long_client_dcid,
+        &long_server_dcid,
+        &[_]u8{},
+        .{ .handshake = secrets.server },
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(long_pto_ack);
+    const long_pto_ack_result = try sendServerLongPacket(
+        io,
+        &server_socket,
+        &client_socket,
+        &long_client_lifecycle,
+        &long_client,
+        long_pto_ack,
+        long_pto_deadline + 4,
+        long_client_connection_id,
+        &long_client_dcid,
+        &client_receive_buf,
+        .{ .handshake = secrets.server },
+    );
+    try require(long_pto_ack_result.processed_packets == 1);
+    try require(long_client.sentPacketCount(.handshake) == 0);
+    try require(long_client.bytesInFlight(.handshake) == 0);
+    try long_client_lifecycle.armRecoveryTimerFromConnection(long_client_connection_id, &long_client);
+    try require(long_client_lifecycle.recoveryTimerCount() == 0);
 
     try client.sendPing();
     const first_ping = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
@@ -556,9 +775,12 @@ pub fn main() !void {
     try client_lifecycle.armRecoveryTimerFromConnection(client_connection_id, &client);
     try require(client_lifecycle.recoveryTimerCount() == 0);
 
-    std.debug.print("[udp-pto] client_port={} server_port={} ping_deadline={} pto_ping_bytes={} stream_deadline={} stream_probe_bytes={} retransmit_deadline={} retransmit_probe_bytes={} crypto_deadline={} crypto_probe_bytes={} received=\"{s}\" retransmitted=\"{s}\" crypto=\"{s}\" client_inflight={} timers_remaining={}\n", .{
+    std.debug.print("[udp-pto] client_port={} server_port={} long_pto_deadline={} long_pto_bytes={} long_ack_bytes={} ping_deadline={} pto_ping_bytes={} stream_deadline={} stream_probe_bytes={} retransmit_deadline={} retransmit_probe_bytes={} crypto_deadline={} crypto_probe_bytes={} received=\"{s}\" retransmitted=\"{s}\" crypto=\"{s}\" client_inflight={} timers_remaining={}\n", .{
         client_local.port,
         server_local.port,
+        long_pto_deadline,
+        long_pto_probe.len,
+        long_pto_ack.len,
         ping_deadline,
         pto_ping.len,
         stream_deadline,
