@@ -1013,9 +1013,10 @@ produce or consume TLS-owned QUIC packets over UDP.
   `run-udp-congestion-recovery-loopback` build step. The example sends
   protected short PING packets over loopback UDP through the lifecycle route
   owner, returns protected ACK frames that trigger NewReno recovery-period
-  behavior, proves a repeated loss does not reduce the congestion window again
-  inside recovery, and proves persistent congestion reduces the congestion
-  window to the minimum window. ACK-driven and PTO-driven 1-RTT STREAM
+  behavior, prints evidence that repeated loss does not reduce the congestion
+  window again inside recovery, and prints evidence that persistent congestion
+  reduces the congestion window to the minimum window. ACK-driven and
+  PTO-driven 1-RTT STREAM
   retransmission plus ACK-driven frame-payload CRYPTO retransmission and
   protected 0-RTT STREAM/RESET_STREAM/STOP_SENDING retransmission are now
   covered separately.
@@ -2494,7 +2495,7 @@ run from `build.zig`.
 | `udp_spin_bit_loopback` | Socket-backed loopback UDP spin-bit exercise: enabled single-path spin-bit signaling, lifecycle-routed protected short PING/ACK receive paths, first false spin round, migrated second true-spin PING with `path_changed`, lifecycle-owned route update/reset, reset ACK spin, and final ACK cleanup. | Present |
 | `udp_ecn_validation_loopback` | Socket-backed loopback UDP ECN validation exercise: lifecycle-routed modeled ECT(0) protected short PING routing, lifecycle-routed protected ACK_ECN success, lifecycle-routed ACK_ECN CE-driven NewReno recovery response, lifecycle-owned endpoint ECN state update for the active UDP tuple, and migrated-path ECN isolation without claiming real IP-header ECN marking. | Present |
 | `udp_loss_recovery_loopback` | Socket-backed loopback UDP lifecycle loss-recovery exercise: lifecycle-routed protected short PING/ACK receive paths, protected ACK-driven packet-threshold loss, lifecycle timer-driven time-threshold cleanup, and final timer disarm. | Present |
-| `udp_congestion_recovery_loopback` | Socket-backed loopback UDP lifecycle congestion-recovery exercise: lifecycle-routed protected short PING/ACK receive paths, NewReno recovery-period repeated-loss suppression, and persistent congestion reduction to the minimum congestion window. | Present |
+| `udp_congestion_recovery_loopback` | Socket-backed loopback UDP lifecycle congestion-recovery exercise: lifecycle-routed protected short PING/ACK receive paths, explicit NewReno recovery-period repeated-loss suppression evidence, and explicit persistent congestion reduction to the minimum congestion window. | Present |
 | `udp_pto_recovery_loopback` | Socket-backed loopback UDP lifecycle PTO recovery exercise: lifecycle-routed protected long/short and installed-key 0-RTT receive paths, lifecycle timer service plus protected long Handshake PTO probe polling, installed-key 0-RTT RESET_STREAM PTO probe polling, and protected short probe polling for ACK-loss PTO, protected long-header PING/ACK delivery, protected 0-RTT retransmission and 1-RTT ACK cleanup, protected short PING fallback probe delivery, queued STREAM data as a protected PTO probe, in-flight STREAM/CRYPTO data as protected PTO probes, duplicate receive/CRYPTO range discard, ACK cleanup, and final timer disarm. | Present |
 | `udp_stream_retransmission_loopback` | Socket-backed loopback UDP lifecycle STREAM retransmission exercise: lifecycle-routed sparse protected ACK receive marks a 1-RTT STREAM packet lost, the sender emits a new protected STREAM retransmission packet, the receiver discards the duplicate stream range idempotently, and a final ACK clears bytes in flight. | Present |
 | `udp_key_update_loopback` | Socket-backed loopback UDP key-update exercise: lifecycle-owned route selection and protected receive processing with installed 1-RTT traffic secrets, local key update initiation, next key-phase PING routing, authenticated peer key-phase advancement, ACK delivery, and ACK-gated second-update re-enable. | Present |

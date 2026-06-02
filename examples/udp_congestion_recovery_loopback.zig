@@ -42,6 +42,7 @@ const RecoveryPeriodResult = struct {
     server_port: u16,
     first_recovery_window: usize,
     second_recovery_window: usize,
+    repeated_loss_suppressed: bool,
     remaining_packets: usize,
 };
 
@@ -50,6 +51,7 @@ const PersistentCongestionResult = struct {
     server_port: u16,
     minimum_window: usize,
     final_window: usize,
+    reduced_to_minimum: bool,
     remaining_packets: usize,
     bytes_in_flight: usize,
 };
@@ -282,6 +284,7 @@ fn runRecoveryPeriodPhase(allocator: std.mem.Allocator, io: std.Io) !RecoveryPer
         .server_port = server_local.port,
         .first_recovery_window = first_recovery_window,
         .second_recovery_window = second_recovery_window,
+        .repeated_loss_suppressed = second_recovery_window == first_recovery_window,
         .remaining_packets = client.sentPacketCount(.application),
     };
 }
@@ -353,6 +356,7 @@ fn runPersistentCongestionPhase(allocator: std.mem.Allocator, io: std.Io) !Persi
         .server_port = server_local.port,
         .minimum_window = minimum_window,
         .final_window = client.congestionWindow(.application),
+        .reduced_to_minimum = client.congestionWindow(.application) == minimum_window,
         .remaining_packets = client.sentPacketCount(.application),
         .bytes_in_flight = client.bytesInFlight(.application),
     };
@@ -368,16 +372,18 @@ pub fn main() !void {
     const recovery_period = try runRecoveryPeriodPhase(allocator, io);
     const persistent_congestion = try runPersistentCongestionPhase(allocator, io);
 
-    std.debug.print("[udp-congestion] recovery_client_port={} recovery_server_port={} recovery_cwnd={} repeated_loss_cwnd={} recovery_remaining={} persistent_client_port={} persistent_server_port={} minimum_cwnd={} persistent_cwnd={} persistent_remaining={} persistent_inflight={}\n", .{
+    std.debug.print("[udp-congestion] recovery_client_port={} recovery_server_port={} recovery_cwnd={} repeated_loss_cwnd={} repeated_loss_suppressed={} recovery_remaining={} persistent_client_port={} persistent_server_port={} minimum_cwnd={} persistent_cwnd={} persistent_minimum={} persistent_remaining={} persistent_inflight={}\n", .{
         recovery_period.client_port,
         recovery_period.server_port,
         recovery_period.first_recovery_window,
         recovery_period.second_recovery_window,
+        recovery_period.repeated_loss_suppressed,
         recovery_period.remaining_packets,
         persistent_congestion.client_port,
         persistent_congestion.server_port,
         persistent_congestion.minimum_window,
         persistent_congestion.final_window,
+        persistent_congestion.reduced_to_minimum,
         persistent_congestion.remaining_packets,
         persistent_congestion.bytes_in_flight,
     });
