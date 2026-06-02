@@ -275,6 +275,8 @@ pub fn main() !void {
     );
     try require(client_route.connection_id == 32);
     try require(std.mem.eql(u8, client_route.destination_connection_id.asSlice(), &followup_client_initial_scid));
+    const followup_timer_count = client_lifecycle.recoveryTimerCount();
+    try require(followup_timer_count == 1);
     var client_initial_crypto_buf: [64]u8 = undefined;
     const client_crypto_len = (try version_negotiation_initial.handoff.followup_connection.recvCryptoInSpace(.initial, &client_initial_crypto_buf)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, client_initial_crypto_buf[0..client_crypto_len], server_followup_crypto));
@@ -316,7 +318,7 @@ pub fn main() !void {
     try require(server_route.connection_id == 21);
     try require(std.mem.eql(u8, server_route.destination_connection_id.asSlice(), &server_initial_scid));
 
-    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} followup_odcid_len={} server_tp_version=0x{x} server_tp_bytes={} malformed_tp_close={} accepted={} client_route={} server_route={} vn_response_bytes={} followup_initial_bytes={} server_initial_bytes={}\n", .{
+    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} followup_odcid_len={} server_tp_version=0x{x} server_tp_bytes={} malformed_tp_close={} followup_timers={} accepted={} client_route={} server_route={} vn_response_bytes={} followup_initial_bytes={} server_initial_bytes={}\n", .{
         client_local.port,
         server_local.port,
         parsed_version_negotiation.versions.len,
@@ -325,6 +327,7 @@ pub fn main() !void {
         @intFromEnum(followup_peer_version.chosen_version),
         server_transport_parameter_bytes.len,
         quicz.transport_error.codeValue(.transport_parameter_error),
+        followup_timer_count,
         accepted_route.server_source_route.connection_id,
         client_route.connection_id,
         server_route.connection_id,
