@@ -18092,6 +18092,23 @@ test "EndpointConnectionLifecycle emits protected Version Negotiation follow-up 
     var crypto_buf: [64]u8 = undefined;
     const recv_len = (try server.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(initial_crypto, crypto_buf[0..recv_len]);
+
+    const server_scid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    try server.validatePeerAddress();
+    try server.sendCryptoInSpace(.initial, "vn server initial");
+    const server_initial = (try server.pollInitialProtectedDatagram(
+        12,
+        &followup_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_initial);
+    try result.handoff.followup_connection.processInitialProtectedDatagram(13, secrets.server, server_initial);
+    try std.testing.expectEqualStrings(&server_scid, result.handoff.followup_connection.peerInitialSourceConnectionId().?);
+    try result.handoff.followup_connection.applyPeerTransportParameters(server.localTransportParameters());
+    const peer_version_information = result.handoff.followup_connection.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v2, peer_version_information.chosen_version);
 }
 
 test "EndpointConnectionLifecycle processes accepted protected Initial after authentication" {

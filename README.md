@@ -188,8 +188,8 @@ experimental.
 - [UDP endpoint loopback](examples/udp_endpoint_loopback.zig): Socket-backed
   endpoint routing with Version Negotiation, protected follow-up Initial,
   follow-up Original DCID evidence, accepted protected Initial processing,
-  protected server Initial response processing, and Initial/short-header
-  classification. Run with
+  protected server Initial response processing, server transport-parameter
+  validation, and Initial/short-header classification. Run with
   `zig build run-udp-endpoint-loopback`.
 - [UDP zero-CID loopback](examples/udp_zero_cid_loopback.zig): Zero-length CID
   tuple routing over loopback UDP. Run with `zig build run-udp-zero-cid-loopback`.
