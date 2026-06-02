@@ -137,7 +137,7 @@ pub fn main() !void {
   运行：`zig build run-udp-address-validation-loopback`。
 - [Retry token](examples/retry_token.zig)：Retry datagram 处理、token 复用和 Retry CID 校验。
   运行：`zig build run-retry-token`。
-- [Connection IDs](examples/connection_ids.zig)：NEW_CONNECTION_ID、RETIRE_CONNECTION_ID 和 route replacement state。
+- [Connection IDs](examples/connection_ids.zig)：NEW_CONNECTION_ID、RETIRE_CONNECTION_ID、lifecycle-owned issue/register route bridge 和 replacement state。
   运行：`zig build run-connection-ids`。
 - [Stateless reset](examples/stateless_reset.zig)：reset token 匹配和 inactive-CID reset 构造。
   运行：`zig build run-stateless-reset`。
@@ -153,7 +153,7 @@ pub fn main() !void {
   运行：`zig build run-udp-preferred-address-loopback`。
 - [UDP replacement CID loopback](examples/udp_replacement_cid_loopback.zig)：replacement CID 注册、retire_prior_to 处理和 reset-token 保留。
   运行：`zig build run-udp-replacement-cid-loopback`。
-- [UDP connection IDs loopback](examples/udp_connection_ids_loopback.zig)：lifecycle-routed protected NEW_CONNECTION_ID/RETIRE_CONNECTION_ID 与 ACK 交换。
+- [UDP connection IDs loopback](examples/udp_connection_ids_loopback.zig)：lifecycle-routed protected NEW_CONNECTION_ID/RETIRE_CONNECTION_ID、endpoint issue/register route bridge 与 ACK 交换。
   运行：`zig build run-udp-connection-ids-loopback`。
 - [UDP protected loopback](examples/udp_protected_loopback.zig)：lifecycle-owned accepted protected Initial processing、protected server Initial response processing，以及 routed caller-keyed 1-RTT loopback UDP processing。
   运行：`zig build run-udp-protected-loopback`。

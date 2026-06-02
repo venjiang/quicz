@@ -134,10 +134,11 @@ pub fn main() !void {
 
     const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     const cid0 = [_]u8{ 0xc0, 0xff, 0xee, 0x00 };
-    const sequence0 = try conn.issueConnectionId(&cid0, token0, 0);
-    try lifecycle.registerConnectionId(77, &cid0, path, .{ .sequence_number = sequence0, .stateless_reset_token = token0 });
+    const issued0 = try lifecycle.issueConnectionIdRoute(77, &conn, &cid0, path, token0, 0, .{});
+    const sequence0 = issued0.sequence_number;
     try require(lifecycle.routeCount() == 1);
     try require(sequence0 == 0);
+    try require(issued0.retired_count == 0);
     try require(conn.pendingNewConnectionIdCount() == 1);
 
     var tx: [64]u8 = undefined;
@@ -151,8 +152,8 @@ pub fn main() !void {
 
     const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
     const cid1 = [_]u8{ 0xc0, 0xff, 0xee, 0x01 };
-    const sequence1 = try conn.issueConnectionId(&cid1, token1, 1);
-    const replacement = try lifecycle.registerReplacementConnectionId(77, &cid1, path, sequence1, 1, .{ .stateless_reset_token = token1 });
+    const replacement = try lifecycle.issueConnectionIdRoute(77, &conn, &cid1, path, token1, 1, .{});
+    const sequence1 = replacement.sequence_number;
     const payload1 = (try conn.pollTx(20, &tx)) orelse return error.UnexpectedState;
     try expectNewConnectionId(payload1, allocator, sequence1, &cid1);
     const retired_route_token = (try lifecycle.statelessResetTokenForDatagram(path, &[_]u8{ 0x40, 0xc0, 0xff, 0xee, 0x00, 0x01 })) orelse return error.UnexpectedState;

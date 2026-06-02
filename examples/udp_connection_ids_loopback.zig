@@ -149,12 +149,11 @@ pub fn main() !void {
         .active_migration_disabled = true,
     });
 
-    const sequence0 = try server.issueConnectionId(&cid0, token0, 0);
-    try server_lifecycle.registerConnectionId(51, &cid0, server_path, .{
-        .sequence_number = sequence0,
+    const issued0 = try server_lifecycle.issueConnectionIdRoute(51, &server, &cid0, server_path, token0, 0, .{
         .active_migration_disabled = true,
-        .stateless_reset_token = token0,
     });
+    const sequence0 = issued0.sequence_number;
+    try require(issued0.retired_count == 0);
 
     const new0 = (try server.pollProtectedShortDatagram(0, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
     defer allocator.free(new0);
@@ -200,11 +199,10 @@ pub fn main() !void {
     try require(cid0_probe_received.route.connection_id == 51);
     try require(cid0_probe_received.route.sequence_number.? == sequence0);
 
-    const sequence1 = try server.issueConnectionId(&cid1, token1, 1);
-    const replacement = try server_lifecycle.registerReplacementConnectionId(51, &cid1, server_path, sequence1, 1, .{
+    const replacement = try server_lifecycle.issueConnectionIdRoute(51, &server, &cid1, server_path, token1, 1, .{
         .active_migration_disabled = true,
-        .stateless_reset_token = token1,
     });
+    const sequence1 = replacement.sequence_number;
     try require(replacement.sequence_number == sequence1);
     try require(replacement.retire_prior_to == 1);
     try require(replacement.retired_count == 1);

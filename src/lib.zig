@@ -563,6 +563,25 @@ pub const EndpointProtectedInitialError = Error || endpoint.RouteError;
 /// Errors returned while coordinating routed protected endpoint datagrams.
 pub const EndpointProtectedDatagramError = Error || endpoint.RouteError;
 
+/// Errors returned while coordinating endpoint-owned connection ID lifecycle.
+pub const EndpointConnectionIdError = Error || endpoint.RouteError;
+
+/// Endpoint route policy for a locally issued connection ID.
+pub const EndpointIssuedConnectionIdOptions = struct {
+    /// Reject packets from a different UDP tuple while active migration is disabled.
+    active_migration_disabled: bool = false,
+};
+
+/// Result of issuing a local connection ID and registering its endpoint route.
+pub const EndpointIssuedConnectionIdResult = struct {
+    /// NEW_CONNECTION_ID sequence number assigned by the connection.
+    sequence_number: u64,
+    /// Retire Prior To threshold applied to endpoint routes.
+    retire_prior_to: u64,
+    /// Number of older endpoint routes retired by the threshold.
+    retired_count: usize,
+};
+
 /// Endpoint result after accepting Version Negotiation and registering follow-up routing.
 pub const EndpointVersionNegotiationFollowupResult = struct {
     /// Version Negotiation processing result, including selected version and old route cleanup.
@@ -921,6 +940,54 @@ pub const EndpointConnectionLifecycle = struct {
             retire_prior_to,
             options,
         );
+    }
+
+    /// Issue a local CID and register its endpoint route in one lifecycle step.
+    ///
+    /// The connection owns RFC 9000 NEW_CONNECTION_ID sequencing and token
+    /// uniqueness checks. The endpoint lifecycle owns the receive route and
+    /// retained stateless reset token. If route registration fails, the helper
+    /// rolls back the just-issued local CID so callers do not have to repair
+    /// split connection/router state.
+    pub fn issueConnectionIdRoute(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        destination_connection_id: []const u8,
+        path: endpoint.Udp4Tuple,
+        stateless_reset_token: [packet.stateless_reset_token_len]u8,
+        retire_prior_to: u64,
+        options: EndpointIssuedConnectionIdOptions,
+    ) EndpointConnectionIdError!EndpointIssuedConnectionIdResult {
+        const original_local_connection_id_count = connection.local_connection_ids.items.len;
+        const original_next_sequence = connection.next_local_connection_id_sequence;
+        const sequence_number = try connection.issueConnectionId(
+            destination_connection_id,
+            stateless_reset_token,
+            retire_prior_to,
+        );
+        errdefer connection.rollbackIssuedConnectionIds(
+            original_local_connection_id_count,
+            original_next_sequence,
+        );
+
+        const replacement = try self.registerReplacementConnectionId(
+            connection_id,
+            destination_connection_id,
+            path,
+            sequence_number,
+            retire_prior_to,
+            .{
+                .active_migration_disabled = options.active_migration_disabled,
+                .stateless_reset_token = stateless_reset_token,
+            },
+        );
+
+        return .{
+            .sequence_number = replacement.sequence_number,
+            .retire_prior_to = replacement.retire_prior_to,
+            .retired_count = replacement.retired_count,
+        };
     }
 
     /// Move a route to a caller-validated UDP tuple.
@@ -12394,6 +12461,19 @@ pub const Connection = struct {
         }
     }
 
+    fn rollbackIssuedConnectionIds(
+        self: *Connection,
+        original_len: usize,
+        original_next_sequence: u64,
+    ) void {
+        std.debug.assert(original_len <= self.local_connection_ids.items.len);
+        for (self.local_connection_ids.items[original_len..]) |local_id| {
+            self.allocator.free(local_id.connection_id);
+        }
+        self.local_connection_ids.items.len = original_len;
+        self.next_local_connection_id_sequence = original_next_sequence;
+    }
+
     fn findActiveConnectionId(self: *Connection, sequence_number: u64) ?*ActiveConnectionId {
         for (self.active_connection_ids.items) |*active_id| {
             if (active_id.sequence_number == sequence_number) return active_id;
@@ -17476,20 +17556,22 @@ test "EndpointConnectionLifecycle registers replacement connection IDs" {
 
     var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer lifecycle.deinit();
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
 
-    try lifecycle.registerConnectionId(51, &cid0, path, .{
-        .sequence_number = 0,
-        .stateless_reset_token = token0,
-    });
+    const issued0 = try lifecycle.issueConnectionIdRoute(51, &conn, &cid0, path, token0, 0, .{});
+    try std.testing.expectEqual(@as(u64, 0), issued0.sequence_number);
+    try std.testing.expectEqual(@as(u64, 0), issued0.retire_prior_to);
+    try std.testing.expectEqual(@as(usize, 0), issued0.retired_count);
+    try std.testing.expectEqual(@as(usize, 1), conn.pendingNewConnectionIdCount());
     try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 1), lifecycle.statelessResetTokenCount());
 
-    const replacement = try lifecycle.registerReplacementConnectionId(51, &cid1, path, 1, 1, .{
-        .stateless_reset_token = token1,
-    });
+    const replacement = try lifecycle.issueConnectionIdRoute(51, &conn, &cid1, path, token1, 1, .{});
     try std.testing.expectEqual(@as(u64, 1), replacement.sequence_number);
     try std.testing.expectEqual(@as(u64, 1), replacement.retire_prior_to);
     try std.testing.expectEqual(@as(usize, 1), replacement.retired_count);
+    try std.testing.expectEqual(@as(usize, 2), conn.pendingNewConnectionIdCount());
     try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 2), lifecycle.statelessResetTokenCount());
 
@@ -17501,6 +17583,47 @@ test "EndpointConnectionLifecycle registers replacement connection IDs" {
     try std.testing.expectEqual(@as(u64, 51), active_route.connection_id);
     try std.testing.expectEqual(@as(?u64, 1), active_route.sequence_number);
     try std.testing.expectEqual(@as(?[packet.stateless_reset_token_len]u8, null), try lifecycle.statelessResetTokenForDatagram(path, &datagram1));
+}
+
+test "EndpointConnectionLifecycle rolls back issued connection ID route failures" {
+    const occupied_cid = [_]u8{ 0xc0, 0xff, 0xee, 0x00 };
+    const rollback_cid = [_]u8{ 0xc0, 0xff, 0xee, 0x01 };
+    const committed_cid = [_]u8{ 0xc0, 0xff, 0xee, 0x02 };
+    const occupied_token = [_]u8{0x42} ** packet.stateless_reset_token_len;
+    const rollback_token = [_]u8{0x24} ** packet.stateless_reset_token_len;
+    const committed_token = [_]u8{0x18} ** packet.stateless_reset_token_len;
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const committed_datagram = [_]u8{ 0x40, 0xc0, 0xff, 0xee, 0x02, 0x01 };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    try lifecycle.registerConnectionId(51, &occupied_cid, path, .{
+        .sequence_number = 0,
+        .stateless_reset_token = occupied_token,
+    });
+
+    try std.testing.expectError(
+        error.DuplicateConnectionId,
+        lifecycle.issueConnectionIdRoute(51, &conn, &rollback_cid, path, rollback_token, 0, .{}),
+    );
+    try std.testing.expectEqual(@as(u64, 0), conn.localConnectionIdCount());
+    try std.testing.expectEqual(@as(usize, 0), conn.pendingNewConnectionIdCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.statelessResetTokenCount());
+
+    try std.testing.expect(try lifecycle.retireConnectionIdOnPath(&occupied_cid, path));
+    const committed = try lifecycle.issueConnectionIdRoute(51, &conn, &committed_cid, path, committed_token, 0, .{});
+    try std.testing.expectEqual(@as(u64, 0), committed.sequence_number);
+    try std.testing.expectEqual(@as(u64, 1), conn.localConnectionIdCount());
+    try std.testing.expectEqual(@as(usize, 1), conn.pendingNewConnectionIdCount());
+    const route = try lifecycle.routeDatagram(path, &committed_datagram);
+    try std.testing.expectEqual(@as(?u64, 0), route.sequence_number);
 }
 
 test "EndpointConnectionLifecycle mirrors ECN validation by UDP path" {

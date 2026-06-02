@@ -171,8 +171,8 @@ experimental.
 - [Retry token](examples/retry_token.zig): Retry datagram processing, token
   reuse, and Retry CID validation. Run with `zig build run-retry-token`.
 - [Connection IDs](examples/connection_ids.zig): NEW_CONNECTION_ID,
-  RETIRE_CONNECTION_ID, and route replacement state. Run with
-  `zig build run-connection-ids`.
+  RETIRE_CONNECTION_ID, lifecycle-owned issue/register route bridging, and
+  replacement state. Run with `zig build run-connection-ids`.
 - [Stateless reset](examples/stateless_reset.zig): Reset token matching and
   inactive-CID reset construction. Run with `zig build run-stateless-reset`.
 - [Initial keys](examples/initial_keys.zig): QUIC v1/v2 Initial key derivation
@@ -194,8 +194,9 @@ experimental.
   Replacement CID registration, retire_prior_to handling, and reset-token
   retention. Run with `zig build run-udp-replacement-cid-loopback`.
 - [UDP connection IDs loopback](examples/udp_connection_ids_loopback.zig):
-  Lifecycle-routed protected NEW_CONNECTION_ID/RETIRE_CONNECTION_ID and ACK
-  exchange. Run with `zig build run-udp-connection-ids-loopback`.
+  Lifecycle-routed protected NEW_CONNECTION_ID/RETIRE_CONNECTION_ID, endpoint
+  issue/register route bridging, and ACK exchange. Run with
+  `zig build run-udp-connection-ids-loopback`.
 - [UDP protected loopback](examples/udp_protected_loopback.zig):
   Lifecycle-owned accepted protected Initial processing and protected server
   Initial response processing plus routed caller-keyed 1-RTT processing over
