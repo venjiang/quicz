@@ -270,6 +270,34 @@ pub fn main() !void {
         .{recovery_window},
     );
 
+    var recovery_ack_accounting = quicz.recovery.Recovery.init(.{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    recovery_ack_accounting.congestion_window = 12_000;
+    recovery_ack_accounting.ssthresh = 12_000;
+    recovery_ack_accounting.congestion_avoidance_bytes_acked = 600;
+    recovery_ack_accounting.onPacketSent(12_000);
+    recovery_ack_accounting.onPtoExpired();
+    recovery_ack_accounting.onCongestionEvent(20, 100);
+    const recovery_ack_cwnd = recovery_ack_accounting.congestion_window;
+    recovery_ack_accounting.onPacketAcked(1200, 100, 80, 0);
+    if (recovery_ack_accounting.congestion_window != recovery_ack_cwnd) return error.LossRecoveryExampleFailed;
+    if (recovery_ack_accounting.congestion_avoidance_bytes_acked != 0) return error.LossRecoveryExampleFailed;
+    if (recovery_ack_accounting.bytes_in_flight != 10_800) return error.LossRecoveryExampleFailed;
+    if (recovery_ack_accounting.pto_count != 0) return error.LossRecoveryExampleFailed;
+    const recovery_ack_latest_rtt = recovery_ack_accounting.latest_rtt_ms orelse return error.LossRecoveryExampleFailed;
+    if (recovery_ack_latest_rtt != 80) return error.LossRecoveryExampleFailed;
+    std.debug.print(
+        "[loss] recovery ACK accounting cwnd={d} latest_rtt={d} inflight={d} credit={d}\n",
+        .{
+            recovery_ack_accounting.congestion_window,
+            recovery_ack_latest_rtt,
+            recovery_ack_accounting.bytes_in_flight,
+            recovery_ack_accounting.congestion_avoidance_bytes_acked,
+        },
+    );
+
     var congestion_probe = try quicz.Connection.init(allocator, .client, .{
         .max_datagram_size = 1350,
         .initial_rtt_ms = 100,

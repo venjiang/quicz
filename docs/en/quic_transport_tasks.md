@@ -75,6 +75,12 @@ produce or consume TLS-owned QUIC packets over UDP.
 
 ## Progress Notes
 
+- 2026-06-02: Added controlled-clock NewReno recovery-period ACK accounting
+  coverage. `Recovery` tests now verify that an ACK for a packet sent at the
+  recovery-start boundary clears PTO backoff, updates RTT, and removes bytes in
+  flight without growing `congestion_window` or accumulating congestion-avoidance
+  credit; `loss_recovery` now prints
+  `recovery ACK accounting cwnd=6000 latest_rtt=80 inflight=10800 credit=0`.
 - 2026-06-02: Added socket-backed UDP installed-key 0-RTT PTO recovery
   coverage. `udp_pto_recovery_loopback` now emits an installed-key 0-RTT
   RESET_STREAM over loopback UDP, services the Application PTO through
@@ -2450,7 +2456,7 @@ run from `build.zig`.
 | `connection_ids` | Current local NEW_CONNECTION_ID issuing with stateless-reset-token uniqueness checks, peer RETIRE_CONNECTION_ID handling, lifecycle-owned issue/register endpoint route bridging with retire_prior_to route retirement, and caller-keyed protected 1-RTT NEW_CONNECTION_ID/RETIRE_CONNECTION_ID exchange. | Present |
 | `stateless_reset` | Current constant-time stateless reset token match, false-positive rejection, and lifecycle-owned endpoint inactive-CID reset action construction. | Present |
 | `ecn_validation` | Current frame-payload ECT send modeling, ACK_ECN counter validation, and endpoint path-identity ECN state isolation. | Present |
-| `loss_recovery` | Current frame-payload invalid ACK range rejection, largest-acknowledged RTT sampling, cross-space bytes-in-flight congestion admission, packet-threshold loss, time-threshold loss, aggregate loss-time timer service, NewReno underutilized-cwnd suppression, slow-start/congestion-avoidance byte-counted and batched-ACK growth, recovery period, new-congestion-event one-packet STREAM recovery probe, minimum-window ssthresh clamp, PTO-backoff-independent persistent congestion, persistent-congestion min-RTT refresh, non-contiguous persistent-congestion suppression, and ACK-delay handling. | Present |
+| `loss_recovery` | Current frame-payload invalid ACK range rejection, largest-acknowledged RTT sampling, cross-space bytes-in-flight congestion admission, packet-threshold loss, time-threshold loss, aggregate loss-time timer service, NewReno underutilized-cwnd suppression, slow-start/congestion-avoidance byte-counted and batched-ACK growth, recovery period, recovery-period ACK accounting without congestion growth, new-congestion-event one-packet STREAM recovery probe, minimum-window ssthresh clamp, PTO-backoff-independent persistent congestion, persistent-congestion min-RTT refresh, non-contiguous persistent-congestion suppression, and ACK-delay handling. | Present |
 | `pto_recovery` | Current frame-payload Initial/Handshake/Application PTO hooks, including aggregate PTO timer service, Application PTO gating until handshake confirmation, client Initial ACK PTO-backoff reset suppression, client no-in-flight anti-deadlock PTO, anti-amplification-limited server PTO disarm/rearm plus expired-PTO service when new datagrams unblock sending, connection-level RTT sharing and PTO backoff across packet number spaces, Initial/Handshake RTT ACK-delay suppression, Initial/Handshake max_ack_delay suppression, congestion-window bypass for one armed PTO probe, PING fallback probes, cross-space peer probes for other in-flight packet number spaces, queued STREAM data probe selection, in-flight STREAM retransmission probe selection, ACKed RESET_STREAM retransmission suppression, and protected 1-RTT CRYPTO PTO probe selection. | Present |
 | `address_validation` | Current modeled server anti-amplification budget, explicit peer-address validation, lifecycle-routed protected HANDSHAKE_DONE/NEW_TOKEN delivery, server-side HANDSHAKE_DONE-triggered Handshake discard, endpoint peer-address binding, `AddressValidationPolicy` NEW_TOKEN issue/rotation/originating-version binding/secret-set and replay-filter export/restore/validation/replay rejection, and address-validation unblocking. | Present |
 | `udp_address_validation_loopback` | Socket-backed loopback UDP address-validation exercise: lifecycle-routed protected HANDSHAKE_DONE/NEW_TOKEN delivery, NEW_TOKEN path/version binding, replay rejection, and future server address-validation unblocking. | Present |

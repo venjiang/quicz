@@ -496,6 +496,34 @@ test "congestion recovery period avoids repeated loss reduction and ACK growth" 
     try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
 }
 
+test "ACK inside NewReno recovery updates accounting without congestion growth" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    recovery.congestion_window = 12_000;
+    recovery.ssthresh = 12_000;
+    recovery.congestion_avoidance_bytes_acked = 600;
+    recovery.onPacketSent(12_000);
+    recovery.onPtoExpired();
+
+    recovery.onCongestionEvent(20, 100);
+    const recovery_window = recovery.congestion_window;
+    try std.testing.expectEqual(@as(usize, 6_000), recovery_window);
+    try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
+    try std.testing.expectEqual(@as(u8, 1), recovery.pto_count);
+
+    recovery.onPacketAcked(1200, 100, 80, 0);
+    try std.testing.expectEqual(@as(usize, 10_800), recovery.bytes_in_flight);
+    try std.testing.expectEqual(@as(u8, 0), recovery.pto_count);
+    try std.testing.expectEqual(@as(?u64, 80), recovery.latest_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 80), recovery.smoothed_rtt_ms);
+    try std.testing.expectEqual(recovery_window, recovery.congestion_window);
+    try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
+
+    recovery.onPacketAcked(6_000, 101, 80, 0);
+    try std.testing.expectEqual(@as(usize, 4_800), recovery.bytes_in_flight);
+    try std.testing.expectEqual(recovery_window + 1200, recovery.congestion_window);
+    try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
+}
+
 test "NewReno congestion event clamps cwnd without clamping ssthresh" {
     var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
     recovery.congestion_window = 3_000;
