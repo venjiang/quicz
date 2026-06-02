@@ -324,10 +324,14 @@ pub fn main() !void {
     const client_received_crypto = try readCryptoRequired(&client, .initial, &client_crypto_buf);
     try require(std.mem.eql(u8, client_received_crypto, "server accepted retry"));
 
-    try client.applyPeerTransportParameters(server.localTransportParameters());
-    try server.applyPeerTransportParameters(client.localTransportParameters());
+    var server_transport_parameter_buf: [256]u8 = undefined;
+    const server_transport_parameter_bytes = try server.encodeLocalTransportParameters(&server_transport_parameter_buf);
+    try client.applyPeerTransportParameterBytes(server_transport_parameter_bytes);
+    var client_transport_parameter_buf: [256]u8 = undefined;
+    const client_transport_parameter_bytes = try client.encodeLocalTransportParameters(&client_transport_parameter_buf);
+    try server.applyPeerTransportParameterBytes(client_transport_parameter_bytes);
 
-    std.debug.print("[udp-retry] client_port={} server_port={} first_bytes={} retry_bytes={} retry_initial_bytes={} server_initial_bytes={} switched_route={} token_len={} replay_rejected={} address_validated={} client_tp_retry=true\n", .{
+    std.debug.print("[udp-retry] client_port={} server_port={} first_bytes={} retry_bytes={} retry_initial_bytes={} server_initial_bytes={} switched_route={} token_len={} replay_rejected={} address_validated={} server_tp_bytes={} client_tp_bytes={} client_tp_retry=true\n", .{
         client_local.port,
         server_local.port,
         first_initial.len,
@@ -338,5 +342,7 @@ pub fn main() !void {
         retry_accept.token.len,
         replay_rejected,
         server.peerAddressValidated(),
+        server_transport_parameter_bytes.len,
+        client_transport_parameter_bytes.len,
     });
 }
