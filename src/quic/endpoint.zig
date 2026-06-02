@@ -909,6 +909,28 @@ pub const EndpointRouter = struct {
         return resultForRoute(route.*, new_path);
     }
 
+    /// Move a non-empty-CID route to the UDP tuple that carried validated traffic.
+    ///
+    /// This is the endpoint-side commit primitive for helpers that already
+    /// authenticated a protected datagram and proved it consumed a pending
+    /// PATH_CHALLENGE. Zero-length CID routes cannot be updated by CID alone
+    /// because their route identity is the UDP tuple.
+    pub fn updateRoutePathFromValidatedDatagram(
+        self: *EndpointRouter,
+        destination_connection_id: []const u8,
+        new_path: Udp4Tuple,
+    ) RouteError!RouteResult {
+        const cid = try ConnectionId.init(destination_connection_id);
+        if (cid.len == 0) return error.AmbiguousConnectionId;
+
+        const index = self.findRouteIndex(cid) orelse return error.UnknownConnectionId;
+        const route = &self.routes.items[index];
+        if (!route.path.eql(new_path) and route.active_migration_disabled) return error.ActiveMigrationDisabled;
+
+        route.path = new_path;
+        return resultForRoute(route.*, new_path);
+    }
+
     /// Return a stateless reset token for a datagram that has no active route on this path.
     ///
     /// Active routes take precedence and return null. Long-header datagrams are
@@ -2092,9 +2114,17 @@ test "EndpointRouter updates route path after caller validates migration" {
     try std.testing.expect(!on_new_path.path_changed);
     try std.testing.expectError(error.PathMismatch, router.updateRoutePath(&dcid, old_path, third_path));
 
+    const validated_update = try router.updateRoutePathFromValidatedDatagram(&dcid, third_path);
+    try std.testing.expectEqual(@as(u64, 3), validated_update.connection_id);
+    try std.testing.expect(!validated_update.path_changed);
+    const on_third_path = try router.routeDatagram(third_path, &short_datagram);
+    try std.testing.expect(!on_third_path.path_changed);
+
     try std.testing.expect(try router.retireConnectionId(&dcid));
     try router.registerConnectionId(4, &dcid, old_path, .{ .active_migration_disabled = true });
     try std.testing.expectError(error.ActiveMigrationDisabled, router.updateRoutePath(&dcid, old_path, new_path));
+    try std.testing.expectError(error.ActiveMigrationDisabled, router.updateRoutePathFromValidatedDatagram(&dcid, new_path));
+    try std.testing.expectError(error.AmbiguousConnectionId, router.updateRoutePathFromValidatedDatagram(&[_]u8{}, new_path));
 }
 
 test "EndpointRouter commits caller-validated preferred address migration" {

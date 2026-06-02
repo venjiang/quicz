@@ -123,7 +123,7 @@ pub fn main() !void {
     var server_receive_buf: [1500]u8 = undefined;
     const response_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const response_path = try udp4Tuple(server_socket.address, response_received.from);
-    const migrated_route = try server_lifecycle.processRoutedProtectedShortDatagram(
+    const validation_result = try server_lifecycle.processRoutedProtectedShortDatagramAndUpdatePath(
         connection_handle,
         &server,
         response_path,
@@ -131,6 +131,7 @@ pub fn main() !void {
         secrets.client,
         response_received.data,
     );
+    const migrated_route = validation_result.route;
     try require(migrated_route.connection_id == connection_handle);
     try require(migrated_route.path_changed);
     try require(std.mem.eql(u8, migrated_route.destination_connection_id.asSlice(), &server_dcid));
@@ -139,7 +140,7 @@ pub fn main() !void {
     try require(server.bytesInFlight(.application) == 0);
     try require(server.pendingAckLargest(.application) == 0);
 
-    const updated_route = try server_lifecycle.updateRoutePath(&server_dcid, old_path, response_path);
+    const updated_route = validation_result.updated_route orelse return error.UnexpectedState;
     try require(updated_route.connection_id == connection_handle);
     try require(!updated_route.path_changed);
 

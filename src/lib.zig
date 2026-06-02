@@ -629,6 +629,14 @@ pub const EndpointProtectedLongDatagramResult = struct {
     processed_packets: usize,
 };
 
+/// Endpoint result after processing a path-validation protected short datagram.
+pub const EndpointPathValidatedShortDatagramResult = struct {
+    /// Endpoint route selected before packet protection was removed.
+    route: endpoint.RouteResult,
+    /// Route after endpoint path update, present only when validation completed.
+    updated_route: ?endpoint.RouteResult,
+};
+
 /// Endpoint result after accepting a protected Initial and emitting a response.
 pub const EndpointAcceptedProtectedInitialResponseResult = struct {
     /// Authentication, packet processing, and route installation result.
@@ -1019,6 +1027,23 @@ pub const EndpointConnectionLifecycle = struct {
         connection: *Connection,
     ) endpoint.RouteError!endpoint.RouteResult {
         const updated = try self.updateRoutePath(destination_connection_id, current_path, new_path);
+        connection.resetSpinBitForPath();
+        return updated;
+    }
+
+    /// Move a route to the UDP tuple that carried validated path traffic.
+    ///
+    /// This endpoint-owned commit path is used only after a protected datagram
+    /// has been authenticated and `Connection` has consumed a matching
+    /// PATH_RESPONSE. It also resets connection spin-bit state because the
+    /// accepted route is now a new network path.
+    pub fn updateRoutePathFromValidatedDatagramAndResetSpinBit(
+        self: *EndpointConnectionLifecycle,
+        destination_connection_id: []const u8,
+        new_path: endpoint.Udp4Tuple,
+        connection: *Connection,
+    ) endpoint.RouteError!endpoint.RouteResult {
+        const updated = try self.router.updateRoutePathFromValidatedDatagram(destination_connection_id, new_path);
         connection.resetSpinBitForPath();
         return updated;
     }
@@ -1847,6 +1872,53 @@ pub const EndpointConnectionLifecycle = struct {
             datagram,
         );
         return route;
+    }
+
+    /// Route/process a path-validation short packet and commit validated path updates.
+    ///
+    /// The ordinary routed receive helper leaves endpoint path updates to the
+    /// caller. This variant is for endpoint loops that want one owner for
+    /// protected receive, PATH_RESPONSE validation, route path update, spin-bit
+    /// reset, and recovery timer refresh. A path update is committed only when
+    /// the packet routes to `connection_id`, authentication/frame processing
+    /// succeeds, the routed tuple differs from the stored route, and the
+    /// connection consumes at least one outstanding PATH_CHALLENGE.
+    pub fn processRoutedProtectedShortDatagramAndUpdatePath(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!EndpointPathValidatedShortDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+
+        const outstanding_before = connection.outstandingPathChallengeCount();
+        try self.processProtectedShortDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            keys,
+            route.destination_connection_id.asSlice().len,
+            datagram,
+        );
+
+        const outstanding_after = connection.outstandingPathChallengeCount();
+        const updated_route: ?endpoint.RouteResult = if (route.path_changed and outstanding_after < outstanding_before)
+            try self.updateRoutePathFromValidatedDatagramAndResetSpinBit(
+                route.destination_connection_id.asSlice(),
+                path,
+                connection,
+            )
+        else
+            null;
+
+        return .{
+            .route = route,
+            .updated_route = updated_route,
+        };
     }
 
     /// Route and process one caller-keyed protected 1-RTT datagram with close propagation.
@@ -17534,6 +17606,75 @@ test "EndpointConnectionLifecycle updates caller-validated route path" {
     try std.testing.expectEqual(@as(u64, 77), confirmed_route.connection_id);
     try std.testing.expect(!confirmed_route.path_changed);
     try std.testing.expectError(error.PathMismatch, lifecycle.updateRoutePath(&dcid, old_path, new_path));
+}
+
+test "EndpointConnectionLifecycle updates route path after protected PATH_RESPONSE validation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(88, &server_dcid, old_path, .{});
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+
+    try client.sendPing();
+    const migrated_ping = (try client.pollProtectedShortDatagram(1, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(migrated_ping);
+    const ping_result = try lifecycle.processRoutedProtectedShortDatagramAndUpdatePath(
+        88,
+        &server,
+        new_path,
+        2,
+        secrets.client,
+        migrated_ping,
+    );
+    try std.testing.expect(ping_result.route.path_changed);
+    try std.testing.expect(ping_result.updated_route == null);
+    try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+    try std.testing.expect((try lifecycle.routeDatagram(new_path, migrated_ping)).path_changed);
+
+    const challenge_data = [_]u8{ 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb };
+    try server.sendPathChallenge(challenge_data);
+    const challenge = (try server.pollProtectedShortDatagram(3, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(challenge);
+    try std.testing.expectEqual(@as(usize, 1), server.outstandingPathChallengeCount());
+    try client.processProtectedShortDatagram(4, secrets.server, client_dcid.len, challenge);
+
+    const response = (try client.pollProtectedShortDatagram(5, &server_dcid, secrets.client)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response);
+    const validation_result = try lifecycle.processRoutedProtectedShortDatagramAndUpdatePath(
+        88,
+        &server,
+        new_path,
+        6,
+        secrets.client,
+        response,
+    );
+    try std.testing.expect(validation_result.route.path_changed);
+    const updated_route = validation_result.updated_route orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 88), updated_route.connection_id);
+    try std.testing.expect(!updated_route.path_changed);
+    try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+
+    const confirmed_route = try lifecycle.routeDatagram(new_path, response);
+    try std.testing.expectEqual(@as(u64, 88), confirmed_route.connection_id);
+    try std.testing.expect(!confirmed_route.path_changed);
 }
 
 test "EndpointConnectionLifecycle retires zero-length CID routes by path" {

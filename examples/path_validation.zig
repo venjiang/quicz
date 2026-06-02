@@ -147,14 +147,19 @@ fn protectedShortRoundtrip(allocator: std.mem.Allocator) !void {
     const response = (try server.pollProtectedShortDatagram(2, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
     defer allocator.free(response);
     try require(response.len >= 1200);
-    const migrated_route = try lifecycle.routeDatagram(new_path, response);
-    try require(migrated_route.path_changed);
-
-    try client.processProtectedShortDatagram(3, secrets.server, client_dcid.len, response);
+    const validation_result = try lifecycle.processRoutedProtectedShortDatagramAndUpdatePath(
+        33,
+        &client,
+        new_path,
+        3,
+        secrets.server,
+        response,
+    );
+    try require(validation_result.route.path_changed);
     try require(client.outstandingPathChallengeCount() == 0);
     try require(client.bytesInFlight(.application) == 0);
 
-    const updated_route = try lifecycle.updateRoutePath(&client_dcid, old_path, new_path);
+    const updated_route = validation_result.updated_route orelse return error.UnexpectedState;
     try require(!updated_route.path_changed);
     const confirmed_route = try lifecycle.routeDatagram(new_path, response);
     try require(!confirmed_route.path_changed);
@@ -167,7 +172,7 @@ fn protectedShortRoundtrip(allocator: std.mem.Allocator) !void {
     std.debug.print("[path] protected short PATH_CHALLENGE/PATH_RESPONSE bytes={}/{} endpoint_path_changed={} endpoint_path_updated={}\n", .{
         challenge.len,
         response.len,
-        migrated_route.path_changed,
+        validation_result.route.path_changed,
         !confirmed_route.path_changed,
     });
 }

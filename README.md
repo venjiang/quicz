@@ -159,7 +159,7 @@ experimental.
   across connection handles. Run with `zig build run-endpoint-recovery-timers`.
 - [Path validation](examples/path_validation.zig): PATH_CHALLENGE/PATH_RESPONSE
   retry, duplicate pending-response suppression, 1200-byte protected
-  path-validation datagrams, and route update modeling. Run with
+  path-validation datagrams, and validation-driven lifecycle route updates. Run with
   `zig build run-path-validation`.
 - [Address validation](examples/address_validation.zig): HMAC address-validation
   tokens, version binding, secret rotation, replay snapshots, and
@@ -250,8 +250,8 @@ experimental.
   Lifecycle-routed installed-key key update, key phase advancement, and ACK
   gating. Run with `zig build run-udp-key-update-loopback`.
 - [UDP path validation loopback](examples/udp_path_validation_loopback.zig):
-  Lifecycle-routed PATH_CHALLENGE/PATH_RESPONSE route validation over a new
-  peer port. Run with `zig build run-udp-path-validation-loopback`.
+  Lifecycle-routed PATH_CHALLENGE/PATH_RESPONSE validation-driven route update
+  over a new peer port. Run with `zig build run-udp-path-validation-loopback`.
 - [UDP Retry loopback](examples/udp_retry_loopback.zig): Lifecycle-owned Retry
   delivery, token validation, and routed follow-up Initial processing. Run
   with `zig build run-udp-retry-loopback`.

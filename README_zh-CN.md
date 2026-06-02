@@ -129,7 +129,7 @@ pub fn main() !void {
   运行：`zig build run-pto-recovery`。
 - [Endpoint recovery timers](examples/endpoint_recovery_timers.zig)：跨 connection handle 的 endpoint-owned recovery timer 调度和 routed protected receive refresh。
   运行：`zig build run-endpoint-recovery-timers`。
-- [Path validation](examples/path_validation.zig)：PATH_CHALLENGE/PATH_RESPONSE 重试、重复 pending response 抑制、1200 字节 protected path-validation datagram 和 route update 建模。
+- [Path validation](examples/path_validation.zig)：PATH_CHALLENGE/PATH_RESPONSE 重试、重复 pending response 抑制、1200 字节 protected path-validation datagram 和验证驱动的 lifecycle route update。
   运行：`zig build run-path-validation`。
 - [Address validation](examples/address_validation.zig)：HMAC address-validation token、version binding、secret rotation、replay snapshot 和 lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery。
   运行：`zig build run-address-validation`。
@@ -185,7 +185,7 @@ pub fn main() !void {
   运行：`zig build run-udp-stream-retransmission-loopback`。
 - [UDP key update loopback](examples/udp_key_update_loopback.zig)：经 lifecycle route 的 installed-key key update、key phase advancement 和 ACK gating。
   运行：`zig build run-udp-key-update-loopback`。
-- [UDP path validation loopback](examples/udp_path_validation_loopback.zig)：在新 peer port 上执行 lifecycle-routed PATH_CHALLENGE/PATH_RESPONSE route validation。
+- [UDP path validation loopback](examples/udp_path_validation_loopback.zig)：在新 peer port 上执行 lifecycle-routed PATH_CHALLENGE/PATH_RESPONSE 验证驱动 route update。
   运行：`zig build run-udp-path-validation-loopback`。
 - [UDP Retry loopback](examples/udp_retry_loopback.zig)：lifecycle-owned Retry delivery、token validation 和 routed follow-up Initial processing。
   运行：`zig build run-udp-retry-loopback`。
