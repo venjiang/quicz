@@ -251,6 +251,11 @@ pub fn main() !void {
 
     const cid1_probe = [_]u8{ 0x40, 0xc0, 0xff, 0xee, 0x01, 0x01 };
     try require((try server_lifecycle.statelessResetTokenForDatagram(server_path, &cid1_probe)) == null);
+    try client_socket.send(io, &server_socket.address, &cid1_probe);
+    const cid1_probe_received = try receiveRoute(io, &server_lifecycle, &server_socket, &server_receive_buf);
+    try require(cid1_probe_received.route.connection_id == 51);
+    try require(cid1_probe_received.route.sequence_number.? == sequence1);
+    try require(std.mem.eql(u8, cid1_probe_received.route.destination_connection_id.asSlice(), &cid1));
 
     const ack1 = (try server.pollProtectedShortDatagram(8, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
     defer allocator.free(ack1);
@@ -269,7 +274,7 @@ pub fn main() !void {
     try require(ack1_received.route.connection_id == 41);
     try require(client.bytesInFlight(.application) == 0);
 
-    std.debug.print("[udp-connection-ids] client_port={} server_port={} new0_bytes={} new1_bytes={} retire_bytes={} route0_seq={} active_seq={} local_active={} retired0_token=true client_inflight={}\n", .{
+    std.debug.print("[udp-connection-ids] client_port={} server_port={} new0_bytes={} new1_bytes={} retire_bytes={} route0_seq={} active_seq={} active_probe_seq={} local_active={} retired0_token=true client_inflight={}\n", .{
         client_local.port,
         server_local.port,
         new0.len,
@@ -277,6 +282,7 @@ pub fn main() !void {
         retire.len,
         sequence0,
         retire_received.route.sequence_number.?,
+        cid1_probe_received.route.sequence_number.?,
         server.localConnectionIdCount(),
         client.bytesInFlight(.application),
     });
