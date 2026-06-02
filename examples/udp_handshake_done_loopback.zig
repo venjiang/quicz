@@ -124,6 +124,8 @@ pub fn main() !void {
 
     try server.sendHandshakeDone();
     try require(server.handshakeConfirmed());
+    try require(server.handshakeState() == .confirmed);
+    try require(server.connectionState() == .active);
     try require(server.packetNumberSpaceDiscarded(.handshake));
     try require(!server.hasHandshakeProtectionKeys());
     const server_handshake_keys_discarded = !server.hasHandshakeProtectionKeys();
@@ -151,6 +153,8 @@ pub fn main() !void {
     try require(done_route.connection_id == client_handle);
     try require(std.mem.eql(u8, done_route.destination_connection_id.asSlice(), &client_dcid));
     try require(client.handshakeConfirmed());
+    try require(client.handshakeState() == .confirmed);
+    try require(client.connectionState() == .active);
     try require(client.packetNumberSpaceDiscarded(.handshake));
     try require(!client.hasHandshakeProtectionKeys());
     try require(client.pendingAckLargest(.application) == 0);
@@ -180,14 +184,18 @@ pub fn main() !void {
     try require(server.bytesInFlight(.application) == 0);
     try require(server_lifecycle.recoveryTimerCount() == 0);
 
-    std.debug.print("[udp-handshake-done] client_port={} server_port={} done_bytes={} ack_bytes={} server_confirmed={} server_handshake_keys_discarded={} client_confirmed={} client_handshake_keys={} client_ack_largest={} client_ack_cleared={} server_inflight={} server_timers={}\n", .{
+    std.debug.print("[udp-handshake-done] client_port={} server_port={} done_bytes={} ack_bytes={} server_confirmed={} server_handshake_state={s} server_connection_state={s} server_handshake_keys_discarded={} client_confirmed={} client_handshake_state={s} client_connection_state={s} client_handshake_keys={} client_ack_largest={} client_ack_cleared={} server_inflight={} server_timers={}\n", .{
         client_local.port,
         server_local.port,
         done_datagram.len,
         ack_datagram.len,
         server.handshakeConfirmed(),
+        @tagName(server.handshakeState()),
+        @tagName(server.connectionState()),
         server_handshake_keys_discarded,
         client.handshakeConfirmed(),
+        @tagName(client.handshakeState()),
+        @tagName(client.connectionState()),
         client.hasHandshakeProtectionKeys(),
         client_ack_largest,
         client_ack_cleared,

@@ -239,8 +239,8 @@ experimental.
   `zig build run-udp-crypto-backend-loopback`.
 - [UDP HANDSHAKE_DONE loopback](examples/udp_handshake_done_loopback.zig):
   Socket-backed lifecycle-routed installed-key HANDSHAKE_DONE confirmation,
-  server/client Handshake key discard evidence, and ACK pending/cleanup output.
-  Run with
+  server/client Handshake key discard and public state evidence, plus ACK
+  pending/cleanup output. Run with
   `zig build run-udp-handshake-done-loopback`.
 - [UDP flow control loopback](examples/udp_flow_control_loopback.zig):
   Lifecycle-routed protected STREAM/BLOCKED/MAX flow-control exchange over
