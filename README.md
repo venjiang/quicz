@@ -141,7 +141,8 @@ experimental.
   behavior, and close-triggered validation. Run with
   `zig build run-graceful-close`.
 - [Idle timeout](examples/idle_timeout.zig): Modeled idle timeout export,
-  refresh, and close behavior. Run with `zig build run-idle-timeout`.
+  refresh, close behavior, and endpoint route/timer cleanup. Run with
+  `zig build run-idle-timeout`.
 - [Packet spaces](examples/packet_spaces.zig): Initial, Handshake, 0-RTT, and
   Application packet-number-space behavior. Run with `zig build run-packet-spaces`.
 - [ECN validation](examples/ecn_validation.zig): ACK_ECN validation and

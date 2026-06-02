@@ -1386,6 +1386,30 @@ pub const EndpointConnectionLifecycle = struct {
         return self.recovery_timers.serviceConnection(connection_id, connection, now_millis);
     }
 
+    /// Apply one connection's idle timeout and retire endpoint state if it closes.
+    ///
+    /// `Connection.checkIdleTimeouts()` remains the source of truth for the
+    /// connection state transition. This endpoint bridge only observes the
+    /// active-to-closed idle transition and then removes routes and recovery
+    /// timers owned by the lifecycle for `connection_id`.
+    pub fn checkIdleTimeoutsAndRetireConnection(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+    ) Error!?EndpointConnectionRetireResult {
+        if (connection.connectionState() != .active) {
+            try connection.checkIdleTimeouts(now_millis);
+            return null;
+        }
+
+        connection.checkIdleTimeouts(now_millis) catch |err| switch (err) {
+            error.ConnectionClosed => return self.retireConnection(connection_id),
+            else => return err,
+        };
+        return null;
+    }
+
     /// Poll one protected long-header datagram and refresh recovery scheduling.
     ///
     /// This bridge covers Initial, Handshake, and 0-RTT long packets emitted by
@@ -16726,6 +16750,52 @@ test "EndpointConnectionLifecycle retires routes with recovery timer" {
     const retired_again = lifecycle.retireConnection(41);
     try std.testing.expectEqual(@as(usize, 0), retired_again.routes_retired);
     try std.testing.expect(!retired_again.recovery_timer_disarmed);
+}
+
+test "EndpointConnectionLifecycle retires route and timer after idle timeout closes connection" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const cid0 = [_]u8{ 0x41, 0x41, 0x41, 0x41 };
+    const cid1 = [_]u8{ 0x42, 0x42, 0x42, 0x42 };
+    try lifecycle.registerConnectionId(55, &cid0, path, .{ .sequence_number = 0 });
+    try lifecycle.registerConnectionId(55, &cid1, path, .{ .sequence_number = 1 });
+
+    try conn.sendPing();
+    var out_buf: [16]u8 = undefined;
+    const payload = (try conn.pollTx(10, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), payload.len);
+    try lifecycle.armRecoveryTimerFromConnection(55, &conn);
+    try std.testing.expectEqual(@as(usize, 2), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try std.testing.expectEqual(@as(?i64, 40), conn.idleTimeoutDeadlineMillis());
+    try std.testing.expectEqual(
+        @as(?EndpointConnectionRetireResult, null),
+        try lifecycle.checkIdleTimeoutsAndRetireConnection(55, &conn, 39),
+    );
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+    try std.testing.expectEqual(@as(usize, 2), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const retired = (try lifecycle.checkIdleTimeoutsAndRetireConnection(55, &conn, 40)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(ConnectionState.closed, conn.connectionState());
+    try std.testing.expectEqual(@as(usize, 2), retired.routes_retired);
+    try std.testing.expect(retired.recovery_timer_disarmed);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
 }
 
 test "EndpointConnectionLifecycle processes Version Negotiation and retires old attempt" {
