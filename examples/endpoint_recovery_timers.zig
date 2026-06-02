@@ -264,6 +264,51 @@ pub fn main() !void {
     try require(installed_handshake_pto_client.packetNumberSpaceDiscarded(.initial));
     try require(installed_handshake_pto_lifecycle.recoveryTimerCount() == 1);
 
+    var installed_zero_rtt_pto_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer installed_zero_rtt_pto_lifecycle.deinit();
+    var installed_zero_rtt_pto_client = try quicz.Connection.init(allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer installed_zero_rtt_pto_client.deinit();
+    try installed_zero_rtt_pto_client.installZeroRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+    });
+    try installed_zero_rtt_pto_client.confirmHandshake();
+    const installed_zero_rtt_pto_stream_id = try installed_zero_rtt_pto_client.openStream();
+    try installed_zero_rtt_pto_client.sendOnStream(installed_zero_rtt_pto_stream_id, "bye", false);
+    try installed_zero_rtt_pto_client.resetStream(installed_zero_rtt_pto_stream_id, 19);
+    const installed_zero_rtt_pto_first = (try installed_zero_rtt_pto_lifecycle.pollProtectedZeroRttDatagramWithInstalledKeys(
+        protected_client_id,
+        &installed_zero_rtt_pto_client,
+        90,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(installed_zero_rtt_pto_first);
+    try require(installed_zero_rtt_pto_client.sentPacketCount(.application) == 1);
+    try require(installed_zero_rtt_pto_client.pending_reset_streams.items.len == 0);
+    try require(installed_zero_rtt_pto_lifecycle.recoveryTimerCount() == 1);
+    const installed_zero_rtt_pto_timer = installed_zero_rtt_pto_lifecycle.earliestRecoveryDeadline() orelse return error.EndpointRecoveryTimerExampleFailed;
+    try require(installed_zero_rtt_pto_timer.connection_id == protected_client_id);
+    try require(installed_zero_rtt_pto_timer.timer.space == .application);
+    try require(installed_zero_rtt_pto_timer.timer.kind == .pto);
+    const installed_zero_rtt_pto_probe_result = try installed_zero_rtt_pto_lifecycle.serviceRecoveryTimerAndPollProtectedZeroRttDatagramWithInstalledKeys(
+        protected_client_id,
+        &installed_zero_rtt_pto_client,
+        installed_zero_rtt_pto_timer.timer.deadline_millis,
+        &server_dcid,
+        &client_dcid,
+    );
+    const installed_zero_rtt_pto_serviced = installed_zero_rtt_pto_probe_result.serviced orelse return error.EndpointRecoveryTimerExampleFailed;
+    try require(installed_zero_rtt_pto_serviced.connection_id == protected_client_id);
+    try require(installed_zero_rtt_pto_serviced.timer.space == .application);
+    const installed_zero_rtt_pto_probe = installed_zero_rtt_pto_probe_result.datagram orelse return error.EndpointRecoveryTimerExampleFailed;
+    defer allocator.free(installed_zero_rtt_pto_probe);
+    const installed_zero_rtt_pto_bytes = installed_zero_rtt_pto_probe.len;
+    try require(installed_zero_rtt_pto_client.sentPacketCount(.application) == 2);
+    try require(installed_zero_rtt_pto_client.pending_reset_streams.items.len == 0);
+    try require(installed_zero_rtt_pto_lifecycle.recoveryTimerCount() == 1);
+
     var protected_client = try quicz.Connection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });
@@ -735,7 +780,7 @@ pub fn main() !void {
     try require(protected_client.bytesInFlight(.application) == 0);
     const protected_timers_remaining = protected_client_lifecycle.recoveryTimerCount() + protected_server_lifecycle.recoveryTimerCount();
 
-    std.debug.print("[endpoint-timers] first_connection={} first_kind={s} first_deadline={} second_connection={} second_kind={s} second_deadline={} pto_ping={} loss_remaining={} close_disarmed={} timers_remaining={} routes_remaining={} long_pto_bytes={} installed_pto_bytes={} installed_handshake_pto_bytes={} protected_bytes={} protected_timers={}\n", .{
+    std.debug.print("[endpoint-timers] first_connection={} first_kind={s} first_deadline={} second_connection={} second_kind={s} second_deadline={} pto_ping={} loss_remaining={} close_disarmed={} timers_remaining={} routes_remaining={} long_pto_bytes={} installed_pto_bytes={} installed_handshake_pto_bytes={} installed_zero_rtt_pto_bytes={} protected_bytes={} protected_timers={}\n", .{
         first.connection_id,
         @tagName(first.timer.kind),
         first.timer.deadline_millis,
@@ -750,6 +795,7 @@ pub fn main() !void {
         long_pto_bytes,
         installed_pto_bytes,
         installed_handshake_pto_bytes,
+        installed_zero_rtt_pto_bytes,
         long_initial.len + long_ack.len + caller_handshake.len + caller_handshake_ack.len + installed_handshake.len + installed_handshake_ack.len + caller_zero.len + caller_zero_ack.len + installed_zero.len + caller_short.len + caller_short_ack.len + ping.len + ack.len + explicit_key_phase_ping.len + explicit_key_phase_ack.len + key_phase_ping.len + key_phase_ack.len,
         protected_timers_remaining,
     });

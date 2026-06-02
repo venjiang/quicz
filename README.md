@@ -156,7 +156,7 @@ experimental.
   `zig build run-pto-recovery`.
 - [Endpoint recovery timers](examples/endpoint_recovery_timers.zig):
   Endpoint-owned recovery timer scheduling, caller-keyed and installed-key
-  protected probe polling, and routed protected receive refresh across
+  protected long/short probe polling, and routed protected receive refresh across
   connection handles. Run with `zig build run-endpoint-recovery-timers`.
 - [Path validation](examples/path_validation.zig): PATH_CHALLENGE/PATH_RESPONSE
   retry, duplicate pending-response suppression, 1200-byte protected

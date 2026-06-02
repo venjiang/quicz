@@ -1498,6 +1498,39 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Service a due Application recovery timer and poll an installed-key 0-RTT probe.
+    ///
+    /// This is the TLS-owned early-data long-packet recovery wakeup bridge.
+    /// The connection owns installed local 0-RTT packet-protection state,
+    /// while the endpoint lifecycle owns the recovery timer wakeup and refresh.
+    pub fn serviceRecoveryTimerAndPollProtectedZeroRttDatagramWithInstalledKeys(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+    ) Error!EndpointProtectedLongRecoveryPollResult {
+        const serviced = try self.serviceRecoveryTimer(connection_id, connection, now_millis);
+        const deadline = serviced orelse return .{
+            .serviced = null,
+            .datagram = null,
+        };
+        if (deadline.timer.space != .application) return error.InvalidPacket;
+
+        const datagram = try self.pollProtectedZeroRttDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+            scid,
+        );
+        return .{
+            .serviced = deadline,
+            .datagram = datagram,
+        };
+    }
+
     /// Service a due Application recovery timer and poll a protected 1-RTT probe.
     ///
     /// This is the caller-keyed short-packet endpoint event-loop bridge for
@@ -19573,6 +19606,95 @@ test "EndpointConnectionLifecycle services and polls installed-key protected Han
         payload_offset += decoded.len;
     }
     try std.testing.expect(found_ping);
+}
+
+test "EndpointConnectionLifecycle services and polls installed-key protected zero RTT PTO probe" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installZeroRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+    });
+    try client.confirmHandshake();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "bye", false);
+    try client.resetStream(stream_id, 19);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 19,
+        .final_size = 3,
+    };
+
+    const first = (try lifecycle.pollProtectedZeroRttDatagramWithInstalledKeys(
+        41,
+        &client,
+        10,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        first,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const deadline = lifecycle.earliestRecoveryDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 41), deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, deadline.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline.timer.kind);
+
+    const early = try lifecycle.serviceRecoveryTimerAndPollProtectedZeroRttDatagramWithInstalledKeys(
+        41,
+        &client,
+        deadline.timer.deadline_millis - 1,
+        &server_dcid,
+        &client_dcid,
+    );
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), early.serviced);
+    try std.testing.expectEqual(@as(?[]u8, null), early.datagram);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const due = try lifecycle.serviceRecoveryTimerAndPollProtectedZeroRttDatagramWithInstalledKeys(
+        41,
+        &client,
+        deadline.timer.deadline_millis,
+        &server_dcid,
+        &client_dcid,
+    );
+    const serviced = due.serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 41), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    const probe = due.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        probe,
+        secrets.client,
+        1,
+        .{ .reset_stream = reset_frame },
+    ));
 }
 
 test "EndpointConnectionLifecycle services and polls protected short PTO probe" {
