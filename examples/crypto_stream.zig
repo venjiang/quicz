@@ -410,7 +410,7 @@ pub fn main() !void {
         &backend_scratch,
         &compatibilities,
     );
-    const compatible_selected = (try compatible_server.selectPeerCompatibleVersion(&compatibilities)) orelse return error.UnexpectedState;
+    const compatible_selected = compatible_progress.peer_compatible_version_selected orelse return error.UnexpectedState;
     const compatible_peer = compatible_server.peerVersionInformation() orelse return error.UnexpectedState;
     std.debug.print("[crypto] backend_compatible_version selected=0x{x} peer_versions={} peer_tp_applied={} peer_max_data={}\n", .{
         @intFromEnum(compatible_selected),

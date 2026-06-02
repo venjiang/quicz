@@ -2870,6 +2870,8 @@ pub const CryptoBackendProgress = struct {
     peer_transport_parameters_bytes: usize = 0,
     /// Whether peer transport parameters were applied during this drive step.
     peer_transport_parameters_applied: bool = false,
+    /// Compatible QUIC version selected while applying peer Version Information.
+    peer_compatible_version_selected: ?packet.Version = null,
     /// Whether Handshake traffic secrets were installed during this drive step.
     handshake_keys_installed: bool = false,
     /// Whether any 0-RTT traffic secret was installed during this drive step.
@@ -10688,11 +10690,11 @@ pub const Connection = struct {
             switch (peer_transport_parameter_policy) {
                 .strict => try self.applyPeerTransportParameterBytes(peer_transport_parameters),
                 .close_on_error => try self.applyPeerTransportParameterBytesOrClose(peer_transport_parameters),
-                .compatible => |compatibilities| _ = try self.applyPeerTransportParameterBytesWithCompatibleVersion(
+                .compatible => |compatibilities| progress.peer_compatible_version_selected = try self.applyPeerTransportParameterBytesWithCompatibleVersion(
                     peer_transport_parameters,
                     compatibilities,
                 ),
-                .compatible_close_on_error => |compatibilities| _ = try self.applyPeerTransportParameterBytesWithCompatibleVersionOrClose(
+                .compatible_close_on_error => |compatibilities| progress.peer_compatible_version_selected = try self.applyPeerTransportParameterBytesWithCompatibleVersionOrClose(
                     peer_transport_parameters,
                     compatibilities,
                 ),
@@ -15922,6 +15924,7 @@ test "driveCryptoBackendInSpace exchanges transport parameter bytes with backend
     try std.testing.expectEqual(progress.local_transport_parameters_bytes, backend.local_transport_parameters.items.len);
     try std.testing.expectEqual(peer_params_out.getWritten().len, progress.peer_transport_parameters_bytes);
     try std.testing.expect(progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, null), progress.peer_compatible_version_selected);
 
     var parsed_local = try transport_parameters.parse(backend.local_transport_parameters.items, std.testing.allocator);
     defer parsed_local.deinit(std.testing.allocator);
@@ -16005,6 +16008,7 @@ test "driveCryptoBackendInSpaceWithCompatibleVersion applies backend peer Versio
 
     try std.testing.expectEqual(peer_params_out.getWritten().len, progress.peer_transport_parameters_bytes);
     try std.testing.expect(progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), progress.peer_compatible_version_selected);
     try std.testing.expectEqual(@as(u64, 4321), server.peer_max_data);
     const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);

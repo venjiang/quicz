@@ -49,7 +49,8 @@ current implementation shape.
   `driveCryptoBackendInSpaceWithCompatibleVersion()` and
   `driveCryptoBackendInSpaceWithCompatibleVersionOrClose()` wrappers route the
   same compatible Version Information policy through `CryptoBackend` peer
-  transport-parameter bytes before backend output is pulled.
+  transport-parameter bytes before backend output is pulled and report the
+  selected version in `CryptoBackendProgress`.
 - Client connections can validate one RFC 8999 Version Negotiation packet, ignore
   unsafe packets that contain the Original Version or mismatched CIDs, select a
   non-reserved mutual version from local `available_versions`, carry that

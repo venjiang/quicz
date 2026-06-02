@@ -44,7 +44,8 @@
   `driveCryptoBackendInSpaceWithCompatibleVersion()` 和
   `driveCryptoBackendInSpaceWithCompatibleVersionOrClose()` wrapper 会把同一
   compatible Version Information policy 接入 `CryptoBackend` 对端
-  transport-parameter bytes 处理，并在应用成功后才拉取 backend output。
+  transport-parameter bytes 处理，并在应用成功后才拉取 backend output，同时在
+  `CryptoBackendProgress` 中报告 selected version。
 - Client 连接现在可以校验一个 RFC 8999 Version Negotiation packet，忽略包含
   Original Version 或 CID 不匹配的不安全 packet，从本端 `available_versions`
   中选择非 reserved 的 mutual version，通过
