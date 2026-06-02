@@ -145,7 +145,7 @@ pub fn main() !void {
   运行：`zig build run-initial-keys`。
 - [Endpoint routing](examples/endpoint_routing.zig)：内存态 DCID、tuple、Version Negotiation、Retry 和 reset routing。
   运行：`zig build run-endpoint-routing`。
-- [UDP endpoint loopback](examples/udp_endpoint_loopback.zig)：socket-backed endpoint routing，覆盖 Version Negotiation、protected follow-up Initial、accepted protected Initial processing、protected server Initial response processing 和 Initial/short-header classification。
+- [UDP endpoint loopback](examples/udp_endpoint_loopback.zig)：socket-backed endpoint routing，覆盖 Version Negotiation、protected follow-up Initial、follow-up Original DCID 证据、accepted protected Initial processing、protected server Initial response processing 和 Initial/short-header classification。
   运行：`zig build run-udp-endpoint-loopback`。
 - [UDP zero-CID loopback](examples/udp_zero_cid_loopback.zig)：基于 loopback UDP 的 zero-length CID tuple routing。
   运行：`zig build run-udp-zero-cid-loopback`。

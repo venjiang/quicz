@@ -201,6 +201,8 @@ pub fn main() !void {
     try require(version_negotiation_result.retired.routes_retired == 1);
     try require(version_negotiation_followup.followup_route.connection_id == 32);
     try require(version_negotiation_initial.handoff.followup_connection.versionNegotiationSelectedVersion() == .v2);
+    const followup_original_dcid = version_negotiation_initial.handoff.followup_connection.originalDestinationConnectionId() orelse return error.UnexpectedState;
+    try require(std.mem.eql(u8, followup_original_dcid, &original_dcid));
     try require(version_negotiation_initial.initial_datagram.len >= 1200);
     try require(client_lifecycle.routeCount() == 1);
     try require(client_lifecycle.recoveryTimerCount() == 1);
@@ -285,11 +287,12 @@ pub fn main() !void {
     try require(server_route.connection_id == 21);
     try require(std.mem.eql(u8, server_route.destination_connection_id.asSlice(), &server_initial_scid));
 
-    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} accepted={} client_route={} server_route={} vn_response_bytes={} followup_initial_bytes={} server_initial_bytes={}\n", .{
+    std.debug.print("[udp-endpoint] client_port={} server_port={} vn_versions={} vn_selected=0x{x} followup_odcid_len={} accepted={} client_route={} server_route={} vn_response_bytes={} followup_initial_bytes={} server_initial_bytes={}\n", .{
         client_local.port,
         server_local.port,
         parsed_version_negotiation.versions.len,
         @intFromEnum(selected_version),
+        followup_original_dcid.len,
         accepted_route.server_source_route.connection_id,
         client_route.connection_id,
         server_route.connection_id,

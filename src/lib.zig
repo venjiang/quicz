@@ -18070,6 +18070,7 @@ test "EndpointConnectionLifecycle emits protected Version Negotiation follow-up 
     try std.testing.expectEqual(packet.Version.v2, result.handoff.followup.version_negotiation.selected_version);
     try std.testing.expectEqual(packet.Version.v2, result.handoff.followup_connection.config.chosen_version);
     try std.testing.expectEqual(@as(u64, 112), result.handoff.followup.followup_route.connection_id);
+    try std.testing.expectEqualStrings(&original_dcid, result.handoff.followup_connection.originalDestinationConnectionId().?);
     try std.testing.expectEqual(@as(usize, 1), result.handoff.followup_connection.sentPacketCount(.initial));
     try std.testing.expectEqual(result.initial_datagram.len, result.handoff.followup_connection.bytesInFlight(.initial));
     try std.testing.expect(result.initial_datagram.len >= min_initial_udp_datagram_len);
