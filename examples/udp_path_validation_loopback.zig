@@ -96,6 +96,32 @@ pub fn main() !void {
     try require(server.outstandingPathChallengeCount() == 1);
     try server_socket.send(io, &new_client_socket.address, challenge_packet);
 
+    try client.sendPing();
+    const pre_validation_packet = (try client.pollProtectedShortDatagram(
+        2,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(pre_validation_packet);
+    try new_client_socket.send(io, &server_socket.address, pre_validation_packet);
+
+    var server_receive_buf: [1500]u8 = undefined;
+    const pre_validation_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
+    const pre_validation_path = try udp4Tuple(server_socket.address, pre_validation_received.from);
+    const pre_validation_result = try server_lifecycle.processRoutedProtectedShortDatagramAndUpdatePath(
+        connection_handle,
+        &server,
+        pre_validation_path,
+        3,
+        secrets.client,
+        pre_validation_received.data,
+    );
+    try require(pre_validation_result.route.connection_id == connection_handle);
+    try require(pre_validation_result.route.path_changed);
+    try require(pre_validation_result.updated_route == null);
+    try require(server.outstandingPathChallengeCount() == 1);
+    try require((try server_lifecycle.routeDatagram(pre_validation_path, pre_validation_received.data)).path_changed);
+
     var client_receive_buf: [1500]u8 = undefined;
     const challenge_received = try new_client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     const challenge_path = try udp4Tuple(new_client_socket.address, challenge_received.from);
@@ -103,7 +129,7 @@ pub fn main() !void {
         connection_handle,
         &client,
         challenge_path,
-        2,
+        4,
         secrets.server,
         challenge_received.data,
     );
@@ -113,21 +139,20 @@ pub fn main() !void {
     try require(client.pendingAckLargest(.application) == 0);
 
     const response_packet = (try client.pollProtectedShortDatagram(
-        3,
+        5,
         &server_dcid,
         secrets.client,
     )) orelse return error.UnexpectedState;
     defer allocator.free(response_packet);
     try new_client_socket.send(io, &server_socket.address, response_packet);
 
-    var server_receive_buf: [1500]u8 = undefined;
     const response_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const response_path = try udp4Tuple(server_socket.address, response_received.from);
     const validation_result = try server_lifecycle.processRoutedProtectedShortDatagramAndUpdatePath(
         connection_handle,
         &server,
         response_path,
-        4,
+        6,
         secrets.client,
         response_received.data,
     );
@@ -138,7 +163,7 @@ pub fn main() !void {
 
     try require(server.outstandingPathChallengeCount() == 0);
     try require(server.bytesInFlight(.application) == 0);
-    try require(server.pendingAckLargest(.application) == 0);
+    try require(server.pendingAckLargest(.application) == 1);
 
     const updated_route = validation_result.updated_route orelse return error.UnexpectedState;
     try require(updated_route.connection_id == connection_handle);
@@ -148,12 +173,14 @@ pub fn main() !void {
     try require(confirmed_route.connection_id == connection_handle);
     try require(!confirmed_route.path_changed);
 
-    std.debug.print("[udp-path] old_client_port={} new_client_port={} server_port={} challenge_bytes={} response_bytes={} path_changed={} endpoint_updated={} server_inflight={}\n", .{
+    std.debug.print("[udp-path] old_client_port={} new_client_port={} server_port={} pre_validation_bytes={} challenge_bytes={} response_bytes={} pre_validation_updated={} path_changed={} endpoint_updated={} server_inflight={}\n", .{
         old_client_local.port,
         new_client_local.port,
         server_local.port,
+        pre_validation_received.data.len,
         challenge_packet.len,
         response_received.data.len,
+        pre_validation_result.updated_route != null,
         migrated_route.path_changed,
         !confirmed_route.path_changed,
         server.bytesInFlight(.application),
