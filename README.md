@@ -236,7 +236,8 @@ experimental.
   `zig build run-udp-handshake-done-loopback`.
 - [UDP flow control loopback](examples/udp_flow_control_loopback.zig):
   Lifecycle-routed protected STREAM/BLOCKED/MAX flow-control exchange over
-  loopback UDP. Run with `zig build run-udp-flow-control-loopback`.
+  loopback UDP, including resumed FIN final-size evidence. Run with
+  `zig build run-udp-flow-control-loopback`.
 - [UDP spin bit loopback](examples/udp_spin_bit_loopback.zig): Configurable
   single-path spin-bit signaling over lifecycle-routed protected short packets.
   Run with `zig build run-udp-spin-bit-loopback`.

@@ -169,7 +169,7 @@ pub fn main() !void {
   运行：`zig build run-udp-crypto-backend-loopback`。
 - [UDP HANDSHAKE_DONE loopback](examples/udp_handshake_done_loopback.zig)：socket-backed lifecycle-routed installed-key HANDSHAKE_DONE confirmation、Handshake key discard 和 ACK cleanup。
   运行：`zig build run-udp-handshake-done-loopback`。
-- [UDP flow control loopback](examples/udp_flow_control_loopback.zig)：lifecycle-routed protected STREAM/BLOCKED/MAX flow-control loopback UDP 交换。
+- [UDP flow control loopback](examples/udp_flow_control_loopback.zig)：lifecycle-routed protected STREAM/BLOCKED/MAX flow-control loopback UDP 交换，并输出恢复发送后的 FIN final-size 证据。
   运行：`zig build run-udp-flow-control-loopback`。
 - [UDP spin bit loopback](examples/udp_spin_bit_loopback.zig)：lifecycle-routed protected short packet 上的可配置单路径 spin-bit signaling。
   运行：`zig build run-udp-spin-bit-loopback`。

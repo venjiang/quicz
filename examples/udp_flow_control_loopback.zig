@@ -261,6 +261,9 @@ pub fn main() !void {
 
     const resumed_len = (try server.recvOnStream(stream_id, &read_buf)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, read_buf[0..resumed_len], "!"));
+    const final_size = (try server.recvStreamFinalSize(stream_id)) orelse return error.UnexpectedState;
+    try require(final_size == 6);
+    try require(try server.recvStreamFinished(stream_id));
 
     const final_ack = try sendServerPacket(
         io,
@@ -277,7 +280,7 @@ pub fn main() !void {
     );
     try require(client.bytesInFlight(.application) == 0);
 
-    std.debug.print("[udp-flow] client_port={} server_port={} stream={} stream_packet={} blocked_packet={} max_data_packet={} max_stream_packet={} resumed_packet={} final_ack={} peer_blocked={} client_inflight={}\n", .{
+    std.debug.print("[udp-flow] client_port={} server_port={} stream={} stream_packet={} blocked_packet={} max_data_packet={} max_stream_packet={} resumed_packet={} final_ack={} peer_blocked={} final_size={} finished={} client_inflight={}\n", .{
         client_local.port,
         server_local.port,
         stream_id,
@@ -288,6 +291,8 @@ pub fn main() !void {
         resumed_packet,
         final_ack,
         server.peerStreamDataBlockedLimit(stream_id).?,
+        final_size,
+        try server.recvStreamFinished(stream_id),
         client.bytesInFlight(.application),
     });
 }
