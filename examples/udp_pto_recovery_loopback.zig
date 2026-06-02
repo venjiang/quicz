@@ -240,6 +240,43 @@ fn packetContainsCrypto(
     return false;
 }
 
+fn zeroRttPacketContainsResetStream(
+    allocator: std.mem.Allocator,
+    packet: []const u8,
+    keys: quicz.protection.Aes128PacketProtectionKeys,
+    expected_packet_number: u64,
+    stream_id: u64,
+    application_error_code: u64,
+    final_size: u64,
+) !bool {
+    var opened = try quicz.protection.unprotectLongPacketAes128(
+        allocator,
+        keys,
+        packet,
+        expected_packet_number,
+    );
+    defer quicz.protection.deinitProtectedLongPacket(&opened, allocator);
+    try require(opened.packet.header.packet_type == .zero_rtt);
+
+    var offset: usize = 0;
+    while (offset < opened.packet.plaintext.len) {
+        var decoded = try quicz.frame.decodeFrameSlice(opened.packet.plaintext[offset..], allocator);
+        defer quicz.frame.deinitFrame(&decoded.frame, allocator);
+        if (decoded.len == 0) return error.UnexpectedState;
+        offset += decoded.len;
+
+        switch (decoded.frame) {
+            .reset_stream => |reset| {
+                return reset.stream_id == stream_id and
+                    reset.application_error_code == application_error_code and
+                    reset.final_size == final_size;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
     const client_connection_id: u64 = 41;
@@ -264,6 +301,8 @@ pub fn main() !void {
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const long_client_dcid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const long_server_dcid = [_]u8{ 0xba, 0xdb, 0xee, 0xf0 };
+    const zero_rtt_client_dcid = [_]u8{ 0x24, 0x31, 0x24, 0x41 };
+    const zero_rtt_server_dcid = [_]u8{ 0x24, 0x51, 0x24, 0x61 };
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
     var client = try quicz.Connection.init(allocator, .client, .{
@@ -453,6 +492,138 @@ pub fn main() !void {
     try require(long_client.bytesInFlight(.handshake) == 0);
     try long_client_lifecycle.armRecoveryTimerFromConnection(long_client_connection_id, &long_client);
     try require(long_client_lifecycle.recoveryTimerCount() == 0);
+
+    const zero_rtt_client_connection_id: u64 = 241;
+    const zero_rtt_server_connection_id: u64 = 251;
+    var zero_rtt_client = try quicz.Connection.init(allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer zero_rtt_client.deinit();
+    var zero_rtt_server = try quicz.Connection.init(allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer zero_rtt_server.deinit();
+    try zero_rtt_server.validatePeerAddress();
+    try zero_rtt_client.installZeroRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+    });
+    try zero_rtt_server.installZeroRttTrafficSecrets(.{
+        .peer = secrets.client.secret,
+    });
+    try zero_rtt_server.acceptZeroRtt();
+    try zero_rtt_client.confirmHandshake();
+    try zero_rtt_server.confirmHandshake();
+
+    var zero_rtt_client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer zero_rtt_client_lifecycle.deinit();
+    var zero_rtt_server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer zero_rtt_server_lifecycle.deinit();
+    try zero_rtt_client_lifecycle.registerConnectionId(zero_rtt_client_connection_id, &zero_rtt_client_dcid, client_path, .{
+        .active_migration_disabled = true,
+    });
+    try zero_rtt_server_lifecycle.registerConnectionId(zero_rtt_server_connection_id, &zero_rtt_server_dcid, server_path, .{
+        .active_migration_disabled = true,
+    });
+
+    const zero_rtt_stream_id = try zero_rtt_client.openStream();
+    try zero_rtt_client.sendOnStream(zero_rtt_stream_id, "bye", false);
+    try zero_rtt_client.resetStream(zero_rtt_stream_id, 19);
+    const zero_rtt_first = (try zero_rtt_client_lifecycle.pollProtectedZeroRttDatagramWithInstalledKeys(
+        zero_rtt_client_connection_id,
+        &zero_rtt_client,
+        900,
+        &zero_rtt_server_dcid,
+        &zero_rtt_client_dcid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(zero_rtt_first);
+    try require(try zeroRttPacketContainsResetStream(
+        allocator,
+        zero_rtt_first,
+        secrets.client,
+        0,
+        zero_rtt_stream_id,
+        19,
+        3,
+    ));
+    try client_socket.send(io, &server_socket.address, zero_rtt_first);
+    const zero_rtt_first_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const zero_rtt_first_route = try zero_rtt_server_lifecycle.processRoutedProtectedZeroRttDatagramWithInstalledKeys(
+        zero_rtt_server_connection_id,
+        &zero_rtt_server,
+        zero_rtt_first_received.path,
+        901,
+        zero_rtt_first_received.data,
+    );
+    try require(zero_rtt_first_route.connection_id == zero_rtt_server_connection_id);
+    try require(std.mem.eql(u8, zero_rtt_first_route.destination_connection_id.asSlice(), &zero_rtt_server_dcid));
+    try require(zero_rtt_server.pendingAckLargest(.application) == 0);
+
+    const zero_rtt_timer = zero_rtt_client_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
+    try require(zero_rtt_timer.connection_id == zero_rtt_client_connection_id);
+    try require(zero_rtt_timer.timer.space == .application);
+    try require(zero_rtt_timer.timer.kind == .pto);
+    const zero_rtt_pto_deadline = zero_rtt_timer.timer.deadline_millis;
+    const zero_rtt_probe_result = try zero_rtt_client_lifecycle.serviceRecoveryTimerAndPollProtectedZeroRttDatagramWithInstalledKeys(
+        zero_rtt_client_connection_id,
+        &zero_rtt_client,
+        zero_rtt_pto_deadline,
+        &zero_rtt_server_dcid,
+        &zero_rtt_client_dcid,
+    );
+    const zero_rtt_serviced = zero_rtt_probe_result.serviced orelse return error.UnexpectedState;
+    try require(zero_rtt_serviced.connection_id == zero_rtt_client_connection_id);
+    try require(zero_rtt_serviced.timer.space == .application);
+    try require(zero_rtt_serviced.timer.kind == .pto);
+    const zero_rtt_probe = zero_rtt_probe_result.datagram orelse return error.UnexpectedState;
+    defer allocator.free(zero_rtt_probe);
+    try require(zero_rtt_client.sentPacketCount(.application) == 2);
+    try require(zero_rtt_client_lifecycle.recoveryTimerCount() == 1);
+    try require(try zeroRttPacketContainsResetStream(
+        allocator,
+        zero_rtt_probe,
+        secrets.client,
+        1,
+        zero_rtt_stream_id,
+        19,
+        3,
+    ));
+    try client_socket.send(io, &server_socket.address, zero_rtt_probe);
+    const zero_rtt_probe_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const zero_rtt_probe_route = try zero_rtt_server_lifecycle.processRoutedProtectedZeroRttDatagramWithInstalledKeys(
+        zero_rtt_server_connection_id,
+        &zero_rtt_server,
+        zero_rtt_probe_received.path,
+        zero_rtt_pto_deadline + 2,
+        zero_rtt_probe_received.data,
+    );
+    try require(zero_rtt_probe_route.connection_id == zero_rtt_server_connection_id);
+    try require(std.mem.eql(u8, zero_rtt_probe_route.destination_connection_id.asSlice(), &zero_rtt_server_dcid));
+    try require(zero_rtt_server.pendingAckLargest(.application) == 1);
+
+    const zero_rtt_ack = (try zero_rtt_server_lifecycle.pollProtectedShortDatagram(
+        zero_rtt_server_connection_id,
+        &zero_rtt_server,
+        zero_rtt_pto_deadline + 3,
+        &zero_rtt_client_dcid,
+        secrets.server,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(zero_rtt_ack);
+    try server_socket.send(io, &client_socket.address, zero_rtt_ack);
+    const zero_rtt_ack_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+    const zero_rtt_ack_route = try zero_rtt_client_lifecycle.processRoutedProtectedShortDatagram(
+        zero_rtt_client_connection_id,
+        &zero_rtt_client,
+        zero_rtt_ack_received.path,
+        zero_rtt_pto_deadline + 4,
+        secrets.server,
+        zero_rtt_ack_received.data,
+    );
+    try require(zero_rtt_ack_route.connection_id == zero_rtt_client_connection_id);
+    try require(std.mem.eql(u8, zero_rtt_ack_route.destination_connection_id.asSlice(), &zero_rtt_client_dcid));
+    try require(zero_rtt_client.sentPacketCount(.application) == 0);
+    try require(zero_rtt_client.bytesInFlight(.application) == 0);
+    try zero_rtt_client_lifecycle.armRecoveryTimerFromConnection(zero_rtt_client_connection_id, &zero_rtt_client);
+    try require(zero_rtt_client_lifecycle.recoveryTimerCount() == 0);
 
     try client.sendPing();
     const first_ping = (try client.pollProtectedShortDatagram(10, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
@@ -775,12 +946,15 @@ pub fn main() !void {
     try client_lifecycle.armRecoveryTimerFromConnection(client_connection_id, &client);
     try require(client_lifecycle.recoveryTimerCount() == 0);
 
-    std.debug.print("[udp-pto] client_port={} server_port={} long_pto_deadline={} long_pto_bytes={} long_ack_bytes={} ping_deadline={} pto_ping_bytes={} stream_deadline={} stream_probe_bytes={} retransmit_deadline={} retransmit_probe_bytes={} crypto_deadline={} crypto_probe_bytes={} received=\"{s}\" retransmitted=\"{s}\" crypto=\"{s}\" client_inflight={} timers_remaining={}\n", .{
+    std.debug.print("[udp-pto] client_port={} server_port={} long_pto_deadline={} long_pto_bytes={} long_ack_bytes={} zero_rtt_deadline={} zero_rtt_probe_bytes={} zero_rtt_ack_bytes={} ping_deadline={} pto_ping_bytes={} stream_deadline={} stream_probe_bytes={} retransmit_deadline={} retransmit_probe_bytes={} crypto_deadline={} crypto_probe_bytes={} received=\"{s}\" retransmitted=\"{s}\" crypto=\"{s}\" client_inflight={} timers_remaining={}\n", .{
         client_local.port,
         server_local.port,
         long_pto_deadline,
         long_pto_probe.len,
         long_pto_ack.len,
+        zero_rtt_pto_deadline,
+        zero_rtt_probe.len,
+        zero_rtt_ack.len,
         ping_deadline,
         pto_ping.len,
         stream_deadline,
