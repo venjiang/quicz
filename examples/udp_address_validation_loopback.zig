@@ -148,15 +148,18 @@ pub fn main() !void {
         .local = server_path.local,
         .remote = quicz.endpoint.Udp4Address.init(client_local.octets, changed_client_port),
     };
+    var path_rejected = false;
     if (token_policy.validateTokenForPath(.new_token, 15, changed_path, stored_token)) |_| {
         return error.UnexpectedState;
     } else |err| switch (err) {
-        error.InvalidToken => {},
+        error.InvalidToken => path_rejected = true,
         else => return err,
     }
+    try require(path_rejected);
 
     const validation = try token_policy.validateTokenForPath(.new_token, 16, server_path, stored_token);
-    try require(validation.originating_version == .v1);
+    const v1_validated = validation.originating_version == .v1;
+    try require(v1_validated);
     var secret_set = try token_policy.exportSecretSet(allocator);
     defer secret_set.deinit(allocator);
     var replay_snapshot = try token_policy.exportReplayFilter(allocator);
@@ -172,9 +175,12 @@ pub fn main() !void {
     defer future_server.deinit();
     try future_server.sendPing();
     var future_out: [16]u8 = undefined;
-    try require((try future_server.pollTx(17, &future_out)) == null);
+    const blocked_before_validation = (try future_server.pollTx(17, &future_out)) == null;
+    try require(blocked_before_validation);
     try future_server.validatePeerAddress();
     const future_ping = (try future_server.pollTx(18, &future_out)) orelse return error.UnexpectedState;
+    const unblocked_after_validation = future_ping.len > 0;
+    try require(unblocked_after_validation);
 
     var replay_rejected = false;
     if (restored_policy.validateTokenForPath(.new_token, 19, server_path, stored_token)) |_| {
@@ -206,13 +212,18 @@ pub fn main() !void {
     const v2_validation = try token_policy.validateTokenForPathForVersion(.new_token, .v2, 22, server_path, v2_token);
     try require(v2_validation.originating_version == .v2);
 
-    std.debug.print("[udp-address] client_port={} server_port={} handshake_bytes={} token_bytes={} stored_token_len={} route={} future_ping_bytes={} previous_secrets={} replay_entries={} replay_rejected={} version_rejected={} v2_validated={}\n", .{
+    std.debug.print("[udp-address] client_port={} server_port={} handshake_bytes={} token_bytes={} stored_token_len={} route={} handshake_confirmed={} path_rejected={} v1_validated={} blocked_before_validation={} unblocked_after_validation={} future_ping_bytes={} previous_secrets={} replay_entries={} replay_rejected={} version_rejected={} v2_validated={}\n", .{
         client_local.port,
         server_local.port,
         handshake_done.len,
         new_token.len,
         stored_token.len,
         token_route.connection_id,
+        client.handshakeConfirmed(),
+        path_rejected,
+        v1_validated,
+        blocked_before_validation,
+        unblocked_after_validation,
         future_ping.len,
         secret_set.previous_secrets.len,
         replay_snapshot.fingerprints.len,

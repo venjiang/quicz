@@ -133,7 +133,7 @@ pub fn main() !void {
   运行：`zig build run-path-validation`。
 - [Address validation](examples/address_validation.zig)：HMAC address-validation token、version binding、secret rotation、replay snapshot 和 lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery。
   运行：`zig build run-address-validation`。
-- [UDP address validation loopback](examples/udp_address_validation_loopback.zig)：socket-backed lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery、NEW_TOKEN path/version binding、secret rotation、replay snapshot restore rejection 和 future address-validation unblocking。
+- [UDP address validation loopback](examples/udp_address_validation_loopback.zig)：socket-backed lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery、带 changed-path rejection 证据的 NEW_TOKEN path/version binding、secret rotation、replay snapshot restore rejection 和 future address-validation block/unblock 证据。
   运行：`zig build run-udp-address-validation-loopback`。
 - [Retry token](examples/retry_token.zig)：Retry datagram 处理、token 复用和 Retry CID transport-parameter byte 校验。
   运行：`zig build run-retry-token`。
