@@ -191,7 +191,7 @@ pub fn main() !void {
   运行：`zig build run-udp-retry-loopback`。
 - [UDP close lifecycle loopback](examples/udp_close_lifecycle_loopback.zig)：lifecycle-routed protected close delivery、protected receive auto-close、route retirement 和 stateless reset follow-up。
   运行：`zig build run-udp-close-lifecycle-loopback`。
-- [UDP stateless reset loopback](examples/udp_stateless_reset_loopback.zig)：socket-backed reset trigger delivery、reset emission 和 client token match。
+- [UDP stateless reset loopback](examples/udp_stateless_reset_loopback.zig)：socket-backed active-route suppression、reset trigger delivery、reset emission 和 client token match。
   运行：`zig build run-udp-stateless-reset-loopback`。
 
 ## 高级主题

@@ -270,8 +270,9 @@ experimental.
   route retirement, and stateless reset follow-up. Run with
   `zig build run-udp-close-lifecycle-loopback`.
 - [UDP stateless reset loopback](examples/udp_stateless_reset_loopback.zig):
-  Socket-backed reset trigger delivery, reset emission, and client token match.
-  Run with `zig build run-udp-stateless-reset-loopback`.
+  Socket-backed active-route suppression, reset trigger delivery, reset
+  emission, and client token match. Run with
+  `zig build run-udp-stateless-reset-loopback`.
 
 ## Advanced Topics
 
