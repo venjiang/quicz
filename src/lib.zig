@@ -762,7 +762,8 @@ pub const EndpointConnectionLifecycle = struct {
     /// protected Initial before endpoint routes are installed, so malformed
     /// Initial packets do not leave active routes behind. After successful
     /// packet processing, the lifecycle owner records the received UDP datagram
-    /// length for the modeled server anti-amplification budget, registers the
+    /// length for the modeled server anti-amplification budget, services any
+    /// recovery timer that expired while the server was blocked, registers the
     /// Original DCID and server Source CID routes, then mirrors the connection
     /// recovery timer. TLS transcript ownership and address-token policy remain
     /// caller-owned.
@@ -786,7 +787,7 @@ pub const EndpointConnectionLifecycle = struct {
             .{ .initial = initial_secrets.client },
             datagram,
         );
-        try connection.recordPeerAddressBytesReceived(datagram.len);
+        _ = try connection.recordPeerAddressDatagramReceived(now_millis, datagram.len);
         const accepted_routes = try self.registerAcceptedInitialConnectionIds(
             connection_id,
             initial_accept,
@@ -4047,6 +4048,23 @@ pub const Connection = struct {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (!self.isAntiAmplificationLimited()) return;
         self.peer_address_bytes_received = std.math.add(usize, self.peer_address_bytes_received, bytes) catch std.math.maxInt(usize);
+    }
+
+    /// Record one received datagram and immediately service an expired recovery timer.
+    ///
+    /// RFC 9002 requires a server that was blocked by anti-amplification limits
+    /// to re-arm PTO when a datagram grants new send credit. If that PTO would
+    /// already have expired while the server was blocked, this helper services
+    /// the aggregate loss detection timer with the supplied controlled clock.
+    pub fn recordPeerAddressDatagramReceived(
+        self: *Connection,
+        now_millis: i64,
+        bytes: usize,
+    ) Error!?LossDetectionTimerDeadline {
+        const was_at_limit = self.serverAtAntiAmplificationLimit();
+        try self.recordPeerAddressBytesReceived(bytes);
+        if (!was_at_limit) return null;
+        return try self.serviceLossDetectionTimer(now_millis);
     }
 
     /// Mark the peer address as validated and lift the modeled anti-amplification limit.
@@ -16159,6 +16177,55 @@ test "server anti-amplification limit disarms PTO until more peer bytes arrive" 
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(?usize, 2), server.antiAmplificationLimitRemaining());
+}
+
+test "received datagram re-arms anti-amplification PTO and services expired timer" {
+    var rearmed = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer rearmed.deinit();
+
+    try rearmed.recordPeerAddressBytesReceived(1);
+    _ = try rearmed.recordPacketSentInSpace(.initial, 10, 3);
+    try std.testing.expectEqual(@as(?usize, 0), rearmed.antiAmplificationLimitRemaining());
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), rearmed.lossDetectionTimerDeadlineMillis());
+
+    try std.testing.expectEqual(
+        @as(?LossDetectionTimerDeadline, null),
+        try rearmed.recordPeerAddressDatagramReceived(100, 1),
+    );
+    const rearmed_timer = rearmed.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, rearmed_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, rearmed_timer.kind);
+    try std.testing.expectEqual(@as(i64, 310), rearmed_timer.deadline_millis);
+    try std.testing.expectEqual(@as(usize, 0), rearmed.initial_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 0), rearmed.initial_packet_space.recovery_state.pto_count);
+
+    var expired = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer expired.deinit();
+
+    try expired.recordPeerAddressBytesReceived(1);
+    _ = try expired.recordPacketSentInSpace(.initial, 10, 3);
+    try std.testing.expectEqual(@as(?usize, 0), expired.antiAmplificationLimitRemaining());
+
+    const serviced = (try expired.recordPeerAddressDatagramReceived(10_000, 1)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, serviced.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.kind);
+    try std.testing.expectEqual(@as(i64, 310), serviced.deadline_millis);
+    try std.testing.expectEqual(@as(usize, 1), expired.initial_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), expired.initial_packet_space.recovery_state.pto_count);
+
+    var out_buf: [16]u8 = undefined;
+    const probe = (try expired.pollTxInSpace(.initial, 10_001, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(probe, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(?usize, 2), expired.antiAmplificationLimitRemaining());
 }
 
 test "serviceLossDetectionTimer is no-op before aggregate deadline" {

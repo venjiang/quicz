@@ -129,9 +129,8 @@ pub fn main() !void {
     if (limited_server.initial_packet_space.pending_ping_count != 0) return error.PtoRecoveryExampleFailed;
     if (limited_server.initial_packet_space.recovery_state.pto_count != 0) return error.PtoRecoveryExampleFailed;
 
-    try limited_server.recordPeerAddressBytesReceived(1);
-    const anti_amp_pto_deadline = limited_server.ptoDeadlineMillis(.initial) orelse return error.PtoRecoveryExampleFailed;
-    const anti_amp_serviced = (try limited_server.serviceLossDetectionTimer(anti_amp_pto_deadline)) orelse return error.PtoRecoveryExampleFailed;
+    const anti_amp_serviced = (try limited_server.recordPeerAddressDatagramReceived(10_000, 1)) orelse return error.PtoRecoveryExampleFailed;
+    const anti_amp_pto_deadline = anti_amp_serviced.deadline_millis;
     if (anti_amp_serviced.space != .initial) return error.PtoRecoveryExampleFailed;
     if (anti_amp_serviced.kind != .pto) return error.PtoRecoveryExampleFailed;
     if (limited_server.initial_packet_space.pending_ping_count != 1) return error.PtoRecoveryExampleFailed;
@@ -146,7 +145,7 @@ pub fn main() !void {
     }
 
     std.debug.print(
-        "[pto] anti-amplification limited PTO disarmed until credit deadline={d} probe={d}\n",
+        "[pto] anti-amplification unblock serviced expired PTO deadline={d} probe={d}\n",
         .{ anti_amp_pto_deadline, anti_amp_probe.len },
     );
 
