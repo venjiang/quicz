@@ -269,7 +269,7 @@ experimental.
   receives. Run with `zig build run-udp-stream-retransmission-loopback`.
 - [UDP key update loopback](examples/udp_key_update_loopback.zig):
   Lifecycle-routed installed-key key update, key phase advancement, and ACK
-  gating with observable ACK threshold evidence. Run with
+  gating with observable ACK threshold and generation-count evidence. Run with
   `zig build run-udp-key-update-loopback`.
 - [UDP path validation loopback](examples/udp_path_validation_loopback.zig):
   Lifecycle-routed PATH_CHALLENGE/PATH_RESPONSE validation-driven route update

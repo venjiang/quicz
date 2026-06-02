@@ -4906,6 +4906,18 @@ pub const Connection = struct {
         return null;
     }
 
+    /// Return the number of installed local 1-RTT send key updates applied.
+    pub fn localOneRttKeyUpdateCount(self: Connection) ?u64 {
+        if (self.local_one_rtt_key_phase_state) |state| return state.keyUpdateCount();
+        return null;
+    }
+
+    /// Return the number of installed peer 1-RTT receive key updates applied.
+    pub fn peerOneRttKeyUpdateCount(self: Connection) ?u64 {
+        if (self.peer_one_rtt_key_phase_state) |state| return state.keyUpdateCount();
+        return null;
+    }
+
     /// Return the packet-number threshold that must be ACKed before another
     /// local installed-key 1-RTT key update can be initiated.
     ///
@@ -24086,8 +24098,11 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     try client.confirmHandshake();
     try server.confirmHandshake();
     try std.testing.expectEqual(@as(?u64, null), client.pendingOneRttKeyUpdateAckThreshold());
+    try std.testing.expectEqual(@as(?u64, 0), client.localOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?u64, 0), server.peerOneRttKeyUpdateCount());
     try client.initiateOneRttKeyUpdate();
     try std.testing.expectEqual(@as(?bool, true), client.localOneRttKeyPhase());
+    try std.testing.expectEqual(@as(?u64, 1), client.localOneRttKeyUpdateCount());
     try std.testing.expectEqual(@as(?u64, 0), client.pendingOneRttKeyUpdateAckThreshold());
     try std.testing.expectError(error.InvalidPacket, client.initiateOneRttKeyUpdate());
 
@@ -24098,6 +24113,7 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(ping);
     try server.processProtectedShortDatagramWithInstalledKeys(11, server_dcid.len, ping);
+    try std.testing.expectEqual(@as(?u64, 1), server.peerOneRttKeyUpdateCount());
     const ack = (try server.pollProtectedShortDatagramWithInstalledKeys(
         12,
         &client_dcid,
@@ -24108,6 +24124,7 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
 
     try client.initiateOneRttKeyUpdate();
     try std.testing.expectEqual(@as(?bool, false), client.localOneRttKeyPhase());
+    try std.testing.expectEqual(@as(?u64, 2), client.localOneRttKeyUpdateCount());
     try std.testing.expectEqual(@as(?u64, 1), client.pendingOneRttKeyUpdateAckThreshold());
 }
 

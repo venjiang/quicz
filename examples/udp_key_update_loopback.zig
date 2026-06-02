@@ -121,6 +121,8 @@ pub fn main() !void {
 
     try client.initiateOneRttKeyUpdate();
     try require(client.localOneRttKeyPhase().?);
+    const first_client_update_count = client.localOneRttKeyUpdateCount() orelse return error.UnexpectedState;
+    try require(first_client_update_count == 1);
     const first_update_ack_threshold = client.pendingOneRttKeyUpdateAckThreshold() orelse return error.UnexpectedState;
     try require(first_update_ack_threshold == 0);
     try expectInvalidSecondUpdate(&client);
@@ -151,6 +153,8 @@ pub fn main() !void {
     try require(ping_route.connection_id == 51);
     try require(std.mem.eql(u8, ping_route.destination_connection_id.asSlice(), &server_dcid));
     try require(server.peerOneRttKeyPhase().?);
+    const server_peer_update_count = server.peerOneRttKeyUpdateCount() orelse return error.UnexpectedState;
+    try require(server_peer_update_count == 1);
     try require(server.pendingAckLargest(.application) == 0);
 
     const ack = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
@@ -180,16 +184,21 @@ pub fn main() !void {
 
     try client.initiateOneRttKeyUpdate();
     try require(client.localOneRttKeyPhase().? == false);
+    const second_client_update_count = client.localOneRttKeyUpdateCount() orelse return error.UnexpectedState;
+    try require(second_client_update_count == 2);
     const second_update_ack_threshold = client.pendingOneRttKeyUpdateAckThreshold() orelse return error.UnexpectedState;
     try require(second_update_ack_threshold == 1);
 
-    std.debug.print("[udp-key-update] client_port={} server_port={} ping_bytes={} ack_bytes={} first_ack_threshold={} ack_gate_cleared={} second_ack_threshold={} ping_key_phase={} ack_key_phase={} server_peer_phase={} client_next_phase={} client_inflight={}\n", .{
+    std.debug.print("[udp-key-update] client_port={} server_port={} ping_bytes={} ack_bytes={} first_update_count={} first_ack_threshold={} server_peer_update_count={} ack_gate_cleared={} second_update_count={} second_ack_threshold={} ping_key_phase={} ack_key_phase={} server_peer_phase={} client_next_phase={} client_inflight={}\n", .{
         client_local.port,
         server_local.port,
         key_update_ping.len,
         ack.len,
+        first_client_update_count,
         first_update_ack_threshold,
+        server_peer_update_count,
         ack_gate_cleared,
+        second_client_update_count,
         second_update_ack_threshold,
         ping_key_phase,
         ack_key_phase,
