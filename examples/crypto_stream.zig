@@ -361,7 +361,8 @@ pub fn main() !void {
     var backend_payload_buf: [96]u8 = undefined;
     var backend_output: [32]u8 = undefined;
     var backend_output_len: usize = 0;
-    while (try bridged.pollTxInSpace(.handshake, 105, &backend_payload_buf)) |payload| {
+    while (!bridged.packetNumberSpaceDiscarded(.handshake)) {
+        const payload = (try bridged.pollTxInSpace(.handshake, 105, &backend_payload_buf)) orelse break;
         try appendCryptoPayload(gpa, payload, &backend_output, &backend_output_len);
     }
     std.debug.print("[crypto] backend_bridge inbound={s} outbound={s} in_chunks={} out_chunks={} local_tp={} peer_tp={} peer_tp_applied={} handshake_keys={} zero_rtt_keys={} one_rtt_keys={} confirmed={} state={s}\n", .{
@@ -400,6 +401,42 @@ pub fn main() !void {
         confirmed_no_output.packetNumberSpaceDiscarded(.handshake),
         confirmed_progress.handshake_keys_installed,
         confirmed_no_output.hasHandshakeProtectionKeys(),
+    });
+
+    var confirmed_with_output = try quicz.Connection.init(gpa, .server, .{});
+    defer confirmed_with_output.deinit();
+    try confirmed_with_output.validatePeerAddress();
+    try processCryptoFrame(&confirmed_with_output, .handshake, 107, 0, "client hello");
+    var confirmed_output_backend = MockCryptoBackend{
+        .outbound = "server finished",
+        .handshake_traffic_secrets = .{
+            .local = initial_secrets.server.secret,
+            .peer = initial_secrets.client.secret,
+        },
+    };
+    const confirmed_output_progress = try confirmed_with_output.driveCryptoBackendInSpace(
+        .handshake,
+        confirmed_output_backend.backend(),
+        &backend_scratch,
+    );
+    if (confirmed_with_output.packetNumberSpaceDiscarded(.handshake)) return error.UnexpectedState;
+    const keys_before_confirmed_output_send = confirmed_with_output.hasHandshakeProtectionKeys();
+    var confirmed_output_buf: [96]u8 = undefined;
+    var confirmed_output_crypto: [32]u8 = undefined;
+    var confirmed_output_crypto_len: usize = 0;
+    const confirmed_output_payload = (try confirmed_with_output.pollTxInSpace(
+        .handshake,
+        108,
+        &confirmed_output_buf,
+    )) orelse return error.UnexpectedState;
+    try appendCryptoPayload(gpa, confirmed_output_payload, &confirmed_output_crypto, &confirmed_output_crypto_len);
+    if (!confirmed_with_output.packetNumberSpaceDiscarded(.handshake)) return error.UnexpectedState;
+    std.debug.print("[crypto] backend_confirmed_with_output outbound={s} confirmed={} keys_before_send={} discarded_after_send={} keys_present={}\n", .{
+        confirmed_output_crypto[0..confirmed_output_crypto_len],
+        confirmed_output_progress.handshake_confirmed,
+        keys_before_confirmed_output_send,
+        confirmed_with_output.packetNumberSpaceDiscarded(.handshake),
+        confirmed_with_output.hasHandshakeProtectionKeys(),
     });
 
     var close_on_bad_tp = try quicz.Connection.init(gpa, .server, .{});

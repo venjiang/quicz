@@ -130,8 +130,8 @@ experimental.
   `zig build run-stop-sending`.
 - [CRYPTO streams](examples/crypto_stream.zig): Per-space CRYPTO buffering,
   receive-buffer overflow auto-close, mock backend handoff, protected backend
-  transport-parameter auto-close, and protected CRYPTO flow. Run with
-  `zig build run-crypto-stream`.
+  transport-parameter auto-close, backend-confirmed Handshake key discard, and
+  protected CRYPTO flow. Run with `zig build run-crypto-stream`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
   long/short close, invalid ACK/ACK_ECN-range auto-close, semantic frame-error
   auto-close including invalid ACK/ACK_ECN, 0-RTT ACK/ACK_ECN packet-type

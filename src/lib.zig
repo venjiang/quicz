@@ -5716,6 +5716,14 @@ pub const Connection = struct {
         self.discardPacketNumberSpaceState(.initial);
     }
 
+    fn maybeDiscardHandshakeAfterConfirmedCryptoSent(self: *Connection, space: PacketNumberSpace) void {
+        if (space != .handshake or !self.handshake_confirmed or self.isClosingOrClosed()) return;
+
+        const packet_space = self.packetNumberSpace(.handshake);
+        if (packet_space.discarded.* or packet_space.crypto_send_queue.items.len != 0) return;
+        self.discardPacketNumberSpaceState(.handshake);
+    }
+
     fn packetNumberSpace(self: *Connection, space: PacketNumberSpace) PacketNumberSpaceView {
         return switch (space) {
             .initial => .{
@@ -7658,6 +7666,7 @@ pub const Connection = struct {
             self.recordLocalInitialSourceConnectionId(built.local_initial_source_connection_id[0..len]);
         }
         self.maybeDiscardInitialAfterHandshakePacketSent(built.space);
+        self.maybeDiscardHandshakeAfterConfirmedCryptoSent(built.space);
     }
 
     fn buildNextProtectedShortPacket(
@@ -12294,6 +12303,7 @@ pub const Connection = struct {
         self.recordPeerAddressBytesSent(written.len);
         self.recordPacketActivity(now_millis);
         self.maybeDiscardInitialAfterHandshakePacketSent(space);
+        self.maybeDiscardHandshakeAfterConfirmedCryptoSent(space);
         return written;
     }
 
@@ -14737,7 +14747,8 @@ test "driveCryptoBackendInSpace delivers reassembled CRYPTO and queues backend o
     var payload_buf: [64]u8 = undefined;
     var collected: [32]u8 = undefined;
     var collected_len: usize = 0;
-    while (try conn.pollTxInSpace(.handshake, 2, &payload_buf)) |payload| {
+    while (!conn.packetNumberSpaceDiscarded(.handshake)) {
+        const payload = (try conn.pollTxInSpace(.handshake, 2, &payload_buf)) orelse break;
         var payload_offset: usize = 0;
         while (payload_offset < payload.len) {
             var decoded = try frame.decodeFrameSlice(payload[payload_offset..], std.testing.allocator);
@@ -14754,6 +14765,7 @@ test "driveCryptoBackendInSpace delivers reassembled CRYPTO and queues backend o
         }
     }
     try std.testing.expectEqualStrings("server flight", collected[0..collected_len]);
+    try std.testing.expect(conn.packetNumberSpaceDiscarded(.handshake));
 }
 
 test "driveCryptoBackendInSpace discards Handshake space when backend confirms without outbound crypto" {
@@ -14838,6 +14850,131 @@ test "driveCryptoBackendInSpace discards Handshake space when backend confirms w
         .local = secrets.server.secret,
         .peer = secrets.client.secret,
     }));
+}
+
+test "driveCryptoBackendInSpace discards Handshake space after confirmed outbound crypto is sent" {
+    const ConfirmingOutputBackend = struct {
+        secrets: HandshakeTrafficSecrets,
+        outbound: []const u8,
+        outbound_sent: bool = false,
+        secrets_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(_: *anyopaque, space: PacketNumberSpace, _: []const u8) Error!void {
+            if (space != .handshake) return error.CryptoError;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+
+        fn pullHandshakeTrafficSecrets(context: *anyopaque) Error!?HandshakeTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.secrets_sent) return null;
+            self.secrets_sent = true;
+            return self.secrets;
+        }
+
+        fn handshakeConfirmed(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var frame_payload = try Connection.init(std.testing.allocator, .server, .{});
+    defer frame_payload.deinit();
+    try frame_payload.validatePeerAddress();
+
+    var frame_payload_backend = ConfirmingOutputBackend{
+        .secrets = .{
+            .local = secrets.server.secret,
+            .peer = secrets.client.secret,
+        },
+        .outbound = "server finished",
+    };
+    var scratch: [64]u8 = undefined;
+    const frame_progress = try frame_payload.driveCryptoBackendInSpace(
+        .handshake,
+        frame_payload_backend.backend(),
+        &scratch,
+    );
+
+    try std.testing.expect(frame_progress.handshake_confirmed);
+    try std.testing.expect(frame_progress.handshake_keys_installed);
+    try std.testing.expectEqual(@as(usize, 1), frame_progress.outbound_chunks);
+    try std.testing.expect(!frame_payload.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(frame_payload.hasHandshakeProtectionKeys());
+
+    var payload_buf: [64]u8 = undefined;
+    const payload = (try frame_payload.pollTxInSpace(.handshake, 1, &payload_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .crypto => |crypto| try std.testing.expectEqualStrings("server finished", crypto.data),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(frame_payload.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(!frame_payload.hasHandshakeProtectionKeys());
+    try std.testing.expectError(error.InvalidPacket, frame_payload.sendCryptoInSpace(.handshake, "late"));
+
+    var protected_sender = try Connection.init(std.testing.allocator, .server, .{});
+    defer protected_sender.deinit();
+    try protected_sender.validatePeerAddress();
+    var protected_receiver = try Connection.init(std.testing.allocator, .client, .{});
+    defer protected_receiver.deinit();
+    try protected_receiver.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var protected_backend = ConfirmingOutputBackend{
+        .secrets = .{
+            .local = secrets.server.secret,
+            .peer = secrets.client.secret,
+        },
+        .outbound = "protected finished",
+    };
+    const protected_progress = try protected_sender.driveCryptoBackendInSpace(
+        .handshake,
+        protected_backend.backend(),
+        &scratch,
+    );
+    try std.testing.expect(protected_progress.handshake_confirmed);
+    try std.testing.expect(protected_sender.hasHandshakeProtectionKeys());
+
+    const protected = (try protected_sender.pollProtectedHandshakeDatagramWithInstalledKeys(
+        2,
+        &client_scid,
+        &server_scid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    try std.testing.expect(protected_sender.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(!protected_sender.hasHandshakeProtectionKeys());
+    try std.testing.expectError(error.InvalidPacket, protected_sender.sendCryptoInSpace(.handshake, "late"));
+
+    try protected_receiver.processProtectedHandshakeDatagramWithInstalledKeys(3, protected);
+    var crypto_buf: [64]u8 = undefined;
+    const recv_len = (try protected_receiver.recvCryptoInSpace(.handshake, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("protected finished", crypto_buf[0..recv_len]);
 }
 
 test "driveCryptoBackendInSpace requires scratch buffer before consuming crypto" {
