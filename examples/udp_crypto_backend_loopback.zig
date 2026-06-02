@@ -186,38 +186,79 @@ pub fn main() !void {
     const stream_payload = stream_buf[0..stream_len];
     try require(std.mem.eql(u8, stream_payload, "udp backend one rtt"));
 
-    const ack_datagram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
-        server_handle,
-        &server,
-        2,
-        &client_dcid,
-    )) orelse return error.UnexpectedState;
-    defer allocator.free(ack_datagram);
-    try require(server.pendingAckLargest(.application) == null);
-    try server_socket.send(io, &client_socket.address, ack_datagram);
+    try server.sendOnStream(stream_id, stream_payload, true);
+    var echo_datagram_count: usize = 0;
+    var echo_bytes: usize = 0;
+    var echo_len_or_null: ?usize = null;
+    while (echo_datagram_count < 3 and echo_len_or_null == null) : (echo_datagram_count += 1) {
+        const echo_datagram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &server,
+            2 + @as(i64, @intCast(echo_datagram_count)),
+            &client_dcid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(echo_datagram);
+        echo_bytes += echo_datagram.len;
+        try server_socket.send(io, &client_socket.address, echo_datagram);
 
-    const ack_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
-    const ack_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        const echo_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+        const echo_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            client_handle,
+            &client,
+            echo_received.path,
+            5 + @as(i64, @intCast(echo_datagram_count)),
+            echo_received.data,
+        );
+        try require(echo_route.connection_id == client_handle);
+        try require(std.mem.eql(u8, echo_route.destination_connection_id.asSlice(), &client_dcid));
+        echo_len_or_null = try client.recvOnStream(stream_id, &stream_buf);
+    }
+    try require(client.bytesInFlight(.application) == 0);
+    const client_inflight_after_echo = client.bytesInFlight(.application);
+
+    const echo_len = echo_len_or_null orelse return error.UnexpectedState;
+    const echo_payload = stream_buf[0..echo_len];
+    try require(std.mem.eql(u8, echo_payload, stream_payload));
+    const echo_ack_largest = client.pendingAckLargest(.application) orelse return error.UnexpectedState;
+
+    const final_ack = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         client_handle,
         &client,
-        ack_received.path,
-        3,
-        ack_received.data,
-    );
-    try require(ack_route.connection_id == client_handle);
-    try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &client_dcid));
-    try require(client.bytesInFlight(.application) == 0);
-    try require(client_lifecycle.recoveryTimerCount() == 0);
+        8,
+        &server_dcid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(final_ack);
+    try require(client.pendingAckLargest(.application) == null);
+    try client_socket.send(io, &server_socket.address, final_ack);
 
-    std.debug.print("[udp-crypto-backend] client_port={} server_port={} stream_bytes={} ack_bytes={} received=\"{s}\" client_backend_keys={} server_backend_keys={} confirmed={} client_inflight={}\n", .{
+    const final_ack_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const final_ack_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        final_ack_received.path,
+        9,
+        final_ack_received.data,
+    );
+    try require(final_ack_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, final_ack_route.destination_connection_id.asSlice(), &server_dcid));
+    try require(server.bytesInFlight(.application) == 0);
+    try require(server_lifecycle.recoveryTimerCount() == 0);
+
+    std.debug.print("[udp-crypto-backend] client_port={} server_port={} stream_bytes={} echo_packets={} echo_bytes={} echo_ack_largest={} final_ack_bytes={} received=\"{s}\" echo=\"{s}\" client_backend_keys={} server_backend_keys={} confirmed={} client_inflight_after_echo={} server_inflight={} server_timers={}\n", .{
         client_local.port,
         server_local.port,
         stream_datagram.len,
-        ack_datagram.len,
+        echo_datagram_count,
+        echo_bytes,
+        echo_ack_largest,
+        final_ack.len,
         stream_payload,
+        echo_payload,
         client_progress.one_rtt_keys_installed,
         server_progress.one_rtt_keys_installed,
         client.handshakeConfirmed() and server.handshakeConfirmed(),
-        client.bytesInFlight(.application),
+        client_inflight_after_echo,
+        server.bytesInFlight(.application),
+        server_lifecycle.recoveryTimerCount(),
     });
 }
