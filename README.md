@@ -171,8 +171,8 @@ experimental.
   `zig build run-address-validation`.
 - [UDP address validation loopback](examples/udp_address_validation_loopback.zig):
   Socket-backed lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery, NEW_TOKEN
-  path/version binding, replay snapshot restore rejection, and future
-  address-validation unblocking. Run with
+  path/version binding, secret rotation, replay snapshot restore rejection, and
+  future address-validation unblocking. Run with
   `zig build run-udp-address-validation-loopback`.
 - [Retry token](examples/retry_token.zig): Retry datagram processing, token
   reuse, and Retry CID transport-parameter byte validation. Run with

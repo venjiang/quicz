@@ -68,6 +68,7 @@ pub fn main() !void {
     const connection_handle: u64 = 91;
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
     const token_secret: quicz.address_validation_token.Secret = [_]u8{0x5c} ** quicz.address_validation_token.secret_len;
+    const rotated_token_secret: quicz.address_validation_token.Secret = [_]u8{0x6d} ** quicz.address_validation_token.secret_len;
     const token_nonce: quicz.address_validation_token.Nonce = [_]u8{0x5a} ** quicz.address_validation_token.nonce_len;
     const v2_token_nonce: quicz.address_validation_token.Nonce = [_]u8{0x6b} ** quicz.address_validation_token.nonce_len;
 
@@ -102,6 +103,8 @@ pub fn main() !void {
     );
     defer allocator.free(address_token);
     try server.issueNewToken(address_token);
+    try token_policy.rotateSecret(rotated_token_secret);
+    try require(token_policy.previousSecretCount() == 1);
 
     const handshake_done = (try server.pollProtectedShortDatagram(11, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
     defer allocator.free(handshake_done);
@@ -203,7 +206,7 @@ pub fn main() !void {
     const v2_validation = try token_policy.validateTokenForPathForVersion(.new_token, .v2, 22, server_path, v2_token);
     try require(v2_validation.originating_version == .v2);
 
-    std.debug.print("[udp-address] client_port={} server_port={} handshake_bytes={} token_bytes={} stored_token_len={} route={} future_ping_bytes={} replay_entries={} replay_rejected={} version_rejected={} v2_validated={}\n", .{
+    std.debug.print("[udp-address] client_port={} server_port={} handshake_bytes={} token_bytes={} stored_token_len={} route={} future_ping_bytes={} previous_secrets={} replay_entries={} replay_rejected={} version_rejected={} v2_validated={}\n", .{
         client_local.port,
         server_local.port,
         handshake_done.len,
@@ -211,6 +214,7 @@ pub fn main() !void {
         stored_token.len,
         token_route.connection_id,
         future_ping.len,
+        secret_set.previous_secrets.len,
         replay_snapshot.fingerprints.len,
         replay_rejected,
         version_rejected,

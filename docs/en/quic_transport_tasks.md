@@ -340,8 +340,9 @@ produce or consume TLS-owned QUIC packets over UDP.
   `udp_address_validation_loopback` delivers protected HANDSHAKE_DONE and
   NEW_TOKEN over real loopback UDP sockets through
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagram()`, then
-  validates NEW_TOKEN path binding, originating-version binding, replay
-  snapshot restore rejection, and future address-validation unblocking.
+  validates NEW_TOKEN path binding, originating-version binding, secret
+  rotation, replay snapshot restore rejection, and future address-validation
+  unblocking.
 - 2026-05-29: Routed the address-validation protected HANDSHAKE_DONE and
   NEW_TOKEN receive paths through the endpoint lifecycle helper.
   `address_validation` now registers the client receive CID with
@@ -2505,7 +2506,7 @@ run from `build.zig`.
 | `loss_recovery` | Current frame-payload invalid ACK range rejection, largest-acknowledged RTT sampling, cross-space bytes-in-flight congestion admission, packet-threshold loss, time-threshold loss, aggregate loss-time timer service, NewReno underutilized-cwnd suppression, slow-start/congestion-avoidance byte-counted and batched-ACK growth, recovery period, recovery-period ACK accounting without congestion growth, new-congestion-event one-packet STREAM recovery probe, minimum-window ssthresh clamp, PTO-backoff-independent persistent congestion, persistent-congestion min-RTT refresh, non-contiguous persistent-congestion suppression, and ACK-delay handling. | Present |
 | `pto_recovery` | Current frame-payload Initial/Handshake/Application PTO hooks, including aggregate PTO timer service, Application PTO gating until handshake confirmation, client Initial ACK PTO-backoff reset suppression, client no-in-flight anti-deadlock PTO, anti-amplification-limited server PTO disarm/rearm plus expired-PTO service when new datagrams unblock sending, connection-level RTT sharing and PTO backoff across packet number spaces, Initial/Handshake RTT ACK-delay suppression, Initial/Handshake max_ack_delay suppression, congestion-window bypass for one armed PTO probe, PING fallback probes, cross-space peer probes for other in-flight packet number spaces, queued STREAM data probe selection, in-flight STREAM retransmission probe selection, ACKed RESET_STREAM retransmission suppression, and protected 1-RTT CRYPTO PTO probe selection. | Present |
 | `address_validation` | Current modeled server anti-amplification budget, explicit peer-address validation, lifecycle-routed protected HANDSHAKE_DONE/NEW_TOKEN delivery, server-side HANDSHAKE_DONE-triggered Handshake discard, endpoint peer-address binding, `AddressValidationPolicy` NEW_TOKEN issue/rotation/originating-version binding/secret-set and replay-filter export/restore/validation/replay rejection, and address-validation unblocking. | Present |
-| `udp_address_validation_loopback` | Socket-backed loopback UDP address-validation exercise: lifecycle-routed protected HANDSHAKE_DONE/NEW_TOKEN delivery, NEW_TOKEN path/version binding, replay snapshot restore rejection, and future server address-validation unblocking. | Present |
+| `udp_address_validation_loopback` | Socket-backed loopback UDP address-validation exercise: lifecycle-routed protected HANDSHAKE_DONE/NEW_TOKEN delivery, NEW_TOKEN path/version binding, secret rotation, replay snapshot restore rejection, and future server address-validation unblocking. | Present |
 | `retry_token` | Current v1/v2 Retry packet integrity-tag encode/verify/parse, server-side Retry datagram issuance, client-side Retry datagram processing, Retry CID transport-parameter validation/export through TLS extension bytes, endpoint peer-address binding, `AddressValidationPolicy` Retry token issue/path validation, one-time Retry token consumption, and address-validation unblocking. | Present |
 | `interop_client` | Manual or optional external-server interop check. | Planned |
 
