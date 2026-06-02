@@ -104,6 +104,11 @@ pub fn main() !void {
     try require(second_route.destination_connection_id.asSlice().len == 0);
     try require(!second_route.path_changed);
 
+    try client2_socket.send(io, &server_socket.address, &short_datagram);
+    const unknown_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
+    const unknown_path = try udp4Tuple(server_socket.address, unknown_received.from);
+    try expectUnknownRoute(&lifecycle, unknown_path, unknown_received.data);
+
     const long_zero_dcid = [_]u8{ 0xc0, 0x00, 0x00, 0x00, 0x01, 0x00 };
     try client0_socket.send(io, &server_socket.address, &long_zero_dcid);
     const long_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
@@ -129,7 +134,7 @@ pub fn main() !void {
     try require(confirmed_route.connection_id == 102);
     try require(!confirmed_route.path_changed);
 
-    std.debug.print("[udp-zero-cid] client0_port={} client1_port={} client2_port={} server_port={} route0={} route1={} long_route={} retired0=true updated_route={} confirmed_route={}\n", .{
+    std.debug.print("[udp-zero-cid] client0_port={} client1_port={} client2_port={} server_port={} route0={} route1={} pre_update_unknown=true long_route={} retired0=true updated_route={} confirmed_route={}\n", .{
         client0_local.port,
         client1_local.port,
         client2_local.port,

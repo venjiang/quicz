@@ -147,7 +147,7 @@ pub fn main() !void {
   运行：`zig build run-endpoint-routing`。
 - [UDP endpoint loopback](examples/udp_endpoint_loopback.zig)：socket-backed endpoint routing，覆盖 Version Negotiation、protected follow-up Initial、follow-up Original DCID 证据、accepted protected Initial processing、protected server Initial response processing、server transport-parameter byte validation 和 Initial/short-header classification。
   运行：`zig build run-udp-endpoint-loopback`。
-- [UDP zero-CID loopback](examples/udp_zero_cid_loopback.zig)：基于 loopback UDP 的 zero-length CID tuple routing。
+- [UDP zero-CID loopback](examples/udp_zero_cid_loopback.zig)：基于 loopback UDP 的 zero-length CID tuple routing、unknown tuple 拒绝和 route update。
   运行：`zig build run-udp-zero-cid-loopback`。
 - [UDP preferred address loopback](examples/udp_preferred_address_loopback.zig)：preferred-address transport-parameter byte handoff、route migration 和 active-migration-disabled 处理。
   运行：`zig build run-udp-preferred-address-loopback`。

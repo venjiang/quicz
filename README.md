@@ -194,7 +194,8 @@ experimental.
   byte validation, and Initial/short-header classification. Run with
   `zig build run-udp-endpoint-loopback`.
 - [UDP zero-CID loopback](examples/udp_zero_cid_loopback.zig): Zero-length CID
-  tuple routing over loopback UDP. Run with `zig build run-udp-zero-cid-loopback`.
+  tuple routing, unknown tuple rejection, and route update over loopback UDP.
+  Run with `zig build run-udp-zero-cid-loopback`.
 - [UDP preferred address loopback](examples/udp_preferred_address_loopback.zig):
   Preferred-address transport-parameter byte handoff, route migration, and
   active-migration-disabled handling. Run with
