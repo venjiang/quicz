@@ -53,6 +53,34 @@ pub fn main() !void {
         .{pre_confirm_deadline},
     );
 
+    var anti_deadlock = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer anti_deadlock.deinit();
+    _ = try anti_deadlock.recordPacketSentInSpace(.initial, 10, 100);
+    try anti_deadlock.receiveAckInSpace(.initial, 70, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    const anti_deadlock_deadline = anti_deadlock.lossDetectionTimerDeadlineMillis() orelse return error.PtoRecoveryExampleFailed;
+    if (anti_deadlock_deadline.space != .initial) return error.PtoRecoveryExampleFailed;
+    if (anti_deadlock_deadline.kind != .pto) return error.PtoRecoveryExampleFailed;
+    if (anti_deadlock.totalBytesInFlight() != 0) return error.PtoRecoveryExampleFailed;
+    const anti_deadlock_serviced = (try anti_deadlock.serviceLossDetectionTimer(anti_deadlock_deadline.deadline_millis)) orelse return error.PtoRecoveryExampleFailed;
+    if (anti_deadlock_serviced.space != .initial) return error.PtoRecoveryExampleFailed;
+    if (anti_deadlock.initial_packet_space.pending_ping_count != 1) return error.PtoRecoveryExampleFailed;
+    var anti_deadlock_out: [32]u8 = undefined;
+    const anti_deadlock_probe = (try anti_deadlock.pollTxInSpace(.initial, anti_deadlock_deadline.deadline_millis + 1, &anti_deadlock_out)) orelse return error.PtoRecoveryExampleFailed;
+    var anti_deadlock_decoded = try quicz.frame.decodeFrameSlice(anti_deadlock_probe, allocator);
+    defer quicz.frame.deinitFrame(&anti_deadlock_decoded.frame, allocator);
+    switch (anti_deadlock_decoded.frame) {
+        .ping => {},
+        else => return error.PtoRecoveryExampleFailed,
+    }
+    std.debug.print(
+        "[pto] client anti-deadlock PTO deadline={d} emitted Initial PING bytes={d}\n",
+        .{ anti_deadlock_deadline.deadline_millis, anti_deadlock_probe.len },
+    );
+
     var initial_ack_client = try quicz.Connection.init(allocator, .client, .{ .initial_rtt_ms = 100 });
     defer initial_ack_client.deinit();
     _ = try initial_ack_client.recordPacketSentInSpace(.initial, 10, 100);

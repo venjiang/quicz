@@ -125,7 +125,7 @@ pub fn main() !void {
   运行：`zig build run-ecn-validation`。
 - [Loss recovery](examples/loss_recovery.zig)：ACK 驱动的 loss、RTT sampling、NewReno、persistent congestion 和非连续 persistent-congestion 抑制。
   运行：`zig build run-loss-recovery`。
-- [PTO recovery](examples/pto_recovery.zig)：PTO timer、probe selection、backoff、anti-amplification gating 和已 ACK 的 RESET_STREAM 重传抑制。
+- [PTO recovery](examples/pto_recovery.zig)：PTO timer、probe selection、backoff、client anti-deadlock PTO、anti-amplification gating 和已 ACK 的 RESET_STREAM 重传抑制。
   运行：`zig build run-pto-recovery`。
 - [Endpoint recovery timers](examples/endpoint_recovery_timers.zig)：跨 connection handle 的 endpoint-owned recovery timer 调度和 routed protected receive refresh。
   运行：`zig build run-endpoint-recovery-timers`。

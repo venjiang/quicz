@@ -2961,6 +2961,21 @@ fn ptoDeadlineFor(
     return saturatingAddMillis(sent_time, pto_ms);
 }
 
+fn ptoDeadlineFromStart(
+    start_millis: i64,
+    recovery_state: recovery.Recovery,
+    include_max_ack_delay: bool,
+    pto_count: u8,
+) i64 {
+    var deadline_recovery_state = recovery_state;
+    deadline_recovery_state.pto_count = pto_count;
+    const pto_ms = if (include_max_ack_delay)
+        deadline_recovery_state.ptoMs()
+    else
+        deadline_recovery_state.ptoMsWithoutMaxAckDelay();
+    return saturatingAddMillis(start_millis, pto_ms);
+}
+
 fn zeroEcnCounts() frame.EcnCounts {
     return .{
         .ect0_count = 0,
@@ -3665,6 +3680,7 @@ pub const Connection = struct {
     largest_acknowledged: ?u64,
     first_rtt_sample_sent_time_millis: ?i64,
     loss_deadline_millis: ?i64,
+    anti_deadlock_pto_start_millis: ?i64,
     ecn_sent_ect0: u64,
     ecn_sent_ect1: u64,
     ecn_largest_acknowledged: ?u64,
@@ -3814,6 +3830,7 @@ pub const Connection = struct {
             .largest_acknowledged = null,
             .first_rtt_sample_sent_time_millis = null,
             .loss_deadline_millis = null,
+            .anti_deadlock_pto_start_millis = null,
             .ecn_sent_ect0 = 0,
             .ecn_sent_ect1 = 0,
             .ecn_largest_acknowledged = null,
@@ -4148,8 +4165,10 @@ pub const Connection = struct {
         if (!self.ptoAllowedInSpace(space)) return null;
         const pto_count = self.connectionPtoBackoffCount();
         return switch (space) {
-            .initial => ptoDeadlineFor(self.initial_packet_space.sent_packets.items, self.initial_packet_space.recovery_state, false, pto_count),
-            .handshake => ptoDeadlineFor(self.handshake_packet_space.sent_packets.items, self.handshake_packet_space.recovery_state, false, pto_count),
+            .initial => ptoDeadlineFor(self.initial_packet_space.sent_packets.items, self.initial_packet_space.recovery_state, false, pto_count) orelse
+                self.antiDeadlockPtoDeadlineMillis(.initial, pto_count),
+            .handshake => ptoDeadlineFor(self.handshake_packet_space.sent_packets.items, self.handshake_packet_space.recovery_state, false, pto_count) orelse
+                self.antiDeadlockPtoDeadlineMillis(.handshake, pto_count),
             .application => ptoDeadlineFor(self.sent_packets.items, self.recovery_state, true, pto_count),
         };
     }
@@ -4972,6 +4991,7 @@ pub const Connection = struct {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         self.handshake_state = .confirmed;
         self.handshake_confirmed = true;
+        self.anti_deadlock_pto_start_millis = null;
     }
 
     /// Discard Initial or Handshake packet-number-space recovery state.
@@ -5016,6 +5036,7 @@ pub const Connection = struct {
         packet_space.ecn_largest_acknowledged.* = null;
         packet_space.ecn_counts.* = zeroEcnCounts();
         packet_space.ecn_validation_state.* = .unknown;
+        self.anti_deadlock_pto_start_millis = null;
         self.resetConnectionPtoBackoff();
     }
 
@@ -5780,6 +5801,7 @@ pub const Connection = struct {
     fn recordAckElicitingSendInSpace(self: *Connection, space: PacketNumberSpace, bytes: usize) void {
         const packet_space = self.packetNumberSpace(space);
         packet_space.recovery_state.onPacketSent(bytes);
+        self.anti_deadlock_pto_start_millis = null;
         if (packet_space.pto_probe_count.* != 0) {
             packet_space.pto_probe_count.* -= 1;
         }
@@ -9092,6 +9114,7 @@ pub const Connection = struct {
         const largest_acknowledged_snapshot = packet_space.largest_acknowledged.*;
         const first_rtt_sample_sent_time_snapshot = packet_space.first_rtt_sample_sent_time_millis.*;
         const loss_deadline_millis_snapshot = packet_space.loss_deadline_millis.*;
+        const anti_deadlock_pto_start_millis_snapshot = self.anti_deadlock_pto_start_millis;
         const congestion_probe_count_snapshot = packet_space.congestion_probe_count.*;
         const ecn_sent_ect0_snapshot = packet_space.ecn_sent_ect0.*;
         const ecn_sent_ect1_snapshot = packet_space.ecn_sent_ect1.*;
@@ -9241,6 +9264,7 @@ pub const Connection = struct {
             packet_space.largest_acknowledged.* = largest_acknowledged_snapshot;
             packet_space.first_rtt_sample_sent_time_millis.* = first_rtt_sample_sent_time_snapshot;
             packet_space.loss_deadline_millis.* = loss_deadline_millis_snapshot;
+            self.anti_deadlock_pto_start_millis = anti_deadlock_pto_start_millis_snapshot;
             packet_space.congestion_probe_count.* = congestion_probe_count_snapshot;
             packet_space.ecn_sent_ect0.* = ecn_sent_ect0_snapshot;
             packet_space.ecn_sent_ect1.* = ecn_sent_ect1_snapshot;
@@ -10789,6 +10813,7 @@ pub const Connection = struct {
             if (persistent_congestion_established) {
                 packet_space.recovery_state.onPersistentCongestion();
             }
+            self.refreshAntiDeadlockPtoTimer(space, now_millis);
             return;
         }
         if (local_key_update_acked) {
@@ -10820,6 +10845,7 @@ pub const Connection = struct {
         if (persistent_congestion_established) {
             packet_space.recovery_state.onPersistentCongestion();
         }
+        self.refreshAntiDeadlockPtoTimer(space, now_millis);
     }
 
     fn validateEcnAck(
@@ -11023,6 +11049,7 @@ pub const Connection = struct {
                 packet_space.recovery_state.onPersistentCongestion();
             }
         }
+        self.refreshAntiDeadlockPtoTimer(space, now_millis);
     }
 
     fn hasPendingAckElicitingDataInSpace(self: *Connection, space: PacketNumberSpace) bool {
@@ -11076,6 +11103,55 @@ pub const Connection = struct {
     fn armCongestionProbeIfPendingData(self: *Connection, space: PacketNumberSpace) void {
         if (self.hasQueuedAckElicitingDataInSpace(space)) {
             self.armCongestionProbeInSpace(space);
+        }
+    }
+
+    fn peerCompletedAddressValidationForPto(self: Connection) bool {
+        if (self.side == .server) return true;
+        return self.handshake_packet_space.largest_acknowledged != null or self.handshake_confirmed;
+    }
+
+    fn hasQueuedInitialOrHandshakeAckElicitingData(self: Connection, space: PacketNumberSpace) bool {
+        return switch (space) {
+            .initial => self.initial_packet_space.crypto_send_queue.items.len != 0 or self.initial_packet_space.pending_ping_count != 0,
+            .handshake => self.handshake_packet_space.crypto_send_queue.items.len != 0 or self.handshake_packet_space.pending_ping_count != 0,
+            .application => false,
+        };
+    }
+
+    fn antiDeadlockPtoSpace(self: Connection) ?PacketNumberSpace {
+        if (self.peerCompletedAddressValidationForPto()) return null;
+        if (self.totalBytesInFlight() != 0) return null;
+
+        if (self.local_handshake_keys != null and !self.handshake_packet_space.discarded) {
+            if (!self.hasQueuedInitialOrHandshakeAckElicitingData(.handshake)) return .handshake;
+            return null;
+        }
+        if (!self.initial_packet_space.discarded and !self.hasQueuedInitialOrHandshakeAckElicitingData(.initial)) {
+            return .initial;
+        }
+        return null;
+    }
+
+    fn antiDeadlockPtoDeadlineMillis(self: Connection, space: PacketNumberSpace, pto_count: u8) ?i64 {
+        if (self.antiDeadlockPtoSpace() != space) return null;
+        const start_millis = self.anti_deadlock_pto_start_millis orelse return null;
+        const recovery_state = switch (space) {
+            .initial => self.initial_packet_space.recovery_state,
+            .handshake => self.handshake_packet_space.recovery_state,
+            .application => return null,
+        };
+        return ptoDeadlineFromStart(start_millis, recovery_state, false, pto_count);
+    }
+
+    fn refreshAntiDeadlockPtoTimer(self: *Connection, trigger_space: PacketNumberSpace, now_millis: i64) void {
+        if (self.antiDeadlockPtoSpace() == null) {
+            self.anti_deadlock_pto_start_millis = null;
+            return;
+        }
+        if (trigger_space == .application and self.anti_deadlock_pto_start_millis == null) return;
+        if (self.anti_deadlock_pto_start_millis == null) {
+            self.anti_deadlock_pto_start_millis = now_millis;
         }
     }
 
@@ -15961,6 +16037,90 @@ test "Application PTO is gated until handshake confirmation" {
     try std.testing.expectEqual(@as(i64, 335), deadline.deadline_millis);
 }
 
+test "client no-in-flight Initial ACK arms anti-deadlock PTO" {
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+
+    _ = try client.recordPacketSentInSpace(.initial, 10, 100);
+    try client.receiveAckInSpace(.initial, 70, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 0), client.totalBytesInFlight());
+
+    const deadline = client.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, deadline.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline.kind);
+    try std.testing.expectEqual(@as(i64, 250), deadline.deadline_millis);
+
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), try client.serviceLossDetectionTimer(249));
+    try std.testing.expectEqual(@as(usize, 0), client.initial_packet_space.pending_ping_count);
+
+    const serviced = (try client.serviceLossDetectionTimer(250)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, serviced.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.kind);
+    try std.testing.expectEqual(@as(usize, 1), client.initial_packet_space.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), client.initial_packet_space.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadlineMillis());
+
+    var out_buf: [32]u8 = undefined;
+    const probe = (try client.pollTxInSpace(.initial, 251, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(probe, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.initial));
+}
+
+test "client anti-deadlock PTO selects Handshake when keys are installed" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+
+    _ = try client.recordPacketSentInSpace(.initial, 10, 100);
+    try client.receiveAckInSpace(.initial, 70, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try std.testing.expectEqual(@as(?i64, null), client.ptoDeadlineMillis(.initial));
+    const deadline = client.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.handshake, deadline.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline.kind);
+    try std.testing.expectEqual(@as(i64, 250), deadline.deadline_millis);
+
+    const serviced = (try client.serviceLossDetectionTimer(deadline.deadline_millis)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.handshake, serviced.space);
+    try std.testing.expectEqual(@as(usize, 1), client.handshake_packet_space.pending_ping_count);
+
+    var out_buf: [32]u8 = undefined;
+    const probe = (try client.pollTxInSpace(.handshake, deadline.deadline_millis + 1, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(probe, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.handshake));
+    try std.testing.expect(client.packetNumberSpaceDiscarded(.initial));
+}
+
 test "server anti-amplification limit disarms PTO until more peer bytes arrive" {
     var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
@@ -17365,8 +17525,11 @@ test "EndpointConnectionLifecycle refreshes protected long timer lifecycle" {
     try std.testing.expectEqual(@as(usize, 1), client_result.processed_packets);
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.initial));
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.initial));
-    try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
-    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), client_lifecycle.earliestRecoveryDeadline());
+    try std.testing.expectEqual(@as(usize, 1), client_lifecycle.recoveryTimerCount());
+    const anti_deadlock_timer = client_lifecycle.earliestRecoveryDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(client_connection_id, anti_deadlock_timer.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.initial, anti_deadlock_timer.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, anti_deadlock_timer.timer.kind);
 }
 
 test "EndpointConnectionLifecycle refreshes protected long CRYPTO space timer lifecycle" {

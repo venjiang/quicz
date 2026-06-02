@@ -150,8 +150,9 @@ experimental.
   NewReno, persistent congestion, and non-contiguous persistent-congestion
   suppression. Run with `zig build run-loss-recovery`.
 - [PTO recovery](examples/pto_recovery.zig): PTO timers, probe selection,
-  backoff, anti-amplification gating, and ACKed RESET_STREAM retransmission
-  suppression. Run with `zig build run-pto-recovery`.
+  backoff, client anti-deadlock PTO, anti-amplification gating, and ACKed
+  RESET_STREAM retransmission suppression. Run with
+  `zig build run-pto-recovery`.
 - [Endpoint recovery timers](examples/endpoint_recovery_timers.zig):
   Endpoint-owned recovery timer scheduling and routed protected receive refresh
   across connection handles. Run with `zig build run-endpoint-recovery-timers`.
