@@ -223,10 +223,49 @@ pub fn main() !void {
     const server_peer_retains_first_update = server.peerOneRttRetainsKeyGeneration(1) orelse return error.UnexpectedState;
     try require(!server_peer_retains_first_update);
 
+    const stale_generation_1_keys = quicz.protection.nextAes128PacketProtectionKeys(secrets.client);
+    const stale_ping_plaintext = [_]u8{
+        @intFromEnum(quicz.frame.FrameType.ping),
+        @intFromEnum(quicz.frame.FrameType.padding),
+        @intFromEnum(quicz.frame.FrameType.padding),
+    };
+    const stale_generation_1_ping = try quicz.protection.protectShortPacketAes128(
+        allocator,
+        .{
+            .dcid = &server_dcid,
+            .key_phase = true,
+            .packet_number = 2,
+        },
+        try quicz.packet.encodePacketNumberForHeader(2, null),
+        stale_generation_1_keys,
+        &stale_ping_plaintext,
+    );
+    defer allocator.free(stale_generation_1_ping);
+    try require(try quicz.protection.peekShortPacketKeyPhaseAes128(secrets.client.hp, stale_generation_1_ping, server_dcid.len));
+    try client_socket.send(io, &server_socket.address, stale_generation_1_ping);
+
+    const stale_ping_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const stale_rejected = if (server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        51,
+        &server,
+        stale_ping_received.path,
+        6,
+        stale_ping_received.data,
+    )) |_| false else |err| switch (err) {
+        error.InvalidPacket => true,
+        else => return err,
+    };
+    try require(stale_rejected);
+    try require(server.nextPeerPacketNumber(.application) == 2);
+    try require(server.pendingAckLargest(.application).? == 1);
+    try require((server.peerOneRttKeyUpdateCount() orelse return error.UnexpectedState) == 2);
+    const server_after_stale_next_pn = server.nextPeerPacketNumber(.application);
+    const server_after_stale_ack = server.pendingAckLargest(.application).?;
+
     const second_ack = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         51,
         &server,
-        6,
+        7,
         &client_dcid,
     )) orelse return error.UnexpectedState;
     defer allocator.free(second_ack);
@@ -239,7 +278,7 @@ pub fn main() !void {
         41,
         &client,
         second_ack_received.path,
-        7,
+        8,
         second_ack_received.data,
     );
     try require(second_ack_route.connection_id == 41);
@@ -248,7 +287,7 @@ pub fn main() !void {
     try require(client.pendingOneRttKeyUpdateAckThreshold() == null);
     const second_ack_gate_cleared = client.pendingOneRttKeyUpdateAckThreshold() == null;
 
-    std.debug.print("[udp-key-update] client_port={} server_port={} ping_bytes={} ack_bytes={} first_update_count={} first_ack_threshold={} server_peer_update_count={} server_peer_retains_initial={} ack_gate_cleared={} second_update_count={} second_ack_threshold={} client_retains_first_update={} client_retains_current={} second_ping_bytes={} second_ack_bytes={} server_peer_second_update_count={} server_peer_retains_first_update={} second_ack_gate_cleared={} ping_key_phase={} ack_key_phase={} second_ping_key_phase={} second_ack_key_phase={} server_peer_phase={} client_next_phase={} client_inflight={}\n", .{
+    std.debug.print("[udp-key-update] client_port={} server_port={} ping_bytes={} ack_bytes={} first_update_count={} first_ack_threshold={} server_peer_update_count={} server_peer_retains_initial={} ack_gate_cleared={} second_update_count={} second_ack_threshold={} client_retains_first_update={} client_retains_current={} second_ping_bytes={} stale_ping_bytes={} second_ack_bytes={} server_peer_second_update_count={} server_peer_retains_first_update={} stale_rejected={} server_after_stale_next_pn={} server_after_stale_ack={} second_ack_gate_cleared={} ping_key_phase={} ack_key_phase={} second_ping_key_phase={} second_ack_key_phase={} server_peer_phase={} client_next_phase={} client_inflight={}\n", .{
         client_local.port,
         server_local.port,
         key_update_ping.len,
@@ -263,9 +302,13 @@ pub fn main() !void {
         client_retains_first_update,
         client_retains_current,
         second_update_ping.len,
+        stale_generation_1_ping.len,
         second_ack.len,
         server_peer_second_update_count,
         server_peer_retains_first_update,
+        stale_rejected,
+        server_after_stale_next_pn,
+        server_after_stale_ack,
         second_ack_gate_cleared,
         ping_key_phase,
         ack_key_phase,

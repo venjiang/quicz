@@ -24162,12 +24162,37 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(1));
     try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(2));
     try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(3));
+    const stale_generation_1_keys = protection.nextAes128PacketProtectionKeys(secrets.client);
+    const stale_ping_plaintext = [_]u8{
+        @intFromEnum(frame.FrameType.ping),
+        @intFromEnum(frame.FrameType.padding),
+        @intFromEnum(frame.FrameType.padding),
+    };
+    const stale_generation_1_ping = try protection.protectShortPacketAes128(
+        std.testing.allocator,
+        .{
+            .dcid = &server_dcid,
+            .key_phase = true,
+            .packet_number = 2,
+        },
+        try packet.encodePacketNumberForHeader(2, null),
+        stale_generation_1_keys,
+        &stale_ping_plaintext,
+    );
+    defer std.testing.allocator.free(stale_generation_1_ping);
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedShortDatagramWithInstalledKeys(16, server_dcid.len, stale_generation_1_ping),
+    );
+    try std.testing.expectEqual(@as(u64, 2), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 1), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(?u64, 2), server.peerOneRttKeyUpdateCount());
     const second_ack = (try server.pollProtectedShortDatagramWithInstalledKeys(
-        16,
+        17,
         &client_dcid,
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(second_ack);
-    try client.processProtectedShortDatagramWithInstalledKeys(17, client_dcid.len, second_ack);
+    try client.processProtectedShortDatagramWithInstalledKeys(18, client_dcid.len, second_ack);
     try std.testing.expectEqual(@as(?u64, null), client.pendingOneRttKeyUpdateAckThreshold());
 }
 
