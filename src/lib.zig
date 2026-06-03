@@ -2198,6 +2198,50 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Route/process a path-validation short packet, update validated paths, and close on frame errors.
+    ///
+    /// This preserves `processRoutedProtectedShortDatagramAndUpdatePath()`
+    /// success behavior while using the close-propagating receive path for
+    /// authenticated Application plaintext frame errors. If frame processing
+    /// fails, no endpoint path update is committed.
+    pub fn processRoutedProtectedShortDatagramAndUpdatePathOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!EndpointPathValidatedShortDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+
+        const outstanding_before = connection.outstandingPathChallengeCount();
+        try self.processProtectedShortDatagramOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            keys,
+            route.destination_connection_id.asSlice().len,
+            datagram,
+        );
+
+        const outstanding_after = connection.outstandingPathChallengeCount();
+        const updated_route: ?endpoint.RouteResult = if (route.path_changed and outstanding_after < outstanding_before)
+            try self.updateRoutePathFromValidatedDatagramAndResetSpinBit(
+                route.destination_connection_id.asSlice(),
+                path,
+                connection,
+            )
+        else
+            null;
+
+        return .{
+            .route = route,
+            .updated_route = updated_route,
+        };
+    }
+
     /// Route and process one caller-keyed protected 1-RTT datagram with close propagation.
     ///
     /// This validates the endpoint route, uses its destination CID length for
@@ -18653,6 +18697,60 @@ test "EndpointConnectionLifecycle updates route path after protected PATH_RESPON
     const confirmed_route = try lifecycle.routeDatagram(new_path, response);
     try std.testing.expectEqual(@as(u64, 88), confirmed_route.connection_id);
     try std.testing.expect(!confirmed_route.path_changed);
+}
+
+test "EndpointConnectionLifecycle path update OrClose queues close without route update" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(89, &server_dcid, old_path, .{});
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const challenge_data = [_]u8{ 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb };
+    try server.sendPathChallenge(challenge_data);
+    const challenge = (try server.pollProtectedShortDatagram(3, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(challenge);
+    try std.testing.expectEqual(@as(usize, 1), server.outstandingPathChallengeCount());
+
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_short = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
+    defer std.testing.allocator.free(invalid_short);
+
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedShortDatagramAndUpdatePathOrClose(
+        89,
+        &server,
+        new_path,
+        4,
+        secrets.client,
+        invalid_short,
+    ));
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 1), server.outstandingPathChallengeCount());
+    const unchanged_route = try lifecycle.routeDatagram(new_path, invalid_short);
+    try std.testing.expectEqual(@as(u64, 89), unchanged_route.connection_id);
+    try std.testing.expect(unchanged_route.path_changed);
 }
 
 test "EndpointConnectionLifecycle retires zero-length CID routes by path" {

@@ -108,7 +108,7 @@ pub fn main() !void {
     var server_receive_buf: [1500]u8 = undefined;
     const pre_validation_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const pre_validation_path = try udp4Tuple(server_socket.address, pre_validation_received.from);
-    const pre_validation_result = try server_lifecycle.processRoutedProtectedShortDatagramAndUpdatePath(
+    const pre_validation_result = try server_lifecycle.processRoutedProtectedShortDatagramAndUpdatePathOrClose(
         connection_handle,
         &server,
         pre_validation_path,
@@ -148,7 +148,7 @@ pub fn main() !void {
 
     const response_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const response_path = try udp4Tuple(server_socket.address, response_received.from);
-    const validation_result = try server_lifecycle.processRoutedProtectedShortDatagramAndUpdatePath(
+    const validation_result = try server_lifecycle.processRoutedProtectedShortDatagramAndUpdatePathOrClose(
         connection_handle,
         &server,
         response_path,
