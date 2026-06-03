@@ -203,9 +203,23 @@ pub fn main() !void {
     }
     const refreshed_min_rtt = persistent.recovery_state.min_rtt_ms orelse return error.LossRecoveryExampleFailed;
     if (refreshed_min_rtt != 500) return error.LossRecoveryExampleFailed;
+    const persistent_recovery_cleared = persistent.recovery_state.congestion_recovery_start_time_millis == null;
+    if (!persistent_recovery_cleared) return error.LossRecoveryExampleFailed;
+    if (!persistent.recovery_state.wouldStartCongestionRecovery(1800)) return error.LossRecoveryExampleFailed;
+    persistent.recovery_state.congestion_avoidance_bytes_acked = 600;
+    persistent.recovery_state.onCongestionEvent(1800, 1900);
+    const persistent_reentry_start = persistent.recovery_state.congestion_recovery_start_time_millis orelse return error.LossRecoveryExampleFailed;
+    if (persistent_reentry_start != 1900) return error.LossRecoveryExampleFailed;
+    if (persistent.recovery_state.congestion_avoidance_bytes_acked != 0) return error.LossRecoveryExampleFailed;
     std.debug.print(
-        "[loss] persistent congestion duration={d} reduced cwnd={d} refreshed_min_rtt={d}\n",
-        .{ persistent_duration, persistent.congestionWindow(.application), refreshed_min_rtt },
+        "[loss] persistent congestion duration={d} reduced_cwnd={d} refreshed_min_rtt={d} recovery_cleared={} reentry_start={d}\n",
+        .{
+            persistent_duration,
+            persistent.congestionWindow(.application),
+            refreshed_min_rtt,
+            persistent_recovery_cleared,
+            persistent_reentry_start,
+        },
     );
 
     var non_contiguous_persistent = try quicz.Connection.init(allocator, .client, .{

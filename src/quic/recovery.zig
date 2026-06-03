@@ -570,6 +570,14 @@ test "persistent congestion duration and response follow RFC 9002 bounds" {
     try std.testing.expectEqual(minimumCongestionWindow(1200), recovery.congestion_window);
     try std.testing.expectEqual(@as(usize, 6_000), recovery.ssthresh);
     try std.testing.expectEqual(@as(?i64, null), recovery.congestion_recovery_start_time_millis);
+    try std.testing.expect(recovery.wouldStartCongestionRecovery(43));
+
+    recovery.congestion_avoidance_bytes_acked = 600;
+    recovery.onCongestionEvent(43, 50);
+    try std.testing.expectEqual(@as(?i64, 50), recovery.congestion_recovery_start_time_millis);
+    try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
+    try std.testing.expectEqual(minimumCongestionWindow(1200), recovery.congestion_window);
+    try std.testing.expectEqual(@as(usize, 1200), recovery.ssthresh);
 }
 
 test "persistent congestion refreshes min RTT from newest sample when present" {

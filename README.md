@@ -151,8 +151,8 @@ experimental.
   CE-driven congestion response. Run with `zig build run-ecn-validation`.
 - [Loss recovery](examples/loss_recovery.zig): ACK-driven loss, RTT sampling,
   NewReno recovery-period ACK accounting, persistent-congestion min-RTT
-  refresh, and non-contiguous persistent-congestion suppression. Run with
-  `zig build run-loss-recovery`.
+  refresh, recovery-period clearing/re-entry, and non-contiguous
+  persistent-congestion suppression. Run with `zig build run-loss-recovery`.
 - [PTO recovery](examples/pto_recovery.zig): PTO timers, probe selection,
   backoff, client anti-deadlock PTO, anti-amplification gating/unblock service,
   and ACKed RESET_STREAM retransmission suppression. Run with

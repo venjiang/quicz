@@ -123,7 +123,7 @@ pub fn main() !void {
   运行：`zig build run-packet-spaces`。
 - [ECN validation](examples/ecn_validation.zig)：ACK_ECN 校验和 CE 驱动的 congestion response。
   运行：`zig build run-ecn-validation`。
-- [Loss recovery](examples/loss_recovery.zig)：ACK 驱动的 loss、RTT sampling、NewReno recovery-period ACK accounting、persistent-congestion min-RTT refresh 和非连续 persistent-congestion 抑制。
+- [Loss recovery](examples/loss_recovery.zig)：ACK 驱动的 loss、RTT sampling、NewReno recovery-period ACK accounting、persistent-congestion min-RTT refresh、recovery-period 清理/重新进入和非连续 persistent-congestion 抑制。
   运行：`zig build run-loss-recovery`。
 - [PTO recovery](examples/pto_recovery.zig)：PTO timer、probe selection、backoff、client anti-deadlock PTO、anti-amplification gating/unblock service 和已 ACK 的 RESET_STREAM 重传抑制。
   运行：`zig build run-pto-recovery`。
