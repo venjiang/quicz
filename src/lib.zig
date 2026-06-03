@@ -1687,6 +1687,31 @@ pub const EndpointConnectionLifecycle = struct {
         return null;
     }
 
+    /// Apply one connection's close/drain timeout and retire endpoint state if it closes.
+    ///
+    /// `Connection.checkCloseTimeouts()` remains the source of truth for the
+    /// closing/draining-to-closed transition. This endpoint bridge only observes
+    /// that terminal close transition and then removes routes and recovery
+    /// timers owned by the lifecycle for `connection_id`.
+    pub fn checkCloseTimeoutsAndRetireConnection(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+    ) Error!?EndpointConnectionRetireResult {
+        const state = connection.connectionState();
+        if (state != .closing and state != .draining) {
+            try connection.checkCloseTimeouts(now_millis);
+            return null;
+        }
+
+        connection.checkCloseTimeouts(now_millis) catch |err| switch (err) {
+            error.ConnectionClosed => return self.retireConnection(connection_id),
+            else => return err,
+        };
+        return null;
+    }
+
     /// Poll one protected long-header datagram and refresh recovery scheduling.
     ///
     /// This bridge covers Initial, Handshake, and 0-RTT long packets emitted by
@@ -5487,6 +5512,12 @@ pub const Connection = struct {
     /// Apply the modeled QUIC idle timeout under a controlled clock.
     pub fn checkIdleTimeouts(self: *Connection, now_millis: i64) Error!void {
         self.expireIdleState(now_millis);
+        if (self.state == .closed) return error.ConnectionClosed;
+    }
+
+    /// Apply the modeled close/drain timeout under a controlled clock.
+    pub fn checkCloseTimeouts(self: *Connection, now_millis: i64) Error!void {
+        self.expireCloseState(now_millis);
         if (self.state == .closed) return error.ConnectionClosed;
     }
 
@@ -17721,6 +17752,77 @@ test "EndpointConnectionLifecycle retires route and timer after idle timeout clo
     try std.testing.expectEqual(ConnectionState.closed, conn.connectionState());
     try std.testing.expectEqual(@as(usize, 2), retired.routes_retired);
     try std.testing.expect(retired.recovery_timer_disarmed);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle retires route and timer after close timeout closes connection" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const closing_cid = [_]u8{ 0x43, 0x43, 0x43, 0x43 };
+    const draining_cid = [_]u8{ 0x44, 0x44, 0x44, 0x44 };
+
+    var closing = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer closing.deinit();
+    try closing.confirmHandshake();
+    try lifecycle.registerConnectionId(56, &closing_cid, path, .{ .sequence_number = 0 });
+    _ = try closing.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(56, &closing);
+    try closing.closeConnection(0, @intFromEnum(frame.FrameType.ping), "done");
+    var out_buf: [64]u8 = undefined;
+    _ = (try closing.pollTx(11, &out_buf)) orelse return error.TestUnexpectedResult;
+    const closing_deadline = closing.closeDeadlineMillis() orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(?EndpointConnectionRetireResult, null),
+        try lifecycle.checkCloseTimeoutsAndRetireConnection(56, &closing, closing_deadline - 1),
+    );
+    try std.testing.expectEqual(ConnectionState.closing, closing.connectionState());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const closing_retired = (try lifecycle.checkCloseTimeoutsAndRetireConnection(56, &closing, closing_deadline)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(ConnectionState.closed, closing.connectionState());
+    try std.testing.expectEqual(@as(usize, 1), closing_retired.routes_retired);
+    try std.testing.expect(closing_retired.recovery_timer_disarmed);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+
+    var draining = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    defer draining.deinit();
+    try draining.confirmHandshake();
+    try draining.validatePeerAddress();
+    try lifecycle.registerConnectionId(57, &draining_cid, path, .{ .sequence_number = 0 });
+    _ = try draining.recordPacketSentInSpace(.application, 20, 100);
+    try lifecycle.armRecoveryTimerFromConnection(57, &draining);
+
+    var close_buf: [64]u8 = undefined;
+    var close_out = buffer.fixedWriter(&close_buf);
+    try frame.encodeFrame(close_out.writer(), .{ .application_close = .{
+        .error_code = 0,
+        .reason_phrase = "remote",
+    } });
+    try draining.processDatagram(21, close_out.getWritten());
+    const draining_deadline = draining.closeDeadlineMillis() orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(
+        @as(?EndpointConnectionRetireResult, null),
+        try lifecycle.checkCloseTimeoutsAndRetireConnection(57, &draining, draining_deadline - 1),
+    );
+    try std.testing.expectEqual(ConnectionState.draining, draining.connectionState());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const draining_retired = (try lifecycle.checkCloseTimeoutsAndRetireConnection(57, &draining, draining_deadline)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(ConnectionState.closed, draining.connectionState());
+    try std.testing.expectEqual(@as(usize, 1), draining_retired.routes_retired);
+    try std.testing.expect(draining_retired.recovery_timer_disarmed);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());

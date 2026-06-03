@@ -122,20 +122,42 @@ fn runProtectedAutoClose(
     const auto_client_drain_deadline = client.closeDeadlineMillis() orelse return error.UnexpectedState;
     try require(auto_client_drain_deadline > 32);
 
+    const auto_server_retired = (try server_lifecycle.checkCloseTimeoutsAndRetireConnection(
+        connection_handle,
+        &server,
+        auto_server_close_deadline,
+    )) orelse return error.UnexpectedState;
+    try require(auto_server_retired.routes_retired == 1);
+    try require(!auto_server_retired.recovery_timer_disarmed);
+    try require(server.connectionState() == .closed);
+    try require(server_lifecycle.routeCount() == 0);
+
+    const auto_client_retired = (try client_lifecycle.checkCloseTimeoutsAndRetireConnection(
+        connection_handle,
+        &client,
+        auto_client_drain_deadline,
+    )) orelse return error.UnexpectedState;
+    try require(auto_client_retired.routes_retired == 1);
+    try require(!auto_client_retired.recovery_timer_disarmed);
+    try require(client.connectionState() == .closed);
+    try require(client_lifecycle.routeCount() == 0);
+
     switch (client.peerClose() orelse return error.UnexpectedState) {
         .connection => |close| {
             try require(close.error_code == quicz.transport_error.codeValue(.frame_encoding_error));
             try require(close.frame_type == 0x1f);
             try require(std.mem.eql(u8, close.reason_phrase, "frame encoding"));
-            std.debug.print("[udp-close] auto_close invalid_bytes={} close_bytes={} error={} frame_type={} server_state={s} server_deadline={} client_state={s} client_deadline={}\n", .{
+            std.debug.print("[udp-close] auto_close invalid_bytes={} close_bytes={} error={} frame_type={} server_state={s} server_deadline={} server_timeout_retired={} client_state={s} client_deadline={} client_timeout_retired={}\n", .{
                 invalid_received.data.len,
                 close_received.data.len,
                 close.error_code,
                 close.frame_type,
                 @tagName(server.connectionState()),
                 auto_server_close_deadline,
+                auto_server_retired.routes_retired,
                 @tagName(client.connectionState()),
                 auto_client_drain_deadline,
+                auto_client_retired.routes_retired,
             });
         },
         else => return error.UnexpectedState,
