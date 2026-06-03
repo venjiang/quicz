@@ -282,8 +282,8 @@ experimental.
   with `zig build run-udp-retry-loopback`.
 - [UDP close lifecycle loopback](examples/udp_close_lifecycle_loopback.zig):
   Lifecycle-routed protected close delivery, protected receive auto-close,
-  route retirement, and stateless reset follow-up. Run with
-  `zig build run-udp-close-lifecycle-loopback`.
+  close/drain deadline evidence, route retirement, and stateless reset
+  follow-up. Run with `zig build run-udp-close-lifecycle-loopback`.
 - [UDP stateless reset loopback](examples/udp_stateless_reset_loopback.zig):
   Socket-backed active-route suppression, unknown-CID drop, reset trigger
   delivery, reset emission, and client token match. Run with

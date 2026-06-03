@@ -97,9 +97,12 @@ fn runProtectedAutoClose(
         invalid_received.data,
     ));
     try require(server.connectionState() == .closing);
+    try require(server.closeDeadlineMillis() == null);
 
     const close_packet = (try server_lifecycle.pollProtectedShortDatagram(connection_handle, &server, 31, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
     defer allocator.free(close_packet);
+    const auto_server_close_deadline = server.closeDeadlineMillis() orelse return error.UnexpectedState;
+    try require(auto_server_close_deadline > 31);
     try server_socket.*.send(io, &invalid_received.from, close_packet);
 
     var client_receive_buf: [1500]u8 = undefined;
@@ -116,19 +119,23 @@ fn runProtectedAutoClose(
     try require(close_route.connection_id == connection_handle);
     try require(std.mem.eql(u8, close_route.destination_connection_id.asSlice(), &client_dcid));
     try require(client.connectionState() == .draining);
+    const auto_client_drain_deadline = client.closeDeadlineMillis() orelse return error.UnexpectedState;
+    try require(auto_client_drain_deadline > 32);
 
     switch (client.peerClose() orelse return error.UnexpectedState) {
         .connection => |close| {
             try require(close.error_code == quicz.transport_error.codeValue(.frame_encoding_error));
             try require(close.frame_type == 0x1f);
             try require(std.mem.eql(u8, close.reason_phrase, "frame encoding"));
-            std.debug.print("[udp-close] auto_close invalid_bytes={} close_bytes={} error={} frame_type={} server_state={s} client_state={s}\n", .{
+            std.debug.print("[udp-close] auto_close invalid_bytes={} close_bytes={} error={} frame_type={} server_state={s} server_deadline={} client_state={s} client_deadline={}\n", .{
                 invalid_received.data.len,
                 close_received.data.len,
                 close.error_code,
                 close.frame_type,
                 @tagName(server.connectionState()),
+                auto_server_close_deadline,
                 @tagName(client.connectionState()),
+                auto_client_drain_deadline,
             });
         },
         else => return error.UnexpectedState,
@@ -185,8 +192,12 @@ pub fn main() !void {
     try require(server_lifecycle.statelessResetTokenCount() == 1);
 
     try client.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "udp close");
+    try require(client.connectionState() == .closing);
+    try require(client.closeDeadlineMillis() == null);
     const close_packet = (try client.pollProtectedShortDatagram(1, &server_dcid, secrets.client)) orelse return error.UnexpectedState;
     defer allocator.free(close_packet);
+    const client_close_deadline = client.closeDeadlineMillis() orelse return error.UnexpectedState;
+    try require(client_close_deadline > 1);
     try client_socket.send(io, &server_socket.address, close_packet);
 
     var server_receive_buf: [1500]u8 = undefined;
@@ -203,6 +214,8 @@ pub fn main() !void {
     try require(close_route.connection_id == connection_handle);
     try require(std.mem.eql(u8, close_route.destination_connection_id.asSlice(), &server_dcid));
     try require(server.connectionState() == .draining);
+    const server_drain_deadline = server.closeDeadlineMillis() orelse return error.UnexpectedState;
+    try require(server_drain_deadline > 2);
     switch (server.peerClose() orelse return error.UnexpectedState) {
         .connection => |close| {
             try require(close.error_code == 0);
@@ -245,11 +258,15 @@ pub fn main() !void {
     const reset_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
     try require(quicz.packet.matchesStatelessReset(reset_received.data, reset_token));
 
-    std.debug.print("[udp-close] client_port={} server_port={} close_bytes={} retired_routes={} reset_bytes={} matched=true server_state={s}\n", .{
+    std.debug.print("[udp-close] client_port={} server_port={} close_bytes={} client_deadline={} server_deadline={} retired_routes={} routes_remaining={} reset_tokens={} reset_bytes={} matched=true server_state={s}\n", .{
         client_local.port,
         server_local.port,
         close_packet.len,
+        client_close_deadline,
+        server_drain_deadline,
         retired.routes_retired,
+        server_lifecycle.routeCount(),
+        server_lifecycle.statelessResetTokenCount(),
         reset_received.data.len,
         @tagName(server.connectionState()),
     });
