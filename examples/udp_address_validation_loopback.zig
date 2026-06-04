@@ -78,6 +78,8 @@ pub fn main() !void {
     var client = try quicz.Connection.init(allocator, .client, .{});
     defer client.deinit();
 
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
     var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
     defer client_lifecycle.deinit();
 
@@ -106,7 +108,7 @@ pub fn main() !void {
     try token_policy.rotateSecret(rotated_token_secret);
     try require(token_policy.previousSecretCount() == 1);
 
-    const handshake_done = (try server.pollProtectedShortDatagram(11, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
+    const handshake_done = (try server_lifecycle.pollProtectedShortDatagram(connection_handle, &server, 11, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
     defer allocator.free(handshake_done);
     try server_socket.send(io, &client_socket.address, handshake_done);
 
@@ -125,8 +127,9 @@ pub fn main() !void {
     try require(std.mem.eql(u8, handshake_route.destination_connection_id.asSlice(), &client_dcid));
     try require(client.handshakeConfirmed());
 
-    const new_token = (try server.pollProtectedShortDatagram(13, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
+    const new_token = (try server_lifecycle.pollProtectedShortDatagram(connection_handle, &server, 13, &client_dcid, secrets.server)) orelse return error.UnexpectedState;
     defer allocator.free(new_token);
+    try require(server_lifecycle.recoveryTimerCount() == 1);
     try server_socket.send(io, &client_socket.address, new_token);
 
     const token_received = try client_socket.receiveTimeout(io, &client_receive_buf, receiveTimeout());
@@ -222,13 +225,14 @@ pub fn main() !void {
     const v2_validation = try token_policy.validateTokenForPathForVersion(.new_token, .v2, 22, server_path, v2_token);
     try require(v2_validation.originating_version == .v2);
 
-    std.debug.print("[udp-address] client_port={} server_port={} handshake_bytes={} token_bytes={} stored_token_len={} route={} handshake_confirmed={} path_rejected={} v1_validated={} blocked_before_validation={} unblocked_after_validation={} future_ping_bytes={} previous_secrets={} replay_entries={} replay_rejected={} version_rejected={} v2_validated={}\n", .{
+    std.debug.print("[udp-address] client_port={} server_port={} handshake_bytes={} token_bytes={} stored_token_len={} route={} emit_timers={} handshake_confirmed={} path_rejected={} v1_validated={} blocked_before_validation={} unblocked_after_validation={} future_ping_bytes={} previous_secrets={} replay_entries={} replay_rejected={} version_rejected={} v2_validated={}\n", .{
         client_local.port,
         server_local.port,
         handshake_done.len,
         new_token.len,
         stored_token.len,
         token_route.connection_id,
+        server_lifecycle.recoveryTimerCount(),
         client.handshakeConfirmed(),
         path_rejected,
         v1_validated,

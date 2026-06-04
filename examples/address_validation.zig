@@ -38,9 +38,12 @@ fn protectedTokenAndHandshakeDoneExample(allocator: std.mem.Allocator) !void {
     try server.validatePeerAddress();
     var client = try quicz.Connection.init(allocator, .client, .{});
     defer client.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
     var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
     defer client_lifecycle.deinit();
 
+    const server_connection_handle: u64 = 500;
     const client_connection_handle: u64 = 501;
     const client_receive_path = reversePath(client_path);
     try client_lifecycle.registerConnectionId(client_connection_handle, &client_dcid, client_receive_path, .{});
@@ -67,7 +70,7 @@ fn protectedTokenAndHandshakeDoneExample(allocator: std.mem.Allocator) !void {
     defer restored_policy.deinit();
     if (restored_policy.previousSecretCount() != 1) return error.AddressValidationExampleFailed;
 
-    const handshake_done = (try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server)) orelse return error.AddressValidationExampleFailed;
+    const handshake_done = (try server_lifecycle.pollProtectedShortDatagram(server_connection_handle, &server, 10, &client_dcid, secrets.server)) orelse return error.AddressValidationExampleFailed;
     defer allocator.free(handshake_done);
     const handshake_route = try client_lifecycle.processRoutedProtectedShortDatagram(
         client_connection_handle,
@@ -81,8 +84,9 @@ fn protectedTokenAndHandshakeDoneExample(allocator: std.mem.Allocator) !void {
     if (!std.mem.eql(u8, handshake_route.destination_connection_id.asSlice(), &client_dcid)) return error.AddressValidationExampleFailed;
     if (!client.handshakeConfirmed()) return error.AddressValidationExampleFailed;
 
-    const new_token = (try server.pollProtectedShortDatagram(12, &client_dcid, secrets.server)) orelse return error.AddressValidationExampleFailed;
+    const new_token = (try server_lifecycle.pollProtectedShortDatagram(server_connection_handle, &server, 12, &client_dcid, secrets.server)) orelse return error.AddressValidationExampleFailed;
     defer allocator.free(new_token);
+    if (server_lifecycle.recoveryTimerCount() != 1) return error.AddressValidationExampleFailed;
     const new_token_route = try client_lifecycle.processRoutedProtectedShortDatagram(
         client_connection_handle,
         &client,
@@ -180,10 +184,11 @@ fn protectedTokenAndHandshakeDoneExample(allocator: std.mem.Allocator) !void {
     const v2_validation = try restored_policy.validateTokenForPathForVersion(.new_token, .v2, 19, client_path, v2_token);
     if (v2_validation.originating_version != .v2) return error.AddressValidationExampleFailed;
 
-    std.debug.print("[address] protected_handshake_done bytes={} new_token_bytes={} stored_token_len={} server_handshake_discarded={} new_token_validated={} path_bound={} version_bound={} version_rejected={} secret_set_previous={} replay_entries={} replay_rejected={} future_ping_bytes={}\n", .{
+    std.debug.print("[address] protected_handshake_done bytes={} new_token_bytes={} stored_token_len={} emit_timers={} server_handshake_discarded={} new_token_validated={} path_bound={} version_bound={} version_rejected={} secret_set_previous={} replay_entries={} replay_rejected={} future_ping_bytes={}\n", .{
         handshake_done.len,
         new_token.len,
         stored_token.len,
+        server_lifecycle.recoveryTimerCount(),
         server.packetNumberSpaceDiscarded(.handshake),
         future_server.peerAddressValidated(),
         true,
