@@ -167,7 +167,7 @@ pub fn main() !void {
   运行：`zig build run-udp-one-rtt-loopback`。
 - [UDP echo loopback](examples/udp_echo_loopback.zig)：socket-backed lifecycle-routed installed-key 1-RTT STREAM echo、request/echo payload equality、final ACK cleanup 和 client/server bytes-in-flight/timer-state 证据。
   运行：`zig build run-udp-echo-loopback`。
-- [UDP CryptoBackend loopback](examples/udp_crypto_backend_loopback.zig)：socket-backed mock `CryptoBackend` 1-RTT traffic-secret handoff、lifecycle-routed installed-key STREAM echo、final ACK cleanup 和 client/server bytes-in-flight/timer-state 证据。
+- [UDP CryptoBackend loopback](examples/udp_crypto_backend_loopback.zig)：socket-backed mock `CryptoBackend` 1-RTT traffic-secret handoff、lifecycle-routed installed-key STREAM echo、final ACK cleanup，以及 client/server bytes-in-flight 和 recovery-timer deadline/cleanup 证据。
   运行：`zig build run-udp-crypto-backend-loopback`。
 - [UDP HANDSHAKE_DONE loopback](examples/udp_handshake_done_loopback.zig)：socket-backed lifecycle-routed installed-key HANDSHAKE_DONE confirmation、server/client Handshake key discard 和公开 state 证据，以及 ACK pending/cleanup 输出。
   运行：`zig build run-udp-handshake-done-loopback`。
