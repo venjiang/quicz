@@ -169,11 +169,52 @@ pub fn main() !void {
     try require(server.pendingAckLargest(.application) == 0);
     try require(server.nextPeerPacketNumber(.application) == 1);
     const server_accepted_early_packet = server.nextPeerPacketNumber(.application) == 1;
-    const server_early_ack_largest = server.pendingAckLargest(.application).?;
+    const server_initial_early_ack_largest = server.pendingAckLargest(.application).?;
 
     var read_buf: [32]u8 = undefined;
     const read_len = (try server.recvOnStream(stream_id, &read_buf)) orelse return error.UnexpectedState;
     try require(std.mem.eql(u8, read_buf[0..read_len], "udp early data"));
+
+    try client.confirmHandshake();
+    try client_lifecycle.armRecoveryTimerFromConnection(client_handle, &client);
+    try require(client_lifecycle.recoveryTimerCount() == 1);
+    const early_timer = client_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
+    try require(early_timer.connection_id == client_handle);
+    try require(early_timer.timer.space == .application);
+    try require(early_timer.timer.kind == .pto);
+
+    const early_pto_result = try client_lifecycle.serviceRecoveryTimerAndPollProtectedZeroRttDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        early_timer.timer.deadline_millis,
+        &server_dcid,
+        &client_dcid,
+    );
+    const early_pto_serviced = early_pto_result.serviced orelse return error.UnexpectedState;
+    try require(early_pto_serviced.connection_id == client_handle);
+    try require(early_pto_serviced.timer.space == .application);
+    try require(early_pto_serviced.timer.kind == .pto);
+    const early_pto_probe = early_pto_result.datagram orelse return error.UnexpectedState;
+    defer allocator.free(early_pto_probe);
+    try require(client.sentPacketCount(.application) == 2);
+    try require(client_lifecycle.recoveryTimerCount() == 1);
+    try client_socket.send(io, &server_socket.address, early_pto_probe);
+
+    const early_pto_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const early_pto_route = try server_lifecycle.processRoutedProtectedZeroRttDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        early_pto_received.path,
+        early_timer.timer.deadline_millis + 1,
+        early_pto_received.data,
+    );
+    try require(early_pto_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, early_pto_route.destination_connection_id.asSlice(), &server_dcid));
+    try require(server.pendingAckLargest(.application) == 1);
+    try require(server.nextPeerPacketNumber(.application) == 2);
+    try require((try server.recvOnStream(stream_id, &read_buf)) == null);
+    const server_early_pto_ack_largest = server.pendingAckLargest(.application).?;
+
     try server.validatePeerAddress();
 
     try client.installOneRttTrafficSecrets(.{
@@ -234,13 +275,16 @@ pub fn main() !void {
     );
     try require(ping_route.connection_id == server_handle);
     try require(std.mem.eql(u8, ping_route.destination_connection_id.asSlice(), &server_dcid));
-    try require(server.pendingAckLargest(.application) == 1);
+    try require(server.pendingAckLargest(.application) == 2);
     try require(!server.hasPeerZeroRttProtectionKey());
 
-    std.debug.print("[udp-zero-rtt] client_port={} server_port={} early_bytes={} ack_bytes={} ping_bytes={} stream_id={} received=\"{s}\" post_ack_inflight={} rejected_before_accept={} rejected_zero_keys_discarded={} accepted_after_accept={} server_early_ack_largest={} client_zero_keys_discarded={} server_zero_keys_before_1rtt={} server_zero_keys_discarded={}\n", .{
+    std.debug.print("[udp-zero-rtt] client_port={} server_port={} early_bytes={} early_pto_deadline={} early_pto_bytes={} early_pto_route={} ack_bytes={} ping_bytes={} stream_id={} received=\"{s}\" post_ack_inflight={} rejected_before_accept={} rejected_zero_keys_discarded={} accepted_after_accept={} server_initial_early_ack_largest={} server_early_pto_ack_largest={} client_zero_keys_discarded={} server_zero_keys_before_1rtt={} server_zero_keys_discarded={}\n", .{
         client_local.port,
         server_local.port,
         early.len,
+        early_timer.timer.deadline_millis,
+        early_pto_probe.len,
+        early_pto_route.connection_id,
         ack.len,
         one_rtt_ping.len,
         stream_id,
@@ -249,7 +293,8 @@ pub fn main() !void {
         rejecting_server.nextPeerPacketNumber(.application) == 0,
         rejected_zero_keys_discarded,
         server_accepted_early_packet,
-        server_early_ack_largest,
+        server_initial_early_ack_largest,
+        server_early_pto_ack_largest,
         client_zero_keys_discarded,
         server_zero_keys_before_1rtt,
         !server.hasPeerZeroRttProtectionKey(),

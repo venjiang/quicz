@@ -401,6 +401,13 @@ produce or consume TLS-owned QUIC packets over UDP.
   `udp_zero_rtt_loopback`. The loopback now rejects early-data processing before
   acceptance, explicitly calls `rejectZeroRtt()`, proves the peer 0-RTT receive
   keys and accepted flag are cleared, and verifies a later accept attempt fails.
+- 2026-06-04: Extended `udp_zero_rtt_loopback` with serviced installed-key
+  0-RTT PTO evidence. The example now arms the endpoint recovery timer after
+  modeled handshake confirmation, services the client's Application PTO through
+  `serviceRecoveryTimerAndPollProtectedZeroRttDatagramWithInstalledKeys()`,
+  routes the protected 0-RTT STREAM PTO probe over loopback UDP, and verifies
+  the duplicate STREAM data is discarded while ACK largest advances to the PTO
+  packet number.
 - 2026-06-03: Added lifecycle-owned address-token validation unblocking.
   `EndpointConnectionLifecycle.validateAddressTokenForPathAndArmConnection()`
   now validates a path-bound endpoint token, records replay state, marks the
@@ -2624,7 +2631,7 @@ run from `build.zig`.
 | `udp_protected_loopback` | Socket-backed loopback UDP lifecycle protected packet exercise: lifecycle-owned caller-keyed protected client Initial route registration, accepted protected Initial authentication before server route registration, anti-amplification budget accounting, protected server Initial response emission and routed client-side processing, routed caller-keyed 1-RTT PING processing, and routed caller-keyed 1-RTT ACK processing. | Present |
 | `udp_handshake_keys_loopback` | Socket-backed loopback UDP Handshake-key exercise: lifecycle-routed installed-key Handshake CRYPTO delivery in both directions, serviced installed-key Handshake PTO probe routing with duplicate CRYPTO discard evidence, and routed Handshake ACK cleanup. | Present |
 | `udp_crypto_stream_loopback` | Socket-backed loopback UDP CryptoBackend CRYPTO stream exercise: mock `CryptoBackend` Handshake traffic-secret installation, local/peer transport-parameter byte handoff, lifecycle-routed protected Handshake CRYPTO flights, backend receive/output, and routed ACK cleanup. | Present |
-| `udp_zero_rtt_loopback` | Socket-backed loopback UDP 0-RTT exercise: lifecycle-routed installed-key 0-RTT STREAM delivery, explicit accept-before-process enforcement, rejection-driven peer key discard, accepted early ACK evidence, routed 1-RTT ACK cleanup, and client/server 0-RTT key discard evidence across the 1-RTT boundary. | Present |
+| `udp_zero_rtt_loopback` | Socket-backed loopback UDP 0-RTT exercise: lifecycle-routed installed-key 0-RTT STREAM delivery, explicit accept-before-process enforcement, rejection-driven peer key discard, serviced installed-key 0-RTT PTO probe routing with duplicate STREAM discard evidence, accepted early ACK evidence, routed 1-RTT ACK cleanup, and client/server 0-RTT key discard evidence across the 1-RTT boundary. | Present |
 | `udp_one_rtt_loopback` | Socket-backed loopback UDP 1-RTT exercise: lifecycle-routed installed-key 1-RTT STREAM delivery after modeled handshake confirmation and routed Application-space ACK cleanup. | Present |
 | `udp_echo_loopback` | Socket-backed loopback UDP installed-key 1-RTT echo exercise: lifecycle-routed client STREAM delivery, server bidirectional STREAM echo, request/echo payload equality, final ACK cleanup, client final-ACK timer-state evidence, and server bytes-in-flight/timer cleanup evidence. | Present |
 | `udp_crypto_backend_loopback` | Socket-backed loopback UDP CryptoBackend exercise: mock `CryptoBackend` 1-RTT traffic-secret handoff, modeled handshake confirmation, lifecycle-routed installed-key STREAM echo, serviced installed-key 1-RTT PTO probe routing with duplicate STREAM discard evidence, client/server send-side recovery-timer deadline evidence, final ACK cleanup, client final-ACK timer-state evidence, and server bytes-in-flight/timer cleanup evidence. | Present |
