@@ -224,7 +224,6 @@ pub fn main() !void {
     var echo_datagram_count: usize = 0;
     var echo_bytes: usize = 0;
     var echo_len_or_null: ?usize = null;
-    var server_echo_timer_deadline: ?i64 = null;
     while (echo_datagram_count < 3 and echo_len_or_null == null) : (echo_datagram_count += 1) {
         const echo_datagram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
             server_handle,
@@ -233,13 +232,6 @@ pub fn main() !void {
             &client_dcid,
         )) orelse return error.UnexpectedState;
         defer allocator.free(echo_datagram);
-        if (server_echo_timer_deadline == null and server_lifecycle.recoveryTimerCount() == 1) {
-            const server_echo_timer = server_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
-            try require(server_echo_timer.connection_id == server_handle);
-            try require(server_echo_timer.timer.space == .application);
-            try require(server_echo_timer.timer.kind == .pto);
-            server_echo_timer_deadline = server_echo_timer.timer.deadline_millis;
-        }
         echo_bytes += echo_datagram.len;
         try server_socket.send(io, &client_socket.address, echo_datagram);
 
@@ -257,12 +249,46 @@ pub fn main() !void {
     }
     try require(client.bytesInFlight(.application) == 0);
     const client_inflight_after_echo = client.bytesInFlight(.application);
-    const server_echo_deadline = server_echo_timer_deadline orelse return error.UnexpectedState;
 
     const echo_len = echo_len_or_null orelse return error.UnexpectedState;
     const echo_payload = stream_buf[0..echo_len];
     try require(std.mem.eql(u8, echo_payload, stream_payload));
     const echo_ack_largest = client.pendingAckLargest(.application) orelse return error.UnexpectedState;
+    try server_lifecycle.armRecoveryTimerFromConnection(server_handle, &server);
+    const server_echo_timer = server_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
+    try require(server_echo_timer.connection_id == server_handle);
+    try require(server_echo_timer.timer.space == .application);
+    try require(server_echo_timer.timer.kind == .pto);
+    const server_echo_deadline = server_echo_timer.timer.deadline_millis;
+
+    const server_pto_result = try server_lifecycle.serviceRecoveryTimerAndPollProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        server_echo_deadline,
+        &client_dcid,
+    );
+    const server_pto_serviced = server_pto_result.serviced orelse return error.UnexpectedState;
+    try require(server_pto_serviced.connection_id == server_handle);
+    try require(server_pto_serviced.timer.space == .application);
+    try require(server_pto_serviced.timer.kind == .pto);
+    const server_pto_probe = server_pto_result.datagram orelse return error.UnexpectedState;
+    defer allocator.free(server_pto_probe);
+    try require(server_lifecycle.recoveryTimerCount() == 1);
+    try server_socket.send(io, &client_socket.address, server_pto_probe);
+
+    const server_pto_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+    const server_pto_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        server_pto_received.path,
+        server_echo_deadline + 1,
+        server_pto_received.data,
+    );
+    try require(server_pto_route.connection_id == client_handle);
+    try require(std.mem.eql(u8, server_pto_route.destination_connection_id.asSlice(), &client_dcid));
+    const echo_pto_ack_largest = client.pendingAckLargest(.application).?;
+    try require(echo_pto_ack_largest > echo_ack_largest);
+    try require((try client.recvOnStream(stream_id, &stream_buf)) == null);
 
     const final_ack = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         client_handle,
@@ -288,7 +314,7 @@ pub fn main() !void {
     try require(client_lifecycle.recoveryTimerCount() == 1);
     try require(server_lifecycle.recoveryTimerCount() == 0);
 
-    std.debug.print("[udp-crypto-backend] client_port={} server_port={} stream_bytes={} client_timer_deadline={} client_pto_bytes={} client_pto_route={} echo_packets={} echo_bytes={} echo_timer_deadline={} echo_ack_largest={} final_ack_bytes={} received=\"{s}\" echo=\"{s}\" client_backend_keys={} server_backend_keys={} confirmed={} client_inflight_after_echo={} server_inflight={} client_timers={} server_timers={}\n", .{
+    std.debug.print("[udp-crypto-backend] client_port={} server_port={} stream_bytes={} client_timer_deadline={} client_pto_bytes={} client_pto_route={} echo_packets={} echo_bytes={} echo_timer_deadline={} server_pto_bytes={} server_pto_route={} echo_ack_largest={} echo_pto_ack_largest={} final_ack_bytes={} received=\"{s}\" echo=\"{s}\" client_backend_keys={} server_backend_keys={} confirmed={} client_inflight_after_echo={} server_inflight={} client_timers={} server_timers={}\n", .{
         client_local.port,
         server_local.port,
         stream_datagram.len,
@@ -298,7 +324,10 @@ pub fn main() !void {
         echo_datagram_count,
         echo_bytes,
         server_echo_deadline,
+        server_pto_probe.len,
+        server_pto_route.connection_id,
         echo_ack_largest,
+        echo_pto_ack_largest,
         final_ack.len,
         stream_payload,
         echo_payload,

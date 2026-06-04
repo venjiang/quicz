@@ -242,9 +242,10 @@ experimental.
   `zig build run-udp-echo-loopback`.
 - [UDP CryptoBackend loopback](examples/udp_crypto_backend_loopback.zig):
   Socket-backed mock `CryptoBackend` 1-RTT traffic-secret handoff followed by
-  lifecycle-routed installed-key STREAM echo, installed-key PTO probe routing,
-  final ACK cleanup, and client/server bytes-in-flight and recovery-timer
-  deadline/cleanup evidence. Run with `zig build run-udp-crypto-backend-loopback`.
+  lifecycle-routed installed-key STREAM echo, client/server installed-key PTO
+  probe routing with duplicate STREAM discard evidence, final ACK cleanup, and
+  client/server bytes-in-flight and recovery-timer deadline/cleanup evidence.
+  Run with `zig build run-udp-crypto-backend-loopback`.
 - [UDP HANDSHAKE_DONE loopback](examples/udp_handshake_done_loopback.zig):
   Socket-backed lifecycle-routed installed-key HANDSHAKE_DONE confirmation,
   server/client Handshake key discard and public state evidence, plus ACK
