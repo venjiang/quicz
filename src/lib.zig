@@ -637,6 +637,9 @@ pub const EndpointVersionNegotiationError = Error || endpoint.RouteError;
 /// Errors returned while coordinating endpoint-owned protected Initial accept state.
 pub const EndpointProtectedInitialError = Error || endpoint.RouteError;
 
+/// Errors returned while accepting endpoint-owned Retry follow-up Initials.
+pub const EndpointRetryProtectedInitialError = EndpointProtectedInitialError || address_validation_token.Error;
+
 /// Errors returned while coordinating routed protected endpoint datagrams.
 pub const EndpointProtectedDatagramError = Error || endpoint.RouteError;
 
@@ -742,6 +745,16 @@ pub const EndpointAcceptedProtectedInitialResponseResult = struct {
     /// The caller owns these bytes and must free them with the same allocator
     /// used by `connection`.
     response_datagram: []u8,
+};
+
+/// Endpoint result after accepting a Retry follow-up protected Initial.
+pub const EndpointRetryProtectedInitialResult = struct {
+    /// Endpoint route selected by the Retry Source CID.
+    route: endpoint.RouteResult,
+    /// Initial accept metadata borrowed from the follow-up datagram.
+    initial_accept: endpoint.InitialAcceptResult,
+    /// Authenticated Retry token metadata returned by endpoint policy.
+    token_validation: EndpointAddressValidationResult,
 };
 
 /// Endpoint result after validating an address token for one connection.
@@ -1320,6 +1333,62 @@ pub const EndpointConnectionLifecycle = struct {
             datagram,
         );
         return route;
+    }
+
+    /// Accept a Retry follow-up Initial on an already-switched endpoint route.
+    ///
+    /// This helper keeps the server Retry follow-up receive path on the
+    /// lifecycle owner after `switchInitialDestinationConnectionIdAfterRetry()`
+    /// has replaced the Original DCID route with the Retry Source CID. It
+    /// proves the datagram routes to the caller's connection handle, extracts
+    /// Initial accept metadata, validates and consumes the path-bound Retry
+    /// token, then processes the protected Initial packet.
+    pub fn processRetryValidatedProtectedInitialDatagram(
+        self: *EndpointConnectionLifecycle,
+        policy: *endpoint.AddressValidationPolicy,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        path: endpoint.Udp4Tuple,
+        datagram: []const u8,
+        supported_versions: []const packet.Version,
+    ) EndpointRetryProtectedInitialError!EndpointRetryProtectedInitialResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+
+        const initial_accept = (try endpoint.peekInitialAcceptDatagram(
+            path,
+            datagram,
+            supported_versions,
+        )) orelse return error.InvalidPacket;
+        if (!std.mem.eql(u8, initial_accept.original_destination_connection_id, route.destination_connection_id.asSlice())) {
+            return error.InvalidPacket;
+        }
+        if (initial_accept.token.len == 0) return error.InvalidPacket;
+
+        const token_validation = try self.validateRetryTokenForPathAndArmConnection(
+            policy,
+            connection_id,
+            connection,
+            initial_accept.version,
+            now_millis,
+            path,
+            initial_accept.token,
+        );
+        _ = try self.processRoutedProtectedInitialDatagram(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            initial_accept.original_destination_connection_id,
+            datagram,
+        );
+
+        return .{
+            .route = route,
+            .initial_accept = initial_accept,
+            .token_validation = token_validation,
+        };
     }
 
     /// Return a retained stateless reset token for an inactive destination CID.
@@ -15460,6 +15529,94 @@ test "EndpointConnectionLifecycle validates Retry token and consumes pending sta
     );
     try std.testing.expect(!replay_server.peerAddressValidated());
     try std.testing.expectEqual(@as(usize, 1), replay_server.pendingRetryTokenCount());
+}
+
+test "EndpointConnectionLifecycle accepts Retry follow-up Initial through lifecycle helper" {
+    const secret: address_validation_token.Secret = [_]u8{0xf1} ** address_validation_token.secret_len;
+    const nonce: address_validation_token.Nonce = [_]u8{0x2c} ** address_validation_token.nonce_len;
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 192, 0, 2, 29 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 198, 51, 100, 27 }, 50_000),
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const retry_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38 };
+    const supported_versions = [_]packet.Version{.v1};
+    const connection_id: u64 = 702;
+
+    var policy = endpoint.AddressValidationPolicy.init(std.testing.allocator, secret, .{
+        .max_previous_secrets = 1,
+        .max_replay_entries = 4,
+    });
+    defer policy.deinit();
+    const token = try policy.issueTokenForPath(std.testing.allocator, .retry, 1_000, 60_000, path, nonce);
+    defer std.testing.allocator.free(token);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(connection_id, &original_dcid, path, .{
+        .active_migration_disabled = true,
+    });
+    _ = try lifecycle.switchInitialDestinationConnectionIdAfterRetry(&original_dcid, &retry_scid, path);
+
+    const retry_secrets = try protection.deriveInitialSecrets(.v1, &retry_scid);
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.sendCryptoInSpace(.initial, "client after retry");
+    const followup_initial = (try client.pollInitialProtectedDatagram(
+        1_010,
+        &retry_scid,
+        &client_scid,
+        token,
+        retry_secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(followup_initial);
+
+    var missing_pending_server = try Connection.init(std.testing.allocator, .server, .{});
+    defer missing_pending_server.deinit();
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processRetryValidatedProtectedInitialDatagram(
+            &policy,
+            connection_id,
+            &missing_pending_server,
+            1_020,
+            path,
+            followup_initial,
+            &supported_versions,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), policy.replayFilterEntryCount());
+    try std.testing.expectEqual(@as(u64, 0), missing_pending_server.nextPeerPacketNumber(.initial));
+    try std.testing.expect(!missing_pending_server.peerAddressValidated());
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.issueRetryToken(token);
+    const result = try lifecycle.processRetryValidatedProtectedInitialDatagram(
+        &policy,
+        connection_id,
+        &server,
+        1_020,
+        path,
+        followup_initial,
+        &supported_versions,
+    );
+    try std.testing.expectEqual(connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &retry_scid, result.route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(packet.Version.v1, result.initial_accept.version);
+    try std.testing.expectEqualSlices(u8, &retry_scid, result.initial_accept.original_destination_connection_id);
+    try std.testing.expectEqualSlices(u8, &client_scid, result.initial_accept.source_connection_id);
+    try std.testing.expectEqual(address_validation_token.Kind.retry, result.token_validation.validation.kind);
+    try std.testing.expectEqual(packet.Version.v1, result.token_validation.validation.originating_version);
+    try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 0), server.pendingRetryTokenCount());
+    try std.testing.expectEqual(@as(usize, 1), policy.replayFilterEntryCount());
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
+
+    var crypto_buf: [64]u8 = undefined;
+    const recv_len = (try server.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("client after retry", crypto_buf[0..recv_len]);
 }
 
 test "address-bound NEW_TOKEN validates only for its originating QUIC version" {

@@ -280,8 +280,8 @@ experimental.
   over a new peer port with close-propagating receive, plus pre-validation PING
   no-update evidence. Run with `zig build run-udp-path-validation-loopback`.
 - [UDP Retry loopback](examples/udp_retry_loopback.zig): Lifecycle-owned Retry
-  delivery, token validation/consumption, and routed follow-up Initial processing. Run
-  with `zig build run-udp-retry-loopback`.
+  delivery, token validation/consumption, and follow-up Initial acceptance and
+  processing. Run with `zig build run-udp-retry-loopback`.
 - [UDP close lifecycle loopback](examples/udp_close_lifecycle_loopback.zig):
   Lifecycle-routed protected close delivery, protected receive auto-close,
   close/drain deadline evidence, timeout-driven route cleanup, route

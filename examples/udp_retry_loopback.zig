@@ -237,40 +237,22 @@ pub fn main() !void {
 
     const retry_initial_received = try server_socket.receiveTimeout(io, &server_receive_buf, receiveTimeout());
     const retry_initial_path = try udp4Tuple(server_socket.address, retry_initial_received.from);
-    const routed_retry_action = try server_lifecycle.handleDatagramWithVersionNegotiation(
-        &action_buf,
+    const retry_initial_result = try server_lifecycle.processRetryValidatedProtectedInitialDatagram(
+        &token_policy,
+        connection_handle,
+        &server,
+        4,
         retry_initial_path,
         retry_initial_received.data,
-        &reset_prefix,
         &supported_versions,
     );
-    const routed_retry = switch (routed_retry_action) {
-        .routed => |route| route,
-        else => return error.UnexpectedState,
-    };
-    try require(routed_retry.connection_id == connection_handle);
-    try require(std.mem.eql(u8, routed_retry.destination_connection_id.asSlice(), &retry_scid));
-
-    const retry_accept = (try quicz.endpoint.peekInitialAcceptDatagram(
-        retry_initial_path,
-        retry_initial_received.data,
-        &supported_versions,
-    )) orelse return error.UnexpectedState;
+    const retry_accept = retry_initial_result.initial_accept;
     try require(retry_accept.version == .v1);
     try require(std.mem.eql(u8, retry_accept.original_destination_connection_id, &retry_scid));
     try require(std.mem.eql(u8, retry_accept.source_connection_id, &client_initial_scid));
     try require(std.mem.eql(u8, retry_accept.token, retry_token));
-
-    const validation = try server_lifecycle.validateRetryTokenForPathAndArmConnection(
-        &token_policy,
-        connection_handle,
-        &server,
-        .v1,
-        4,
-        retry_initial_path,
-        retry_accept.token,
-    );
-    try require(validation.validation.originating_version == .v1);
+    try require(retry_initial_result.route.connection_id == connection_handle);
+    try require(retry_initial_result.token_validation.validation.originating_version == .v1);
     try require(server.peerAddressValidated());
     try require(server.pendingRetryTokenCount() == 0);
 
@@ -285,16 +267,7 @@ pub fn main() !void {
     }
     try require(replay_rejected);
 
-    const server_retry_initial_route = try server_lifecycle.processRoutedProtectedInitialDatagram(
-        connection_handle,
-        &server,
-        retry_initial_path,
-        6,
-        &retry_scid,
-        retry_initial_received.data,
-    );
-    try require(server_retry_initial_route.connection_id == connection_handle);
-    try require(std.mem.eql(u8, server_retry_initial_route.destination_connection_id.asSlice(), &retry_scid));
+    try require(std.mem.eql(u8, retry_initial_result.route.destination_connection_id.asSlice(), &retry_scid));
     var server_crypto_buf: [64]u8 = undefined;
     const server_received_crypto = try readCryptoRequired(&server, .initial, &server_crypto_buf);
     try require(std.mem.eql(u8, server_received_crypto, "client after retry"));
@@ -344,7 +317,7 @@ pub fn main() !void {
         retry_datagram.len,
         retry_initial.len,
         server_initial.len,
-        routed_retry.connection_id,
+        retry_initial_result.route.connection_id,
         retry_accept.token.len,
         replay_rejected,
         server.peerAddressValidated(),
