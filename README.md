@@ -161,6 +161,10 @@ experimental.
   object wired through `TlsBackend`, proving the adapter can be driven from a C
   boundary before binding a concrete TLS library. Run with
   `zig build run-tls-c-abi-adapter`.
+- [TLS OpenSSL probe](examples/tls_openssl_probe.zig): Links OpenSSL via
+  `pkg-config`, verifies the OpenSSL QUIC method and QUIC TLS callback/
+  transport-parameter APIs, and records that callback mode is distinct from
+  OpenSSL's full QUIC connection mode. Run with `zig build run-tls-openssl-probe`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
   long/short close, invalid ACK/ACK_ECN-range auto-close, semantic frame-error
   auto-close including invalid ACK/ACK_ECN, 0-RTT ACK/ACK_ECN packet-type
@@ -335,8 +339,9 @@ experimental.
 - Endpoint lifecycle: DCID routing, route retirement, stateless reset lookup/emission, and endpoint recovery timers.
 - Recovery and congestion: simplified RFC 9002 ACK/loss/PTO/NewReno/ECN model with deterministic tests.
 - TLS status: mock `CryptoBackend` handoff and a narrow C-ABI `TlsBackend`
-  adapter are present; binding a real C TLS library and driving a real TLS 1.3
-  transcript is still pending.
+  adapter are present; `run-tls-openssl-probe` links OpenSSL and verifies its
+  QUIC TLS callback APIs, but driving a real TLS 1.3 transcript is still
+  pending.
 
 ## License
 

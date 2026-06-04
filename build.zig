@@ -189,6 +189,24 @@ pub fn build(b: *std.Build) void {
     exe_tls_c_abi_adapter.root_module.link_libc = true;
     b.installArtifact(exe_tls_c_abi_adapter);
 
+    // OpenSSL QUIC TLS API probe executable
+    const exe_tls_openssl_probe = b.addExecutable(.{
+        .name = "quicz-tls-openssl-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tls_openssl_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    exe_tls_openssl_probe.root_module.addCSourceFile(.{
+        .file = b.path("examples/tls_openssl_probe.c"),
+        .flags = &.{},
+    });
+    exe_tls_openssl_probe.root_module.link_libc = true;
+    exe_tls_openssl_probe.root_module.linkSystemLibrary("ssl", .{});
+    exe_tls_openssl_probe.root_module.linkSystemLibrary("crypto", .{});
+    b.installArtifact(exe_tls_openssl_probe);
+
     // Graceful close executable
     const exe_graceful_close = b.addExecutable(.{
         .name = "quicz-graceful-close",
@@ -846,6 +864,15 @@ pub fn build(b: *std.Build) void {
     run_tls_c_abi_adapter_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_tls_c_abi_adapter_cmd.addArgs(args);
+    }
+
+    // zig build run-tls-openssl-probe
+    const run_tls_openssl_probe = b.step("run-tls-openssl-probe", "Run quicz OpenSSL QUIC TLS API probe");
+    const run_tls_openssl_probe_cmd = b.addRunArtifact(exe_tls_openssl_probe);
+    run_tls_openssl_probe.dependOn(&run_tls_openssl_probe_cmd.step);
+    run_tls_openssl_probe_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_tls_openssl_probe_cmd.addArgs(args);
     }
 
     // zig build run-graceful-close
