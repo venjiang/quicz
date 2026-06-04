@@ -1204,6 +1204,14 @@ produce or consume TLS-owned QUIC packets over UDP.
   STREAM_DATA_BLOCKED through the endpoint lifecycle owner, delivers receive-side
   MAX_DATA and MAX_STREAM_DATA credit refreshes back to the sender, resumes the
   STREAM with FIN, and proves final ACK cleanup.
+- 2026-06-04: Extended `udp_flow_control_loopback` with caller-keyed resumed
+  STREAM PTO evidence. After receive-side MAX_DATA/MAX_STREAM_DATA refresh lets
+  the sender resume the STREAM with FIN, the example mirrors the client recovery
+  timer into `EndpointConnectionLifecycle`, services the Application PTO through
+  `serviceRecoveryTimerAndPollProtectedShortDatagram()`, routes the protected
+  resumed STREAM PTO probe over loopback UDP, verifies duplicate FIN data is not
+  delivered again while server ACK largest advances, and then uses the final ACK
+  to clear client bytes in flight.
 - 2026-05-26: Added `examples/udp_key_update_loopback.zig` and the
   `run-udp-key-update-loopback` build step. The example installs modeled
   1-RTT traffic secrets into client and server connections, initiates an
@@ -2652,7 +2660,7 @@ run from `build.zig`.
 | `udp_echo_loopback` | Socket-backed loopback UDP installed-key 1-RTT echo exercise: lifecycle-routed client STREAM delivery, server bidirectional STREAM echo, request/echo payload equality, serviced server-side 1-RTT PTO probe routing with duplicate STREAM discard evidence, final ACK cleanup, client final-ACK timer-state evidence, and server bytes-in-flight/timer cleanup evidence. | Present |
 | `udp_crypto_backend_loopback` | Socket-backed loopback UDP CryptoBackend exercise: mock `CryptoBackend` 1-RTT traffic-secret handoff, modeled handshake confirmation, lifecycle-routed installed-key STREAM echo, serviced client/server installed-key 1-RTT PTO probe routing with duplicate STREAM discard evidence, client/server send-side recovery-timer deadline evidence, final ACK cleanup, client final-ACK timer-state evidence, and server bytes-in-flight/timer cleanup evidence. | Present |
 | `udp_handshake_done_loopback` | Socket-backed loopback UDP HANDSHAKE_DONE exercise: lifecycle-routed installed-key HANDSHAKE_DONE confirmation, server/client Handshake key discard evidence, public handshake/connection-state evidence, and routed ACK pending/cleanup evidence. | Present |
-| `udp_flow_control_loopback` | Socket-backed loopback UDP flow-control exercise: lifecycle-routed protected STREAM delivery to the receive limit, lifecycle-routed protected STREAM_DATA_BLOCKED routing, lifecycle-routed receive-side MAX_DATA/MAX_STREAM_DATA credit refresh delivery, lifecycle-routed resumed STREAM data with FIN final-size evidence, and lifecycle-routed final ACK cleanup. | Present |
+| `udp_flow_control_loopback` | Socket-backed loopback UDP flow-control exercise: lifecycle-routed protected STREAM delivery to the receive limit, lifecycle-routed protected STREAM_DATA_BLOCKED routing, lifecycle-routed receive-side MAX_DATA/MAX_STREAM_DATA credit refresh delivery, lifecycle-routed resumed STREAM data with FIN final-size evidence, caller-keyed resumed STREAM PTO probe routing with duplicate discard evidence, and lifecycle-routed final ACK cleanup. | Present |
 | `udp_spin_bit_loopback` | Socket-backed loopback UDP spin-bit exercise: enabled single-path spin-bit signaling, lifecycle-routed protected short PING/ACK receive paths, first false spin round, migrated second true-spin PING with `path_changed`, lifecycle-owned route update/reset, reset server ACK/client outgoing spin evidence, and final ACK cleanup. | Present |
 | `udp_ecn_validation_loopback` | Socket-backed loopback UDP ECN validation exercise: lifecycle-routed modeled ECT(0) protected short PING routing, lifecycle-routed protected ACK_ECN success, lifecycle-routed ACK_ECN CE-driven NewReno recovery response, lifecycle-owned endpoint ECN state update for the active UDP tuple, and migrated-path ECN isolation without claiming real IP-header ECN marking. | Present |
 | `udp_loss_recovery_loopback` | Socket-backed loopback UDP lifecycle loss-recovery exercise: lifecycle-routed protected short PING/ACK receive paths, protected ACK-driven packet-threshold loss, lifecycle timer-driven time-threshold cleanup, and final timer disarm. | Present |

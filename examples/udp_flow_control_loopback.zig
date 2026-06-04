@@ -264,6 +264,44 @@ pub fn main() !void {
     const final_size = (try server.recvStreamFinalSize(stream_id)) orelse return error.UnexpectedState;
     try require(final_size == 6);
     try require(try server.recvStreamFinished(stream_id));
+    const resumed_ack_largest = server.pendingAckLargest(.application) orelse return error.UnexpectedState;
+
+    try client_lifecycle.armRecoveryTimerFromConnection(41, &client);
+    const resumed_timer = client_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
+    try require(resumed_timer.connection_id == 41);
+    try require(resumed_timer.timer.space == .application);
+    try require(resumed_timer.timer.kind == .pto);
+    const resumed_pto_result = try client_lifecycle.serviceRecoveryTimerAndPollProtectedShortDatagram(
+        41,
+        &client,
+        resumed_timer.timer.deadline_millis,
+        &server_dcid,
+        secrets.client,
+    );
+    const resumed_pto_serviced = resumed_pto_result.serviced orelse return error.UnexpectedState;
+    try require(resumed_pto_serviced.connection_id == 41);
+    try require(resumed_pto_serviced.timer.space == .application);
+    try require(resumed_pto_serviced.timer.kind == .pto);
+    const resumed_pto_probe = resumed_pto_result.datagram orelse return error.UnexpectedState;
+    defer allocator.free(resumed_pto_probe);
+    try require(client_lifecycle.recoveryTimerCount() == 1);
+    try client_socket.send(io, &server_socket.address, resumed_pto_probe);
+
+    const resumed_pto_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const resumed_pto_route = try server_lifecycle.processRoutedProtectedShortDatagram(
+        51,
+        &server,
+        resumed_pto_received.path,
+        resumed_timer.timer.deadline_millis + 1,
+        secrets.client,
+        resumed_pto_received.data,
+    );
+    try require(resumed_pto_route.connection_id == 51);
+    try require(std.mem.eql(u8, resumed_pto_route.destination_connection_id.asSlice(), &server_dcid));
+    const resumed_pto_ack_largest = server.pendingAckLargest(.application) orelse return error.UnexpectedState;
+    try require(resumed_pto_ack_largest > resumed_ack_largest);
+    try require((try server.recvOnStream(stream_id, &read_buf)) == null);
+    try require(try server.recvStreamFinished(stream_id));
 
     const final_ack = try sendServerPacket(
         io,
@@ -273,14 +311,14 @@ pub fn main() !void {
         &client,
         &server_socket,
         &client_socket,
-        10,
+        resumed_timer.timer.deadline_millis + 2,
         &client_dcid,
         secrets.server,
         &client_receive_buf,
     );
     try require(client.bytesInFlight(.application) == 0);
 
-    std.debug.print("[udp-flow] client_port={} server_port={} stream={} stream_packet={} blocked_packet={} max_data_packet={} max_stream_packet={} resumed_packet={} final_ack={} peer_blocked={} final_size={} finished={} client_inflight={}\n", .{
+    std.debug.print("[udp-flow] client_port={} server_port={} stream={} stream_packet={} blocked_packet={} max_data_packet={} max_stream_packet={} resumed_packet={} resumed_pto_deadline={} resumed_pto_bytes={} resumed_ack_largest={} resumed_pto_ack_largest={} final_ack={} peer_blocked={} final_size={} finished={} client_inflight={}\n", .{
         client_local.port,
         server_local.port,
         stream_id,
@@ -289,6 +327,10 @@ pub fn main() !void {
         max_data_packet,
         max_stream_packet,
         resumed_packet,
+        resumed_timer.timer.deadline_millis,
+        resumed_pto_probe.len,
+        resumed_ack_largest,
+        resumed_pto_ack_largest,
         final_ack,
         server.peerStreamDataBlockedLimit(stream_id).?,
         final_size,
