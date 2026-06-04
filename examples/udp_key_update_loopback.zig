@@ -223,6 +223,42 @@ pub fn main() !void {
     const server_peer_retains_first_update = server.peerOneRttRetainsKeyGeneration(1) orelse return error.UnexpectedState;
     try require(!server_peer_retains_first_update);
 
+    const second_update_timer = client_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
+    try require(second_update_timer.connection_id == 41);
+    try require(second_update_timer.timer.space == .application);
+    try require(second_update_timer.timer.kind == .pto);
+    const second_update_pto_result = try client_lifecycle.serviceRecoveryTimerAndPollProtectedShortDatagramWithInstalledKeys(
+        41,
+        &client,
+        second_update_timer.timer.deadline_millis,
+        &server_dcid,
+    );
+    const second_update_pto_serviced = second_update_pto_result.serviced orelse return error.UnexpectedState;
+    try require(second_update_pto_serviced.connection_id == 41);
+    try require(second_update_pto_serviced.timer.space == .application);
+    try require(second_update_pto_serviced.timer.kind == .pto);
+    const second_update_pto_probe = second_update_pto_result.datagram orelse return error.UnexpectedState;
+    defer allocator.free(second_update_pto_probe);
+    const second_pto_key_phase = try quicz.protection.peekShortPacketKeyPhaseAes128(secrets.client.hp, second_update_pto_probe, server_dcid.len);
+    try require(!second_pto_key_phase);
+    try client_socket.send(io, &server_socket.address, second_update_pto_probe);
+
+    const second_pto_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const second_pto_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        51,
+        &server,
+        second_pto_received.path,
+        second_update_timer.timer.deadline_millis + 1,
+        second_pto_received.data,
+    );
+    try require(second_pto_route.connection_id == 51);
+    try require(std.mem.eql(u8, second_pto_route.destination_connection_id.asSlice(), &server_dcid));
+    try require(server.peerOneRttKeyPhase().? == false);
+    try require((server.peerOneRttKeyUpdateCount() orelse return error.UnexpectedState) == 2);
+    try require(server.nextPeerPacketNumber(.application) == 3);
+    try require(server.pendingAckLargest(.application).? == 2);
+    const second_pto_ack_largest = server.pendingAckLargest(.application).?;
+
     const stale_generation_1_keys = quicz.protection.nextAes128PacketProtectionKeys(secrets.client);
     const stale_ping_plaintext = [_]u8{
         @intFromEnum(quicz.frame.FrameType.ping),
@@ -256,8 +292,8 @@ pub fn main() !void {
         else => return err,
     };
     try require(stale_rejected);
-    try require(server.nextPeerPacketNumber(.application) == 2);
-    try require(server.pendingAckLargest(.application).? == 1);
+    try require(server.nextPeerPacketNumber(.application) == 3);
+    try require(server.pendingAckLargest(.application).? == second_pto_ack_largest);
     try require((server.peerOneRttKeyUpdateCount() orelse return error.UnexpectedState) == 2);
     const server_after_stale_next_pn = server.nextPeerPacketNumber(.application);
     const server_after_stale_ack = server.pendingAckLargest(.application).?;
@@ -265,7 +301,7 @@ pub fn main() !void {
     const second_ack = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         51,
         &server,
-        7,
+        second_update_timer.timer.deadline_millis + 3,
         &client_dcid,
     )) orelse return error.UnexpectedState;
     defer allocator.free(second_ack);
@@ -278,7 +314,7 @@ pub fn main() !void {
         41,
         &client,
         second_ack_received.path,
-        8,
+        second_update_timer.timer.deadline_millis + 4,
         second_ack_received.data,
     );
     try require(second_ack_route.connection_id == 41);
@@ -287,7 +323,7 @@ pub fn main() !void {
     try require(client.pendingOneRttKeyUpdateAckThreshold() == null);
     const second_ack_gate_cleared = client.pendingOneRttKeyUpdateAckThreshold() == null;
 
-    std.debug.print("[udp-key-update] client_port={} server_port={} ping_bytes={} ack_bytes={} first_update_count={} first_ack_threshold={} server_peer_update_count={} server_peer_retains_initial={} ack_gate_cleared={} second_update_count={} second_ack_threshold={} client_retains_first_update={} client_retains_current={} second_ping_bytes={} stale_ping_bytes={} second_ack_bytes={} server_peer_second_update_count={} server_peer_retains_first_update={} stale_rejected={} server_after_stale_next_pn={} server_after_stale_ack={} second_ack_gate_cleared={} ping_key_phase={} ack_key_phase={} second_ping_key_phase={} second_ack_key_phase={} server_peer_phase={} client_next_phase={} client_inflight={}\n", .{
+    std.debug.print("[udp-key-update] client_port={} server_port={} ping_bytes={} ack_bytes={} first_update_count={} first_ack_threshold={} server_peer_update_count={} server_peer_retains_initial={} ack_gate_cleared={} second_update_count={} second_ack_threshold={} client_retains_first_update={} client_retains_current={} second_ping_bytes={} second_pto_deadline={} second_pto_bytes={} second_pto_ack_largest={} stale_ping_bytes={} second_ack_bytes={} server_peer_second_update_count={} server_peer_retains_first_update={} stale_rejected={} server_after_stale_next_pn={} server_after_stale_ack={} second_ack_gate_cleared={} client_inflight={}\n", .{
         client_local.port,
         server_local.port,
         key_update_ping.len,
@@ -302,6 +338,9 @@ pub fn main() !void {
         client_retains_first_update,
         client_retains_current,
         second_update_ping.len,
+        second_update_timer.timer.deadline_millis,
+        second_update_pto_probe.len,
+        second_pto_ack_largest,
         stale_generation_1_ping.len,
         second_ack.len,
         server_peer_second_update_count,
@@ -310,12 +349,15 @@ pub fn main() !void {
         server_after_stale_next_pn,
         server_after_stale_ack,
         second_ack_gate_cleared,
+        client.bytesInFlight(.application),
+    });
+    std.debug.print("[udp-key-update-phases] ping_key_phase={} ack_key_phase={} second_ping_key_phase={} second_pto_key_phase={} second_ack_key_phase={} server_peer_phase={} client_next_phase={}\n", .{
         ping_key_phase,
         ack_key_phase,
         second_ping_key_phase,
+        second_pto_key_phase,
         second_ack_key_phase,
         server.peerOneRttKeyPhase().?,
         client.localOneRttKeyPhase().?,
-        client.bytesInFlight(.application),
     });
 }
