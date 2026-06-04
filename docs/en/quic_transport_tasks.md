@@ -434,8 +434,11 @@ produce or consume TLS-owned QUIC packets over UDP.
   disarmed with zero bytes in flight.
 - 2026-06-04: Extended `udp_crypto_backend_loopback` installed-key recovery
   timer evidence. The mock `CryptoBackend` 1-RTT loopback now asserts and prints
-  the client STREAM send-side PTO deadline and the server echo send-side PTO
-  deadline, then verifies the final routed ACK disarms the server lifecycle
+  the client STREAM send-side PTO deadline, services that due Application timer
+  through `serviceRecoveryTimerAndPollProtectedShortDatagramWithInstalledKeys()`,
+  routes the resulting protected STREAM PTO probe over loopback UDP, verifies
+  the duplicate STREAM is not delivered again, prints the server echo send-side
+  PTO deadline, then verifies the final routed ACK disarms the server lifecycle
   timer and clears server bytes in flight.
 - 2026-05-29: Added socket-backed UDP address-validation loopback coverage.
   `udp_address_validation_loopback` delivers protected HANDSHAKE_DONE and
@@ -2618,7 +2621,7 @@ run from `build.zig`.
 | `udp_zero_rtt_loopback` | Socket-backed loopback UDP 0-RTT exercise: lifecycle-routed installed-key 0-RTT STREAM delivery, explicit accept-before-process enforcement, rejection-driven peer key discard, accepted early ACK evidence, routed 1-RTT ACK cleanup, and client/server 0-RTT key discard evidence across the 1-RTT boundary. | Present |
 | `udp_one_rtt_loopback` | Socket-backed loopback UDP 1-RTT exercise: lifecycle-routed installed-key 1-RTT STREAM delivery after modeled handshake confirmation and routed Application-space ACK cleanup. | Present |
 | `udp_echo_loopback` | Socket-backed loopback UDP installed-key 1-RTT echo exercise: lifecycle-routed client STREAM delivery, server bidirectional STREAM echo, request/echo payload equality, final ACK cleanup, client final-ACK timer-state evidence, and server bytes-in-flight/timer cleanup evidence. | Present |
-| `udp_crypto_backend_loopback` | Socket-backed loopback UDP CryptoBackend exercise: mock `CryptoBackend` 1-RTT traffic-secret handoff, modeled handshake confirmation, lifecycle-routed installed-key STREAM echo, client/server send-side recovery-timer deadline evidence, final ACK cleanup, client final-ACK timer-state evidence, and server bytes-in-flight/timer cleanup evidence. | Present |
+| `udp_crypto_backend_loopback` | Socket-backed loopback UDP CryptoBackend exercise: mock `CryptoBackend` 1-RTT traffic-secret handoff, modeled handshake confirmation, lifecycle-routed installed-key STREAM echo, serviced installed-key 1-RTT PTO probe routing with duplicate STREAM discard evidence, client/server send-side recovery-timer deadline evidence, final ACK cleanup, client final-ACK timer-state evidence, and server bytes-in-flight/timer cleanup evidence. | Present |
 | `udp_handshake_done_loopback` | Socket-backed loopback UDP HANDSHAKE_DONE exercise: lifecycle-routed installed-key HANDSHAKE_DONE confirmation, server/client Handshake key discard evidence, public handshake/connection-state evidence, and routed ACK pending/cleanup evidence. | Present |
 | `udp_flow_control_loopback` | Socket-backed loopback UDP flow-control exercise: lifecycle-routed protected STREAM delivery to the receive limit, lifecycle-routed protected STREAM_DATA_BLOCKED routing, lifecycle-routed receive-side MAX_DATA/MAX_STREAM_DATA credit refresh delivery, lifecycle-routed resumed STREAM data with FIN final-size evidence, and lifecycle-routed final ACK cleanup. | Present |
 | `udp_spin_bit_loopback` | Socket-backed loopback UDP spin-bit exercise: enabled single-path spin-bit signaling, lifecycle-routed protected short PING/ACK receive paths, first false spin round, migrated second true-spin PING with `path_changed`, lifecycle-owned route update/reset, reset server ACK/client outgoing spin evidence, and final ACK cleanup. | Present |
