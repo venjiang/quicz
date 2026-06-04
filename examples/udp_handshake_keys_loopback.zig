@@ -130,6 +130,11 @@ pub fn main() !void {
     )) orelse return error.UnexpectedState;
     defer allocator.free(server_handshake);
     try require(server.sentPacketCount(.handshake) == 1);
+    try require(server_lifecycle.recoveryTimerCount() == 1);
+    const server_handshake_timer = server_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
+    try require(server_handshake_timer.connection_id == server_handle);
+    try require(server_handshake_timer.timer.space == .handshake);
+    try require(server_handshake_timer.timer.kind == .pto);
     try server_socket.send(io, &client_socket.address, server_handshake);
 
     var server_receive_buf: [1500]u8 = undefined;
@@ -151,10 +156,41 @@ pub fn main() !void {
     const client_received_crypto = try readCryptoRequired(&client, .handshake, &client_crypto_buf);
     try require(std.mem.eql(u8, client_received_crypto, "server handshake keys"));
 
+    const server_pto_result = try server_lifecycle.serviceRecoveryTimerAndPollProtectedHandshakeDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        server_handshake_timer.timer.deadline_millis,
+        &client_dcid,
+        &server_dcid,
+    );
+    const server_pto_serviced = server_pto_result.serviced orelse return error.UnexpectedState;
+    try require(server_pto_serviced.connection_id == server_handle);
+    try require(server_pto_serviced.timer.space == .handshake);
+    try require(server_pto_serviced.timer.kind == .pto);
+    const server_pto_probe = server_pto_result.datagram orelse return error.UnexpectedState;
+    defer allocator.free(server_pto_probe);
+    try require(server.sentPacketCount(.handshake) == 2);
+    try require(server_lifecycle.recoveryTimerCount() == 1);
+    try server_socket.send(io, &client_socket.address, server_pto_probe);
+
+    const server_pto_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+    const client_pto_route = try client_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        server_pto_received.path,
+        server_handshake_timer.timer.deadline_millis + 1,
+        server_pto_received.data,
+    );
+    try require(client_pto_route.connection_id == client_handle);
+    try require(std.mem.eql(u8, client_pto_route.destination_connection_id.asSlice(), &client_dcid));
+    try require(client.pendingAckLargest(.handshake) == 1);
+    try require(client.nextPeerPacketNumber(.handshake) == 2);
+    try require((try client.recvCryptoInSpace(.handshake, &client_crypto_buf)) == null);
+
     const client_ack = (try client_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
         client_handle,
         &client,
-        2,
+        server_handshake_timer.timer.deadline_millis + 2,
         &server_dcid,
         &client_dcid,
     )) orelse return error.UnexpectedState;
@@ -167,7 +203,7 @@ pub fn main() !void {
         server_handle,
         &server,
         client_ack_received.path,
-        3,
+        server_handshake_timer.timer.deadline_millis + 3,
         client_ack_received.data,
     );
     try require(server_ack_route.connection_id == server_handle);
@@ -175,11 +211,12 @@ pub fn main() !void {
     try require(server.sentPacketCount(.handshake) == 0);
     try require(server.bytesInFlight(.handshake) == 0);
 
+    const client_flight_millis = server_handshake_timer.timer.deadline_millis + 4;
     try client.sendCryptoInSpace(.handshake, "client handshake keys");
     const client_handshake = (try client_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
         client_handle,
         &client,
-        4,
+        client_flight_millis,
         &server_dcid,
         &client_dcid,
     )) orelse return error.UnexpectedState;
@@ -192,7 +229,7 @@ pub fn main() !void {
         server_handle,
         &server,
         client_handshake_received.path,
-        5,
+        client_flight_millis + 1,
         client_handshake_received.data,
     );
     try require(server_handshake_route.connection_id == server_handle);
@@ -207,7 +244,7 @@ pub fn main() !void {
     const server_ack = (try server_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
         server_handle,
         &server,
-        6,
+        client_flight_millis + 2,
         &client_dcid,
         &server_dcid,
     )) orelse return error.UnexpectedState;
@@ -220,7 +257,7 @@ pub fn main() !void {
         client_handle,
         &client,
         server_ack_received.path,
-        7,
+        client_flight_millis + 3,
         server_ack_received.data,
     );
     try require(client_ack_route.connection_id == client_handle);
@@ -229,10 +266,13 @@ pub fn main() !void {
     try require(client_lifecycle.recoveryTimerCount() == 0);
     try require(server_lifecycle.recoveryTimerCount() == 0);
 
-    std.debug.print("[udp-handshake-keys] client_port={} server_port={} server_crypto_bytes={} client_ack_bytes={} client_crypto_bytes={} server_ack_bytes={} client_received=\"{s}\" server_received=\"{s}\" client_inflight={} server_inflight={}\n", .{
+    std.debug.print("[udp-handshake-keys] client_port={} server_port={} server_crypto_bytes={} server_pto_deadline={} server_pto_bytes={} server_pto_route={} client_ack_bytes={} client_crypto_bytes={} server_ack_bytes={} client_received=\"{s}\" server_received=\"{s}\" client_inflight={} server_inflight={}\n", .{
         client_local.port,
         server_local.port,
         server_handshake.len,
+        server_handshake_timer.timer.deadline_millis,
+        server_pto_probe.len,
+        client_pto_route.connection_id,
         client_ack.len,
         client_handshake.len,
         server_ack.len,

@@ -384,6 +384,12 @@ produce or consume TLS-owned QUIC packets over UDP.
   traffic secrets over real loopback UDP sockets through
   `EndpointConnectionLifecycle`, delivers Handshake CRYPTO in both directions,
   and verifies routed Handshake ACK cleanup.
+- 2026-06-04: Extended `udp_handshake_keys_loopback` with serviced installed-key
+  Handshake PTO evidence. The example now services the server Handshake PTO
+  through `serviceRecoveryTimerAndPollProtectedHandshakeDatagramWithInstalledKeys()`,
+  routes the protected Handshake CRYPTO PTO probe over loopback UDP, verifies the
+  duplicate CRYPTO data is not delivered again, and then ACKs both server
+  Handshake packets back to zero bytes in flight.
 - 2026-05-29: Added socket-backed UDP 0-RTT loopback coverage.
   `udp_zero_rtt_loopback` uses installed 0-RTT keys over real loopback UDP
   sockets through `EndpointConnectionLifecycle`, validates that receive
@@ -2616,7 +2622,7 @@ run from `build.zig`.
 | `udp_replacement_cid_loopback` | Socket-backed loopback UDP replacement CID exercise: lifecycle-owned NEW_CONNECTION_ID-style replacement route registration, retire_prior_to route retirement, inactive old-CID reset-token lookup, active replacement token suppression, invalid retire_prior_to rejection, and active-migration-disabled stray-path rejection. | Present |
 | `udp_connection_ids_loopback` | Socket-backed loopback UDP connection ID exercise: lifecycle-routed protected NEW_CONNECTION_ID delivery, lifecycle-owned issue/register endpoint route update, inactive old-CID reset-token lookup, active replacement CID route probing, lifecycle-routed protected RETIRE_CONNECTION_ID through the active replacement CID, lifecycle-routed ACK cleanup, and server-side local CID retirement. | Present |
 | `udp_protected_loopback` | Socket-backed loopback UDP lifecycle protected packet exercise: lifecycle-owned caller-keyed protected client Initial route registration, accepted protected Initial authentication before server route registration, anti-amplification budget accounting, protected server Initial response emission and routed client-side processing, routed caller-keyed 1-RTT PING processing, and routed caller-keyed 1-RTT ACK processing. | Present |
-| `udp_handshake_keys_loopback` | Socket-backed loopback UDP Handshake-key exercise: lifecycle-routed installed-key Handshake CRYPTO delivery in both directions and routed Handshake ACK cleanup. | Present |
+| `udp_handshake_keys_loopback` | Socket-backed loopback UDP Handshake-key exercise: lifecycle-routed installed-key Handshake CRYPTO delivery in both directions, serviced installed-key Handshake PTO probe routing with duplicate CRYPTO discard evidence, and routed Handshake ACK cleanup. | Present |
 | `udp_crypto_stream_loopback` | Socket-backed loopback UDP CryptoBackend CRYPTO stream exercise: mock `CryptoBackend` Handshake traffic-secret installation, local/peer transport-parameter byte handoff, lifecycle-routed protected Handshake CRYPTO flights, backend receive/output, and routed ACK cleanup. | Present |
 | `udp_zero_rtt_loopback` | Socket-backed loopback UDP 0-RTT exercise: lifecycle-routed installed-key 0-RTT STREAM delivery, explicit accept-before-process enforcement, rejection-driven peer key discard, accepted early ACK evidence, routed 1-RTT ACK cleanup, and client/server 0-RTT key discard evidence across the 1-RTT boundary. | Present |
 | `udp_one_rtt_loopback` | Socket-backed loopback UDP 1-RTT exercise: lifecycle-routed installed-key 1-RTT STREAM delivery after modeled handshake confirmation and routed Application-space ACK cleanup. | Present |

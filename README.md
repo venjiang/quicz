@@ -217,7 +217,7 @@ experimental.
   loopback UDP. Run with `zig build run-udp-protected-loopback`.
 - [UDP Handshake keys loopback](examples/udp_handshake_keys_loopback.zig):
   Socket-backed lifecycle-routed installed-key Handshake CRYPTO delivery and
-  ACK cleanup over loopback UDP. Run with
+  ACK cleanup, plus serviced installed-key Handshake PTO probe routing over loopback UDP. Run with
   `zig build run-udp-handshake-keys-loopback`.
 - [UDP Crypto stream loopback](examples/udp_crypto_stream_loopback.zig):
   Socket-backed mock `CryptoBackend` Handshake CRYPTO byte handoff,
