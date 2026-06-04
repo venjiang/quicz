@@ -176,8 +176,9 @@ experimental.
   replay snapshot restore rejection, and lifecycle-owned address-validation
   block/unblock evidence. Run with
   `zig build run-udp-address-validation-loopback`.
-- [Retry token](examples/retry_token.zig): Retry datagram processing, token
-  reuse, and Retry CID transport-parameter byte validation. Run with
+- [Retry token](examples/retry_token.zig): Retry datagram processing,
+  lifecycle-owned token validation/consumption, token reuse rejection, and Retry
+  CID transport-parameter byte validation. Run with
   `zig build run-retry-token`.
 - [Connection IDs](examples/connection_ids.zig): NEW_CONNECTION_ID,
   RETIRE_CONNECTION_ID, lifecycle-owned issue/register route bridging, and
@@ -279,7 +280,7 @@ experimental.
   over a new peer port with close-propagating receive, plus pre-validation PING
   no-update evidence. Run with `zig build run-udp-path-validation-loopback`.
 - [UDP Retry loopback](examples/udp_retry_loopback.zig): Lifecycle-owned Retry
-  delivery, token validation, and routed follow-up Initial processing. Run
+  delivery, token validation/consumption, and routed follow-up Initial processing. Run
   with `zig build run-udp-retry-loopback`.
 - [UDP close lifecycle loopback](examples/udp_close_lifecycle_loopback.zig):
   Lifecycle-routed protected close delivery, protected receive auto-close,

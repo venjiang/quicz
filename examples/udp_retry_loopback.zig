@@ -261,8 +261,18 @@ pub fn main() !void {
     try require(std.mem.eql(u8, retry_accept.source_connection_id, &client_initial_scid));
     try require(std.mem.eql(u8, retry_accept.token, retry_token));
 
-    const validation = try token_policy.validateTokenForPath(.retry, 4, retry_initial_path, retry_accept.token);
-    try require(validation.originating_version == .v1);
+    const validation = try server_lifecycle.validateRetryTokenForPathAndArmConnection(
+        &token_policy,
+        connection_handle,
+        &server,
+        .v1,
+        4,
+        retry_initial_path,
+        retry_accept.token,
+    );
+    try require(validation.validation.originating_version == .v1);
+    try require(server.peerAddressValidated());
+    try require(server.pendingRetryTokenCount() == 0);
 
     var replay_rejected = false;
     if (token_policy.validateTokenForPath(.retry, 5, retry_initial_path, retry_accept.token)) |_| {
@@ -274,10 +284,6 @@ pub fn main() !void {
         }
     }
     try require(replay_rejected);
-
-    try server.validateRetryToken(retry_accept.token);
-    try require(server.peerAddressValidated());
-    try require(server.pendingRetryTokenCount() == 0);
 
     const server_retry_initial_route = try server_lifecycle.processRoutedProtectedInitialDatagram(
         connection_handle,

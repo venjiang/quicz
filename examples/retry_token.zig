@@ -19,6 +19,9 @@ pub fn main() !void {
     defer server.deinit();
     var client = try quicz.Connection.init(allocator, .client, .{});
     defer client.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+    const connection_handle: u64 = 1;
 
     const token_secret: quicz.address_validation_token.Secret = [_]u8{0x42} ** quicz.address_validation_token.secret_len;
     const token_nonce: quicz.address_validation_token.Nonce = [_]u8{0x19} ** quicz.address_validation_token.nonce_len;
@@ -93,7 +96,15 @@ pub fn main() !void {
     var tx: [16]u8 = undefined;
     if (try server.pollTx(0, &tx) != null) return error.RetryTokenExampleFailed;
 
-    if (token_policy.validateTokenForPath(.retry, 10, changed_client_path, accepted_retry_token)) |_| {
+    if (server_lifecycle.validateRetryTokenForPathAndArmConnection(
+        &token_policy,
+        connection_handle,
+        &server,
+        .v1,
+        10,
+        changed_client_path,
+        accepted_retry_token,
+    )) |_| {
         return error.RetryTokenExampleFailed;
     } else |err| {
         switch (err) {
@@ -103,14 +114,34 @@ pub fn main() !void {
     }
     if (server.peerAddressValidated() or server.pendingRetryTokenCount() != 1) return error.RetryTokenExampleFailed;
 
-    _ = try token_policy.validateTokenForPath(.retry, 10, client_path, accepted_retry_token);
-    try server.validateRetryToken(accepted_retry_token);
+    const retry_validation = try server_lifecycle.validateRetryTokenForPathAndArmConnection(
+        &token_policy,
+        connection_handle,
+        &server,
+        .v1,
+        10,
+        client_path,
+        accepted_retry_token,
+    );
+    if (retry_validation.validation.kind != .retry or retry_validation.validation.originating_version != .v1) {
+        return error.RetryTokenExampleFailed;
+    }
     const payload = (try server.pollTx(11, &tx)) orelse return error.RetryTokenExampleFailed;
     if (!server.peerAddressValidated() or server.pendingRetryTokenCount() != 0) return error.RetryTokenExampleFailed;
 
-    server.validateRetryToken(accepted_retry_token) catch |err| {
+    if (server_lifecycle.validateRetryTokenForPathAndArmConnection(
+        &token_policy,
+        connection_handle,
+        &server,
+        .v1,
+        12,
+        client_path,
+        accepted_retry_token,
+    )) |_| {
+        return error.RetryTokenExampleFailed;
+    } else |err| {
         if (err != error.InvalidPacket) return err;
-    };
+    }
 
     std.debug.print(
         "[retry] token_len={} original_dcid_len={} retry_scid_len={} server_retry_scid_len={} address_bound={} path_bound={} tp_validated={} server_tp_bytes={} integrity={} v2_integrity={} address_validated={} ping_bytes={}\n",

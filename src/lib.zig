@@ -868,6 +868,50 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Validate and consume an endpoint-issued Retry token for one server connection.
+    ///
+    /// The helper first proves that the connection is still waiting for this
+    /// one-time Retry token, then authenticates and replay-records the
+    /// endpoint path token. Only after both checks succeed does it consume the
+    /// connection token, unblock anti-amplification, and refresh endpoint
+    /// recovery scheduling.
+    pub fn validateRetryTokenForPathAndArmConnection(
+        self: *EndpointConnectionLifecycle,
+        policy: *endpoint.AddressValidationPolicy,
+        connection_id: u64,
+        connection: *Connection,
+        expected_originating_version: packet.Version,
+        now_millis: i64,
+        path: endpoint.Udp4Tuple,
+        token: []const u8,
+    ) EndpointAddressValidationError!EndpointAddressValidationResult {
+        if (connection.side != .server) return error.InvalidPacket;
+        if (connection.connectionState() != .active) return error.ConnectionClosed;
+        if (!connection.hasPendingRetryToken(token)) return error.InvalidPacket;
+
+        _ = try policy.validateTokenForPathWithoutReplayForVersion(
+            .retry,
+            expected_originating_version,
+            now_millis,
+            path,
+            token,
+        );
+        const validation = try policy.validateTokenForPathForVersion(
+            .retry,
+            expected_originating_version,
+            now_millis,
+            path,
+            token,
+        );
+        try connection.validateRetryToken(token);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+
+        return .{
+            .validation = validation,
+            .recovery_timer = connection.lossDetectionTimerDeadlineMillis(),
+        };
+    }
+
     /// Register a destination connection ID for a caller-owned connection.
     pub fn registerConnectionId(
         self: *EndpointConnectionLifecycle,
@@ -6345,6 +6389,13 @@ pub const Connection = struct {
             const removed = self.retry_tokens.orderedRemove(i);
             self.allocator.free(removed);
             return true;
+        }
+        return false;
+    }
+
+    fn hasPendingRetryToken(self: *const Connection, token: []const u8) bool {
+        for (self.retry_tokens.items) |existing| {
+            if (std.mem.eql(u8, existing, token)) return true;
         }
         return false;
     }
@@ -15295,6 +15346,120 @@ test "EndpointConnectionLifecycle validates path token and arms unblocked server
             token,
         ),
     );
+}
+
+test "EndpointConnectionLifecycle validates Retry token and consumes pending state" {
+    const secret: address_validation_token.Secret = [_]u8{0xe1} ** address_validation_token.secret_len;
+    const nonce: address_validation_token.Nonce = [_]u8{0x9b} ** address_validation_token.nonce_len;
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 192, 0, 2, 19 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 198, 51, 100, 17 }, 50_000),
+    };
+    const changed_path = endpoint.Udp4Tuple{
+        .local = path.local,
+        .remote = endpoint.Udp4Address.init(path.remote.octets, 50_001),
+    };
+    const connection_id: u64 = 701;
+
+    var policy = endpoint.AddressValidationPolicy.init(std.testing.allocator, secret, .{
+        .max_previous_secrets = 1,
+        .max_replay_entries = 4,
+    });
+    defer policy.deinit();
+    const token = try policy.issueTokenForPath(std.testing.allocator, .retry, 1_000, 60_000, path, nonce);
+    defer std.testing.allocator.free(token);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.issueRetryToken(token);
+
+    try server.confirmHandshake();
+    try server.recordPeerAddressBytesReceived(1);
+    _ = try server.recordPacketSentInSpace(.application, 1_010, 1);
+    var out_buf: [32]u8 = undefined;
+    try std.testing.expect(server.lossDetectionTimerDeadlineMillis() != null);
+
+    try server.sendCryptoInSpace(.handshake, "retry");
+    try std.testing.expectEqual(@as(?[]u8, null), try server.pollTxInSpace(.handshake, 1_011, &out_buf));
+    try std.testing.expect(!server.peerAddressValidated());
+
+    try std.testing.expectError(
+        error.InvalidToken,
+        lifecycle.validateRetryTokenForPathAndArmConnection(
+            &policy,
+            connection_id,
+            &server,
+            .v1,
+            1_020,
+            changed_path,
+            token,
+        ),
+    );
+    try std.testing.expect(!server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 1), server.pendingRetryTokenCount());
+    try std.testing.expectEqual(@as(usize, 0), policy.replayFilterEntryCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+
+    var wrong_pending_server = try Connection.init(std.testing.allocator, .server, .{});
+    defer wrong_pending_server.deinit();
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.validateRetryTokenForPathAndArmConnection(
+            &policy,
+            connection_id + 1,
+            &wrong_pending_server,
+            .v1,
+            1_020,
+            path,
+            token,
+        ),
+    );
+    try std.testing.expect(!wrong_pending_server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 0), policy.replayFilterEntryCount());
+
+    const result = try lifecycle.validateRetryTokenForPathAndArmConnection(
+        &policy,
+        connection_id,
+        &server,
+        .v1,
+        1_020,
+        path,
+        token,
+    );
+    try std.testing.expectEqual(address_validation_token.Kind.retry, result.validation.kind);
+    try std.testing.expectEqual(packet.Version.v1, result.validation.originating_version);
+    try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(@as(?usize, null), server.antiAmplificationLimitRemaining());
+    try std.testing.expectEqual(@as(usize, 0), server.pendingRetryTokenCount());
+    const recovery_timer = result.recovery_timer orelse return error.TestUnexpectedResult;
+    const earliest = lifecycle.earliestRecoveryDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(connection_id, earliest.connection_id);
+    try std.testing.expectEqual(recovery_timer.deadline_millis, earliest.timer.deadline_millis);
+    try std.testing.expectEqual(@as(usize, 1), policy.replayFilterEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const crypto_payload = (try server.pollTxInSpace(.handshake, 1_021, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(crypto_payload.len > 0);
+
+    var replay_server = try Connection.init(std.testing.allocator, .server, .{});
+    defer replay_server.deinit();
+    try replay_server.issueRetryToken(token);
+    try std.testing.expectError(
+        error.TokenReplay,
+        lifecycle.validateRetryTokenForPathAndArmConnection(
+            &policy,
+            connection_id + 2,
+            &replay_server,
+            .v1,
+            1_030,
+            path,
+            token,
+        ),
+    );
+    try std.testing.expect(!replay_server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 1), replay_server.pendingRetryTokenCount());
 }
 
 test "address-bound NEW_TOKEN validates only for its originating QUIC version" {

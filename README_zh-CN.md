@@ -135,7 +135,7 @@ pub fn main() !void {
   运行：`zig build run-address-validation`。
 - [UDP address validation loopback](examples/udp_address_validation_loopback.zig)：socket-backed lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery、带 changed-path rejection 证据的 NEW_TOKEN path/version binding、secret rotation、replay snapshot restore rejection 和 lifecycle-owned address-validation block/unblock 证据。
   运行：`zig build run-udp-address-validation-loopback`。
-- [Retry token](examples/retry_token.zig)：Retry datagram 处理、token 复用和 Retry CID transport-parameter byte 校验。
+- [Retry token](examples/retry_token.zig)：Retry datagram 处理、lifecycle-owned token validation/consumption、token 复用拒绝和 Retry CID transport-parameter byte 校验。
   运行：`zig build run-retry-token`。
 - [Connection IDs](examples/connection_ids.zig)：NEW_CONNECTION_ID、RETIRE_CONNECTION_ID、lifecycle-owned issue/register route bridge 和 replacement state。
   运行：`zig build run-connection-ids`。
@@ -189,7 +189,7 @@ pub fn main() !void {
   运行：`zig build run-udp-key-update-loopback`。
 - [UDP path validation loopback](examples/udp_path_validation_loopback.zig)：在新 peer port 上执行带 close-propagating receive 的 lifecycle-routed PATH_CHALLENGE/PATH_RESPONSE 验证驱动 route update，并证明验证前 PING 不会提交 route update。
   运行：`zig build run-udp-path-validation-loopback`。
-- [UDP Retry loopback](examples/udp_retry_loopback.zig)：lifecycle-owned Retry delivery、token validation 和 routed follow-up Initial processing。
+- [UDP Retry loopback](examples/udp_retry_loopback.zig)：lifecycle-owned Retry delivery、token validation/consumption 和 routed follow-up Initial processing。
   运行：`zig build run-udp-retry-loopback`。
 - [UDP close lifecycle loopback](examples/udp_close_lifecycle_loopback.zig)：lifecycle-routed protected close delivery、protected receive auto-close、close/drain deadline 证据、timeout-driven route cleanup、route retirement 和 stateless reset follow-up。
   运行：`zig build run-udp-close-lifecycle-loopback`。
