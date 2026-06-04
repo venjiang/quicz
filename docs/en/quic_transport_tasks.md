@@ -110,6 +110,12 @@ interop, or a production socket event loop. Until those exist, all RFC 8999,
 RFC 9000, RFC 9001, RFC 9002, RFC 9368, and RFC 9369 rows that depend on those
 properties must remain `Partial` rather than `Done`.
 
+The main task remains the IETF QUIC transport implementation. The next-stage
+direction refines execution order and evidence requirements without replacing
+the transport task matrix below: prioritize the TLS-owned socket-backed echo
+path first, then the embeddable socket API, minimal interop entry, and
+TLS/interop observability.
+
 The next implementation milestone is a TLS-owned socket-backed client/server
 echo loop. The minimum proof for that milestone is:
 
@@ -123,8 +129,22 @@ echo loop. The minimum proof for that milestone is:
 - a local UDP client/server stream echo that drives connection accept,
   handshake confirmation, stream data delivery, ACK cleanup, loss/PTO timer
   service, key discard, close, and route cleanup through one lifecycle owner;
+- adapter evidence from `run-tls-backend-adapter`, `run-tls-c-abi-adapter`,
+  `run-tls-openssl-probe`, and `run-tls-openssl-backend-adapter`, plus
+  `zig build test --summary all`;
 - an interop note against at least one external QUIC implementation or a
   documented blocker explaining why interop cannot yet be run.
+
+After the echo path, keep the transport core embeddable instead of baking
+production socket policy into demos. The target socket-facing API shape is
+`feedDatagram`, `processPendingWork`, `pollDatagram`, and `nextDeadline`, with
+one lifecycle owner responsible for timers, route cleanup, close, and key
+discard. The first interop entry should handle only `handshake` and `transfer`
+and return explicit blockers until real TLS-owned binaries exist. Real TLS and
+interop paths must also emit enough evidence for debugging, including keylog
+support and trace events for handshake, transport parameters, traffic-secret
+installation, packet-number spaces, ACK/loss/PTO, key discard, close, and route
+cleanup.
 
 Further mock-only loopbacks are useful only when they close a specific gap in
 the matrix below. They should not be treated as progress toward completing
