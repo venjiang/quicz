@@ -167,7 +167,8 @@ experimental.
   OpenSSL's full QUIC connection mode. Run with `zig build run-tls-openssl-probe`.
 - [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig):
   OpenSSL-backed `TlsBackend` wrapper that accepts quicz local transport
-  parameters through `SSL_set_quic_tls_transport_params()` and receives
+  parameters through `SSL_set_quic_tls_transport_params()`, drives
+  `SSL_do_handshake()` to emit the first TLS CRYPTO flight, and receives
   Handshake CRYPTO bytes from the existing drive path. Run with
   `zig build run-tls-openssl-backend-adapter`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
@@ -346,8 +347,9 @@ experimental.
 - TLS status: mock `CryptoBackend` handoff and a narrow C-ABI `TlsBackend`
   adapter are present; `run-tls-openssl-probe` links OpenSSL and verifies its
   QUIC TLS callback APIs, and `run-tls-openssl-backend-adapter` wires an
-  OpenSSL object into the adapter path. Driving a real TLS 1.3 transcript is
-  still pending.
+  OpenSSL object into the adapter path far enough to emit the first TLS CRYPTO
+  flight. Completing the peer transcript and traffic-secret yield is still
+  pending.
 
 ## License
 
