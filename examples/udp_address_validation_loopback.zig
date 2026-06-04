@@ -157,9 +157,30 @@ pub fn main() !void {
     }
     try require(path_rejected);
 
-    const validation = try token_policy.validateTokenForPath(.new_token, 16, server_path, stored_token);
-    const v1_validated = validation.originating_version == .v1;
+    var future_server = try quicz.Connection.init(allocator, .server, .{});
+    defer future_server.deinit();
+    var future_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer future_lifecycle.deinit();
+    try future_server.sendPing();
+    var future_out: [16]u8 = undefined;
+    const blocked_before_validation = (try future_server.pollTx(17, &future_out)) == null;
+    try require(blocked_before_validation);
+    const future_validation = try future_lifecycle.validateAddressTokenForPathAndArmConnection(
+        &token_policy,
+        92,
+        &future_server,
+        .new_token,
+        .v1,
+        17,
+        server_path,
+        stored_token,
+    );
+    const v1_validated = future_validation.validation.originating_version == .v1;
     try require(v1_validated);
+    const future_ping = (try future_server.pollTx(18, &future_out)) orelse return error.UnexpectedState;
+    const unblocked_after_validation = future_ping.len > 0;
+    try require(unblocked_after_validation);
+
     var secret_set = try token_policy.exportSecretSet(allocator);
     defer secret_set.deinit(allocator);
     var replay_snapshot = try token_policy.exportReplayFilter(allocator);
@@ -170,17 +191,6 @@ pub fn main() !void {
     });
     defer restored_policy.deinit();
     try require(restored_policy.replayFilterEntryCount() == 1);
-
-    var future_server = try quicz.Connection.init(allocator, .server, .{});
-    defer future_server.deinit();
-    try future_server.sendPing();
-    var future_out: [16]u8 = undefined;
-    const blocked_before_validation = (try future_server.pollTx(17, &future_out)) == null;
-    try require(blocked_before_validation);
-    try future_server.validatePeerAddress();
-    const future_ping = (try future_server.pollTx(18, &future_out)) orelse return error.UnexpectedState;
-    const unblocked_after_validation = future_ping.len > 0;
-    try require(unblocked_after_validation);
 
     var replay_rejected = false;
     if (restored_policy.validateTokenForPath(.new_token, 19, server_path, stored_token)) |_| {

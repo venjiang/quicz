@@ -97,10 +97,21 @@ fn protectedTokenAndHandshakeDoneExample(allocator: std.mem.Allocator) !void {
 
     var future_server = try quicz.Connection.init(allocator, .server, .{});
     defer future_server.deinit();
+    var future_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer future_lifecycle.deinit();
     try future_server.sendPing();
     var future_out: [16]u8 = undefined;
     if (try future_server.pollTx(14, &future_out) != null) return error.AddressValidationExampleFailed;
-    if (restored_policy.validateTokenForPath(.new_token, 15, changed_client_path, stored_token)) |_| {
+    if (future_lifecycle.validateAddressTokenForPathAndArmConnection(
+        &restored_policy,
+        502,
+        &future_server,
+        .new_token,
+        .v1,
+        15,
+        changed_client_path,
+        stored_token,
+    )) |_| {
         return error.AddressValidationExampleFailed;
     } else |err| {
         switch (err) {
@@ -108,8 +119,18 @@ fn protectedTokenAndHandshakeDoneExample(allocator: std.mem.Allocator) !void {
             else => return err,
         }
     }
-    _ = try restored_policy.validateTokenForPath(.new_token, 15, client_path, stored_token);
-    try future_server.validatePeerAddress();
+    if (future_server.peerAddressValidated()) return error.AddressValidationExampleFailed;
+    const token_validation = try future_lifecycle.validateAddressTokenForPathAndArmConnection(
+        &restored_policy,
+        502,
+        &future_server,
+        .new_token,
+        .v1,
+        15,
+        client_path,
+        stored_token,
+    );
+    if (token_validation.validation.originating_version != .v1) return error.AddressValidationExampleFailed;
     const future_ping = (try future_server.pollTx(16, &future_out)) orelse return error.AddressValidationExampleFailed;
     if (!future_server.peerAddressValidated()) return error.AddressValidationExampleFailed;
 

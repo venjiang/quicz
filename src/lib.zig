@@ -640,6 +640,9 @@ pub const EndpointProtectedInitialError = Error || endpoint.RouteError;
 /// Errors returned while coordinating routed protected endpoint datagrams.
 pub const EndpointProtectedDatagramError = Error || endpoint.RouteError;
 
+/// Errors returned while validating endpoint-owned address tokens.
+pub const EndpointAddressValidationError = Error || address_validation_token.Error;
+
 /// Errors returned while coordinating endpoint-owned connection ID lifecycle.
 pub const EndpointConnectionIdError = Error || endpoint.RouteError;
 
@@ -741,6 +744,14 @@ pub const EndpointAcceptedProtectedInitialResponseResult = struct {
     response_datagram: []u8,
 };
 
+/// Endpoint result after validating an address token for one connection.
+pub const EndpointAddressValidationResult = struct {
+    /// Authenticated token metadata returned by endpoint policy.
+    validation: address_validation_token.Validation,
+    /// Current aggregate recovery timer after address validation unblocks sends.
+    recovery_timer: ?LossDetectionTimerDeadline,
+};
+
 fn endpointEcnPathState(state: EcnValidationState) endpoint.EcnPathValidationState {
     return switch (state) {
         .unknown => .unknown,
@@ -819,6 +830,42 @@ pub const EndpointConnectionLifecycle = struct {
         const state = endpointEcnPathState(connection.ecnValidationState(space));
         try self.ecn_paths.setStateForPath(path, state);
         return state;
+    }
+
+    /// Validate an endpoint-issued address token and unblock one server connection.
+    ///
+    /// The address token is authenticated and replay-recorded by endpoint
+    /// policy. Only after that succeeds does this helper mark the caller-owned
+    /// server connection's peer address as validated and refresh the endpoint's
+    /// recovery timer snapshot for that connection handle.
+    pub fn validateAddressTokenForPathAndArmConnection(
+        self: *EndpointConnectionLifecycle,
+        policy: *endpoint.AddressValidationPolicy,
+        connection_id: u64,
+        connection: *Connection,
+        expected_kind: address_validation_token.Kind,
+        expected_originating_version: packet.Version,
+        now_millis: i64,
+        path: endpoint.Udp4Tuple,
+        token: []const u8,
+    ) EndpointAddressValidationError!EndpointAddressValidationResult {
+        if (connection.side != .server) return error.InvalidPacket;
+        if (connection.connectionState() != .active) return error.ConnectionClosed;
+
+        const validation = try policy.validateTokenForPathForVersion(
+            expected_kind,
+            expected_originating_version,
+            now_millis,
+            path,
+            token,
+        );
+        try connection.validatePeerAddress();
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+
+        return .{
+            .validation = validation,
+            .recovery_timer = connection.lossDetectionTimerDeadlineMillis(),
+        };
     }
 
     /// Register a destination connection ID for a caller-owned connection.
@@ -15156,6 +15203,98 @@ test "address-bound NEW_TOKEN validates peer address without one-time Retry stat
         other_server.validateAddressValidationToken(secret, .new_token, 1_030, "192.0.2.10:4433", new_token),
     );
     try std.testing.expect(!other_server.peerAddressValidated());
+}
+
+test "EndpointConnectionLifecycle validates path token and arms unblocked server" {
+    const secret: address_validation_token.Secret = [_]u8{0xc5} ** address_validation_token.secret_len;
+    const nonce: address_validation_token.Nonce = [_]u8{0xd6} ** address_validation_token.nonce_len;
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 192, 0, 2, 9 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 198, 51, 100, 7 }, 50_000),
+    };
+    const changed_path = endpoint.Udp4Tuple{
+        .local = path.local,
+        .remote = endpoint.Udp4Address.init(path.remote.octets, 50_001),
+    };
+    const connection_id: u64 = 700;
+
+    var policy = endpoint.AddressValidationPolicy.init(std.testing.allocator, secret, .{
+        .max_previous_secrets = 1,
+        .max_replay_entries = 4,
+    });
+    defer policy.deinit();
+    const token = try policy.issueTokenForPath(std.testing.allocator, .new_token, 1_000, 60_000, path, nonce);
+    defer std.testing.allocator.free(token);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try server.confirmHandshake();
+    try server.recordPeerAddressBytesReceived(1);
+    _ = try server.recordPacketSentInSpace(.application, 1_010, 1);
+    var out_buf: [32]u8 = undefined;
+    try std.testing.expect(server.lossDetectionTimerDeadlineMillis() != null);
+
+    try server.sendCryptoInSpace(.handshake, "abc");
+    try std.testing.expectEqual(@as(?[]u8, null), try server.pollTxInSpace(.handshake, 1_011, &out_buf));
+    try std.testing.expect(!server.peerAddressValidated());
+
+    try std.testing.expectError(
+        error.InvalidToken,
+        lifecycle.validateAddressTokenForPathAndArmConnection(
+            &policy,
+            connection_id,
+            &server,
+            .new_token,
+            .v1,
+            1_020,
+            changed_path,
+            token,
+        ),
+    );
+    try std.testing.expect(!server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 0), policy.replayFilterEntryCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+
+    const result = try lifecycle.validateAddressTokenForPathAndArmConnection(
+        &policy,
+        connection_id,
+        &server,
+        .new_token,
+        .v1,
+        1_020,
+        path,
+        token,
+    );
+    try std.testing.expectEqual(address_validation_token.Kind.new_token, result.validation.kind);
+    try std.testing.expectEqual(packet.Version.v1, result.validation.originating_version);
+    try std.testing.expect(server.peerAddressValidated());
+    try std.testing.expectEqual(@as(?usize, null), server.antiAmplificationLimitRemaining());
+    const recovery_timer = result.recovery_timer orelse return error.TestUnexpectedResult;
+    const earliest = lifecycle.earliestRecoveryDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(connection_id, earliest.connection_id);
+    try std.testing.expectEqual(recovery_timer.deadline_millis, earliest.timer.deadline_millis);
+    try std.testing.expectEqual(@as(usize, 1), policy.replayFilterEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const crypto_payload = (try server.pollTxInSpace(.handshake, 1_021, &out_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(crypto_payload.len > 0);
+
+    try std.testing.expectError(
+        error.TokenReplay,
+        lifecycle.validateAddressTokenForPathAndArmConnection(
+            &policy,
+            connection_id,
+            &server,
+            .new_token,
+            .v1,
+            1_030,
+            path,
+            token,
+        ),
+    );
 }
 
 test "address-bound NEW_TOKEN validates only for its originating QUIC version" {

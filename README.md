@@ -166,14 +166,15 @@ experimental.
   path-validation datagrams, and validation-driven lifecycle route updates. Run with
   `zig build run-path-validation`.
 - [Address validation](examples/address_validation.zig): HMAC address-validation
-  tokens, version binding, secret rotation, replay snapshots, and
-  lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery. Run with
+  tokens, version binding, secret rotation, replay snapshots, lifecycle-routed
+  HANDSHAKE_DONE/NEW_TOKEN delivery, and lifecycle-owned token validation
+  unblocking. Run with
   `zig build run-address-validation`.
 - [UDP address validation loopback](examples/udp_address_validation_loopback.zig):
   Socket-backed lifecycle-routed HANDSHAKE_DONE/NEW_TOKEN delivery, NEW_TOKEN
   path/version binding with explicit changed-path rejection, secret rotation,
-  replay snapshot restore rejection, and future address-validation block/unblock
-  evidence. Run with
+  replay snapshot restore rejection, and lifecycle-owned address-validation
+  block/unblock evidence. Run with
   `zig build run-udp-address-validation-loopback`.
 - [Retry token](examples/retry_token.zig): Retry datagram processing, token
   reuse, and Retry CID transport-parameter byte validation. Run with
