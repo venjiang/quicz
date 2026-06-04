@@ -176,6 +176,41 @@ pub fn main() !void {
     const echo_payload = read_buf[0..echo_len];
     try require(std.mem.eql(u8, echo_payload, request));
     const echo_ack_largest = client.pendingAckLargest(.application) orelse return error.UnexpectedState;
+    try server_lifecycle.armRecoveryTimerFromConnection(server_handle, &server);
+    const server_echo_timer = server_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
+    try require(server_echo_timer.connection_id == server_handle);
+    try require(server_echo_timer.timer.space == .application);
+    try require(server_echo_timer.timer.kind == .pto);
+    const server_echo_deadline = server_echo_timer.timer.deadline_millis;
+
+    const server_pto_result = try server_lifecycle.serviceRecoveryTimerAndPollProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        server_echo_deadline,
+        &client_dcid,
+    );
+    const server_pto_serviced = server_pto_result.serviced orelse return error.UnexpectedState;
+    try require(server_pto_serviced.connection_id == server_handle);
+    try require(server_pto_serviced.timer.space == .application);
+    try require(server_pto_serviced.timer.kind == .pto);
+    const server_pto_probe = server_pto_result.datagram orelse return error.UnexpectedState;
+    defer allocator.free(server_pto_probe);
+    try require(server_lifecycle.recoveryTimerCount() == 1);
+    try server_socket.send(io, &client_socket.address, server_pto_probe);
+
+    const pto_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+    const pto_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        pto_received.path,
+        server_echo_deadline + 1,
+        pto_received.data,
+    );
+    try require(pto_route.connection_id == client_handle);
+    try require(std.mem.eql(u8, pto_route.destination_connection_id.asSlice(), &client_dcid));
+    const echo_pto_ack_largest = client.pendingAckLargest(.application).?;
+    try require(echo_pto_ack_largest > echo_ack_largest);
+    try require((try client.recvOnStream(stream_id, &read_buf)) == null);
 
     const final_ack = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         client_handle,
@@ -201,14 +236,18 @@ pub fn main() !void {
     try require(client_lifecycle.recoveryTimerCount() == 1);
     try require(server_lifecycle.recoveryTimerCount() == 0);
 
-    std.debug.print("[udp-echo] client_port={} server_port={} stream={} request_bytes={} echo_packets={} echo_bytes={} echo_ack_largest={} final_ack_bytes={} request=\"{s}\" echo=\"{s}\" client_inflight_after_echo={} server_inflight={} client_timers={} server_timers={}\n", .{
+    std.debug.print("[udp-echo] client_port={} server_port={} stream={} request_bytes={} echo_packets={} echo_bytes={} echo_timer_deadline={} echo_pto_bytes={} echo_pto_route={} echo_ack_largest={} echo_pto_ack_largest={} final_ack_bytes={} request=\"{s}\" echo=\"{s}\" client_inflight_after_echo={} server_inflight={} client_timers={} server_timers={}\n", .{
         client_local.port,
         server_local.port,
         stream_id,
         request_datagram.len,
         echo_datagram_count,
         echo_bytes,
+        server_echo_deadline,
+        server_pto_probe.len,
+        pto_route.connection_id,
         echo_ack_largest,
+        echo_pto_ack_largest,
         final_ack.len,
         request_payload,
         echo_payload,
