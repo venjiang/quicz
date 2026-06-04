@@ -85,7 +85,7 @@ Common verification examples:
 
 - `run-tls-openssl-backend-adapter`: current real C TLS adapter boundary,
   including local transport parameters, first outbound TLS CRYPTO flight, and
-  peer transport-parameter, Handshake secret, and inbound CRYPTO delivery
+  peer transport-parameter, Handshake/1-RTT secret, and inbound CRYPTO delivery
   through OpenSSL callback boundaries.
 - `run-udp-echo-loopback`: socket-backed installed-key STREAM echo evidence,
   including payload equality, ACK cleanup, and recovery timer cleanup.
@@ -186,7 +186,7 @@ experimental.
   OpenSSL-backed `TlsBackend` wrapper that accepts quicz local transport
   parameters through `SSL_set_quic_tls_transport_params()`, drives
   `SSL_do_handshake()` to emit the first TLS CRYPTO flight, and carries peer
-  transport parameters, Handshake secrets, and inbound Handshake CRYPTO bytes
+  transport parameters, Handshake/1-RTT secrets, and inbound Handshake CRYPTO bytes
   through OpenSSL callback boundaries. Run with `zig build run-tls-openssl-backend-adapter`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
   long/short close, invalid ACK/ACK_ECN-range auto-close, semantic frame-error
@@ -365,9 +365,9 @@ experimental.
   adapter are present; `run-tls-openssl-probe` links OpenSSL and verifies its
   QUIC TLS callback APIs, and `run-tls-openssl-backend-adapter` wires an
   OpenSSL object into the adapter path far enough to emit the first TLS CRYPTO
-  flight and deliver peer transport parameters, Handshake secrets, and inbound
-  CRYPTO through callback boundaries. Completing the full peer transcript and
-  1-RTT traffic-secret yield is still pending.
+  flight and deliver peer transport parameters, Handshake/1-RTT secrets, and
+  inbound CRYPTO through callback boundaries. Completing the full peer
+  transcript and real TLS-owned socket echo is still pending.
 
 ## License
 

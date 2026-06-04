@@ -77,7 +77,7 @@ zig build run-initial-keys
 
 - `run-tls-openssl-backend-adapter`：当前真实 C TLS adapter 边界，覆盖本端
   transport parameters、第一段 TLS CRYPTO flight，以及 peer transport-parameter、
-  Handshake secret 和入站 CRYPTO 经 OpenSSL callback 边界投递到连接层。
+  Handshake/1-RTT secret 和入站 CRYPTO 经 OpenSSL callback 边界投递到连接层。
 - `run-udp-echo-loopback`：socket-backed installed-key STREAM echo 证据，包含
   payload equality、ACK cleanup 和 recovery timer cleanup。
 - `run-udp-pto-recovery-loopback`、`run-udp-loss-recovery-loopback` 和
@@ -160,7 +160,7 @@ pub fn main() !void {
   OpenSSL-backed `TlsBackend` wrapper 接到现有 drive 路径，通过
   `SSL_set_quic_tls_transport_params()` 接收 quicz 本端 transport parameters，驱动
   `SSL_do_handshake()` 产出第一段 TLS CRYPTO flight，并让 peer transport parameters、
-  Handshake secrets 和入站 Handshake CRYPTO bytes 经 OpenSSL callback 边界进入连接层。
+  Handshake/1-RTT secrets 和入站 Handshake CRYPTO bytes 经 OpenSSL callback 边界进入连接层。
   运行：`zig build run-tls-openssl-backend-adapter`。
 - [Graceful close](examples/graceful_close.zig)：本端/对端关闭、protected long/short close、非法 ACK/ACK_ECN range auto-close、包含非法 ACK/ACK_ECN、0-RTT ACK/ACK_ECN packet-type 违规、非法 STREAMS_BLOCKED limit、冲突 STREAM data 和非法 stream control frame 的语义 frame 错误 auto-close、protected receive auto-close、lifecycle-routed protected auto-close、protected long/0-RTT close-state discard、draining 行为和关闭触发校验。
   运行：`zig build run-graceful-close`。
@@ -253,8 +253,8 @@ pub fn main() !void {
 - TLS 状态：已有 mock `CryptoBackend` handoff 和很小的 C-ABI `TlsBackend` adapter；
   `run-tls-openssl-probe` 已链接 OpenSSL 并验证 QUIC TLS callback API，
   `run-tls-openssl-backend-adapter` 已把 OpenSSL object 接入 adapter 路径并产出第一段
-  TLS CRYPTO flight，也能让 peer transport parameters、Handshake secrets 和入站 CRYPTO
-  经 callback 边界进入连接层；完整对端 transcript 和 1-RTT traffic-secret yield 仍待实现。
+  TLS CRYPTO flight，也能让 peer transport parameters、Handshake/1-RTT secrets 和入站
+  CRYPTO 经 callback 边界进入连接层；完整对端 transcript 和真实 TLS-owned socket echo 仍待实现。
 
 ## 许可证
 

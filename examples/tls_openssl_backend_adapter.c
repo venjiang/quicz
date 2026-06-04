@@ -25,6 +25,11 @@ struct quicz_handshake_traffic_secrets {
     uint8_t peer[32];
 };
 
+struct quicz_one_rtt_traffic_secrets {
+    uint8_t local[32];
+    uint8_t peer[32];
+};
+
 struct quicz_openssl_tls_backend {
     SSL_CTX *ctx;
     SSL *ssl;
@@ -41,6 +46,10 @@ struct quicz_openssl_tls_backend {
     int handshake_local_secret_available;
     int handshake_peer_secret_available;
     int handshake_secrets_sent;
+    struct quicz_one_rtt_traffic_secrets one_rtt_secrets;
+    int one_rtt_local_secret_available;
+    int one_rtt_peer_secret_available;
+    int one_rtt_secrets_sent;
     int yield_secret_callbacks;
     size_t received_crypto_len;
     uint8_t inbound_crypto[8192];
@@ -127,22 +136,38 @@ static int yield_secret_cb(
         return 0;
     }
     backend->yield_secret_callbacks += 1;
-    if (prot_level != OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE) {
+    if (prot_level != OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE &&
+        prot_level != OSSL_RECORD_PROTECTION_LEVEL_APPLICATION) {
         return 1;
     }
     if (secret_len != sizeof(backend->handshake_secrets.local)) {
         return 0;
     }
+    if (prot_level == OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE) {
+        if (direction == 1) {
+            memcpy(backend->handshake_secrets.local, secret, secret_len);
+            backend->handshake_local_secret_available = 1;
+            backend->handshake_secrets_sent = 0;
+            return 1;
+        }
+        if (direction == 0) {
+            memcpy(backend->handshake_secrets.peer, secret, secret_len);
+            backend->handshake_peer_secret_available = 1;
+            backend->handshake_secrets_sent = 0;
+            return 1;
+        }
+        return 1;
+    }
     if (direction == 1) {
-        memcpy(backend->handshake_secrets.local, secret, secret_len);
-        backend->handshake_local_secret_available = 1;
-        backend->handshake_secrets_sent = 0;
+        memcpy(backend->one_rtt_secrets.local, secret, secret_len);
+        backend->one_rtt_local_secret_available = 1;
+        backend->one_rtt_secrets_sent = 0;
         return 1;
     }
     if (direction == 0) {
-        memcpy(backend->handshake_secrets.peer, secret, secret_len);
-        backend->handshake_peer_secret_available = 1;
-        backend->handshake_secrets_sent = 0;
+        memcpy(backend->one_rtt_secrets.peer, secret, secret_len);
+        backend->one_rtt_peer_secret_available = 1;
+        backend->one_rtt_secrets_sent = 0;
         return 1;
     }
     return 1;
@@ -355,6 +380,24 @@ enum quicz_tls_backend_status quicz_openssl_tls_backend_pull_handshake_traffic_s
     return QUICZ_TLS_BACKEND_OK;
 }
 
+enum quicz_tls_backend_status quicz_openssl_tls_backend_pull_1rtt_traffic_secrets(
+    void *context,
+    struct quicz_one_rtt_traffic_secrets *out
+) {
+    struct quicz_openssl_tls_backend *backend = context;
+    if (backend == NULL) {
+        return QUICZ_TLS_BACKEND_INTERNAL;
+    }
+    if (!backend->one_rtt_local_secret_available ||
+        !backend->one_rtt_peer_secret_available ||
+        backend->one_rtt_secrets_sent) {
+        return QUICZ_TLS_BACKEND_PENDING;
+    }
+    *out = backend->one_rtt_secrets;
+    backend->one_rtt_secrets_sent = 1;
+    return QUICZ_TLS_BACKEND_OK;
+}
+
 int quicz_openssl_tls_backend_callbacks_set(void *context) {
     const struct quicz_openssl_tls_backend *backend = context;
     return backend != NULL ? backend->callbacks_set : 0;
@@ -479,6 +522,26 @@ enum quicz_tls_backend_status quicz_openssl_tls_backend_debug_yield_handshake_se
     return yield_secret_cb(
         backend->ssl,
         OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE,
+        direction,
+        secret,
+        secret_len,
+        backend
+    ) ? QUICZ_TLS_BACKEND_OK : QUICZ_TLS_BACKEND_CRYPTO_ERROR;
+}
+
+enum quicz_tls_backend_status quicz_openssl_tls_backend_debug_yield_application_secret(
+    void *context,
+    int direction,
+    const uint8_t *secret,
+    size_t secret_len
+) {
+    struct quicz_openssl_tls_backend *backend = context;
+    if (backend == NULL) {
+        return QUICZ_TLS_BACKEND_INTERNAL;
+    }
+    return yield_secret_cb(
+        backend->ssl,
+        OSSL_RECORD_PROTECTION_LEVEL_APPLICATION,
         direction,
         secret,
         secret_len,
