@@ -20,6 +20,11 @@ enum quicz_tls_backend_packet_space {
     QUICZ_TLS_BACKEND_APPLICATION = 2,
 };
 
+struct quicz_handshake_traffic_secrets {
+    uint8_t local[32];
+    uint8_t peer[32];
+};
+
 struct quicz_openssl_tls_backend {
     SSL_CTX *ctx;
     SSL *ssl;
@@ -27,6 +32,16 @@ struct quicz_openssl_tls_backend {
     int local_transport_parameters_set;
     int ssl_is_quic_after_callbacks;
     size_t local_transport_parameters_len;
+    uint8_t peer_transport_parameters[512];
+    size_t peer_transport_parameters_len;
+    int peer_transport_parameters_available;
+    int peer_transport_parameters_sent;
+    int got_transport_params_callbacks;
+    struct quicz_handshake_traffic_secrets handshake_secrets;
+    int handshake_local_secret_available;
+    int handshake_peer_secret_available;
+    int handshake_secrets_sent;
+    int yield_secret_callbacks;
     size_t received_crypto_len;
     uint8_t inbound_crypto[8192];
     size_t inbound_crypto_len;
@@ -107,19 +122,43 @@ static int yield_secret_cb(
     void *arg
 ) {
     (void)ssl;
-    (void)prot_level;
-    (void)direction;
-    (void)secret;
-    (void)secret_len;
-    (void)arg;
+    struct quicz_openssl_tls_backend *backend = arg;
+    if (backend == NULL) {
+        return 0;
+    }
+    backend->yield_secret_callbacks += 1;
+    if (prot_level != OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE) {
+        return 1;
+    }
+    if (secret_len != sizeof(backend->handshake_secrets.local)) {
+        return 0;
+    }
+    if (direction == 1) {
+        memcpy(backend->handshake_secrets.local, secret, secret_len);
+        backend->handshake_local_secret_available = 1;
+        backend->handshake_secrets_sent = 0;
+        return 1;
+    }
+    if (direction == 0) {
+        memcpy(backend->handshake_secrets.peer, secret, secret_len);
+        backend->handshake_peer_secret_available = 1;
+        backend->handshake_secrets_sent = 0;
+        return 1;
+    }
     return 1;
 }
 
 static int got_transport_params_cb(SSL *ssl, const unsigned char *params, size_t params_len, void *arg) {
     (void)ssl;
-    (void)params;
-    (void)params_len;
-    (void)arg;
+    struct quicz_openssl_tls_backend *backend = arg;
+    if (backend == NULL || params_len > sizeof(backend->peer_transport_parameters)) {
+        return 0;
+    }
+    memcpy(backend->peer_transport_parameters, params, params_len);
+    backend->peer_transport_parameters_len = params_len;
+    backend->peer_transport_parameters_available = 1;
+    backend->peer_transport_parameters_sent = 0;
+    backend->got_transport_params_callbacks += 1;
     return 1;
 }
 
@@ -185,7 +224,6 @@ enum quicz_tls_backend_status quicz_openssl_tls_backend_receive(
     if (backend == NULL || backend->ssl == NULL) {
         return QUICZ_TLS_BACKEND_INTERNAL;
     }
-    (void)data;
     (void)space;
     if (data_len > sizeof(backend->inbound_crypto) - backend->inbound_crypto_len) {
         return QUICZ_TLS_BACKEND_BUFFER_TOO_SMALL;
@@ -282,11 +320,39 @@ enum quicz_tls_backend_status quicz_openssl_tls_backend_pull_peer_transport_para
     size_t out_len,
     size_t *written_len
 ) {
-    (void)context;
-    (void)out;
-    (void)out_len;
+    struct quicz_openssl_tls_backend *backend = context;
     *written_len = 0;
-    return QUICZ_TLS_BACKEND_PENDING;
+    if (backend == NULL) {
+        return QUICZ_TLS_BACKEND_INTERNAL;
+    }
+    if (!backend->peer_transport_parameters_available || backend->peer_transport_parameters_sent) {
+        return QUICZ_TLS_BACKEND_PENDING;
+    }
+    if (out_len < backend->peer_transport_parameters_len) {
+        return QUICZ_TLS_BACKEND_BUFFER_TOO_SMALL;
+    }
+    memcpy(out, backend->peer_transport_parameters, backend->peer_transport_parameters_len);
+    *written_len = backend->peer_transport_parameters_len;
+    backend->peer_transport_parameters_sent = 1;
+    return QUICZ_TLS_BACKEND_OK;
+}
+
+enum quicz_tls_backend_status quicz_openssl_tls_backend_pull_handshake_traffic_secrets(
+    void *context,
+    struct quicz_handshake_traffic_secrets *out
+) {
+    struct quicz_openssl_tls_backend *backend = context;
+    if (backend == NULL) {
+        return QUICZ_TLS_BACKEND_INTERNAL;
+    }
+    if (!backend->handshake_local_secret_available ||
+        !backend->handshake_peer_secret_available ||
+        backend->handshake_secrets_sent) {
+        return QUICZ_TLS_BACKEND_PENDING;
+    }
+    *out = backend->handshake_secrets;
+    backend->handshake_secrets_sent = 1;
+    return QUICZ_TLS_BACKEND_OK;
 }
 
 int quicz_openssl_tls_backend_callbacks_set(void *context) {
@@ -312,6 +378,21 @@ size_t quicz_openssl_tls_backend_local_transport_parameters_len(void *context) {
 size_t quicz_openssl_tls_backend_received_crypto_len(void *context) {
     const struct quicz_openssl_tls_backend *backend = context;
     return backend != NULL ? backend->received_crypto_len : 0;
+}
+
+size_t quicz_openssl_tls_backend_peer_transport_parameters_len(void *context) {
+    const struct quicz_openssl_tls_backend *backend = context;
+    return backend != NULL ? backend->peer_transport_parameters_len : 0;
+}
+
+int quicz_openssl_tls_backend_got_transport_params_callbacks(void *context) {
+    const struct quicz_openssl_tls_backend *backend = context;
+    return backend != NULL ? backend->got_transport_params_callbacks : 0;
+}
+
+int quicz_openssl_tls_backend_yield_secret_callbacks(void *context) {
+    const struct quicz_openssl_tls_backend *backend = context;
+    return backend != NULL ? backend->yield_secret_callbacks : 0;
 }
 
 size_t quicz_openssl_tls_backend_pending_inbound_crypto_len(void *context) {
@@ -369,4 +450,38 @@ enum quicz_tls_backend_status quicz_openssl_tls_backend_debug_consume_inbound_on
         return QUICZ_TLS_BACKEND_CRYPTO_ERROR;
     }
     return QUICZ_TLS_BACKEND_OK;
+}
+
+enum quicz_tls_backend_status quicz_openssl_tls_backend_debug_got_transport_parameters(
+    void *context,
+    const uint8_t *params,
+    size_t params_len
+) {
+    struct quicz_openssl_tls_backend *backend = context;
+    if (backend == NULL) {
+        return QUICZ_TLS_BACKEND_INTERNAL;
+    }
+    return got_transport_params_cb(backend->ssl, params, params_len, backend)
+        ? QUICZ_TLS_BACKEND_OK
+        : QUICZ_TLS_BACKEND_BUFFER_TOO_SMALL;
+}
+
+enum quicz_tls_backend_status quicz_openssl_tls_backend_debug_yield_handshake_secret(
+    void *context,
+    int direction,
+    const uint8_t *secret,
+    size_t secret_len
+) {
+    struct quicz_openssl_tls_backend *backend = context;
+    if (backend == NULL) {
+        return QUICZ_TLS_BACKEND_INTERNAL;
+    }
+    return yield_secret_cb(
+        backend->ssl,
+        OSSL_RECORD_PROTECTION_LEVEL_HANDSHAKE,
+        direction,
+        secret,
+        secret_len,
+        backend
+    ) ? QUICZ_TLS_BACKEND_OK : QUICZ_TLS_BACKEND_CRYPTO_ERROR;
 }
