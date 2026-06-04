@@ -6,7 +6,22 @@ tested incrementally.
 
 ## Scope
 
-The first implementation scope is the QUIC transport core:
+`quicz` tracks the IETF QUIC standards, but the practical implementation target
+is not every optional protocol feature. The first usable target is the common
+transport subset exposed by mainstream libraries such as
+[quic-go](https://github.com/quic-go/quic-go),
+[Quinn](https://github.com/quinn-rs/quinn),
+[s2n-quic](https://github.com/aws/s2n-quic), and
+[quiche](https://github.com/cloudflare/quiche) as of 2026-06-04.
+
+Those references all emphasize a QUIC v1 transport with TLS integration,
+client/server endpoints, stream I/O, transport-parameter configuration,
+packet/timer driving, loss recovery, congestion behavior, and interop. Some
+also expose HTTP/3, DATAGRAM, qlog, PMTU/GSO, QUIC v2, or other extensions.
+Those extensions are useful to track, but they are not prerequisites for the
+first interoperable `quicz` transport milestone.
+
+The first implementation scope remains the QUIC transport core:
 
 - RFC 8999: Version-Independent Properties of QUIC
 - RFC 9000: QUIC: A UDP-Based Multiplexed and Secure Transport
@@ -21,6 +36,27 @@ packet/key/token and RFC 9368 version-information primitives:
 - QUIC DATAGRAM, RFC 9221
 - HTTP/3 and QPACK
 - Multipath and other in-progress QUIC WG drafts
+
+## Mainstream Baseline Target
+
+| Feature | Practical target | quicz status |
+| --- | --- | --- |
+| UDP client/server endpoint | Required for first usable milestone. One endpoint owner must drive accept/connect, packet receive/send, timers, route cleanup, and close. | Partial: socket-backed loopback examples and endpoint lifecycle helpers exist; production client/server event loop is missing. |
+| TLS 1.3 integration | Required. Use a C TLS library with QUIC transport-parameter and traffic-secret hooks through a narrow Zig `TlsBackend` adapter. Do not implement TLS in-tree. | Missing: mock `CryptoBackend` and installed-key handoff exist; real TLS backend is missing. |
+| QUIC v1 packet protection | Required. Initial, Handshake, 0-RTT when enabled, and 1-RTT packets must be produced and consumed by the TLS-owned path. | Partial: v1/v2 Initial, Retry integrity, protected long/short helpers, and mock installed-key paths exist. |
+| Streams | Required. Bidirectional and unidirectional stream open, read, write, FIN, reset, STOP_SENDING, and stream limits must work over protected UDP. | Partial: in-memory stream state and protected loopback exercises exist; TLS-owned UDP stream API is missing. |
+| Flow control | Required. Connection, stream, and stream-count flow control must work over protected UDP. | Partial: frame-payload and protected loopback coverage exists; full socket-owned path is missing. |
+| ACK/loss/PTO recovery | Required. ACK processing, packet/time-threshold loss, PTO, retransmission, and timer service must drive the endpoint loop. | Partial: deterministic recovery model and socket-backed loopbacks exist; socket-owned protected-packet lifecycle integration is incomplete. |
+| Congestion control | Required at least at a NewReno-style baseline. CUBIC or configurable controllers are later performance work. | Partial: simplified NewReno-style behavior exists; production tuning and configurable controllers are missing. |
+| Connection IDs and stateless reset | Required. Routing, CID issuance/retirement, reset-token handling, close cleanup, and inactive-CID reset emission must work in the endpoint lifecycle. | Partial: endpoint router, lifecycle helpers, and socket-backed loopbacks exist; full TLS-owned lifecycle integration is missing. |
+| Retry and address validation | Required for server-side robustness and interop. | Partial: token policy, Retry validation, address-validation loopbacks, and TLS extension byte checks exist; production storage/replay policy is missing. |
+| Path validation and migration | Required for single-path validation and route update; full multipath is out of scope. | Partial: PATH_CHALLENGE/PATH_RESPONSE and route-update loopbacks exist; production path policy is incomplete. |
+| 0-RTT | Useful but not required before the first 1-RTT stream echo interop gate. | Partial: explicit accept/reject and mock installed-key 0-RTT paths exist; real TLS replay policy is missing. |
+| RFC 9221 DATAGRAM | Optional extension, not part of the first transport milestone. | Deferred. |
+| HTTP/3 and QPACK | Application-layer work after the transport is interoperable. | Deferred. |
+| QUIC v2 and RFC 9368 compatible version negotiation | Optional extension unless a selected interop target requires it. | Partial primitives exist; full behavior is deferred. |
+| qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
+| External interop | Required to claim the first usable transport milestone. | Missing. |
 
 ## RFC Coverage Status
 
@@ -113,6 +149,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-04: Re-scoped the practical target to the common feature baseline of
+  mainstream QUIC libraries instead of treating every optional QUIC extension
+  as part of the first milestone. The new baseline table records required
+  first-milestone features, deferred extensions, and current `quicz` status for
+  each item.
 - 2026-06-04: Added an explicit phase boundary for the current
   mock/installed-key plus endpoint-lifecycle verification phase. The task plan
   now states that the existing socket-backed loopbacks prove protected routing,

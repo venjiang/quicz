@@ -5,7 +5,10 @@ English | [简体中文](README_zh-CN.md)
 A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF QUIC standard defined at <https://quicwg.org/>.
 
 > Status: **experimental / WIP**.  
-> Goal: eventually support a fully-functional QUIC transport (RFC 9000 family and QUIC v2 RFC 9369), starting from a minimal but correct subset.
+> Goal: implement a practical QUIC transport subset aligned with the common
+> capabilities of mainstream libraries such as quic-go, Quinn, s2n-quic, and
+> quiche. Optional extensions are tracked explicitly instead of being treated
+> as required for the first usable transport.
 
 ## Features and Roadmap
 
@@ -37,6 +40,21 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 4. **QUIC v2 and advanced features**
    - QUIC v2 version (0x6b3343cf), with Initial key derivation, long-header type bits, configured protected long-packet and Retry version use, Retry integrity, token version separation, and RFC 9368 version information present; remaining v2 behavior pending
    - Path migration, richer path validation policy, stateless reset
+
+### Practical Target Boundary
+
+The first usable target is not "every QUIC option". It is a TLS-backed QUIC v1
+client/server stream transport with UDP endpoint lifecycle ownership,
+transport-parameter exchange, packet protection, bidirectional and
+unidirectional streams, flow control, stream reset/STOP_SENDING, ACK/loss/PTO
+recovery, congestion control, close/idle handling, connection IDs, path
+validation, Retry/address validation, stateless reset, and interop evidence.
+
+HTTP/3/QPACK, RFC 9221 DATAGRAM, full QUIC v2 / RFC 9368 version negotiation,
+multi-path, qlog, GSO/GRO, PMTU discovery, and advanced congestion-controller
+selection are tracked in the task plan, but they are not required for the
+first interoperable transport milestone unless they become necessary for the
+chosen interop target.
 
 For the verifiable transport implementation task plan, see
 [`docs/en/quic_transport_tasks.md`](docs/en/quic_transport_tasks.md).

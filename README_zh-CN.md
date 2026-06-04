@@ -5,7 +5,7 @@
 `quicz` 是一个使用 [Zig](https://ziglang.org/) 实现的 QUIC 协议栈，目标对齐 IETF QUIC 标准，规范文档见 <https://quicwg.org/>。
 
 > 状态：**实验性 / 开发中（WIP）**  
-> 目标：从一个最小但语义正确的子集开始，逐步实现一个完整的 QUIC 传输协议（覆盖 RFC 9000 系列以及 QUIC v2 RFC 9369）。
+> 目标：实现一个与 quic-go、Quinn、s2n-quic、quiche 等主流库共同能力对齐的实用 QUIC transport 子集。可选扩展会明确追踪，不作为第一轮可用 transport 的必需条件。
 
 ## 特性与路线图
 
@@ -37,6 +37,20 @@
 4. **QUIC v2 与高级特性**
    - QUIC v2 版本（0x6b3343cf），已支持 Initial key 派生、long-header type bits、按配置使用 protected long-packet 与 Retry version、Retry integrity、token version 隔离和 RFC 9368 version information，剩余 v2 行为仍待实现
    - 路径迁移、更完整的路径验证策略、stateless reset
+
+### 实用目标边界
+
+第一轮可用目标不是“实现所有 QUIC 可选项”。目标是一个 TLS-backed QUIC v1
+client/server stream transport，具备 UDP endpoint lifecycle ownership、transport
+parameter exchange、packet protection、双向和单向 stream、flow control、stream
+reset/STOP_SENDING、ACK/loss/PTO recovery、congestion control、close/idle
+handling、connection ID、path validation、Retry/address validation、stateless reset
+和互通证据。
+
+HTTP/3/QPACK、RFC 9221 DATAGRAM、完整 QUIC v2 / RFC 9368 version negotiation、
+multi-path、qlog、GSO/GRO、PMTU discovery 和高级 congestion-controller selection
+会在任务计划中追踪，但除非选定互通目标要求，否则不作为第一轮可互通 transport
+里程碑的必需条件。
 
 可验证 transport 实现任务计划见 [`docs/zh-CN/quic_transport_tasks.md`](docs/zh-CN/quic_transport_tasks.md)。
 更详细的设计和逐功能说明见 [`docs/zh-CN/`](docs/zh-CN/) 目录。
