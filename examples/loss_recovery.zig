@@ -346,6 +346,53 @@ pub fn main() !void {
         .{ probe_payload.len, congestion_probe.congestionWindow(.application), congestion_probe.bytesInFlight(.application) },
     );
 
+    var ce_probe = try quicz.Connection.init(allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer ce_probe.deinit();
+    const ce_probe_stream_id = try ce_probe.openStream();
+    try ce_probe.sendOnStream(ce_probe_stream_id, "ce congestion probe", false);
+    ce_probe.recovery_state.congestion_window = 36_000;
+    var ce_packet_number: usize = 0;
+    while (ce_packet_number < 30) : (ce_packet_number += 1) {
+        _ = try ce_probe.recordEcnPacketSentInSpace(
+            .application,
+            @as(i64, @intCast(ce_packet_number + 1)) * 10,
+            1200,
+            .ect0,
+        );
+    }
+    var ce_probe_buf: [1400]u8 = undefined;
+    if (try ce_probe.pollTx(350, &ce_probe_buf) != null) return error.LossRecoveryExampleFailed;
+    try ce_probe.receiveAckEcnInSpace(.application, 360, .{
+        .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 0,
+            .ect1_count = 0,
+            .ecn_ce_count = 1,
+        },
+    });
+    if (ce_probe.ecnValidationState(.application) != .capable) return error.LossRecoveryExampleFailed;
+    if (ce_probe.ecnCounts(.application).ecn_ce_count != 1) return error.LossRecoveryExampleFailed;
+    if (ce_probe.congestion_probe_count != 1) return error.LossRecoveryExampleFailed;
+    if (ce_probe.recovery_state.canSend(1)) return error.LossRecoveryExampleFailed;
+    const ce_probe_payload = (try ce_probe.pollTx(370, &ce_probe_buf)) orelse return error.LossRecoveryExampleFailed;
+    if (ce_probe.congestion_probe_count != 0) return error.LossRecoveryExampleFailed;
+    std.debug.print(
+        "[loss] CE congestion probe bytes={d} ce_count={d} cwnd={d} inflight={d}\n",
+        .{
+            ce_probe_payload.len,
+            ce_probe.ecnCounts(.application).ecn_ce_count,
+            ce_probe.congestionWindow(.application),
+            ce_probe.bytesInFlight(.application),
+        },
+    );
+
     var rtt_sampling = try quicz.Connection.init(allocator, .client, .{
         .initial_rtt_ms = 100,
     });

@@ -28547,6 +28547,64 @@ test "new congestion event allows one STREAM retransmission probe despite full c
     try std.testing.expect(conn.bytesInFlight(.application) > conn.congestionWindow(.application));
 }
 
+test "ACK_ECN CE congestion event allows one STREAM probe despite full cwnd" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    const stream_id = try conn.openStream();
+    const queued = "ce congestion probe";
+    try conn.sendOnStream(stream_id, queued, false);
+    conn.recovery_state.congestion_window = 36_000;
+
+    var packet_number: usize = 0;
+    while (packet_number < 30) : (packet_number += 1) {
+        _ = try conn.recordEcnPacketSentInSpace(
+            .application,
+            @as(i64, @intCast(packet_number + 1)) * 10,
+            1200,
+            .ect0,
+        );
+    }
+
+    var out_buf: [1400]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]const u8, null), try conn.pollTx(350, &out_buf));
+
+    try conn.receiveAckEcnInSpace(.application, 360, .{
+        .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 0,
+            .ect1_count = 0,
+            .ecn_ce_count = 1,
+        },
+    });
+
+    try std.testing.expectEqual(EcnValidationState.capable, conn.ecnValidationState(.application));
+    try std.testing.expectEqual(@as(u64, 1), conn.ecnCounts(.application).ecn_ce_count);
+    try std.testing.expect(conn.bytesInFlight(.application) >= conn.congestionWindow(.application));
+    try std.testing.expect(!conn.recovery_state.canSend(1));
+    try std.testing.expectEqual(@as(usize, 1), conn.congestion_probe_count);
+
+    const probe_payload = (try conn.pollTx(370, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(probe_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .stream => |stream| {
+            try std.testing.expectEqual(stream_id, stream.stream_id);
+            try std.testing.expectEqualStrings(queued, stream.data);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), conn.congestion_probe_count);
+    try std.testing.expect(conn.bytesInFlight(.application) > conn.congestionWindow(.application));
+}
+
 test "processDatagram rolls back STREAM retransmission requeue when payload is invalid" {
     var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();

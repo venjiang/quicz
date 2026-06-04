@@ -776,9 +776,14 @@ produce or consume TLS-owned QUIC packets over UDP.
   recovery period and the affected packet number space already has
   ack-eliciting data queued, the next send can bypass the reduced congestion
   window once while still respecting anti-amplification and buffer-size checks.
-  Tests cover a full-cwnd STREAM retransmission after packet-threshold loss;
-  `loss_recovery` now prints the probe retransmit bytes, cwnd, and inflight
-  evidence.
+  Tests cover a full-cwnd STREAM retransmission after packet-threshold loss and
+  a queued STREAM probe after a CE-driven congestion event; `loss_recovery` now
+  prints the loss probe and CE probe bytes, cwnd, and inflight evidence.
+- 2026-06-04: Added controlled-clock CE-driven NewReno congestion-probe
+  evidence. A new ACK_ECN CE test fills the congestion window with ECT packets,
+  queues STREAM data, proves the pre-CE send is blocked, then verifies the CE
+  congestion event grants exactly one probe despite the reduced full cwnd.
+  `loss_recovery` now prints `CE congestion probe`.
 - 2026-05-28: Extended Initial/Handshake packet-number-space discard cleanup to
   ECN state. `discardPacketNumberSpace()` now clears modeled ECT sent counters,
   cumulative ACK_ECN counters, ECN largest-acknowledged, and validation state
@@ -2629,7 +2634,7 @@ run from `build.zig`.
 | `connection_ids` | Current local NEW_CONNECTION_ID issuing with stateless-reset-token uniqueness checks, peer RETIRE_CONNECTION_ID handling, lifecycle-owned issue/register endpoint route bridging with retire_prior_to route retirement, and caller-keyed protected 1-RTT NEW_CONNECTION_ID/RETIRE_CONNECTION_ID exchange. | Present |
 | `stateless_reset` | Current constant-time stateless reset token match, false-positive rejection, and lifecycle-owned endpoint inactive-CID reset action construction. | Present |
 | `ecn_validation` | Current frame-payload ECT send modeling, ACK_ECN counter validation, and endpoint path-identity ECN state isolation. | Present |
-| `loss_recovery` | Current frame-payload invalid ACK range rejection, largest-acknowledged RTT sampling, cross-space bytes-in-flight congestion admission, packet-threshold loss, time-threshold loss, aggregate loss-time timer service, NewReno underutilized-cwnd suppression, slow-start/congestion-avoidance byte-counted and batched-ACK growth, recovery period, recovery-period ACK accounting without congestion growth, new-congestion-event one-packet STREAM recovery probe, minimum-window ssthresh clamp, PTO-backoff-independent persistent congestion, persistent-congestion min-RTT refresh, persistent-congestion recovery-period clearing/re-entry, non-contiguous persistent-congestion suppression, and ACK-delay handling. | Present |
+| `loss_recovery` | Current frame-payload invalid ACK range rejection, largest-acknowledged RTT sampling, cross-space bytes-in-flight congestion admission, packet-threshold loss, time-threshold loss, aggregate loss-time timer service, NewReno underutilized-cwnd suppression, slow-start/congestion-avoidance byte-counted and batched-ACK growth, recovery period, recovery-period ACK accounting without congestion growth, loss/CE-driven new-congestion-event one-packet STREAM recovery probes, minimum-window ssthresh clamp, PTO-backoff-independent persistent congestion, persistent-congestion min-RTT refresh, persistent-congestion recovery-period clearing/re-entry, non-contiguous persistent-congestion suppression, and ACK-delay handling. | Present |
 | `pto_recovery` | Current frame-payload Initial/Handshake/Application PTO hooks, including aggregate PTO timer service, Application PTO gating until handshake confirmation, client Initial ACK PTO-backoff reset suppression, client no-in-flight anti-deadlock PTO, anti-amplification-limited server PTO disarm/rearm plus expired-PTO service when new datagrams unblock sending, connection-level RTT sharing and PTO backoff across packet number spaces, Initial/Handshake RTT ACK-delay suppression, Initial/Handshake max_ack_delay suppression, congestion-window bypass for one armed PTO probe, PING fallback probes, cross-space peer probes for other in-flight packet number spaces, queued STREAM data probe selection, in-flight STREAM retransmission probe selection, ACKed RESET_STREAM retransmission suppression, and protected 1-RTT CRYPTO PTO probe selection. | Present |
 | `address_validation` | Current modeled server anti-amplification budget, explicit peer-address validation, lifecycle-owned protected HANDSHAKE_DONE/NEW_TOKEN emission/delivery timer evidence, server-side HANDSHAKE_DONE-triggered Handshake discard, endpoint peer-address binding, `AddressValidationPolicy` NEW_TOKEN issue/rotation/originating-version binding/secret-set and replay-filter export/restore/validation/replay rejection, and lifecycle-owned address-validation unblocking. | Present |
 | `udp_address_validation_loopback` | Socket-backed loopback UDP address-validation exercise: lifecycle-owned protected HANDSHAKE_DONE/NEW_TOKEN emission/delivery timer evidence, NEW_TOKEN path/version binding with explicit changed-path rejection, secret rotation, replay snapshot restore rejection, and lifecycle-owned server address-validation block/unblock evidence. | Present |
