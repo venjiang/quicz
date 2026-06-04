@@ -325,7 +325,9 @@ experimental.
 - Packet protection: QUIC v1/v2 Initial keys, Retry integrity, protected packet helpers, and key-update state.
 - Endpoint lifecycle: DCID routing, route retirement, stateless reset lookup/emission, and endpoint recovery timers.
 - Recovery and congestion: simplified RFC 9002 ACK/loss/PTO/NewReno/ECN model with deterministic tests.
-- TLS status: mock `CryptoBackend` handoff is present; real TLS 1.3 transcript integration is still pending.
+- TLS status: mock `CryptoBackend` handoff and a narrow C-ABI `TlsBackend`
+  adapter are present; binding a real C TLS library and driving a real TLS 1.3
+  transcript is still pending.
 
 ## License
 

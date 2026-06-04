@@ -217,7 +217,8 @@ pub fn main() !void {
 - 包保护：QUIC v1/v2 Initial key、Retry integrity、protected packet helper 和 key-update state。
 - 端点生命周期：DCID routing、route retirement、stateless reset lookup/emission 和 endpoint recovery timer。
 - 恢复与拥塞：简化 RFC 9002 ACK/loss/PTO/NewReno/ECN 模型，并有确定性测试覆盖。
-- TLS 状态：已有 mock `CryptoBackend` handoff；真实 TLS 1.3 transcript 集成仍待实现。
+- TLS 状态：已有 mock `CryptoBackend` handoff 和很小的 C-ABI `TlsBackend` adapter；
+  真实 C TLS 库绑定与 TLS 1.3 transcript 驱动仍待实现。
 
 ## 许可证
 
