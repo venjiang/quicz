@@ -152,6 +152,11 @@ experimental.
   transport-parameter auto-close, compatible backend Version Information
   handoff progress, backend-confirmed Handshake key discard, and protected
   CRYPTO flow. Run with `zig build run-crypto-stream`.
+- [TLS backend adapter](examples/tls_backend_adapter.zig): C-ABI `TlsBackend`
+  callback adaptation into the existing `CryptoBackend` drive path, with
+  local/peer transport-parameter handoff, CRYPTO bytes, Handshake traffic
+  secrets, and confirmation evidence. Run with
+  `zig build run-tls-backend-adapter`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
   long/short close, invalid ACK/ACK_ECN-range auto-close, semantic frame-error
   auto-close including invalid ACK/ACK_ECN, 0-RTT ACK/ACK_ECN packet-type

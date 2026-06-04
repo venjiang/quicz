@@ -129,6 +129,10 @@ pub fn main() !void {
   运行：`zig build run-stop-sending`。
 - [CRYPTO streams](examples/crypto_stream.zig)：按 packet number space 隔离的 CRYPTO buffering、接收缓冲超限 auto-close、mock backend handoff、protected backend transport-parameter auto-close、compatible backend Version Information handoff progress、backend-confirmed Handshake key discard 和 protected CRYPTO flow。
   运行：`zig build run-crypto-stream`。
+- [TLS backend adapter](examples/tls_backend_adapter.zig)：把 C-ABI `TlsBackend`
+  callback 适配到现有 `CryptoBackend` drive 路径，并输出本端/对端
+  transport-parameter handoff、CRYPTO bytes、Handshake traffic secret 和
+  confirmation 证据。运行：`zig build run-tls-backend-adapter`。
 - [Graceful close](examples/graceful_close.zig)：本端/对端关闭、protected long/short close、非法 ACK/ACK_ECN range auto-close、包含非法 ACK/ACK_ECN、0-RTT ACK/ACK_ECN packet-type 违规、非法 STREAMS_BLOCKED limit、冲突 STREAM data 和非法 stream control frame 的语义 frame 错误 auto-close、protected receive auto-close、lifecycle-routed protected auto-close、protected long/0-RTT close-state discard、draining 行为和关闭触发校验。
   运行：`zig build run-graceful-close`。
 - [Idle timeout](examples/idle_timeout.zig)：建模 idle timeout 导出、刷新、关闭行为和 endpoint route/timer 清理。

@@ -156,6 +156,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_crypto_stream);
 
+    // TLS backend adapter executable
+    const exe_tls_backend_adapter = b.addExecutable(.{
+        .name = "quicz-tls-backend-adapter",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tls_backend_adapter.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_tls_backend_adapter);
+
     // Graceful close executable
     const exe_graceful_close = b.addExecutable(.{
         .name = "quicz-graceful-close",
@@ -795,6 +809,15 @@ pub fn build(b: *std.Build) void {
     run_crypto_stream_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_crypto_stream_cmd.addArgs(args);
+    }
+
+    // zig build run-tls-backend-adapter
+    const run_tls_backend_adapter = b.step("run-tls-backend-adapter", "Run quicz TLS backend adapter example");
+    const run_tls_backend_adapter_cmd = b.addRunArtifact(exe_tls_backend_adapter);
+    run_tls_backend_adapter.dependOn(&run_tls_backend_adapter_cmd.step);
+    run_tls_backend_adapter_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_tls_backend_adapter_cmd.addArgs(args);
     }
 
     // zig build run-graceful-close
