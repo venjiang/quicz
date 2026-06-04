@@ -7,18 +7,14 @@ tested incrementally.
 ## Scope
 
 `quicz` tracks the IETF QUIC standards, but the practical implementation target
-is not every optional protocol feature. The first usable target is the common
-transport subset exposed by mainstream libraries such as
-[quic-go](https://github.com/quic-go/quic-go),
-[Quinn](https://github.com/quinn-rs/quinn),
-[s2n-quic](https://github.com/aws/s2n-quic), and
-[quiche](https://github.com/cloudflare/quiche) as of 2026-06-04.
+is not every optional protocol feature. Internal comparison against mature QUIC
+stacks is used only to extract a common transport capability baseline. The
+first usable target is QUIC v1 transport with TLS integration, client/server
+endpoints, stream I/O, transport-parameter configuration, packet/timer driving,
+loss recovery, congestion behavior, and interop.
 
-Those references all emphasize a QUIC v1 transport with TLS integration,
-client/server endpoints, stream I/O, transport-parameter configuration,
-packet/timer driving, loss recovery, congestion behavior, and interop. Some
-also expose HTTP/3, DATAGRAM, qlog, PMTU/GSO, QUIC v2, or other extensions.
-Those extensions are useful to track, but they are not prerequisites for the
+Optional extensions such as HTTP/3, DATAGRAM, qlog, PMTU/GSO, QUIC v2, or
+other extensions are useful to track, but they are not prerequisites for the
 first interoperable `quicz` transport milestone.
 
 Implementation strategy: do not reimplement mature, non-core capabilities
@@ -45,12 +41,12 @@ packet/key/token and RFC 9368 version-information primitives:
 - HTTP/3 and QPACK
 - Multipath and other in-progress QUIC WG drafts
 
-## Mainstream Baseline Target
+## Practical Transport Baseline
 
 | Feature | Practical target | quicz status |
 | --- | --- | --- |
 | UDP client/server endpoint | Required for first usable milestone. One endpoint owner must drive accept/connect, packet receive/send, timers, route cleanup, and close. | Partial: socket-backed loopback examples and endpoint lifecycle helpers exist; production client/server event loop is missing. |
-| TLS 1.3 integration | Required. Use a C TLS library with QUIC transport-parameter and traffic-secret hooks through a narrow Zig `TlsBackend` adapter. Do not implement TLS in-tree. | Partial: mock `CryptoBackend`, installed-key handoff, a tested C-ABI `TlsBackend` adapter, a C-object adapter probe, an OpenSSL QUIC TLS API/link probe, and an OpenSSL-backed adapter wrapper that emits the first TLS CRYPTO flight exist; completing the peer transcript and traffic-secret yield is missing. |
+| TLS 1.3 integration | Required. Use a C TLS library with QUIC transport-parameter and traffic-secret hooks through a narrow Zig `TlsBackend` adapter. Do not implement TLS in-tree. | Partial: mock `CryptoBackend`, installed-key handoff, a tested C-ABI `TlsBackend` adapter, a C-object adapter probe, an OpenSSL QUIC TLS API/link probe, and an OpenSSL-backed adapter wrapper that emits the first TLS CRYPTO flight and delivers inbound CRYPTO to the OpenSSL receive/release callback boundary exist; completing the peer transcript and traffic-secret yield is missing. |
 | QUIC v1 packet protection | Required. Initial, Handshake, 0-RTT when enabled, and 1-RTT packets must be produced and consumed by the TLS-owned path. | Partial: v1/v2 Initial, Retry integrity, protected long/short helpers, and mock installed-key paths exist. |
 | Streams | Required. Bidirectional and unidirectional stream open, read, write, FIN, reset, STOP_SENDING, and stream limits must work over protected UDP. | Partial: in-memory stream state and protected loopback exercises exist; TLS-owned UDP stream API is missing. |
 | Flow control | Required. Connection, stream, and stream-count flow control must work over protected UDP. | Partial: frame-payload and protected loopback coverage exists; full socket-owned path is missing. |
@@ -182,7 +178,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   first TLS CRYPTO flight through the existing quicz CRYPTO output path after
   passing local transport parameters into `SSL_set_quic_tls_transport_params()`.
   The example still records OpenSSL callback mode as separate from OpenSSL full
-  QUIC mode, accepts Handshake CRYPTO bytes into the wrapper, and intentionally
+  QUIC mode, accepts Handshake CRYPTO bytes into the wrapper, delivers those
+  bytes through the OpenSSL receive/release callback boundary, and intentionally
   leaves peer transport parameters, traffic-secret yield, and full peer
   transcript driving pending.
 - 2026-06-04: Added `examples/tls_openssl_probe.zig` plus a small C probe
@@ -215,9 +212,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   state, packet processing, recovery, endpoint lifecycle, and the Zig API
   remain in scope for `quicz`; TLS and similar adjunct capabilities should use
   maintained libraries behind narrow adapters.
-- 2026-06-04: Re-scoped the practical target to the common feature baseline of
-  mainstream QUIC libraries instead of treating every optional QUIC extension
-  as part of the first milestone. The new baseline table records required
+- 2026-06-04: Re-scoped the practical target to a mature QUIC transport
+  capability baseline instead of treating every optional QUIC extension as part
+  of the first milestone. The new baseline table records required
   first-milestone features, deferred extensions, and current `quicz` status for
   each item.
 - 2026-06-04: Added an explicit phase boundary for the current

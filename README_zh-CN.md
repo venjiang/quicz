@@ -5,7 +5,7 @@
 `quicz` 是一个使用 [Zig](https://ziglang.org/) 实现的 QUIC 协议栈，目标对齐 IETF QUIC 标准，规范文档见 <https://quicwg.org/>。
 
 > 状态：**实验性 / 开发中（WIP）**  
-> 目标：实现一个与 quic-go、Quinn、s2n-quic、quiche 等主流库共同能力对齐的实用 QUIC transport 子集。可选扩展会明确追踪，不作为第一轮可用 transport 的必需条件。
+> 目标：实现一个与成熟 QUIC 协议栈共同能力对齐的实用 QUIC transport 子集。可选扩展会明确追踪，不作为第一轮可用 transport 的必需条件。
 
 ## 特性与路线图
 
@@ -18,6 +18,9 @@
 - [x] 简化 RFC 9002 风格 ACK、loss、PTO、NewReno congestion、ECN、retransmission 和 endpoint recovery-timer 模型，并有 socket-backed UDP loopback 覆盖。
 - [x] 内存态 endpoint routing/lifecycle helper，覆盖 DCID 和 IPv4 UDP tuple routing、Version Negotiation、zero-length CID routing、preferred/replacement CID routing、route retirement、stateless reset emission 和 protected UDP loopback。
 - [ ] 完整 connection state machine 与 TLS-owned protected-packet packet number space routing。
+- [ ] TLS-owned socket-backed client/server echo，具备真实 CRYPTO transcript、traffic-secret 安装和 1-RTT STREAM delivery。
+- [ ] 可嵌入 socket API，让调用方自持 UDP socket、connection map、timer 和 datagram 输出队列。
+- [ ] 面向 `handshake` 和 `transfer` 的最小外部互通入口。
 - [ ] 完整 RFC 9002 loss detection / congestion control，含 socket-owned protected-packet loss/PTO lifecycle integration 与剩余 NewReno 边界。
 - [ ] TLS 1.3 集成（RFC 9001）。
 - [ ] QUIC v2（RFC 9369）完整版本行为支持。
@@ -69,6 +72,19 @@ zig build run-initial-keys
 ```
 
 `zig build` 会构建 `zig-out/lib/libquicz.a` 静态库，以及 `zig-out/bin/` 下的所有示例二进制。当前示例是确定性的协议行为练习，还不是可互操作的 QUIC-over-UDP 程序。
+
+当前最有价值的示例可按验证目标理解：
+
+- `run-tls-openssl-backend-adapter`：当前真实 C TLS adapter 边界，覆盖本端
+  transport parameters、第一段 TLS CRYPTO flight，以及入站 CRYPTO 到 OpenSSL
+  callback 边界的投递。
+- `run-udp-echo-loopback`：socket-backed installed-key STREAM echo 证据，包含
+  payload equality、ACK cleanup 和 recovery timer cleanup。
+- `run-udp-pto-recovery-loopback`、`run-udp-loss-recovery-loopback` 和
+  `run-udp-congestion-recovery-loopback`：loopback UDP 上 lifecycle-routed recovery
+  与 congestion 行为。
+- `run-udp-close-lifecycle-loopback` 和 `run-udp-stateless-reset-loopback`：通过
+  endpoint lifecycle owner 驱动 route cleanup 和 reset 行为。
 
 ### 作为库使用
 
@@ -143,7 +159,8 @@ pub fn main() !void {
 - [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig)：把
   OpenSSL-backed `TlsBackend` wrapper 接到现有 drive 路径，通过
   `SSL_set_quic_tls_transport_params()` 接收 quicz 本端 transport parameters，驱动
-  `SSL_do_handshake()` 产出第一段 TLS CRYPTO flight，并接收入站 Handshake CRYPTO bytes。
+  `SSL_do_handshake()` 产出第一段 TLS CRYPTO flight，并把入站 Handshake CRYPTO bytes
+  投递到 OpenSSL receive/release callback 边界。
   运行：`zig build run-tls-openssl-backend-adapter`。
 - [Graceful close](examples/graceful_close.zig)：本端/对端关闭、protected long/short close、非法 ACK/ACK_ECN range auto-close、包含非法 ACK/ACK_ECN、0-RTT ACK/ACK_ECN packet-type 违规、非法 STREAMS_BLOCKED limit、冲突 STREAM data 和非法 stream control frame 的语义 frame 错误 auto-close、protected receive auto-close、lifecycle-routed protected auto-close、protected long/0-RTT close-state discard、draining 行为和关闭触发校验。
   运行：`zig build run-graceful-close`。
@@ -236,7 +253,8 @@ pub fn main() !void {
 - TLS 状态：已有 mock `CryptoBackend` handoff 和很小的 C-ABI `TlsBackend` adapter；
   `run-tls-openssl-probe` 已链接 OpenSSL 并验证 QUIC TLS callback API，
   `run-tls-openssl-backend-adapter` 已把 OpenSSL object 接入 adapter 路径并产出第一段
-  TLS CRYPTO flight；完整对端 transcript 和 traffic-secret yield 仍待实现。
+  TLS CRYPTO flight，也能把入站 CRYPTO 投递到 callback 边界；完整对端 transcript 和
+  traffic-secret yield 仍待实现。
 
 ## 许可证
 

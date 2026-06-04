@@ -34,9 +34,14 @@ extern fn quicz_openssl_tls_backend_local_transport_parameters_set(context: *any
 extern fn quicz_openssl_tls_backend_ssl_is_quic_after_callbacks(context: *anyopaque) c_int;
 extern fn quicz_openssl_tls_backend_local_transport_parameters_len(context: *anyopaque) usize;
 extern fn quicz_openssl_tls_backend_received_crypto_len(context: *anyopaque) usize;
+extern fn quicz_openssl_tls_backend_pending_inbound_crypto_len(context: *anyopaque) usize;
+extern fn quicz_openssl_tls_backend_released_inbound_crypto_len(context: *anyopaque) usize;
+extern fn quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(context: *anyopaque) c_int;
+extern fn quicz_openssl_tls_backend_inbound_crypto_release_callbacks(context: *anyopaque) c_int;
 extern fn quicz_openssl_tls_backend_generated_crypto_len(context: *anyopaque) usize;
 extern fn quicz_openssl_tls_backend_handshake_drive_calls(context: *anyopaque) c_int;
 extern fn quicz_openssl_tls_backend_last_ssl_error(context: *anyopaque) c_int;
+extern fn quicz_openssl_tls_backend_debug_consume_inbound_once(context: *anyopaque) quicz.TlsBackendStatus;
 
 const FixedWriter = struct {
     buffer: []u8,
@@ -110,6 +115,8 @@ pub fn main() !void {
     try require(!initial_progress.peer_transport_parameters_applied);
     try require(!initial_progress.handshake_keys_installed);
     try require(!initial_progress.handshake_confirmed);
+    const initial_recv_callbacks = quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context);
+    const initial_release_callbacks = quicz_openssl_tls_backend_inbound_crypto_release_callbacks(openssl_context);
 
     const inbound_crypto = "openssl wrapper receives crypto";
     var inbound_payload_buf: [96]u8 = undefined;
@@ -127,14 +134,21 @@ pub fn main() !void {
     );
 
     try require(quicz_openssl_tls_backend_received_crypto_len(openssl_context) == inbound_crypto.len);
+    try require(quicz_openssl_tls_backend_pending_inbound_crypto_len(openssl_context) == inbound_crypto.len);
     try require(handshake_progress.inbound_bytes == inbound_crypto.len);
     try require(handshake_progress.outbound_chunks == 0);
     try require(!handshake_progress.peer_transport_parameters_applied);
     try require(!handshake_progress.handshake_keys_installed);
     try require(!handshake_progress.handshake_confirmed);
 
+    try require(quicz_openssl_tls_backend_debug_consume_inbound_once(openssl_context) == .ok);
+    try require(quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context) == initial_recv_callbacks + 1);
+    try require(quicz_openssl_tls_backend_inbound_crypto_release_callbacks(openssl_context) == initial_release_callbacks + 1);
+    try require(quicz_openssl_tls_backend_pending_inbound_crypto_len(openssl_context) == 0);
+    try require(quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_context) == inbound_crypto.len);
+
     std.debug.print(
-        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} handshake_drive_calls={} last_ssl_error={} handshake_inbound_bytes={} handshake_outbound_chunks={} handshake_keys={} confirmed={}\n",
+        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} handshake_drive_calls={} last_ssl_error={} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} confirmed={}\n",
         .{
             quicz_openssl_tls_backend_callbacks_set(openssl_context),
             quicz_openssl_tls_backend_ssl_is_quic_after_callbacks(openssl_context),
@@ -144,6 +158,9 @@ pub fn main() !void {
             quicz_openssl_tls_backend_handshake_drive_calls(openssl_context),
             quicz_openssl_tls_backend_last_ssl_error(openssl_context),
             handshake_progress.inbound_bytes,
+            quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context),
+            quicz_openssl_tls_backend_inbound_crypto_release_callbacks(openssl_context),
+            quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_context),
             handshake_progress.outbound_chunks,
             handshake_progress.handshake_keys_installed,
             handshake_progress.handshake_confirmed,

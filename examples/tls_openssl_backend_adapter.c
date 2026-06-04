@@ -28,6 +28,12 @@ struct quicz_openssl_tls_backend {
     int ssl_is_quic_after_callbacks;
     size_t local_transport_parameters_len;
     size_t received_crypto_len;
+    uint8_t inbound_crypto[8192];
+    size_t inbound_crypto_len;
+    size_t inbound_crypto_read_len;
+    size_t inbound_crypto_released_len;
+    int inbound_crypto_recv_callbacks;
+    int inbound_crypto_release_callbacks;
     uint8_t outbound_crypto[8192];
     size_t outbound_crypto_len;
     size_t total_outbound_crypto_len;
@@ -55,7 +61,19 @@ static int crypto_send_cb(SSL *ssl, const unsigned char *buf, size_t buf_len, si
 
 static int crypto_recv_rcd_cb(SSL *ssl, const unsigned char **buf, size_t *bytes_read, void *arg) {
     (void)ssl;
-    (void)arg;
+    struct quicz_openssl_tls_backend *backend = arg;
+    if (backend == NULL || backend->inbound_crypto_read_len != 0) {
+        *buf = NULL;
+        *bytes_read = 0;
+        return 1;
+    }
+    backend->inbound_crypto_recv_callbacks += 1;
+    if (backend->inbound_crypto_len != 0) {
+        *buf = backend->inbound_crypto;
+        *bytes_read = backend->inbound_crypto_len;
+        backend->inbound_crypto_read_len = backend->inbound_crypto_len;
+        return 1;
+    }
     *buf = NULL;
     *bytes_read = 0;
     return 1;
@@ -63,8 +81,20 @@ static int crypto_recv_rcd_cb(SSL *ssl, const unsigned char **buf, size_t *bytes
 
 static int crypto_release_rcd_cb(SSL *ssl, size_t bytes_read, void *arg) {
     (void)ssl;
-    (void)bytes_read;
-    (void)arg;
+    struct quicz_openssl_tls_backend *backend = arg;
+    if (backend == NULL || bytes_read > backend->inbound_crypto_read_len) {
+        return 0;
+    }
+    backend->inbound_crypto_release_callbacks += 1;
+    backend->inbound_crypto_released_len += bytes_read;
+    if (bytes_read < backend->inbound_crypto_read_len) {
+        const size_t remaining = backend->inbound_crypto_read_len - bytes_read;
+        memmove(backend->inbound_crypto, backend->inbound_crypto + bytes_read, remaining);
+        backend->inbound_crypto_len = remaining;
+    } else {
+        backend->inbound_crypto_len = 0;
+    }
+    backend->inbound_crypto_read_len = 0;
     return 1;
 }
 
@@ -155,10 +185,13 @@ enum quicz_tls_backend_status quicz_openssl_tls_backend_receive(
     if (backend == NULL || backend->ssl == NULL) {
         return QUICZ_TLS_BACKEND_INTERNAL;
     }
-    if (space != QUICZ_TLS_BACKEND_HANDSHAKE) {
-        return QUICZ_TLS_BACKEND_CRYPTO_ERROR;
-    }
     (void)data;
+    (void)space;
+    if (data_len > sizeof(backend->inbound_crypto) - backend->inbound_crypto_len) {
+        return QUICZ_TLS_BACKEND_BUFFER_TOO_SMALL;
+    }
+    memcpy(backend->inbound_crypto + backend->inbound_crypto_len, data, data_len);
+    backend->inbound_crypto_len += data_len;
     backend->received_crypto_len += data_len;
     return QUICZ_TLS_BACKEND_OK;
 }
@@ -281,6 +314,26 @@ size_t quicz_openssl_tls_backend_received_crypto_len(void *context) {
     return backend != NULL ? backend->received_crypto_len : 0;
 }
 
+size_t quicz_openssl_tls_backend_pending_inbound_crypto_len(void *context) {
+    const struct quicz_openssl_tls_backend *backend = context;
+    return backend != NULL ? backend->inbound_crypto_len : 0;
+}
+
+size_t quicz_openssl_tls_backend_released_inbound_crypto_len(void *context) {
+    const struct quicz_openssl_tls_backend *backend = context;
+    return backend != NULL ? backend->inbound_crypto_released_len : 0;
+}
+
+int quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(void *context) {
+    const struct quicz_openssl_tls_backend *backend = context;
+    return backend != NULL ? backend->inbound_crypto_recv_callbacks : 0;
+}
+
+int quicz_openssl_tls_backend_inbound_crypto_release_callbacks(void *context) {
+    const struct quicz_openssl_tls_backend *backend = context;
+    return backend != NULL ? backend->inbound_crypto_release_callbacks : 0;
+}
+
 size_t quicz_openssl_tls_backend_generated_crypto_len(void *context) {
     const struct quicz_openssl_tls_backend *backend = context;
     return backend != NULL ? backend->total_outbound_crypto_len : 0;
@@ -294,4 +347,26 @@ int quicz_openssl_tls_backend_handshake_drive_calls(void *context) {
 int quicz_openssl_tls_backend_last_ssl_error(void *context) {
     const struct quicz_openssl_tls_backend *backend = context;
     return backend != NULL ? backend->last_ssl_error : 0;
+}
+
+enum quicz_tls_backend_status quicz_openssl_tls_backend_debug_consume_inbound_once(void *context) {
+    struct quicz_openssl_tls_backend *backend = context;
+    if (backend == NULL) {
+        return QUICZ_TLS_BACKEND_INTERNAL;
+    }
+    const unsigned char *buf = NULL;
+    size_t bytes_read = 0;
+    if (!crypto_recv_rcd_cb(backend->ssl, &buf, &bytes_read, backend)) {
+        return QUICZ_TLS_BACKEND_CRYPTO_ERROR;
+    }
+    if (bytes_read == 0) {
+        return QUICZ_TLS_BACKEND_PENDING;
+    }
+    if (buf == NULL) {
+        return QUICZ_TLS_BACKEND_INTERNAL;
+    }
+    if (!crypto_release_rcd_cb(backend->ssl, bytes_read, backend)) {
+        return QUICZ_TLS_BACKEND_CRYPTO_ERROR;
+    }
+    return QUICZ_TLS_BACKEND_OK;
 }

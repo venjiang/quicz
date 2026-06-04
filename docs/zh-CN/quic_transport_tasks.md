@@ -5,18 +5,13 @@
 
 ## 范围
 
-`quicz` 会追踪 IETF QUIC 标准，但实际实现目标不是覆盖所有可选协议特性。
-第一轮可用目标是截至 2026-06-04 在
-[quic-go](https://github.com/quic-go/quic-go)、
-[Quinn](https://github.com/quinn-rs/quinn)、
-[s2n-quic](https://github.com/aws/s2n-quic) 和
-[quiche](https://github.com/cloudflare/quiche) 等主流库中共同暴露的 transport
-子集。
+`quicz` 会追踪 IETF QUIC 标准，但实际实现目标不是覆盖所有可选协议特性。对成熟
+QUIC 协议栈的内部对照只用于提炼共同 transport 能力基线。第一轮可用目标是 QUIC v1
+transport、TLS 集成、client/server endpoint、stream I/O、transport-parameter 配置、
+packet/timer 驱动、loss recovery、congestion 行为和互通。
 
-这些参考实现都强调 QUIC v1 transport、TLS 集成、client/server endpoint、stream
-I/O、transport-parameter 配置、packet/timer 驱动、loss recovery、congestion 行为和
-互通。有些还暴露 HTTP/3、DATAGRAM、qlog、PMTU/GSO、QUIC v2 或其他扩展；这些扩展
-值得追踪，但不是 `quicz` 第一轮可互通 transport 里程碑的前置条件。
+HTTP/3、DATAGRAM、qlog、PMTU/GSO、QUIC v2 或其他扩展值得追踪，但不是 `quicz`
+第一轮可互通 transport 里程碑的前置条件。
 
 实现策略：成熟库已有的非核心能力不自研，只要能用窄 adapter 干净接入，就优先接入
 维护良好的库。`quicz` 自己负责 QUIC transport state、packet processing、recovery、
@@ -40,12 +35,12 @@ version-information 原语）：
 - HTTP/3 和 QPACK
 - Multipath 以及其他 QUIC WG 进行中的草案
 
-## 主流基线目标
+## 实用 Transport 基线
 
 | 功能 | 实用目标 | quicz 状态 |
 | --- | --- | --- |
 | UDP client/server endpoint | 第一轮可用里程碑必须具备。由同一个 endpoint owner 驱动 accept/connect、packet receive/send、timer、route cleanup 和 close。 | 部分完成：已有 socket-backed loopback 示例和 endpoint lifecycle helper；缺少生产级 client/server event loop。 |
-| TLS 1.3 集成 | 必须具备。使用支持 QUIC transport-parameter 和 traffic-secret hook 的 C TLS 库，通过很小的 Zig `TlsBackend` adapter 接入；不在仓库内自研 TLS。 | 部分完成：已有 mock `CryptoBackend`、installed-key handoff、带测试的 C-ABI `TlsBackend` adapter、C-object adapter probe、OpenSSL QUIC TLS API/link probe 和可产出第一段 TLS CRYPTO flight 的 OpenSSL-backed adapter wrapper；缺少完整对端 transcript 和 traffic-secret yield。 |
+| TLS 1.3 集成 | 必须具备。使用支持 QUIC transport-parameter 和 traffic-secret hook 的 C TLS 库，通过很小的 Zig `TlsBackend` adapter 接入；不在仓库内自研 TLS。 | 部分完成：已有 mock `CryptoBackend`、installed-key handoff、带测试的 C-ABI `TlsBackend` adapter、C-object adapter probe、OpenSSL QUIC TLS API/link probe，以及可产出第一段 TLS CRYPTO flight 并把入站 CRYPTO 投递到 OpenSSL receive/release callback 边界的 OpenSSL-backed adapter wrapper；缺少完整对端 transcript 和 traffic-secret yield。 |
 | QUIC v1 packet protection | 必须具备。Initial、Handshake、启用时的 0-RTT 和 1-RTT packet 必须由 TLS-owned 路径生成和消费。 | 部分完成：已有 v1/v2 Initial、Retry integrity、protected long/short helper 和 mock installed-key 路径。 |
 | Stream | 必须具备。Bidirectional/unidirectional stream 的 open、read、write、FIN、reset、STOP_SENDING 和 stream limit 必须能跑在 protected UDP 上。 | 部分完成：已有内存态 stream state 和 protected loopback 练习；缺少 TLS-owned UDP stream API。 |
 | Flow control | 必须具备。Connection、stream 和 stream-count flow control 必须能跑在 protected UDP 上。 | 部分完成：已有 frame-payload 和 protected loopback 覆盖；缺少完整 socket-owned 路径。 |
@@ -163,8 +158,9 @@ installation、packet number space、ACK/loss/PTO、key discard、close 和 rout
   OpenSSL-backed `TlsBackend` wrapper 调用 `SSL_do_handshake()`，并在把 quicz 本端
   transport parameters 传入 `SSL_set_quic_tls_transport_params()` 后，通过现有 quicz
   CRYPTO output 路径产出第一段 TLS CRYPTO flight。该示例仍记录 OpenSSL callback mode
-  与 OpenSSL full QUIC mode 不同，也能把 Handshake CRYPTO bytes 投递给 wrapper；peer
-  transport parameters、traffic-secret yield 和完整对端 transcript 驱动仍待实现。
+  与 OpenSSL full QUIC mode 不同，也能把 Handshake CRYPTO bytes 投递给 wrapper，并
+  经 OpenSSL receive/release callback 边界消费；peer transport parameters、
+  traffic-secret yield 和完整对端 transcript 驱动仍待实现。
 - 2026-06-04：新增 `examples/tls_openssl_probe.zig` 和通过 `pkg-config` 链接
   OpenSSL 的小 C probe。该 probe 验证 OpenSSL 暴露可用 QUIC method，且普通 TLS
   object 可以设置 QUIC TLS callbacks 和本端 transport-parameter bytes；同时记录
@@ -186,9 +182,9 @@ installation、packet number space、ACK/loss/PTO、key discard、close 和 rout
 - 2026-06-04：记录实现策略：成熟非核心能力优先适配，不在仓库内重复自研。`quicz`
   自己负责 QUIC transport state、packet processing、recovery、endpoint lifecycle 和
   Zig API；TLS 等配套能力应放在窄 adapter 后面接入维护良好的库。
-- 2026-06-04：把实用目标重新收敛为主流 QUIC 库的共同功能基线，不再把所有 QUIC
-  可选扩展都当作第一轮里程碑内容。新增基线表逐项记录第一轮必需功能、延后扩展和
-  `quicz` 当前状态。
+- 2026-06-04：把实用目标重新收敛为成熟 QUIC transport 的共同能力基线，不再把所有
+  QUIC 可选扩展都当作第一轮里程碑内容。新增基线表逐项记录第一轮必需功能、延后扩展
+  和 `quicz` 当前状态。
 - 2026-06-04：新增当前 mock/installed-key 加 endpoint lifecycle 可验证覆盖阶段的
   明确边界。任务计划现在说明，现有 socket-backed loopback 能证明实验性骨架的
   protected routing、recovery-timer service 和 endpoint lifecycle 行为，但不能证明完整

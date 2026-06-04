@@ -6,9 +6,9 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 
 > Status: **experimental / WIP**.  
 > Goal: implement a practical QUIC transport subset aligned with the common
-> capabilities of mainstream libraries such as quic-go, Quinn, s2n-quic, and
-> quiche. Optional extensions are tracked explicitly instead of being treated
-> as required for the first usable transport.
+> capabilities expected from mature QUIC stacks. Optional extensions are
+> tracked explicitly instead of being treated as required for the first usable
+> transport.
 
 ## Features and Roadmap
 
@@ -21,6 +21,9 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] Simplified RFC 9002-style ACK, loss, PTO, NewReno congestion, ECN, retransmission, and endpoint recovery-timer models with socket-backed UDP loopback coverage.
 - [x] In-memory endpoint routing/lifecycle helpers for DCID and IPv4 UDP tuple routing, Version Negotiation, zero-length CID routing, preferred/replacement CID routing, route retirement, stateless reset emission, and protected UDP loopbacks.
 - [ ] Complete connection state machine and TLS-owned protected-packet packet number space routing.
+- [ ] TLS-owned socket-backed client/server echo with real CRYPTO transcript, traffic-secret installation, and 1-RTT STREAM delivery.
+- [ ] Embeddable socket API where callers own UDP sockets, connection maps, timers, and datagram output queues.
+- [ ] Minimal external interop entry for `handshake` and `transfer`.
 - [ ] Full RFC 9002 loss detection and congestion control with socket-owned protected-packet loss/PTO lifecycle integration and remaining NewReno edge cases.
 - [ ] TLS 1.3 integration for QUIC (RFC 9001)
 - [ ] QUIC v2 (RFC 9369) version support
@@ -77,6 +80,19 @@ zig build run-initial-keys
 `zig build` builds the static library at `zig-out/lib/libquicz.a` and all
 example binaries under `zig-out/bin/`. The examples are deterministic protocol
 exercises, not interoperable QUIC-over-UDP programs yet.
+
+The most useful examples today are grouped by what they prove:
+
+- `run-tls-openssl-backend-adapter`: current real C TLS adapter boundary,
+  including local transport parameters, first outbound TLS CRYPTO flight, and
+  inbound CRYPTO delivery to the OpenSSL callback boundary.
+- `run-udp-echo-loopback`: socket-backed installed-key STREAM echo evidence,
+  including payload equality, ACK cleanup, and recovery timer cleanup.
+- `run-udp-pto-recovery-loopback`, `run-udp-loss-recovery-loopback`, and
+  `run-udp-congestion-recovery-loopback`: lifecycle-routed recovery and
+  congestion behavior over loopback UDP.
+- `run-udp-close-lifecycle-loopback` and `run-udp-stateless-reset-loopback`:
+  route cleanup and reset behavior through the endpoint lifecycle owner.
 
 ### Use as a library
 
@@ -169,8 +185,8 @@ experimental.
   OpenSSL-backed `TlsBackend` wrapper that accepts quicz local transport
   parameters through `SSL_set_quic_tls_transport_params()`, drives
   `SSL_do_handshake()` to emit the first TLS CRYPTO flight, and receives
-  Handshake CRYPTO bytes from the existing drive path. Run with
-  `zig build run-tls-openssl-backend-adapter`.
+  Handshake CRYPTO bytes from the existing drive path through the OpenSSL
+  receive/release callback boundary. Run with `zig build run-tls-openssl-backend-adapter`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
   long/short close, invalid ACK/ACK_ECN-range auto-close, semantic frame-error
   auto-close including invalid ACK/ACK_ECN, 0-RTT ACK/ACK_ECN packet-type
@@ -348,8 +364,8 @@ experimental.
   adapter are present; `run-tls-openssl-probe` links OpenSSL and verifies its
   QUIC TLS callback APIs, and `run-tls-openssl-backend-adapter` wires an
   OpenSSL object into the adapter path far enough to emit the first TLS CRYPTO
-  flight. Completing the peer transcript and traffic-secret yield is still
-  pending.
+  flight and deliver inbound CRYPTO to the callback boundary. Completing the
+  peer transcript and traffic-secret yield is still pending.
 
 ## License
 
