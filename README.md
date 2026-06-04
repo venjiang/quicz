@@ -157,6 +157,10 @@ experimental.
   local/peer transport-parameter handoff, CRYPTO bytes, Handshake traffic
   secrets, and confirmation evidence. Run with
   `zig build run-tls-backend-adapter`.
+- [TLS C ABI adapter](examples/tls_c_abi_adapter.zig): C-compiled callback
+  object wired through `TlsBackend`, proving the adapter can be driven from a C
+  boundary before binding a concrete TLS library. Run with
+  `zig build run-tls-c-abi-adapter`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
   long/short close, invalid ACK/ACK_ECN-range auto-close, semantic frame-error
   auto-close including invalid ACK/ACK_ECN, 0-RTT ACK/ACK_ECN packet-type

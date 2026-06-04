@@ -170,6 +170,25 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_tls_backend_adapter);
 
+    // TLS C ABI adapter executable
+    const exe_tls_c_abi_adapter = b.addExecutable(.{
+        .name = "quicz-tls-c-abi-adapter",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tls_c_abi_adapter.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    exe_tls_c_abi_adapter.root_module.addCSourceFile(.{
+        .file = b.path("examples/tls_c_abi_demo_backend.c"),
+        .flags = &.{},
+    });
+    exe_tls_c_abi_adapter.root_module.link_libc = true;
+    b.installArtifact(exe_tls_c_abi_adapter);
+
     // Graceful close executable
     const exe_graceful_close = b.addExecutable(.{
         .name = "quicz-graceful-close",
@@ -818,6 +837,15 @@ pub fn build(b: *std.Build) void {
     run_tls_backend_adapter_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_tls_backend_adapter_cmd.addArgs(args);
+    }
+
+    // zig build run-tls-c-abi-adapter
+    const run_tls_c_abi_adapter = b.step("run-tls-c-abi-adapter", "Run quicz TLS C ABI adapter example");
+    const run_tls_c_abi_adapter_cmd = b.addRunArtifact(exe_tls_c_abi_adapter);
+    run_tls_c_abi_adapter.dependOn(&run_tls_c_abi_adapter_cmd.step);
+    run_tls_c_abi_adapter_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_tls_c_abi_adapter_cmd.addArgs(args);
     }
 
     // zig build run-graceful-close

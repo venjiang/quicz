@@ -133,6 +133,9 @@ pub fn main() !void {
   callback 适配到现有 `CryptoBackend` drive 路径，并输出本端/对端
   transport-parameter handoff、CRYPTO bytes、Handshake traffic secret 和
   confirmation 证据。运行：`zig build run-tls-backend-adapter`。
+- [TLS C ABI adapter](examples/tls_c_abi_adapter.zig)：把 C 编译单元里的 callback
+  object 接到 `TlsBackend`，证明绑定具体 TLS 库之前，adapter 能从 C 边界驱动。
+  运行：`zig build run-tls-c-abi-adapter`。
 - [Graceful close](examples/graceful_close.zig)：本端/对端关闭、protected long/short close、非法 ACK/ACK_ECN range auto-close、包含非法 ACK/ACK_ECN、0-RTT ACK/ACK_ECN packet-type 违规、非法 STREAMS_BLOCKED limit、冲突 STREAM data 和非法 stream control frame 的语义 frame 错误 auto-close、protected receive auto-close、lifecycle-routed protected auto-close、protected long/0-RTT close-state discard、draining 行为和关闭触发校验。
   运行：`zig build run-graceful-close`。
 - [Idle timeout](examples/idle_timeout.zig)：建模 idle timeout 导出、刷新、关闭行为和 endpoint route/timer 清理。
