@@ -123,6 +123,11 @@ pub fn main() !void {
     )) orelse return error.UnexpectedState;
     defer allocator.free(stream_datagram);
     try require(client.sentPacketCount(.application) == 1);
+    try require(client_lifecycle.recoveryTimerCount() == 1);
+    const client_stream_timer = client_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
+    try require(client_stream_timer.connection_id == client_handle);
+    try require(client_stream_timer.timer.space == .application);
+    try require(client_stream_timer.timer.kind == .pto);
     try client_socket.send(io, &server_socket.address, stream_datagram);
 
     var server_receive_buf: [1500]u8 = undefined;
@@ -144,6 +149,37 @@ pub fn main() !void {
     const stream_len = (try server.recvOnStream(stream_id, &stream_buf)) orelse return error.UnexpectedState;
     const stream_payload = stream_buf[0..stream_len];
     try require(std.mem.eql(u8, stream_payload, "udp one rtt stream"));
+
+    const client_pto_result = try client_lifecycle.serviceRecoveryTimerAndPollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        client_stream_timer.timer.deadline_millis,
+        &server_dcid,
+    );
+    const client_pto_serviced = client_pto_result.serviced orelse return error.UnexpectedState;
+    try require(client_pto_serviced.connection_id == client_handle);
+    try require(client_pto_serviced.timer.space == .application);
+    try require(client_pto_serviced.timer.kind == .pto);
+    const client_pto_probe = client_pto_result.datagram orelse return error.UnexpectedState;
+    defer allocator.free(client_pto_probe);
+    try require(client.sentPacketCount(.application) == 2);
+    try require(client_lifecycle.recoveryTimerCount() == 1);
+    try client_socket.send(io, &server_socket.address, client_pto_probe);
+
+    const pto_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const pto_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        pto_received.path,
+        client_stream_timer.timer.deadline_millis + 1,
+        pto_received.data,
+    );
+    try require(pto_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, pto_route.destination_connection_id.asSlice(), &server_dcid));
+    try require(server.pendingAckLargest(.application) == 1);
+    try require(server.nextPeerPacketNumber(.application) == 2);
+    try require((try server.recvOnStream(stream_id, &stream_buf)) == null);
+    const server_pto_ack_largest = server.pendingAckLargest(.application).?;
 
     const ack_datagram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
@@ -168,10 +204,14 @@ pub fn main() !void {
     try require(client.bytesInFlight(.application) == 0);
     try require(client_lifecycle.recoveryTimerCount() == 0);
 
-    std.debug.print("[udp-one-rtt] client_port={} server_port={} stream_bytes={} ack_bytes={} stream_id={} received=\"{s}\" client_key_phase={} server_peer_phase={} client_inflight={} server_ack_pending={} server_timers={}\n", .{
+    std.debug.print("[udp-one-rtt] client_port={} server_port={} stream_bytes={} pto_deadline={} pto_bytes={} pto_route={} server_pto_ack_largest={} ack_bytes={} stream_id={} received=\"{s}\" client_key_phase={} server_peer_phase={} client_inflight={} server_ack_pending={} server_timers={}\n", .{
         client_local.port,
         server_local.port,
         stream_datagram.len,
+        client_stream_timer.timer.deadline_millis,
+        client_pto_probe.len,
+        pto_route.connection_id,
+        server_pto_ack_largest,
         ack_datagram.len,
         stream_id,
         stream_payload,

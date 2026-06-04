@@ -231,8 +231,9 @@ experimental.
   discard evidence. Run with
   `zig build run-udp-zero-rtt-loopback`.
 - [UDP 1-RTT loopback](examples/udp_one_rtt_loopback.zig):
-  Socket-backed lifecycle-routed installed-key 1-RTT STREAM delivery and ACK
-  cleanup. Run with `zig build run-udp-one-rtt-loopback`.
+  Socket-backed lifecycle-routed installed-key 1-RTT STREAM delivery, serviced
+  installed-key 1-RTT PTO probe routing with duplicate STREAM discard evidence,
+  and ACK cleanup. Run with `zig build run-udp-one-rtt-loopback`.
 - [UDP echo loopback](examples/udp_echo_loopback.zig):
   Socket-backed lifecycle-routed installed-key 1-RTT STREAM echo, request/echo
   payload equality, final ACK cleanup, and client/server bytes-in-flight/timer-state
