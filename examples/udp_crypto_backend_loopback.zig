@@ -242,9 +242,10 @@ pub fn main() !void {
     try require(final_ack_route.connection_id == server_handle);
     try require(std.mem.eql(u8, final_ack_route.destination_connection_id.asSlice(), &server_dcid));
     try require(server.bytesInFlight(.application) == 0);
+    try require(client_lifecycle.recoveryTimerCount() == 1);
     try require(server_lifecycle.recoveryTimerCount() == 0);
 
-    std.debug.print("[udp-crypto-backend] client_port={} server_port={} stream_bytes={} echo_packets={} echo_bytes={} echo_ack_largest={} final_ack_bytes={} received=\"{s}\" echo=\"{s}\" client_backend_keys={} server_backend_keys={} confirmed={} client_inflight_after_echo={} server_inflight={} server_timers={}\n", .{
+    std.debug.print("[udp-crypto-backend] client_port={} server_port={} stream_bytes={} echo_packets={} echo_bytes={} echo_ack_largest={} final_ack_bytes={} received=\"{s}\" echo=\"{s}\" client_backend_keys={} server_backend_keys={} confirmed={} client_inflight_after_echo={} server_inflight={} client_timers={} server_timers={}\n", .{
         client_local.port,
         server_local.port,
         stream_datagram.len,
@@ -259,6 +260,7 @@ pub fn main() !void {
         client.handshakeConfirmed() and server.handshakeConfirmed(),
         client_inflight_after_echo,
         server.bytesInFlight(.application),
+        client_lifecycle.recoveryTimerCount(),
         server_lifecycle.recoveryTimerCount(),
     });
 }
