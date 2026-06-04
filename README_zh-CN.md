@@ -140,6 +140,10 @@ pub fn main() !void {
   OpenSSL，验证 OpenSSL QUIC method 与 QUIC TLS callback/transport-parameter
   API，并记录 callback mode 不等于 OpenSSL 完整 QUIC connection mode。
   运行：`zig build run-tls-openssl-probe`。
+- [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig)：把
+  OpenSSL-backed `TlsBackend` wrapper 接到现有 drive 路径，通过
+  `SSL_set_quic_tls_transport_params()` 接收 quicz 本端 transport parameters，并接收入站
+  Handshake CRYPTO bytes。运行：`zig build run-tls-openssl-backend-adapter`。
 - [Graceful close](examples/graceful_close.zig)：本端/对端关闭、protected long/short close、非法 ACK/ACK_ECN range auto-close、包含非法 ACK/ACK_ECN、0-RTT ACK/ACK_ECN packet-type 违规、非法 STREAMS_BLOCKED limit、冲突 STREAM data 和非法 stream control frame 的语义 frame 错误 auto-close、protected receive auto-close、lifecycle-routed protected auto-close、protected long/0-RTT close-state discard、draining 行为和关闭触发校验。
   运行：`zig build run-graceful-close`。
 - [Idle timeout](examples/idle_timeout.zig)：建模 idle timeout 导出、刷新、关闭行为和 endpoint route/timer 清理。
@@ -229,7 +233,8 @@ pub fn main() !void {
 - 端点生命周期：DCID routing、route retirement、stateless reset lookup/emission 和 endpoint recovery timer。
 - 恢复与拥塞：简化 RFC 9002 ACK/loss/PTO/NewReno/ECN 模型，并有确定性测试覆盖。
 - TLS 状态：已有 mock `CryptoBackend` handoff 和很小的 C-ABI `TlsBackend` adapter；
-  `run-tls-openssl-probe` 已链接 OpenSSL 并验证 QUIC TLS callback API，但真实 TLS
+  `run-tls-openssl-probe` 已链接 OpenSSL 并验证 QUIC TLS callback API，
+  `run-tls-openssl-backend-adapter` 已把 OpenSSL object 接入 adapter 路径；真实 TLS
   1.3 transcript 驱动仍待实现。
 
 ## 许可证

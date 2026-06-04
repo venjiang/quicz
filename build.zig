@@ -207,6 +207,27 @@ pub fn build(b: *std.Build) void {
     exe_tls_openssl_probe.root_module.linkSystemLibrary("crypto", .{});
     b.installArtifact(exe_tls_openssl_probe);
 
+    // OpenSSL-backed TLS backend adapter executable
+    const exe_tls_openssl_backend_adapter = b.addExecutable(.{
+        .name = "quicz-tls-openssl-backend-adapter",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tls_openssl_backend_adapter.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    exe_tls_openssl_backend_adapter.root_module.addCSourceFile(.{
+        .file = b.path("examples/tls_openssl_backend_adapter.c"),
+        .flags = &.{},
+    });
+    exe_tls_openssl_backend_adapter.root_module.link_libc = true;
+    exe_tls_openssl_backend_adapter.root_module.linkSystemLibrary("ssl", .{});
+    exe_tls_openssl_backend_adapter.root_module.linkSystemLibrary("crypto", .{});
+    b.installArtifact(exe_tls_openssl_backend_adapter);
+
     // Graceful close executable
     const exe_graceful_close = b.addExecutable(.{
         .name = "quicz-graceful-close",
@@ -873,6 +894,15 @@ pub fn build(b: *std.Build) void {
     run_tls_openssl_probe_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_tls_openssl_probe_cmd.addArgs(args);
+    }
+
+    // zig build run-tls-openssl-backend-adapter
+    const run_tls_openssl_backend_adapter = b.step("run-tls-openssl-backend-adapter", "Run quicz OpenSSL-backed TLS backend adapter example");
+    const run_tls_openssl_backend_adapter_cmd = b.addRunArtifact(exe_tls_openssl_backend_adapter);
+    run_tls_openssl_backend_adapter.dependOn(&run_tls_openssl_backend_adapter_cmd.step);
+    run_tls_openssl_backend_adapter_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_tls_openssl_backend_adapter_cmd.addArgs(args);
     }
 
     // zig build run-graceful-close

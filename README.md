@@ -165,6 +165,11 @@ experimental.
   `pkg-config`, verifies the OpenSSL QUIC method and QUIC TLS callback/
   transport-parameter APIs, and records that callback mode is distinct from
   OpenSSL's full QUIC connection mode. Run with `zig build run-tls-openssl-probe`.
+- [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig):
+  OpenSSL-backed `TlsBackend` wrapper that accepts quicz local transport
+  parameters through `SSL_set_quic_tls_transport_params()` and receives
+  Handshake CRYPTO bytes from the existing drive path. Run with
+  `zig build run-tls-openssl-backend-adapter`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
   long/short close, invalid ACK/ACK_ECN-range auto-close, semantic frame-error
   auto-close including invalid ACK/ACK_ECN, 0-RTT ACK/ACK_ECN packet-type
@@ -340,8 +345,9 @@ experimental.
 - Recovery and congestion: simplified RFC 9002 ACK/loss/PTO/NewReno/ECN model with deterministic tests.
 - TLS status: mock `CryptoBackend` handoff and a narrow C-ABI `TlsBackend`
   adapter are present; `run-tls-openssl-probe` links OpenSSL and verifies its
-  QUIC TLS callback APIs, but driving a real TLS 1.3 transcript is still
-  pending.
+  QUIC TLS callback APIs, and `run-tls-openssl-backend-adapter` wires an
+  OpenSSL object into the adapter path. Driving a real TLS 1.3 transcript is
+  still pending.
 
 ## License
 

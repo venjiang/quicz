@@ -50,7 +50,7 @@ packet/key/token and RFC 9368 version-information primitives:
 | Feature | Practical target | quicz status |
 | --- | --- | --- |
 | UDP client/server endpoint | Required for first usable milestone. One endpoint owner must drive accept/connect, packet receive/send, timers, route cleanup, and close. | Partial: socket-backed loopback examples and endpoint lifecycle helpers exist; production client/server event loop is missing. |
-| TLS 1.3 integration | Required. Use a C TLS library with QUIC transport-parameter and traffic-secret hooks through a narrow Zig `TlsBackend` adapter. Do not implement TLS in-tree. | Partial: mock `CryptoBackend`, installed-key handoff, a tested C-ABI `TlsBackend` adapter, a C-object adapter probe, and an OpenSSL QUIC TLS API/link probe exist; driving a real TLS transcript is missing. |
+| TLS 1.3 integration | Required. Use a C TLS library with QUIC transport-parameter and traffic-secret hooks through a narrow Zig `TlsBackend` adapter. Do not implement TLS in-tree. | Partial: mock `CryptoBackend`, installed-key handoff, a tested C-ABI `TlsBackend` adapter, a C-object adapter probe, an OpenSSL QUIC TLS API/link probe, and an OpenSSL-backed adapter wrapper exist; driving a real TLS transcript is missing. |
 | QUIC v1 packet protection | Required. Initial, Handshake, 0-RTT when enabled, and 1-RTT packets must be produced and consumed by the TLS-owned path. | Partial: v1/v2 Initial, Retry integrity, protected long/short helpers, and mock installed-key paths exist. |
 | Streams | Required. Bidirectional and unidirectional stream open, read, write, FIN, reset, STOP_SENDING, and stream limits must work over protected UDP. | Partial: in-memory stream state and protected loopback exercises exist; TLS-owned UDP stream API is missing. |
 | Flow control | Required. Connection, stream, and stream-count flow control must work over protected UDP. | Partial: frame-payload and protected loopback coverage exists; full socket-owned path is missing. |
@@ -157,6 +157,12 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-04: Added `examples/tls_openssl_backend_adapter.zig` with an
+  OpenSSL-backed C wrapper for `TlsBackend`. The example proves the existing
+  crypto drive path can pass quicz local transport parameters into
+  `SSL_set_quic_tls_transport_params()` and deliver Handshake CRYPTO bytes to
+  the OpenSSL wrapper. It intentionally leaves peer transport parameters,
+  traffic-secret yield, and full TLS transcript driving pending.
 - 2026-06-04: Added `examples/tls_openssl_probe.zig` plus a small C probe
   linked through `pkg-config` OpenSSL. The probe verifies OpenSSL exposes a
   usable QUIC method and that a normal TLS object accepts QUIC TLS callbacks
@@ -2781,6 +2787,7 @@ run from `build.zig`.
 | `tls_backend_adapter` | Runnable C-ABI `TlsBackend` adapter contract check: local/peer transport-parameter byte handoff, inbound/outbound CRYPTO byte delivery, Handshake traffic-secret installation, and handshake confirmation through the existing `CryptoBackend` drive path before binding a concrete C TLS library. | Present |
 | `tls_c_abi_adapter` | Runnable C-object-backed `TlsBackend` check: a C-compiled callback object drives the same transport-parameter, CRYPTO byte, Handshake-secret, and confirmation path through the Zig adapter before replacing the demo object with a mature C TLS library binding. | Present |
 | `tls_openssl_probe` | Runnable OpenSSL QUIC TLS API/link probe: uses `pkg-config` OpenSSL, creates OpenSSL's full QUIC client method object, sets QUIC TLS callbacks and local transport parameters on the callback-mode TLS object, and prints the dispatch IDs needed for crypto send, secret yield, and peer transport-parameter callbacks. | Present |
+| `tls_openssl_backend_adapter` | Runnable OpenSSL-backed `TlsBackend` wrapper check: the existing drive path sets quicz local transport parameters on an OpenSSL TLS object and delivers Handshake CRYPTO bytes to the wrapper while leaving transcript output, peer parameters, and traffic-secret yield pending. | Present |
 | `initial_keys` | RFC 9001 QUIC v1 and RFC 9369 QUIC v2 Initial secret/key/IV/header-protection key derivation, RFC 9001 `quic ku` key-update derivation, protected Initial long-packet seal/open, configured v2 connection Initial packetization, and AES header-protection masking from a client Initial DCID. | Present |
 | `endpoint_routing` | Current in-memory endpoint DCID/IPv4 UDP tuple routing, long-header DCID peeking, unsupported-version RFC 8999 Version Negotiation response generation, client Initial Source CID route registration, supported-version unknown-DCID Initial accept classification, accepted Initial Original DCID/server Initial SCID route registration, short-header registered-CID matching, zero-length CID tuple routing, Retry Source CID route switching, caller-validated preferred-address migration commit, sequence/retire-prior-to/connection-handle route retirement, stateless reset token reuse rejection, caller-validated path update, active-migration-disabled rejection, route retirement, stateless reset token lookup for inactive CIDs, reset datagram construction with caller-supplied unpredictable bytes, and route/version-negotiation/reset/drop/accept receive action classification. | Present |
 | `endpoint_recovery_timers` | Endpoint-owned recovery timer scheduling across caller-owned connection handles: endpoint lifecycle route ownership, earliest aggregate timer selection, before-deadline no-op refresh, PTO service/re-arm, ACK-driven disarm, loss-time service, final timer disarm, connection-handle route retirement, routed protected long-header receive timer refresh with processed-count preservation, client Initial ACK anti-deadlock Handshake PTO preservation, caller-keyed and installed-key Handshake/0-RTT protected long-header recovery timer service plus PTO probe polling, protected long-header send timer refresh, routed caller-keyed Handshake CRYPTO-space and 0-RTT long-packet receive timer refresh, caller-keyed Initial/Handshake CRYPTO-space and 0-RTT long-packet send timer refresh, caller-keyed protected 1-RTT short-packet receive timer refresh, caller-keyed protected 1-RTT short-packet send timer refresh, installed-key protected 1-RTT recovery timer service plus PTO probe polling, routed explicit key-phase/key-update short-packet receive timer refresh, caller-owned key-phase-state short-packet send timer refresh, routed installed-key Handshake/0-RTT long-packet receive timer refresh, installed-key Handshake/0-RTT long-packet send timer refresh, and installed-key protected 1-RTT short-packet send/receive timer refresh. | Present |
@@ -2853,6 +2860,7 @@ zig build run-crypto-stream
 zig build run-tls-backend-adapter
 zig build run-tls-c-abi-adapter
 zig build run-tls-openssl-probe
+zig build run-tls-openssl-backend-adapter
 zig build run-graceful-close
 zig build run-idle-timeout
 zig build run-packet-spaces
