@@ -44,6 +44,38 @@ send/receive bridge、installed-key Handshake long-packet helper、首个 client
 STREAM/RESET_STREAM/STOP_SENDING protected long-packet 路由，以及使用调用方 key 的 1-RTT protected short-packet
 PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_RESPONSE/RETIRE_CONNECTION_ID/MAX_*/BLOCKED/STREAM/RESET_STREAM/STOP_SENDING/CONNECTION_CLOSE transmit/receive bridge，并带调用方持有和连接已安装的 key-phase 状态 helper，以及 socket-backed UDP endpoint routing、lifecycle Retry/address-validation routing、lifecycle caller-keyed protected packet/lifecycle loss-recovery/lifecycle congestion-recovery/lifecycle PTO-recovery/lifecycle STREAM-retransmission loopback 和验证驱动的 UDP path-validation route update，但尚不能完整生成或消费 TLS-owned QUIC-over-UDP packet。
 
+## 当前阶段边界
+
+截至 2026-06-04，当前实现阶段定义为 mock/installed-key 加 endpoint lifecycle
+可验证覆盖阶段。这个阶段已有足够证据证明 transport 骨架可以通过真实 loopback UDP
+socket 路由 protected datagram，保持 endpoint-owned route/timer lifecycle state，
+使用调用方持有和连接已安装的 packet-protection key，service loss/PTO recovery timer，
+并用确定性示例证明 key update、path validation、Retry、address validation、close
+和 stateless reset 行为。
+
+这个阶段不等于完整 QUIC 实现。现有证据尚不能证明真实 TLS-owned client/server
+handshake、TLS-owned traffic secret production、由 TLS transcript 驱动的自动 key
+lifecycle、外部互通或生产级 socket event loop。在这些能力存在前，依赖这些性质的
+RFC 8999、RFC 9000、RFC 9001、RFC 9002、RFC 9368 和 RFC 9369 行都必须继续保持
+`Partial`，不能标记为 `Done`。
+
+下一实现里程碑是 TLS-owned socket-backed client/server echo loop。该里程碑的最小
+证明包括：
+
+- 使用支持 QUIC transport-parameter 和 traffic-secret hook 的 C TLS 库，通过很小的
+  Zig `TlsBackend` adapter 接入，而不是在仓库内自研 TLS；
+- 真实 TLS backend 集成，通过 handshake transcript 导出并消费 QUIC transport
+  parameters；
+- happy path 上由 TLS 持有 Initial、Handshake、启用时的 0-RTT 和 1-RTT
+  traffic-secret 安装，而不是调用方提供 mock key；
+- 本地 UDP client/server stream echo 通过同一个 lifecycle owner 驱动 connection
+  accept、handshake confirmation、stream data delivery、ACK cleanup、loss/PTO
+  timer service、key discard、close 和 route cleanup；
+- 至少一个外部 QUIC 实现的互通记录，或说明当前无法运行互通的 blocker。
+
+后续 mock-only loopback 只有在补齐下方矩阵中的明确缺口时才有价值。若缺口没有命名，
+且验证证据没有写回本文，不应把新增 mock 示例视为完成 QUIC 的进展。
+
 ## 任务矩阵
 
 | 领域 | 当前状态 | 目标结果 | 验证方式 |
@@ -71,6 +103,13 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
 
 ## 进展记录
 
+- 2026-06-04：新增当前 mock/installed-key 加 endpoint lifecycle 可验证覆盖阶段的
+  明确边界。任务计划现在说明，现有 socket-backed loopback 能证明实验性骨架的
+  protected routing、recovery-timer service 和 endpoint lifecycle 行为，但不能证明完整
+  TLS-owned QUIC。下一里程碑是通过很小的 Zig `TlsBackend` adapter 接入 C TLS 库后实现
+  TLS-owned socket-backed client/server echo loop，需要 transport-parameter transcript
+  handoff、traffic-secret ownership、lifecycle cleanup，以及外部互通证据或明确互通
+  blocker。
 - 2026-06-02：把 UDP Version Negotiation follow-up server
   transport-parameter validation 切到 TLS extension bytes。server 现在编码本端
   transport parameters，follow-up client 解析并应用这些 bytes，继续验证

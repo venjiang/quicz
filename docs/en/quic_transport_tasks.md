@@ -48,6 +48,44 @@ caller-keyed or installed-key 0-RTT STREAM/RESET_STREAM/STOP_SENDING protected l
 short-packet PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_RESPONSE/RETIRE_CONNECTION_ID/MAX_*/BLOCKED/STREAM/RESET_STREAM/STOP_SENDING/CONNECTION_CLOSE transmit/receive bridge with caller-owned and connection-installed key-phase state helpers, plus socket-backed UDP endpoint routing, lifecycle Retry/address-validation routing, lifecycle caller-keyed protected packet/lifecycle loss-recovery/lifecycle congestion-recovery/lifecycle PTO-recovery/lifecycle STREAM-retransmission loopbacks, and validation-driven UDP path-validation route updates, but it does not yet fully
 produce or consume TLS-owned QUIC packets over UDP.
 
+## Current Phase Boundary
+
+As of 2026-06-04, the current implementation phase is the
+mock/installed-key plus endpoint-lifecycle verification phase. This phase has
+enough evidence to show that the transport skeleton can route protected
+datagrams over real loopback UDP sockets, preserve endpoint-owned route/timer
+lifecycle state, exercise caller-owned and installed-key packet protection,
+service loss/PTO recovery timers, and prove key-update, path-validation, Retry,
+address-validation, close, and stateless-reset behavior with deterministic
+examples.
+
+This phase is intentionally not a complete QUIC implementation. The evidence
+does not prove a real TLS-owned client/server handshake, TLS-owned traffic
+secret production, automatic TLS transcript-driven key lifecycle, external
+interop, or a production socket event loop. Until those exist, all RFC 8999,
+RFC 9000, RFC 9001, RFC 9002, RFC 9368, and RFC 9369 rows that depend on those
+properties must remain `Partial` rather than `Done`.
+
+The next implementation milestone is a TLS-owned socket-backed client/server
+echo loop. The minimum proof for that milestone is:
+
+- a C TLS library backend that exposes QUIC transport-parameter and traffic
+  secret hooks through a small Zig `TlsBackend` adapter, rather than a new
+  in-tree TLS implementation;
+- real TLS backend integration that exports and consumes QUIC transport
+  parameters through the handshake transcript;
+- TLS-owned Initial, Handshake, 0-RTT when enabled, and 1-RTT traffic-secret
+  installation without caller-provided mock keys on the happy path;
+- a local UDP client/server stream echo that drives connection accept,
+  handshake confirmation, stream data delivery, ACK cleanup, loss/PTO timer
+  service, key discard, close, and route cleanup through one lifecycle owner;
+- an interop note against at least one external QUIC implementation or a
+  documented blocker explaining why interop cannot yet be run.
+
+Further mock-only loopbacks are useful only when they close a specific gap in
+the matrix below. They should not be treated as progress toward completing
+QUIC unless the gap is named and the verification evidence is added here.
+
 ## Task Matrix
 
 | Area | Current status | Required outcome | Verification |
@@ -75,6 +113,15 @@ produce or consume TLS-owned QUIC packets over UDP.
 
 ## Progress Notes
 
+- 2026-06-04: Added an explicit phase boundary for the current
+  mock/installed-key plus endpoint-lifecycle verification phase. The task plan
+  now states that the existing socket-backed loopbacks prove protected routing,
+  recovery-timer service, and endpoint lifecycle behavior for the experimental
+  skeleton, but do not prove full TLS-owned QUIC. The next milestone is a
+  TLS-owned socket-backed client/server echo loop backed by a C TLS library via
+  a narrow Zig `TlsBackend` adapter, with transport-parameter transcript
+  handoff, traffic-secret ownership, lifecycle cleanup, and external interop
+  evidence or a documented interop blocker.
 - 2026-06-02: Switched UDP Version Negotiation follow-up server
   transport-parameter validation to TLS extension bytes. The server now encodes
   local transport parameters and the follow-up client parses/applies those
