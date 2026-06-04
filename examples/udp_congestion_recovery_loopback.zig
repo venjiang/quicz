@@ -56,6 +56,16 @@ const PersistentCongestionResult = struct {
     bytes_in_flight: usize,
 };
 
+const CeProbeResult = struct {
+    client_port: u16,
+    server_port: u16,
+    probe_bytes: usize,
+    ce_count: u64,
+    congestion_window: usize,
+    bytes_in_flight: usize,
+    route: u64,
+};
+
 fn fixedWriter(buffer: []u8) FixedWriter {
     return .{ .buffer = buffer };
 }
@@ -193,6 +203,47 @@ fn sendServerAck(
     var payload: [64]u8 = undefined;
     var out = fixedWriter(&payload);
     try quicz.frame.encodeFrame(out.writer(), .{ .ack = ack });
+
+    const packet = try protectShortPacket(
+        allocator,
+        &client_dcid,
+        server_packet_number,
+        keys,
+        out.getWritten(),
+    );
+    defer allocator.free(packet);
+
+    try server_socket.send(io, &client_socket.address, packet);
+    const received = try receiveDatagram(io, client_socket, receive_buf);
+    const route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        41,
+        client,
+        received.path,
+        now_millis,
+        keys,
+        received.data,
+    );
+    try require(route.connection_id == 41);
+    try require(std.mem.eql(u8, route.destination_connection_id.asSlice(), &client_dcid));
+    return packet.len;
+}
+
+fn sendServerAckEcn(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    server_socket: *std.Io.net.Socket,
+    client_socket: *std.Io.net.Socket,
+    client_lifecycle: *quicz.EndpointConnectionLifecycle,
+    client: *quicz.Connection,
+    now_millis: i64,
+    server_packet_number: u64,
+    ack_ecn: quicz.frame.AckEcnFrame,
+    receive_buf: []u8,
+    keys: quicz.protection.Aes128PacketProtectionKeys,
+) !usize {
+    var payload: [64]u8 = undefined;
+    var out = fixedWriter(&payload);
+    try quicz.frame.encodeFrame(out.writer(), .{ .ack_ecn = ack_ecn });
 
     const packet = try protectShortPacket(
         allocator,
@@ -362,6 +413,146 @@ fn runPersistentCongestionPhase(allocator: std.mem.Allocator, io: std.Io) !Persi
     };
 }
 
+fn runCeProbePhase(allocator: std.mem.Allocator, io: std.Io) !CeProbeResult {
+    var client_socket = try bindLoopbackUdp(io);
+    defer client_socket.close(io);
+    var server_socket = try bindLoopbackUdp(io);
+    defer server_socket.close(io);
+
+    const client_local = try udp4Address(client_socket.address);
+    const server_local = try udp4Address(server_socket.address);
+    try require(client_local.port != 0);
+    try require(server_local.port != 0);
+    try require(client_local.port != server_local.port);
+
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try quicz.Connection.init(allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    var server = try quicz.Connection.init(allocator, .server, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+    try prepareLoopbackPair(&client_socket, &server_socket, &client_lifecycle, &server_lifecycle);
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "udp ce congestion probe", false);
+    client.recovery_state.congestion_window = 36_000;
+
+    var client_receive_buf: [1500]u8 = undefined;
+    var server_receive_buf: [1500]u8 = undefined;
+    var ping_payload = [_]u8{@intFromEnum(quicz.frame.FrameType.padding)} ** 1178;
+    ping_payload[0] = @intFromEnum(quicz.frame.FrameType.ping);
+    var packet_number: usize = 0;
+    while (packet_number < 30) : (packet_number += 1) {
+        const packet = try protectShortPacket(
+            allocator,
+            &server_dcid,
+            @intCast(packet_number),
+            secrets.client,
+            &ping_payload,
+        );
+        defer allocator.free(packet);
+        _ = try client.recordEcnPacketSentInSpace(
+            .application,
+            @as(i64, @intCast(packet_number + 1)) * 10,
+            packet.len,
+            .ect0,
+        );
+
+        try client_socket.send(io, &server_socket.address, packet);
+        const received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+        const route = try server_lifecycle.processRoutedProtectedShortDatagram(
+            51,
+            &server,
+            received.path,
+            @as(i64, @intCast(packet_number + 1)) * 10 + 1,
+            secrets.client,
+            received.data,
+        );
+        try require(route.connection_id == 51);
+        try require(std.mem.eql(u8, route.destination_connection_id.asSlice(), &server_dcid));
+    }
+    client.recovery_state.congestion_window = client.bytesInFlight(.application);
+
+    const pre_ce = try client_lifecycle.pollProtectedShortDatagram(
+        41,
+        &client,
+        350,
+        &server_dcid,
+        secrets.client,
+    );
+    try require(pre_ce == null);
+
+    _ = try sendServerAckEcn(allocator, io, &server_socket, &client_socket, &client_lifecycle, &client, 360, 0, .{
+        .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = 0,
+            .ect1_count = 0,
+            .ecn_ce_count = 1,
+        },
+    }, &client_receive_buf, secrets.server);
+
+    try require(client.ecnValidationState(.application) == .capable);
+    try require(client.ecnCounts(.application).ecn_ce_count == 1);
+    try require(client.congestion_probe_count == 1);
+    try require(!client.recovery_state.canSend(1));
+
+    const probe = (try client_lifecycle.pollProtectedShortDatagram(
+        41,
+        &client,
+        370,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(probe);
+    try require(client.congestion_probe_count == 0);
+
+    try client_socket.send(io, &server_socket.address, probe);
+    const received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const route = try server_lifecycle.processRoutedProtectedShortDatagram(
+        51,
+        &server,
+        received.path,
+        371,
+        secrets.client,
+        received.data,
+    );
+    try require(route.connection_id == 51);
+    try require(std.mem.eql(u8, route.destination_connection_id.asSlice(), &server_dcid));
+
+    var stream_buf: [64]u8 = undefined;
+    const stream_len = (try server.recvOnStream(stream_id, &stream_buf)) orelse return error.UnexpectedState;
+    try require(std.mem.eql(u8, stream_buf[0..stream_len], "udp ce congestion probe"));
+    try require(client.bytesInFlight(.application) > client.congestionWindow(.application));
+
+    return .{
+        .client_port = client_local.port,
+        .server_port = server_local.port,
+        .probe_bytes = probe.len,
+        .ce_count = client.ecnCounts(.application).ecn_ce_count,
+        .congestion_window = client.congestionWindow(.application),
+        .bytes_in_flight = client.bytesInFlight(.application),
+        .route = route.connection_id,
+    };
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -371,8 +562,9 @@ pub fn main() !void {
 
     const recovery_period = try runRecoveryPeriodPhase(allocator, io);
     const persistent_congestion = try runPersistentCongestionPhase(allocator, io);
+    const ce_probe = try runCeProbePhase(allocator, io);
 
-    std.debug.print("[udp-congestion] recovery_client_port={} recovery_server_port={} recovery_cwnd={} repeated_loss_cwnd={} repeated_loss_suppressed={} recovery_remaining={} persistent_client_port={} persistent_server_port={} minimum_cwnd={} persistent_cwnd={} persistent_minimum={} persistent_remaining={} persistent_inflight={}\n", .{
+    std.debug.print("[udp-congestion] recovery_client_port={} recovery_server_port={} recovery_cwnd={} repeated_loss_cwnd={} repeated_loss_suppressed={} recovery_remaining={} persistent_client_port={} persistent_server_port={} minimum_cwnd={} persistent_cwnd={} persistent_minimum={} persistent_remaining={} persistent_inflight={} ce_client_port={} ce_server_port={} ce_probe_bytes={} ce_count={} ce_cwnd={} ce_inflight={} ce_route={}\n", .{
         recovery_period.client_port,
         recovery_period.server_port,
         recovery_period.first_recovery_window,
@@ -386,5 +578,12 @@ pub fn main() !void {
         persistent_congestion.reduced_to_minimum,
         persistent_congestion.remaining_packets,
         persistent_congestion.bytes_in_flight,
+        ce_probe.client_port,
+        ce_probe.server_port,
+        ce_probe.probe_bytes,
+        ce_probe.ce_count,
+        ce_probe.congestion_window,
+        ce_probe.bytes_in_flight,
+        ce_probe.route,
     });
 }

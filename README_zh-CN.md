@@ -179,7 +179,7 @@ pub fn main() !void {
   运行：`zig build run-udp-ecn-validation-loopback`。
 - [UDP loss recovery loopback](examples/udp_loss_recovery_loopback.zig)：lifecycle-routed protected ACK 驱动 packet loss 和 timer-driven cleanup。
   运行：`zig build run-udp-loss-recovery-loopback`。
-- [UDP congestion recovery loopback](examples/udp_congestion_recovery_loopback.zig)：loopback UDP 上 lifecycle-routed NewReno recovery-period 和 persistent-congestion 行为，并输出 repeated-loss suppression 与 minimum-window 证据。
+- [UDP congestion recovery loopback](examples/udp_congestion_recovery_loopback.zig)：loopback UDP 上 lifecycle-routed NewReno recovery-period、persistent-congestion 和 ACK_ECN CE-driven STREAM probe 行为，并输出 repeated-loss suppression、minimum-window 和 CE probe 证据。
   运行：`zig build run-udp-congestion-recovery-loopback`。
 - [UDP PTO recovery loopback](examples/udp_pto_recovery_loopback.zig)：endpoint lifecycle timer service、protected long/short 和 installed-key 0-RTT PTO probe polling、routed receive processing 和 retransmission choice。
   运行：`zig build run-udp-pto-recovery-loopback`。

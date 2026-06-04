@@ -262,8 +262,9 @@ experimental.
   over loopback UDP. Run with `zig build run-udp-loss-recovery-loopback`.
 - [UDP congestion recovery loopback](examples/udp_congestion_recovery_loopback.zig):
   Lifecycle-routed NewReno recovery-period and persistent-congestion behavior
-  over loopback UDP, with explicit repeated-loss suppression and minimum-window
-  evidence. Run with `zig build run-udp-congestion-recovery-loopback`.
+  over loopback UDP, with explicit repeated-loss suppression, minimum-window,
+  and ACK_ECN CE-driven STREAM probe evidence. Run with
+  `zig build run-udp-congestion-recovery-loopback`.
 - [UDP PTO recovery loopback](examples/udp_pto_recovery_loopback.zig):
   Endpoint lifecycle timer service, protected long/short and installed-key
   0-RTT PTO probe polling, routed receive processing, and retransmission
