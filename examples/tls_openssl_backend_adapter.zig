@@ -47,6 +47,7 @@ const AdapterServerInitialBackendConnectionDrive = struct {
     client_received_crypto_bytes: usize,
     peer_transport_parameters_bytes: usize,
     handshake_keys_installed: bool,
+    handshake_secret_callbacks: c_int,
     peer_bidi_stream_limit: u64,
     peer_bidi_open_blocked: bool,
     handshake_crypto_bytes: usize,
@@ -550,6 +551,8 @@ fn verifyAdapterServerInitialBackendConnectionDrive(
     try require(second_progress.inbound_bytes == 0);
     try require(second_progress.outbound_chunks == 0);
     try require(!second_progress.handshake_confirmed);
+    const handshake_secret_callbacks = c.quicz_openssl_tls_backend_yield_secret_callbacks(server_backend_context);
+    try require(handshake_secret_callbacks >= 2);
     var peer_bidi_stream_limit: u64 = 0;
     while (peer_bidi_stream_limit < 8) : (peer_bidi_stream_limit += 1) {
         _ = try server.openStream();
@@ -674,6 +677,7 @@ fn verifyAdapterServerInitialBackendConnectionDrive(
         .client_received_crypto_bytes = client_received_crypto_len,
         .peer_transport_parameters_bytes = second_progress.peer_transport_parameters_bytes,
         .handshake_keys_installed = second_progress.handshake_keys_installed,
+        .handshake_secret_callbacks = handshake_secret_callbacks,
         .peer_bidi_stream_limit = peer_bidi_stream_limit,
         .peer_bidi_open_blocked = peer_bidi_open_blocked,
         .handshake_crypto_bytes = handshake_progress.outbound_bytes,
@@ -1573,7 +1577,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_initial={}/{}/{} server_connection_initial={}/{}/{}/{}/{}/{}/{}/{} server_connection_handshake={}/{}/{}/{}/{} server_connection_application={}/{}/{}/{} server_probe_confirmed={}\n",
+        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_initial={}/{}/{} server_connection_initial={}/{}/{}/{}/{}/{}/{}/{}/{} server_connection_handshake={}/{}/{}/{}/{} server_connection_application={}/{}/{}/{} server_probe_confirmed={}\n",
         .{
             transcript.client_keylog_callbacks,
             transcript.server_keylog_callbacks,
@@ -1590,6 +1594,7 @@ pub fn main() !void {
             server_connection_probe.client_received_crypto_bytes,
             server_connection_probe.peer_transport_parameters_bytes,
             server_connection_probe.handshake_keys_installed,
+            server_connection_probe.handshake_secret_callbacks,
             server_connection_probe.peer_bidi_stream_limit,
             server_connection_probe.peer_bidi_open_blocked,
             server_connection_probe.handshake_crypto_bytes,
