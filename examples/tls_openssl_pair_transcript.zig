@@ -247,6 +247,15 @@ const ProtectedHandshakeDelivery = struct {
     server_datagram_bytes: usize,
 };
 
+const SocketHandshakeDelivery = struct {
+    client_crypto_bytes: usize,
+    client_datagram_bytes: usize,
+    client_ack_bytes: usize,
+    server_crypto_bytes: usize,
+    server_datagram_bytes: usize,
+    server_ack_bytes: usize,
+};
+
 const ProtectedApplicationDelivery = struct {
     request_bytes: usize,
     request_datagram_bytes: usize,
@@ -397,6 +406,199 @@ fn verifyProtectedHandshakeCryptoDelivery(
         .client_datagram_bytes = protected_client_handshake.len,
         .server_crypto_bytes = server_read_len,
         .server_datagram_bytes = protected_server_handshake.len,
+    };
+}
+
+fn verifySocketBackedHandshakeCryptoDelivery(
+    expected_client_len: usize,
+    expected_server_len: usize,
+) !SocketHandshakeDelivery {
+    var client_handshake_crypto: [8192]u8 = undefined;
+    var server_handshake_crypto: [8192]u8 = undefined;
+    const copied_client = try copyOpenSslCrypto(true, 2, &client_handshake_crypto);
+    const copied_server = try copyOpenSslCrypto(false, 2, &server_handshake_crypto);
+    try require(copied_client.len == expected_client_len);
+    try require(copied_server.len == expected_server_len);
+    try require(copied_client.len > 0);
+    try require(copied_server.len > 0);
+
+    const client_local = try copyOpenSslSecret(true, 2, 1);
+    const client_peer = try copyOpenSslSecret(true, 2, 0);
+    const server_local = try copyOpenSslSecret(false, 2, 1);
+    const server_peer = try copyOpenSslSecret(false, 2, 0);
+    try require(std.mem.eql(u8, &client_local, &server_peer));
+    try require(std.mem.eql(u8, &server_local, &client_peer));
+
+    const allocator = std.heap.page_allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client_socket = try bindLoopbackUdp(io);
+    defer client_socket.close(io);
+    var server_socket = try bindLoopbackUdp(io);
+    defer server_socket.close(io);
+
+    const client_address = try udp4Address(client_socket.address);
+    const server_address = try udp4Address(server_socket.address);
+    try require(client_address.port != 0);
+    try require(server_address.port != 0);
+    try require(client_address.port != server_address.port);
+
+    const client_dcid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const client_scid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+    const server_dcid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8 };
+    const server_scid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8 };
+    const client_handle: u64 = 81;
+    const server_handle: u64 = 91;
+
+    var client = try quicz.Connection.init(allocator, .client, .{
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try quicz.Connection.init(allocator, .server, .{
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try client.installHandshakeTrafficSecrets(.{
+        .local = client_local,
+        .peer = client_peer,
+    });
+    try server.installHandshakeTrafficSecrets(.{
+        .local = server_local,
+        .peer = server_peer,
+    });
+    try require(client.hasHandshakeProtectionKeys());
+    try require(server.hasHandshakeProtectionKeys());
+
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+
+    const client_path = try udp4Tuple(client_socket.address, server_socket.address);
+    const server_path = try udp4Tuple(server_socket.address, client_socket.address);
+    try client_lifecycle.registerConnectionId(client_handle, &client_dcid, client_path, .{
+        .active_migration_disabled = true,
+    });
+    try server_lifecycle.registerConnectionId(server_handle, &server_dcid, server_path, .{
+        .active_migration_disabled = true,
+    });
+
+    try client.sendCryptoInSpace(.handshake, copied_client);
+    const client_datagram = (try client_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        70,
+        &server_dcid,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_datagram);
+    try client_socket.send(io, &server_socket.address, client_datagram);
+
+    var server_receive_buf: [1500]u8 = undefined;
+    var client_receive_buf: [1500]u8 = undefined;
+    const client_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const client_route = try server_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        client_received.path,
+        71,
+        client_received.data,
+    );
+    try require(client_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, client_route.destination_connection_id.asSlice(), &server_dcid));
+    try require(server.pendingAckLargest(.handshake) == 0);
+
+    var read_buf: [8192]u8 = undefined;
+    const client_read_len = (try server.recvCryptoInSpace(.handshake, &read_buf)) orelse return error.UnexpectedState;
+    try require(client_read_len == copied_client.len);
+    try require(std.mem.eql(u8, read_buf[0..client_read_len], copied_client));
+    try require((try server.recvCryptoInSpace(.handshake, &read_buf)) == null);
+
+    const server_ack = (try server_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        72,
+        &client_dcid,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(server_ack);
+    try server_socket.send(io, &client_socket.address, server_ack);
+
+    const server_ack_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+    const server_ack_route = try client_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        server_ack_received.path,
+        73,
+        server_ack_received.data,
+    );
+    try require(server_ack_route.connection_id == client_handle);
+    try require(std.mem.eql(u8, server_ack_route.destination_connection_id.asSlice(), &client_dcid));
+    try require(client.bytesInFlight(.handshake) == 0);
+
+    try server.sendCryptoInSpace(.handshake, copied_server);
+    const server_datagram = (try server_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        74,
+        &client_dcid,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(server_datagram);
+    try server_socket.send(io, &client_socket.address, server_datagram);
+
+    const server_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+    const server_route = try client_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        server_received.path,
+        75,
+        server_received.data,
+    );
+    try require(server_route.connection_id == client_handle);
+    try require(std.mem.eql(u8, server_route.destination_connection_id.asSlice(), &client_dcid));
+    try require(client.pendingAckLargest(.handshake) == 1);
+
+    const server_read_len = (try client.recvCryptoInSpace(.handshake, &read_buf)) orelse return error.UnexpectedState;
+    try require(server_read_len == copied_server.len);
+    try require(std.mem.eql(u8, read_buf[0..server_read_len], copied_server));
+    try require((try client.recvCryptoInSpace(.handshake, &read_buf)) == null);
+
+    const client_ack = (try client_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        76,
+        &server_dcid,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_ack);
+    try client_socket.send(io, &server_socket.address, client_ack);
+
+    const client_ack_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const client_ack_route = try server_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        client_ack_received.path,
+        77,
+        client_ack_received.data,
+    );
+    try require(client_ack_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, client_ack_route.destination_connection_id.asSlice(), &server_dcid));
+    try require(server.bytesInFlight(.handshake) == 0);
+    try require(client_lifecycle.recoveryTimerCount() == 0);
+    try require(server_lifecycle.recoveryTimerCount() == 0);
+
+    return .{
+        .client_crypto_bytes = client_read_len,
+        .client_datagram_bytes = client_datagram.len,
+        .client_ack_bytes = server_ack.len,
+        .server_crypto_bytes = server_read_len,
+        .server_datagram_bytes = server_datagram.len,
+        .server_ack_bytes = client_ack.len,
     };
 }
 
@@ -743,6 +945,10 @@ pub fn main() !void {
         result.client_out_level_bytes[2],
         result.server_out_level_bytes[2],
     );
+    const socket_handshake = try verifySocketBackedHandshakeCryptoDelivery(
+        result.client_out_level_bytes[2],
+        result.server_out_level_bytes[2],
+    );
     const protected_application = try verifyProtectedApplicationStreamDelivery();
     const socket_echo = try verifySocketBackedApplicationEchoDelivery();
 
@@ -773,7 +979,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        " quicz_delivery={}/{}/{}/{}/{}/{} protected_initial={}/{} protected_handshake={}/{}/{}/{} protected_application={}/{}/{}/{} socket_echo={}/{}/{}/{}/{} iterations={} alerts={}/{} errors={}/{}\n",
+        " quicz_delivery={}/{}/{}/{}/{}/{} protected_initial={}/{} protected_handshake={}/{}/{}/{} socket_handshake={}/{}/{}/{}/{}/{} protected_application={}/{}/{}/{} socket_echo={}/{}/{}/{}/{}",
         .{
             client_initial_bytes,
             server_initial_bytes,
@@ -787,6 +993,12 @@ pub fn main() !void {
             protected_handshake.client_datagram_bytes,
             protected_handshake.server_crypto_bytes,
             protected_handshake.server_datagram_bytes,
+            socket_handshake.client_crypto_bytes,
+            socket_handshake.client_datagram_bytes,
+            socket_handshake.client_ack_bytes,
+            socket_handshake.server_crypto_bytes,
+            socket_handshake.server_datagram_bytes,
+            socket_handshake.server_ack_bytes,
             protected_application.request_bytes,
             protected_application.request_datagram_bytes,
             protected_application.response_bytes,
@@ -796,6 +1008,11 @@ pub fn main() !void {
             socket_echo.echo_bytes,
             socket_echo.echo_datagram_bytes,
             socket_echo.echo_packets,
+        },
+    );
+    std.debug.print(
+        " iterations={} alerts={}/{} errors={}/{}\n",
+        .{
             result.drive_iterations,
             result.client_alert_callbacks,
             result.server_alert_callbacks,
