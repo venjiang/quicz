@@ -448,6 +448,11 @@ const ManualSocketTranscriptDelivery = struct {
     client_handshake_datagram_bytes: usize,
     server_handshake_crypto_bytes: usize,
     server_handshake_datagram_bytes: usize,
+    request_bytes: usize,
+    request_datagram_bytes: usize,
+    echo_bytes: usize,
+    echo_datagram_bytes: usize,
+    final_ack_bytes: usize,
 };
 
 const ProtectedHandshakeDelivery = struct {
@@ -724,10 +729,16 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
 
     var client = try quicz.Connection.init(allocator, .client, .{
+        .initial_max_data = 4096,
+        .initial_max_stream_data = 1024,
+        .initial_max_streams_bidi = 4,
         .max_datagram_size = 8192,
     });
     defer client.deinit();
     var server = try quicz.Connection.init(allocator, .server, .{
+        .initial_max_data = 4096,
+        .initial_max_stream_data = 1024,
+        .initial_max_streams_bidi = 4,
         .max_datagram_size = 8192,
     });
     defer server.deinit();
@@ -913,6 +924,106 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
     try require(manual_result.client_alert_callbacks == 0);
     try require(manual_result.server_alert_callbacks == 0);
 
+    const client_one_rtt_local = try copyManualOpenSslSecret(context, true, 3, 1);
+    const client_one_rtt_peer = try copyManualOpenSslSecret(context, true, 3, 0);
+    const server_one_rtt_local = try copyManualOpenSslSecret(context, false, 3, 1);
+    const server_one_rtt_peer = try copyManualOpenSslSecret(context, false, 3, 0);
+    try require(std.mem.eql(u8, &client_one_rtt_local, &server_one_rtt_peer));
+    try require(std.mem.eql(u8, &server_one_rtt_local, &client_one_rtt_peer));
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = client_one_rtt_local,
+        .peer = client_one_rtt_peer,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = server_one_rtt_local,
+        .peer = server_one_rtt_peer,
+    });
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+    try require(client.hasOneRttProtectionKeys());
+    try require(server.hasOneRttProtectionKeys());
+
+    const stream_id = try client.openStream();
+    const request = "manual openssl udp one-rtt echo";
+    try client.sendOnStream(stream_id, request, true);
+    const request_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        98,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(request_datagram);
+    try client_socket.send(io, &server_socket.address, request_datagram);
+
+    const request_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const request_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        request_received.path,
+        99,
+        request_received.data,
+    );
+    try require(request_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, request_route.destination_connection_id.asSlice(), &server_scid));
+
+    var stream_buf: [128]u8 = undefined;
+    const request_len = (try server.recvOnStream(stream_id, &stream_buf)) orelse return error.UnexpectedState;
+    const request_payload = stream_buf[0..request_len];
+    try require(std.mem.eql(u8, request_payload, request));
+
+    try server.sendOnStream(stream_id, request_payload, true);
+    var echo_packet_count: usize = 0;
+    var echo_datagram_bytes: usize = 0;
+    var echo_len_or_null: ?usize = null;
+    while (echo_packet_count < 4 and echo_len_or_null == null) : (echo_packet_count += 1) {
+        const echo_datagram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &server,
+            100 + @as(i64, @intCast(echo_packet_count)),
+            &client_scid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(echo_datagram);
+        echo_datagram_bytes += echo_datagram.len;
+        try server_socket.send(io, &client_socket.address, echo_datagram);
+
+        const echo_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+        const echo_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            client_handle,
+            &client,
+            echo_received.path,
+            110 + @as(i64, @intCast(echo_packet_count)),
+            echo_received.data,
+        );
+        try require(echo_route.connection_id == client_handle);
+        try require(std.mem.eql(u8, echo_route.destination_connection_id.asSlice(), &client_scid));
+        echo_len_or_null = try client.recvOnStream(stream_id, &stream_buf);
+    }
+    const echo_len = echo_len_or_null orelse return error.UnexpectedState;
+    const echo_payload = stream_buf[0..echo_len];
+    try require(std.mem.eql(u8, echo_payload, request_payload));
+
+    const final_ack = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        120,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(final_ack);
+    try client_socket.send(io, &server_socket.address, final_ack);
+
+    const ack_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const ack_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        ack_received.path,
+        121,
+        ack_received.data,
+    );
+    try require(ack_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &server_scid));
+    try require(server.bytesInFlight(.application) == 0);
+
     return .{
         .client_initial_crypto_bytes = client_read_len,
         .client_initial_datagram_bytes = client_datagram.len,
@@ -922,6 +1033,11 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
         .client_handshake_datagram_bytes = client_handshake_datagram.len,
         .server_handshake_crypto_bytes = server_handshake_read_len,
         .server_handshake_datagram_bytes = server_handshake_datagram.len,
+        .request_bytes = request_len,
+        .request_datagram_bytes = request_datagram.len,
+        .echo_bytes = echo_len,
+        .echo_datagram_bytes = echo_datagram_bytes,
+        .final_ack_bytes = final_ack.len,
     };
 }
 
@@ -1684,7 +1800,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        " manual_socket_transcript={}/{}/{}/{}/{}/{}/{}/{} protected_handshake={}/{}/{}/{} socket_handshake={}/{}/{}/{}/{}/{} protected_application={}/{}/{}/{} socket_echo={}/{}/{}/{}/{}",
+        " manual_socket_transcript={}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{} protected_handshake={}/{}/{}/{} socket_handshake={}/{}/{}/{}/{}/{} protected_application={}/{}/{}/{} socket_echo={}/{}/{}/{}/{}",
         .{
             manual_socket_transcript.client_initial_crypto_bytes,
             manual_socket_transcript.client_initial_datagram_bytes,
@@ -1694,6 +1810,11 @@ pub fn main() !void {
             manual_socket_transcript.client_handshake_datagram_bytes,
             manual_socket_transcript.server_handshake_crypto_bytes,
             manual_socket_transcript.server_handshake_datagram_bytes,
+            manual_socket_transcript.request_bytes,
+            manual_socket_transcript.request_datagram_bytes,
+            manual_socket_transcript.echo_bytes,
+            manual_socket_transcript.echo_datagram_bytes,
+            manual_socket_transcript.final_ack_bytes,
             protected_handshake.client_crypto_bytes,
             protected_handshake.client_datagram_bytes,
             protected_handshake.server_crypto_bytes,

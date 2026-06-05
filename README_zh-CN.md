@@ -98,8 +98,10 @@ zig build run-initial-keys
   另有手动 OpenSSL context 检查会把 live Initial/Handshake TLS CRYPTO bytes
   通过同一 socket/lifecycle 边界路由；
   OpenSSL Handshake secrets 也会驱动双向 installed-key protected Handshake CRYPTO
-  投递，包括通过同一个 lifecycle 的 loopback UDP 投递；OpenSSL 1-RTT secrets 还会保护
-  一次 quicz STREAM request/response，并通过同一个 lifecycle 驱动 loopback UDP STREAM echo。
+  投递，包括通过同一个 lifecycle 的 loopback UDP 投递；同一个手动 OpenSSL context
+  还会安装匹配的 1-RTT secrets，并通过同一 socket/lifecycle 路径驱动一次 quicz
+  STREAM request/echo/final-ACK；完整 OpenSSL pair transcript 也会单独验证
+  installed-key short-packet STREAM request/response 和 socket echo。
 - `run-udp-echo-loopback`：socket-backed installed-key STREAM echo，包含
   payload equality、ACK cleanup 和 recovery timer cleanup。
 - `run-udp-pto-recovery-loopback`、`run-udp-loss-recovery-loopback` 和
@@ -189,8 +191,10 @@ pub fn main() !void {
   loopback UDP 上投递双向 Initial flight，并验证一段手动 OpenSSL
   Initial/Handshake transcript 也能走同一 socket 路径；安装 OpenSSL 产出的
   Handshake secrets，并验证双向 protected Handshake CRYPTO 投递，包括通过同一个 lifecycle 的 loopback UDP 投递；
-  OpenSSL 产出的 1-RTT secrets 也会驱动 installed-key protected STREAM request/response，
-  并通过同一个 lifecycle 驱动 loopback UDP STREAM echo。运行：
+  同一个手动 OpenSSL context 还会安装 OpenSSL 产出的 1-RTT secrets，并通过同一
+  socket 路径驱动 STREAM request/echo 和 final ACK；完整 pair transcript 也会用
+  OpenSSL 产出的 1-RTT secrets 验证 installed-key protected STREAM request/response
+  与 loopback UDP STREAM echo。运行：
   `zig build run-tls-openssl-pair-transcript`。
 - [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig)：把
   OpenSSL-backed `TlsBackend` wrapper 接到现有 drive 路径，通过
@@ -302,9 +306,9 @@ pub fn main() !void {
   CRYPTO 队列，并验证 protected Initial long-packet 投递和双向 Initial flight 的
   socket-backed 投递，以及手动 OpenSSL Initial/Handshake transcript 通过同一
   socket/lifecycle 边界路由；还会验证使用 OpenSSL Handshake secrets 的 installed-key protected
-  Handshake 投递（含 socket-backed 投递）和使用
-  OpenSSL 1-RTT secrets 的 installed-key protected STREAM request/response 与
-  socket-backed STREAM echo；
+  Handshake 投递（含 socket-backed 投递）、同一个手动 context 的 1-RTT STREAM echo
+  经同一 socket/lifecycle 路径投递，以及使用 OpenSSL 1-RTT secrets 的 installed-key
+  protected STREAM request/response 与 socket-backed STREAM echo；
   `run-tls-openssl-backend-adapter` 已把 OpenSSL object 接入 adapter 路径并
   产出第一段 TLS CRYPTO flight，也能让 peer transport parameters、真实
   pair-transcript Handshake/1-RTT secrets 和入站 CRYPTO 经 callback 边界进入连接层，

@@ -111,9 +111,10 @@ Common runnable examples:
   that same socket/lifecycle boundary. The OpenSSL Handshake secrets drive
   installed-key protected Handshake CRYPTO delivery in both directions,
   including loopback UDP delivery through the quicz endpoint lifecycle. The
-  OpenSSL 1-RTT secrets also protect a quicz STREAM request/response over
-  installed-key short packets and drive a loopback UDP STREAM echo through the
-  same lifecycle.
+  same manual OpenSSL context also installs matching 1-RTT secrets and drives
+  a quicz STREAM request/echo/final-ACK exchange through the same
+  socket/lifecycle path; the global OpenSSL pair transcript still separately
+  verifies installed-key short-packet STREAM request/response and socket echo.
 - `run-udp-echo-loopback`: socket-backed installed-key STREAM echo,
   including payload equality, ACK cleanup, and recovery timer cleanup.
 - `run-udp-pto-recovery-loopback`, `run-udp-loss-recovery-loopback`, and
@@ -223,9 +224,11 @@ experimental.
   and verifies a manual OpenSSL Initial/Handshake transcript over the same
   socket path, installs OpenSSL-produced Handshake secrets, and verifies
   protected Handshake CRYPTO delivery in both directions, including loopback
-  UDP delivery through the same lifecycle. OpenSSL-produced 1-RTT
-  secrets also drive an installed-key protected STREAM request/response and a
-  loopback UDP STREAM echo through the same lifecycle.
+  UDP delivery through the same lifecycle. The same manual OpenSSL context
+  installs OpenSSL-produced 1-RTT secrets and drives a STREAM request/echo
+  plus final ACK through the same socket path; the full pair transcript also
+  verifies installed-key protected STREAM request/response and loopback UDP
+  STREAM echo with OpenSSL-produced 1-RTT secrets.
   Run with `zig build run-tls-openssl-pair-transcript`.
 - [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig):
   OpenSSL-backed `TlsBackend` wrapper that accepts quicz local transport
@@ -426,10 +429,11 @@ experimental.
   delivery for both Initial flights, manual OpenSSL Initial/Handshake
   transcript routing over the same socket/lifecycle boundary, installed-key
   protected Handshake delivery, including socket-backed delivery, using
-  OpenSSL Handshake secrets
-  and installed-key protected STREAM request/response plus socket-backed STREAM
-  echo using OpenSSL 1-RTT secrets, while recording keylog callback count/byte
-  evidence without printing key material;
+  OpenSSL Handshake secrets, same-context manual 1-RTT STREAM echo over the
+  same socket/lifecycle path, and installed-key protected STREAM
+  request/response plus socket-backed STREAM echo using OpenSSL 1-RTT secrets,
+  while recording keylog callback count/byte evidence without printing key
+  material;
   `run-tls-openssl-backend-adapter` wires an OpenSSL object into the adapter
   path far enough to emit the first TLS CRYPTO flight and deliver peer
   transport parameters, real pair-transcript Handshake/1-RTT secrets, and
