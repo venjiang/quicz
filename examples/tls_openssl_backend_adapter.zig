@@ -318,6 +318,18 @@ fn copyOpenSslServerCrypto(level: usize, out: []u8) ExampleError![]const u8 {
     return out[0..written_len];
 }
 
+fn copyOpenSslClientCrypto(level: usize, out: []u8) ExampleError![]const u8 {
+    var written_len: usize = 0;
+    const copied = c.quicz_openssl_pair_transcript_copy_client_crypto(
+        @intCast(level),
+        out.ptr,
+        out.len,
+        &written_len,
+    );
+    try require(copied == 1);
+    return out[0..written_len];
+}
+
 fn copyOpenSslClientPeerTransportParameters(out: []u8) ExampleError![]const u8 {
     var written_len: usize = 0;
     const copied = c.quicz_openssl_pair_transcript_copy_client_peer_transport_parameters(
@@ -844,6 +856,32 @@ pub fn main() !void {
     try require(c.quicz_openssl_tls_backend_local_transport_parameters_len(openssl_server_probe_context) == transcript_local_transport_parameters.server.len);
     try require(!c.quicz_openssl_tls_backend_handshake_confirmed(openssl_server_probe_context));
 
+    var server_probe_client_initial_buf: [8192]u8 = undefined;
+    const server_probe_client_initial = try copyOpenSslClientCrypto(0, &server_probe_client_initial_buf);
+    try require(server_probe_client_initial.len == transcript.client_out_level_bytes[0]);
+    try require(statusIsOk(c.quicz_openssl_tls_backend_receive(
+        openssl_server_probe_context,
+        c.QUICZ_TLS_BACKEND_INITIAL,
+        server_probe_client_initial.ptr,
+        server_probe_client_initial.len,
+    )));
+    var server_probe_initial_out_buf: [8192]u8 = undefined;
+    var server_probe_initial_out_len: usize = 0;
+    try require(statusIsOk(c.quicz_openssl_tls_backend_pull(
+        openssl_server_probe_context,
+        c.QUICZ_TLS_BACKEND_INITIAL,
+        server_probe_initial_out_buf[0..].ptr,
+        server_probe_initial_out_buf.len,
+        &server_probe_initial_out_len,
+    )));
+    try require(server_probe_initial_out_len > 0);
+    try require(c.quicz_openssl_tls_backend_received_crypto_len(openssl_server_probe_context) == server_probe_client_initial.len);
+    try require(c.quicz_openssl_tls_backend_generated_crypto_len(openssl_server_probe_context) == server_probe_initial_out_len);
+    try require(c.quicz_openssl_tls_backend_peer_transport_parameters_len(openssl_server_probe_context) == transcript_local_transport_parameters.client.len);
+    try require(c.quicz_openssl_tls_backend_got_transport_params_callbacks(openssl_server_probe_context) == 1);
+    try require(c.quicz_openssl_tls_backend_yield_secret_callbacks(openssl_server_probe_context) >= 2);
+    try require(!c.quicz_openssl_tls_backend_handshake_confirmed(openssl_server_probe_context));
+
     const openssl_context = c.quicz_openssl_tls_backend_new() orelse return error.OutOfMemory;
     defer c.quicz_openssl_tls_backend_free(openssl_context);
 
@@ -1109,7 +1147,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_confirmed={} adapter_keylog={}/{} adapter_pto={}/{}/{}/{} adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
+        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_initial={}/{} server_probe_confirmed={} adapter_keylog={}/{} adapter_pto={}/{}/{}/{} adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
         .{
             transcript.client_keylog_callbacks,
             transcript.server_keylog_callbacks,
@@ -1117,6 +1155,8 @@ pub fn main() !void {
             transcript.server_keylog_bytes,
             transcript.client_peer_transport_parameters_len,
             c.quicz_openssl_tls_backend_local_transport_parameters_len(openssl_server_probe_context),
+            c.quicz_openssl_tls_backend_received_crypto_len(openssl_server_probe_context),
+            server_probe_initial_out_len,
             c.quicz_openssl_tls_backend_handshake_confirmed(openssl_server_probe_context),
             c.quicz_openssl_tls_backend_keylog_callbacks(openssl_context),
             c.quicz_openssl_tls_backend_keylog_bytes(openssl_context),

@@ -44,6 +44,13 @@ struct quicz_openssl_tls_backend {
     int last_ssl_error;
 };
 
+static const unsigned char quicz_openssl_backend_demo_psk[] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+    0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+};
+
 static int crypto_send_cb(SSL *ssl, const unsigned char *buf, size_t buf_len, size_t *consumed, void *arg) {
     (void)ssl;
     struct quicz_openssl_tls_backend *backend = arg;
@@ -191,6 +198,41 @@ static const OSSL_DISPATCH quicz_openssl_tls_dispatch[] = {
     { 0, NULL },
 };
 
+static unsigned int psk_client_cb(
+    SSL *ssl,
+    const char *hint,
+    char *identity,
+    unsigned int max_identity_len,
+    unsigned char *psk,
+    unsigned int max_psk_len
+) {
+    (void)ssl;
+    (void)hint;
+    const char *identity_value = "quicz-psk";
+    if (strlen(identity_value) + 1 > max_identity_len || sizeof(quicz_openssl_backend_demo_psk) > max_psk_len) {
+        return 0;
+    }
+    strcpy(identity, identity_value);
+    memcpy(psk, quicz_openssl_backend_demo_psk, sizeof(quicz_openssl_backend_demo_psk));
+    return (unsigned int)sizeof(quicz_openssl_backend_demo_psk);
+}
+
+static unsigned int psk_server_cb(
+    SSL *ssl,
+    const char *identity,
+    unsigned char *psk,
+    unsigned int max_psk_len
+) {
+    (void)ssl;
+    if (identity == NULL ||
+        strcmp(identity, "quicz-psk") != 0 ||
+        sizeof(quicz_openssl_backend_demo_psk) > max_psk_len) {
+        return 0;
+    }
+    memcpy(psk, quicz_openssl_backend_demo_psk, sizeof(quicz_openssl_backend_demo_psk));
+    return (unsigned int)sizeof(quicz_openssl_backend_demo_psk);
+}
+
 static void *quicz_openssl_tls_backend_new_for_role(int is_client) {
     struct quicz_openssl_tls_backend *backend = calloc(1, sizeof(*backend));
     if (backend == NULL) {
@@ -202,6 +244,16 @@ static void *quicz_openssl_tls_backend_new_for_role(int is_client) {
         free(backend);
         return NULL;
     }
+    if (!SSL_CTX_set_min_proto_version(backend->ctx, TLS1_3_VERSION) ||
+        !SSL_CTX_set_max_proto_version(backend->ctx, TLS1_3_VERSION) ||
+        !SSL_CTX_set_cipher_list(backend->ctx, "PSK") ||
+        !SSL_CTX_set_ciphersuites(backend->ctx, "TLS_AES_128_GCM_SHA256")) {
+        SSL_CTX_free(backend->ctx);
+        free(backend);
+        return NULL;
+    }
+    SSL_CTX_set_psk_client_callback(backend->ctx, psk_client_cb);
+    SSL_CTX_set_psk_server_callback(backend->ctx, psk_server_cb);
 
     backend->ssl = SSL_new(backend->ctx);
     if (backend->ssl == NULL) {

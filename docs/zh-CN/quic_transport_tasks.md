@@ -160,9 +160,10 @@ installation、packet number space、ACK/loss/PTO、key discard、close 和 rout
   `handshake_confirmed` callback，在 peer transport parameters、Handshake/1-RTT
   secrets 和 OpenSSL recv/release 对入站 Handshake CRYPTO 的消费证据均可用后报告确认，因此
   `run-tls-openssl-backend-adapter` 现在会打印 `backend_confirmed=true`。同一
-  translate-c header 也暴露 OpenSSL server-role backend 构造入口，并验证服务端上下文可
-  设置本端 transport parameters 且不会在未驱动握手前误报 confirmed；完整 server-side
-  backend 驱动仍待接入。
+  translate-c header 也暴露 OpenSSL server-role backend 构造入口。backend C harness
+  现在配置 TLS 1.3 + 固定示例 PSK，并验证服务端上下文可设置本端 transport
+  parameters、消费真实 client Initial CRYPTO、产出 server Initial CRYPTO，且不会在
+  完整握手前误报 confirmed；完整 server-side backend 与 quicz 连接层驱动仍待接入。
 - 2026-06-05：新增 `examples/tls_openssl_pair_transcript.zig` 和一个小 C
   harness，使用固定示例 PSK 完成 OpenSSL client/server callback-mode TLS
   transcript。该 harness 按 OpenSSL protection level 路由 CRYPTO bytes，验证双端无
