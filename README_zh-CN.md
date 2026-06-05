@@ -56,6 +56,8 @@ multi-path、qlog、GSO/GRO、PMTU discovery 和高级 congestion-controller sel
 里程碑的必需条件。
 
 可验证 transport 实现任务计划见 [`docs/zh-CN/quic_transport_tasks.md`](docs/zh-CN/quic_transport_tasks.md)。
+关键名词、系统架构、核心协议流程和开发扩展入口见
+[`docs/zh-CN/architecture.md`](docs/zh-CN/architecture.md)。
 更详细的设计和逐功能说明见 [`docs/zh-CN/`](docs/zh-CN/) 目录。
 
 ## 快速开始
@@ -301,6 +303,7 @@ pub fn main() !void {
 ## 高级主题
 
 - [传输任务矩阵](docs/zh-CN/quic_transport_tasks.md)：当前 RFC 覆盖、剩余工作和验证证据。
+- [架构与术语](docs/zh-CN/architecture.md)：关键名词、模块边界、核心协议流程、开发扩展和排障入口。
 - [设计说明](docs/zh-CN/spec.md)：当前架构、协议范围和未支持区域。
 - 包保护：QUIC v1/v2 Initial key、Retry integrity、protected packet helper 和 key-update state。
 - 端点生命周期：DCID routing、route retirement、stateless reset lookup/emission 和 endpoint recovery timer。

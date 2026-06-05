@@ -61,6 +61,8 @@ chosen interop target.
 
 For the verifiable transport implementation task plan, see
 [`docs/en/quic_transport_tasks.md`](docs/en/quic_transport_tasks.md).
+For terminology, architecture, core protocol flows, and extension entry points,
+see [`docs/en/architecture.md`](docs/en/architecture.md).
 For more detailed design and per-feature notes, see the [`docs/en/`](docs/en/) directory.
 
 ## Quick Start
@@ -425,6 +427,7 @@ experimental.
 ## Advanced Topics
 
 - [Transport task matrix](docs/en/quic_transport_tasks.md): current RFC coverage, remaining work, and verification evidence.
+- [Architecture and terminology](docs/en/architecture.md): key terms, module boundaries, core protocol flows, extension points, and troubleshooting entry points.
 - [Design notes](docs/en/spec.md): current architecture, protocol scope, and unsupported areas.
 - Packet protection: QUIC v1/v2 Initial keys, Retry integrity, protected packet helpers, and key-update state.
 - Endpoint lifecycle: DCID routing, route retirement, stateless reset lookup/emission, and endpoint recovery timers.
