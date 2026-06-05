@@ -240,6 +240,14 @@ const ProtectedInitialDelivery = struct {
     datagram_bytes: usize,
 };
 
+const SocketInitialDelivery = struct {
+    client_crypto_bytes: usize,
+    client_datagram_bytes: usize,
+    server_crypto_bytes: usize,
+    server_datagram_bytes: usize,
+    client_ack_bytes: usize,
+};
+
 const ProtectedHandshakeDelivery = struct {
     client_crypto_bytes: usize,
     client_datagram_bytes: usize,
@@ -316,6 +324,168 @@ fn verifyProtectedInitialCryptoDelivery(expected_len: usize) !ProtectedInitialDe
     return .{
         .crypto_bytes = read_len,
         .datagram_bytes = protected.len,
+    };
+}
+
+fn verifySocketBackedInitialCryptoDelivery(
+    expected_client_len: usize,
+    expected_server_len: usize,
+) !SocketInitialDelivery {
+    var client_initial_crypto: [8192]u8 = undefined;
+    var server_initial_crypto: [8192]u8 = undefined;
+    const copied_client = try copyOpenSslCrypto(true, 0, &client_initial_crypto);
+    const copied_server = try copyOpenSslCrypto(false, 0, &server_initial_crypto);
+    try require(copied_client.len == expected_client_len);
+    try require(copied_server.len == expected_server_len);
+    try require(copied_client.len > 0);
+    try require(copied_server.len > 0);
+
+    const allocator = std.heap.page_allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client_socket = try bindLoopbackUdp(io);
+    defer client_socket.close(io);
+    var server_socket = try bindLoopbackUdp(io);
+    defer server_socket.close(io);
+
+    const client_address = try udp4Address(client_socket.address);
+    const server_address = try udp4Address(server_socket.address);
+    try require(client_address.port != 0);
+    try require(server_address.port != 0);
+    try require(client_address.port != server_address.port);
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const client_handle: u64 = 101;
+    const server_handle: u64 = 111;
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try quicz.Connection.init(allocator, .client, .{
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try quicz.Connection.init(allocator, .server, .{
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+
+    const client_path = try udp4Tuple(client_socket.address, server_socket.address);
+    const server_path = try udp4Tuple(server_socket.address, client_socket.address);
+    try client_lifecycle.registerConnectionId(client_handle, &client_scid, client_path, .{
+        .active_migration_disabled = true,
+    });
+    try server_lifecycle.registerConnectionId(server_handle, &original_dcid, server_path, .{
+        .active_migration_disabled = true,
+    });
+    try server_lifecycle.registerConnectionId(server_handle, &server_scid, server_path, .{
+        .active_migration_disabled = true,
+    });
+
+    try client.sendCryptoInSpace(.initial, copied_client);
+    const client_datagram = (try client_lifecycle.pollProtectedLongDatagram(
+        client_handle,
+        &client,
+        80,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        .{ .initial = secrets.client },
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_datagram);
+    try client_socket.send(io, &server_socket.address, client_datagram);
+
+    var server_receive_buf: [9000]u8 = undefined;
+    var client_receive_buf: [9000]u8 = undefined;
+    const client_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const client_route = try server_lifecycle.processRoutedProtectedInitialDatagram(
+        server_handle,
+        &server,
+        client_received.path,
+        81,
+        &original_dcid,
+        client_received.data,
+    );
+    try require(client_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, client_route.destination_connection_id.asSlice(), &original_dcid));
+    try require(server.pendingAckLargest(.initial) == 0);
+
+    var read_buf: [8192]u8 = undefined;
+    const client_read_len = (try server.recvCryptoInSpace(.initial, &read_buf)) orelse return error.UnexpectedState;
+    try require(client_read_len == copied_client.len);
+    try require(std.mem.eql(u8, read_buf[0..client_read_len], copied_client));
+    try require((try server.recvCryptoInSpace(.initial, &read_buf)) == null);
+
+    try server.sendCryptoInSpace(.initial, copied_server);
+    const server_datagram = (try server_lifecycle.pollProtectedLongDatagram(
+        server_handle,
+        &server,
+        82,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(server_datagram);
+    try server_socket.send(io, &client_socket.address, server_datagram);
+
+    const server_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+    const server_route = try client_lifecycle.processRoutedProtectedInitialDatagram(
+        client_handle,
+        &client,
+        server_received.path,
+        83,
+        &original_dcid,
+        server_received.data,
+    );
+    try require(server_route.connection_id == client_handle);
+    try require(std.mem.eql(u8, server_route.destination_connection_id.asSlice(), &client_scid));
+
+    const server_read_len = (try client.recvCryptoInSpace(.initial, &read_buf)) orelse return error.UnexpectedState;
+    try require(server_read_len == copied_server.len);
+    try require(std.mem.eql(u8, read_buf[0..server_read_len], copied_server));
+    try require((try client.recvCryptoInSpace(.initial, &read_buf)) == null);
+    try require(client.pendingAckLargest(.initial) == 0);
+
+    const client_ack = (try client_lifecycle.pollProtectedLongDatagram(
+        client_handle,
+        &client,
+        84,
+        &server_scid,
+        &client_scid,
+        &[_]u8{},
+        .{ .initial = secrets.client },
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_ack);
+    try client_socket.send(io, &server_socket.address, client_ack);
+
+    const client_ack_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const client_ack_route = try server_lifecycle.processRoutedProtectedInitialDatagram(
+        server_handle,
+        &server,
+        client_ack_received.path,
+        85,
+        &original_dcid,
+        client_ack_received.data,
+    );
+    try require(client_ack_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, client_ack_route.destination_connection_id.asSlice(), &server_scid));
+    try require(server.bytesInFlight(.initial) == 0);
+
+    return .{
+        .client_crypto_bytes = client_read_len,
+        .client_datagram_bytes = client_datagram.len,
+        .server_crypto_bytes = server_read_len,
+        .server_datagram_bytes = server_datagram.len,
+        .client_ack_bytes = client_ack.len,
     };
 }
 
@@ -941,6 +1111,10 @@ pub fn main() !void {
         &client_connection,
     );
     const protected_initial = try verifyProtectedInitialCryptoDelivery(result.client_out_level_bytes[0]);
+    const socket_initial = try verifySocketBackedInitialCryptoDelivery(
+        result.client_out_level_bytes[0],
+        result.server_out_level_bytes[0],
+    );
     const protected_handshake = try verifyProtectedHandshakeCryptoDelivery(
         result.client_out_level_bytes[2],
         result.server_out_level_bytes[2],
@@ -979,7 +1153,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        " quicz_delivery={}/{}/{}/{}/{}/{} protected_initial={}/{} protected_handshake={}/{}/{}/{} socket_handshake={}/{}/{}/{}/{}/{} protected_application={}/{}/{}/{} socket_echo={}/{}/{}/{}/{}",
+        " quicz_delivery={}/{}/{}/{}/{}/{} protected_initial={}/{} socket_initial={}/{}/{}/{}/{} protected_handshake={}/{}/{}/{} socket_handshake={}/{}/{}/{}/{}/{} protected_application={}/{}/{}/{} socket_echo={}/{}/{}/{}/{}",
         .{
             client_initial_bytes,
             server_initial_bytes,
@@ -989,6 +1163,11 @@ pub fn main() !void {
             server_application_bytes,
             protected_initial.crypto_bytes,
             protected_initial.datagram_bytes,
+            socket_initial.client_crypto_bytes,
+            socket_initial.client_datagram_bytes,
+            socket_initial.server_crypto_bytes,
+            socket_initial.server_datagram_bytes,
+            socket_initial.client_ack_bytes,
             protected_handshake.client_crypto_bytes,
             protected_handshake.client_datagram_bytes,
             protected_handshake.server_crypto_bytes,

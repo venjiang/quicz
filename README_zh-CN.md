@@ -83,10 +83,10 @@ zig build run-initial-keys
   transport-parameter 和 traffic-secret callback，并把生成的 CRYPTO bytes 映射进
   quicz Initial/Handshake/Application CRYPTO 队列；client Initial CRYPTO bytes
   还会经 quicz protected Initial long-packet helper 发送，并由 server connection 读回；
-  OpenSSL Handshake secrets 也会驱动双向 installed-key protected Handshake CRYPTO 投递，
-  包括通过 quicz endpoint lifecycle 的 loopback UDP 投递；OpenSSL 1-RTT secrets
-  还会保护一次 quicz STREAM request/response，并通过同一个 lifecycle 驱动 loopback
-  UDP STREAM echo。
+  双向 Initial flight 也会通过 quicz endpoint lifecycle 在 loopback UDP 上投递；
+  OpenSSL Handshake secrets 也会驱动双向 installed-key protected Handshake CRYPTO
+  投递，包括通过同一个 lifecycle 的 loopback UDP 投递；OpenSSL 1-RTT secrets 还会保护
+  一次 quicz STREAM request/response，并通过同一个 lifecycle 驱动 loopback UDP STREAM echo。
 - `run-udp-echo-loopback`：socket-backed installed-key STREAM echo 证据，包含
   payload equality、ACK cleanup 和 recovery timer cleanup。
 - `run-udp-pto-recovery-loopback`、`run-udp-loss-recovery-loopback` 和
@@ -170,10 +170,11 @@ pub fn main() !void {
   protection level 分离的 CRYPTO handoff、peer transport-parameter callback，以及双端
   Handshake/1-RTT traffic-secret callback，并把生成的 CRYPTO bytes 投递到 quicz
   packet-number-space CRYPTO 队列；同时会把 client Initial CRYPTO bytes 经 quicz
-  protected Initial long-packet helper 组包，安装 OpenSSL 产出的 Handshake secrets，
-  并验证双向 protected Handshake CRYPTO 投递，包括通过 quicz endpoint lifecycle 的
-  loopback UDP 投递；OpenSSL 产出的 1-RTT secrets 也会驱动 installed-key protected
-  STREAM request/response，并通过同一个 lifecycle 驱动 loopback UDP STREAM echo。运行：
+  protected Initial long-packet helper 组包，并通过 quicz endpoint lifecycle 在
+  loopback UDP 上投递双向 Initial flight；安装 OpenSSL 产出的 Handshake secrets，并验证
+  双向 protected Handshake CRYPTO 投递，包括通过同一个 lifecycle 的 loopback UDP 投递；
+  OpenSSL 产出的 1-RTT secrets 也会驱动 installed-key protected STREAM request/response，
+  并通过同一个 lifecycle 驱动 loopback UDP STREAM echo。运行：
   `zig build run-tls-openssl-pair-transcript`。
 - [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig)：把
   OpenSSL-backed `TlsBackend` wrapper 接到现有 drive 路径，通过
@@ -273,9 +274,9 @@ pub fn main() !void {
   `run-tls-openssl-probe` 已链接 OpenSSL 并验证 QUIC TLS callback API，
   `run-tls-openssl-pair-transcript` 已完成 OpenSSL client/server callback-mode TLS
   transcript，按 protection level 分离 CRYPTO handoff，把生成的 bytes 映射进 quicz
-  CRYPTO 队列，并验证 client Initial flight 的 protected Initial long-packet 投递，以及
-  使用 OpenSSL Handshake secrets 的 installed-key protected Handshake 投递（含
-  socket-backed 投递）和使用
+  CRYPTO 队列，并验证 protected Initial long-packet 投递和双向 Initial flight 的
+  socket-backed 投递，以及使用 OpenSSL Handshake secrets 的 installed-key protected
+  Handshake 投递（含 socket-backed 投递）和使用
   OpenSSL 1-RTT secrets 的 installed-key protected STREAM request/response 与
   socket-backed STREAM echo；
   `run-tls-openssl-backend-adapter` 已把 OpenSSL object 接入 adapter 路径并
