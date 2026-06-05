@@ -387,6 +387,16 @@ enum quicz_tls_backend_status quicz_openssl_tls_backend_pull_1rtt_traffic_secret
     return QUICZ_TLS_BACKEND_OK;
 }
 
+bool quicz_openssl_tls_backend_handshake_confirmed(void *context) {
+    const struct quicz_openssl_tls_backend *backend = context;
+    return backend != NULL &&
+        backend->peer_transport_parameters_available &&
+        backend->handshake_local_secret_available &&
+        backend->handshake_peer_secret_available &&
+        backend->one_rtt_local_secret_available &&
+        backend->one_rtt_peer_secret_available;
+}
+
 int quicz_openssl_tls_backend_callbacks_set(void *context) {
     const struct quicz_openssl_tls_backend *backend = context;
     return backend != NULL ? backend->callbacks_set : 0;

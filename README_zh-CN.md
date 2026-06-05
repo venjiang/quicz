@@ -83,8 +83,8 @@ zig build run-initial-keys
   Handshake CRYPTO 作为 protected Handshake datagram 通过 loopback UDP 投递，复用匹配 Handshake/1-RTT
   secrets，并用 adapter 安装的 client keys 和匹配 peer transcript secrets 驱动
   loopback UDP 1-RTT STREAM echo，并通过同一个 lifecycle owner 服务 Application
-  PTO；建模 handshake confirmation 后会显式丢弃双端 Handshake packet-number space
-  和 Handshake keys，随后通过同一个
+  PTO；OpenSSL-backed `handshake_confirmed` callback 确认 client 后会显式丢弃双端
+  Handshake packet-number space 和 Handshake keys，随后通过同一个
   socket/lifecycle loop owner 投递 protected close 并完成 route cleanup。
 - `run-tls-openssl-pair-transcript`：OpenSSL client/server callback-mode TLS
   transcript，覆盖按 protection level 分离的 CRYPTO handoff，以及双端 peer
@@ -207,8 +207,9 @@ pub fn main() !void {
   Initial CRYPTO flight 作为 protected Initial datagram 通过 loopback UDP 投递，把真实
   pair-transcript Handshake CRYPTO 作为 protected Handshake datagram 通过 loopback UDP
   投递，并用 adapter 安装的 client keys 和匹配 peer transcript secrets 驱动 loopback UDP 1-RTT STREAM echo，
-  同时通过同一个 lifecycle owner 服务 Application PTO；建模 handshake confirmation 后
-  显式丢弃双端 Handshake packet-number space 和 Handshake keys，随后通过同一个
+  同时通过同一个 lifecycle owner 服务 Application PTO；OpenSSL-backed
+  `handshake_confirmed` callback 确认 client 后显式丢弃双端 Handshake packet-number
+  space 和 Handshake keys，随后通过同一个
   socket/lifecycle loop owner 投递 protected close 并完成 route cleanup。输出也会证明
   已消费的 transcript transport-parameter bytes 与连接层应用的 peer bytes 一致，同时打印
   transcript keylog 证据和当前 wrapper keylog 边界。
@@ -318,8 +319,9 @@ pub fn main() !void {
   并把 adapter 产出的 Initial CRYPTO flight 和真实 pair-transcript Handshake CRYPTO
   作为 protected Initial/Handshake datagram 通过 loopback UDP 投递，随后用 adapter
   安装的 client keys 和匹配 peer transcript secrets 驱动 loopback UDP 1-RTT STREAM
-  echo，并通过同一个 lifecycle owner 服务 Application PTO；建模 handshake confirmation 后
-  显式丢弃双端 Handshake packet-number space 和 Handshake keys，并通过同一个
+  echo，并通过同一个 lifecycle owner 服务 Application PTO；OpenSSL-backed
+  `handshake_confirmed` callback 确认 client 后显式丢弃双端 Handshake packet-number
+  space 和 Handshake keys，并通过同一个
   socket/lifecycle loop owner 投递 protected close 与清理 route；完整 endpoint-owned live
   TLS handshake/socket loop 仍待实现。
 

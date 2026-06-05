@@ -93,8 +93,9 @@ Common runnable examples:
   Handshake datagram over loopback UDP, reuses the matching Handshake/1-RTT
   secrets, and drives a loopback UDP 1-RTT STREAM echo with adapter-installed
   client keys and matching peer transcript secrets, including Application PTO
-  service through the same lifecycle owner. After modeled handshake confirmation, it
-  explicitly discards both Handshake packet-number spaces and Handshake keys,
+  service through the same lifecycle owner. After the OpenSSL-backed
+  `handshake_confirmed` callback confirms the client, it explicitly discards
+  both Handshake packet-number spaces and Handshake keys,
   then sends protected close and completes route cleanup through one
   socket/lifecycle loop owner.
 - `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
@@ -245,8 +246,9 @@ experimental.
   CRYPTO through a protected Handshake datagram over loopback UDP, and drives a
   loopback UDP 1-RTT STREAM echo with adapter-installed client keys and
   matching peer transcript secrets, including Application PTO service through
-  the same lifecycle owner. After modeled handshake confirmation, it explicitly
-  discards both Handshake packet-number spaces and Handshake keys, then sends
+  the same lifecycle owner. After the OpenSSL-backed `handshake_confirmed`
+  callback confirms the client, it explicitly discards both Handshake
+  packet-number spaces and Handshake keys, then sends
   protected close and completes route cleanup through one socket/lifecycle loop
   owner. Run with
   `zig build run-tls-openssl-backend-adapter`.
@@ -444,9 +446,10 @@ experimental.
   CRYPTO and real pair-transcript Handshake CRYPTO over loopback UDP as
   protected Initial/Handshake datagrams, then drives loopback UDP 1-RTT STREAM
   echo with adapter-installed client keys and matching peer transcript secrets,
-  services an Application PTO probe through the same lifecycle owner, explicitly
-  discards both Handshake packet-number spaces and Handshake keys after modeled
-  handshake confirmation, then sends protected close and completes route cleanup
+  services an Application PTO probe through the same lifecycle owner, confirms
+  the client through the OpenSSL-backed `handshake_confirmed` callback,
+  explicitly discards both Handshake packet-number spaces and Handshake keys,
+  then sends protected close and completes route cleanup
   through one socket/lifecycle loop owner. The adapter output also prints that
   the consumed transcript transport-parameter bytes match the connection-applied
   peer bytes, plus transcript keylog evidence and the current wrapper keylog

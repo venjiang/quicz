@@ -255,6 +255,10 @@ fn opensslBackendPullOneRttTrafficSecrets(
     return tlsStatus(status);
 }
 
+fn opensslBackendHandshakeConfirmed(context: *anyopaque) callconv(.c) bool {
+    return c.quicz_openssl_tls_backend_handshake_confirmed(context);
+}
+
 fn fixedWriter(buffer: []u8) FixedWriter {
     return .{ .buffer = buffer };
 }
@@ -838,6 +842,7 @@ pub fn main() !void {
         .pull_peer_transport_parameters = opensslBackendPullPeerTransportParameters,
         .pull_handshake_traffic_secrets = opensslBackendPullHandshakeTrafficSecrets,
         .pull_1rtt_traffic_secrets = opensslBackendPullOneRttTrafficSecrets,
+        .handshake_confirmed = opensslBackendHandshakeConfirmed,
     };
 
     var connection = try quicz.Connection.init(allocator, .client, .{
@@ -1011,7 +1016,8 @@ pub fn main() !void {
     try require(!application_progress.zero_rtt_keys_installed);
     try require(application_progress.inbound_bytes == 0);
     try require(application_progress.outbound_chunks == 0);
-    try require(!application_progress.handshake_confirmed);
+    try require(application_progress.handshake_confirmed);
+    try require(connection.handshakeConfirmed());
     try require(connection.hasOneRttProtectionKeys());
 
     try peer.installOneRttTrafficSecrets(.{
@@ -1020,7 +1026,6 @@ pub fn main() !void {
     });
     try require(connection.hasHandshakeProtectionKeys());
     try require(peer.hasHandshakeProtectionKeys());
-    try connection.confirmHandshake();
     try peer.confirmHandshake();
     try connection.discardPacketNumberSpace(.handshake);
     try peer.discardPacketNumberSpace(.handshake);
