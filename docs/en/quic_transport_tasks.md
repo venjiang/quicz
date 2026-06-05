@@ -186,8 +186,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   The backend C harness now configures TLS 1.3 with a fixed example PSK and
   verifies that the server context can install local transport parameters,
   consume real client Initial CRYPTO, produce server Initial CRYPTO, and avoid
-  reporting confirmed before the full handshake; full server-side backend
-  driving through the quicz connection layer remains pending.
+  reporting confirmed before the full handshake. The same example also delivers
+  client Initial CRYPTO into a quicz server connection through a protected
+  Initial datagram, drives the OpenSSL server backend with
+  `driveCryptoBackendInSpace(.initial)`, packetizes the produced server Initial
+  CRYPTO back to the client through quicz, and verifies peer transport
+  parameters plus Handshake keys return to the connection layer. The full
+  server-side Handshake/Application backend loop remains pending.
 - 2026-06-05: Added `examples/tls_openssl_pair_transcript.zig` plus a small C
   harness that completes an OpenSSL client/server callback-mode TLS transcript
   using a fixed example PSK. The harness routes CRYPTO bytes by OpenSSL

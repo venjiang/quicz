@@ -163,7 +163,12 @@ installation、packet number space、ACK/loss/PTO、key discard、close 和 rout
   translate-c header 也暴露 OpenSSL server-role backend 构造入口。backend C harness
   现在配置 TLS 1.3 + 固定示例 PSK，并验证服务端上下文可设置本端 transport
   parameters、消费真实 client Initial CRYPTO、产出 server Initial CRYPTO，且不会在
-  完整握手前误报 confirmed；完整 server-side backend 与 quicz 连接层驱动仍待接入。
+  完整握手前误报 confirmed；同一示例还会用 quicz protected Initial datagram 把
+  client Initial CRYPTO 送入 server connection，通过
+  `driveCryptoBackendInSpace(.initial)` 驱动 OpenSSL server backend 产出 server
+  Initial CRYPTO，再由 quicz server 组包给 client 解包，并验证 peer transport
+  parameters 与 Handshake keys 回到连接层。完整 server-side Handshake/Application
+  backend loop 仍待接入。
 - 2026-06-05：新增 `examples/tls_openssl_pair_transcript.zig` 和一个小 C
   harness，使用固定示例 PSK 完成 OpenSSL client/server callback-mode TLS
   transcript。该 harness 按 OpenSSL protection level 路由 CRYPTO bytes，验证双端无

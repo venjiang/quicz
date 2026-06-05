@@ -40,6 +40,15 @@ const AdapterInitialSocketDelivery = struct {
     ack_bytes: usize,
 };
 
+const AdapterServerInitialBackendConnectionDrive = struct {
+    inbound_crypto_bytes: usize,
+    outbound_crypto_bytes: usize,
+    server_datagram_bytes: usize,
+    client_received_crypto_bytes: usize,
+    peer_transport_parameters_bytes: usize,
+    handshake_keys_installed: bool,
+};
+
 const AdapterHandshakeSocketDelivery = struct {
     crypto_bytes: usize,
     datagram_bytes: usize,
@@ -437,6 +446,106 @@ fn encodeTranscriptTransportParameters(
     return .{
         .client = try client.encodeLocalTransportParameters(client_out),
         .server = try server.encodeLocalTransportParameters(server_out),
+    };
+}
+
+fn verifyAdapterServerInitialBackendConnectionDrive(
+    allocator: std.mem.Allocator,
+    client_initial_crypto: []const u8,
+    expected_peer_transport_parameters_len: usize,
+) !AdapterServerInitialBackendConnectionDrive {
+    const server_backend_context = c.quicz_openssl_tls_backend_new_server() orelse return error.OutOfMemory;
+    defer c.quicz_openssl_tls_backend_free(server_backend_context);
+
+    var server_tls_backend = quicz.TlsBackend{
+        .context = server_backend_context,
+        .receive = opensslBackendReceive,
+        .pull = opensslBackendPull,
+        .set_local_transport_parameters = opensslBackendSetLocalTransportParameters,
+        .pull_peer_transport_parameters = opensslBackendPullPeerTransportParameters,
+        .pull_handshake_traffic_secrets = opensslBackendPullHandshakeTrafficSecrets,
+        .pull_1rtt_traffic_secrets = opensslBackendPullOneRttTrafficSecrets,
+        .handshake_confirmed = opensslBackendHandshakeConfirmed,
+    };
+
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &adapter_original_dcid);
+    var client = try quicz.Connection.init(allocator, .client, .{
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try quicz.Connection.init(allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try client.sendCryptoInSpace(.initial, client_initial_crypto);
+    const client_datagram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        40,
+        &adapter_original_dcid,
+        &adapter_client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_datagram);
+    try require(client_datagram.len >= 1200);
+
+    try server.processProtectedLongDatagramInSpace(.initial, 41, secrets.client, client_datagram);
+    var scratch: [8192]u8 = undefined;
+    const first_progress = try server.driveCryptoBackendInSpace(
+        .initial,
+        server_tls_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(first_progress.local_transport_parameters_bytes > 0);
+    try require(first_progress.inbound_chunks == 1);
+    try require(first_progress.inbound_bytes == client_initial_crypto.len);
+    try require(first_progress.outbound_chunks == 1);
+    try require(first_progress.outbound_bytes > 0);
+    try require(!first_progress.peer_transport_parameters_applied);
+    try require(!first_progress.handshake_confirmed);
+    try require(c.quicz_openssl_tls_backend_received_crypto_len(server_backend_context) == client_initial_crypto.len);
+    try require(c.quicz_openssl_tls_backend_generated_crypto_len(server_backend_context) == first_progress.outbound_bytes);
+    try require(c.quicz_openssl_tls_backend_peer_transport_parameters_len(server_backend_context) == expected_peer_transport_parameters_len);
+
+    const second_progress = try server.driveCryptoBackendInSpace(
+        .initial,
+        server_tls_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(second_progress.peer_transport_parameters_applied);
+    try require(second_progress.peer_transport_parameters_bytes == expected_peer_transport_parameters_len);
+    try require(second_progress.handshake_keys_installed);
+    try require(second_progress.inbound_bytes == 0);
+    try require(second_progress.outbound_chunks == 0);
+    try require(!second_progress.handshake_confirmed);
+
+    const server_datagram = (try server.pollProtectedLongDatagram(
+        42,
+        &adapter_client_scid,
+        &adapter_server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(server_datagram);
+    try require(server_datagram.len > 0);
+
+    try client.processProtectedLongDatagramInSpace(.initial, 43, secrets.server, server_datagram);
+    const client_received_crypto_len = (try client.recvCryptoInSpace(.initial, &scratch)) orelse return error.UnexpectedState;
+    try require(client_received_crypto_len == first_progress.outbound_bytes);
+    try require((try client.recvCryptoInSpace(.initial, &scratch)) == null);
+
+    return .{
+        .inbound_crypto_bytes = first_progress.inbound_bytes,
+        .outbound_crypto_bytes = first_progress.outbound_bytes,
+        .server_datagram_bytes = server_datagram.len,
+        .client_received_crypto_bytes = client_received_crypto_len,
+        .peer_transport_parameters_bytes = second_progress.peer_transport_parameters_bytes,
+        .handshake_keys_installed = second_progress.handshake_keys_installed,
     };
 }
 
@@ -881,6 +990,11 @@ pub fn main() !void {
     try require(c.quicz_openssl_tls_backend_got_transport_params_callbacks(openssl_server_probe_context) == 1);
     try require(c.quicz_openssl_tls_backend_yield_secret_callbacks(openssl_server_probe_context) >= 2);
     try require(!c.quicz_openssl_tls_backend_handshake_confirmed(openssl_server_probe_context));
+    const server_connection_probe = try verifyAdapterServerInitialBackendConnectionDrive(
+        allocator,
+        server_probe_client_initial,
+        transcript_local_transport_parameters.client.len,
+    );
 
     const openssl_context = c.quicz_openssl_tls_backend_new() orelse return error.OutOfMemory;
     defer c.quicz_openssl_tls_backend_free(openssl_context);
@@ -1147,7 +1261,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_initial={}/{} server_probe_confirmed={} adapter_keylog={}/{} adapter_pto={}/{}/{}/{} adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
+        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_initial={}/{} server_connection_initial={}/{}/{}/{}/{}/{} server_probe_confirmed={}\n",
         .{
             transcript.client_keylog_callbacks,
             transcript.server_keylog_callbacks,
@@ -1157,7 +1271,18 @@ pub fn main() !void {
             c.quicz_openssl_tls_backend_local_transport_parameters_len(openssl_server_probe_context),
             c.quicz_openssl_tls_backend_received_crypto_len(openssl_server_probe_context),
             server_probe_initial_out_len,
+            server_connection_probe.inbound_crypto_bytes,
+            server_connection_probe.outbound_crypto_bytes,
+            server_connection_probe.server_datagram_bytes,
+            server_connection_probe.client_received_crypto_bytes,
+            server_connection_probe.peer_transport_parameters_bytes,
+            server_connection_probe.handshake_keys_installed,
             c.quicz_openssl_tls_backend_handshake_confirmed(openssl_server_probe_context),
+        },
+    );
+    std.debug.print(
+        "[tls-openssl-backend-adapter] adapter_keylog={}/{} adapter_pto={}/{}/{}/{} adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
+        .{
             c.quicz_openssl_tls_backend_keylog_callbacks(openssl_context),
             c.quicz_openssl_tls_backend_keylog_bytes(openssl_context),
             adapter_application_socket.client_pto_deadline_millis,
