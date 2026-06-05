@@ -81,8 +81,8 @@ zig build run-initial-keys
   把 adapter 产出的 Initial CRYPTO flight 作为 protected Initial datagram 通过
   loopback UDP 投递，把真实 OpenSSL pair transcript 的 Handshake CRYPTO 作为
   protected Handshake datagram 通过 loopback UDP 投递，复用匹配 Handshake/1-RTT
-  secrets，并验证 adapter 安装的 client 1-RTT keys 能保护 short packet，且对端
-  connection 可用匹配 transcript secrets 解密并 ACK。
+  secrets，并用 adapter 安装的 client keys 和匹配 peer transcript secrets 驱动
+  loopback UDP 1-RTT STREAM echo。
 - `run-tls-openssl-pair-transcript`：OpenSSL client/server callback-mode TLS
   transcript，覆盖按 protection level 分离的 CRYPTO handoff，以及双端 peer
   transport-parameter 和 traffic-secret callback，并把生成的 CRYPTO bytes 映射进
@@ -188,9 +188,9 @@ pub fn main() !void {
   真实 pair-transcript Handshake/1-RTT secrets 和入站 Handshake CRYPTO bytes 经
   OpenSSL callback 边界进入连接层；同时把 adapter 产出的 Initial CRYPTO flight 作为
   protected Initial datagram 通过 loopback UDP 投递，把真实 pair-transcript Handshake
-  CRYPTO 作为 protected Handshake datagram 通过 loopback UDP 投递，并验证 adapter
-  安装的 client 1-RTT keys 能保护 short packet，且对端 connection 可用匹配 transcript
-  secrets 解密并 ACK。运行：`zig build run-tls-openssl-backend-adapter`。
+  CRYPTO 作为 protected Handshake datagram 通过 loopback UDP 投递，并用 adapter 安装的
+  client keys 和匹配 peer transcript secrets 驱动 loopback UDP 1-RTT STREAM echo。
+  运行：`zig build run-tls-openssl-backend-adapter`。
 - [Graceful close](examples/graceful_close.zig)：本端/对端关闭、protected long/short close、非法 ACK/ACK_ECN range auto-close、包含非法 ACK/ACK_ECN、0-RTT ACK/ACK_ECN packet-type 违规、非法 STREAMS_BLOCKED limit、冲突 STREAM data 和非法 stream control frame 的语义 frame 错误 auto-close、protected receive auto-close、lifecycle-routed protected auto-close、protected long/0-RTT close-state discard、draining 行为和关闭触发校验。
   运行：`zig build run-graceful-close`。
 - [Idle timeout](examples/idle_timeout.zig)：建模 idle timeout 导出、刷新、关闭行为和 endpoint route/timer 清理。
@@ -292,9 +292,9 @@ pub fn main() !void {
   产出第一段 TLS CRYPTO flight，也能让 peer transport parameters、真实
   pair-transcript Handshake/1-RTT secrets 和入站 CRYPTO 经 callback 边界进入连接层，
   并把 adapter 产出的 Initial CRYPTO flight 和真实 pair-transcript Handshake CRYPTO
-  作为 protected Initial/Handshake datagram 通过 loopback UDP 投递，随后验证 adapter
-  安装的 client 1-RTT keys 能保护 short packet，且对端 connection 可用匹配 transcript
-  secrets 解密并 ACK；完整 endpoint-owned live TLS handshake/socket loop 仍待实现。
+  作为 protected Initial/Handshake datagram 通过 loopback UDP 投递，随后用 adapter
+  安装的 client keys 和匹配 peer transcript secrets 驱动 loopback UDP 1-RTT STREAM
+  echo；完整 endpoint-owned live TLS handshake/socket loop 仍待实现。
 
 ## 许可证
 

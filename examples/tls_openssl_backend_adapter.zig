@@ -165,6 +165,16 @@ const AdapterHandshakeSocketDelivery = struct {
     ack_bytes: usize,
 };
 
+const AdapterApplicationSocketEcho = struct {
+    request_bytes: usize,
+    request_datagram_bytes: usize,
+    echo_bytes: usize,
+    echo_datagram_bytes: usize,
+    final_ack_bytes: usize,
+    client_inflight_after_echo: usize,
+    server_inflight_after_final_ack: usize,
+};
+
 const adapter_original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
 const adapter_client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
 const adapter_server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
@@ -172,6 +182,8 @@ const adapter_handshake_client_dcid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
 const adapter_handshake_client_scid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
 const adapter_handshake_server_dcid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8 };
 const adapter_handshake_server_scid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8 };
+const adapter_application_client_dcid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+const adapter_application_server_dcid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
 
 fn require(condition: bool) ExampleError!void {
     if (!condition) return error.UnexpectedState;
@@ -491,6 +503,144 @@ fn verifyAdapterHandshakeSocketDelivery(
     };
 }
 
+fn verifyAdapterApplicationSocketEcho(
+    allocator: std.mem.Allocator,
+    client: *quicz.Connection,
+    server: *quicz.Connection,
+) !AdapterApplicationSocketEcho {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client_socket = try bindLoopbackUdp(io);
+    defer client_socket.close(io);
+    var server_socket = try bindLoopbackUdp(io);
+    defer server_socket.close(io);
+
+    const client_address = try udp4Address(client_socket.address);
+    const server_address = try udp4Address(server_socket.address);
+    try require(client_address.port != 0);
+    try require(server_address.port != 0);
+    try require(client_address.port != server_address.port);
+
+    const client_handle: u64 = 401;
+    const server_handle: u64 = 411;
+
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+
+    const client_path = try udp4Tuple(client_socket.address, server_socket.address);
+    const server_path = try udp4Tuple(server_socket.address, client_socket.address);
+    try client_lifecycle.registerConnectionId(client_handle, &adapter_application_client_dcid, client_path, .{
+        .active_migration_disabled = true,
+    });
+    try server_lifecycle.registerConnectionId(server_handle, &adapter_application_server_dcid, server_path, .{
+        .active_migration_disabled = true,
+    });
+
+    const request = "adapter openssl one-rtt echo";
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, request, true);
+    const request_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        client,
+        30,
+        &adapter_application_server_dcid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(request_datagram);
+    try require(request_datagram.len > 0);
+    try client_socket.send(io, &server_socket.address, request_datagram);
+
+    var server_receive_buf: [1500]u8 = undefined;
+    var client_receive_buf: [1500]u8 = undefined;
+    const request_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const request_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        server,
+        request_received.path,
+        31,
+        request_received.data,
+    );
+    try require(request_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, request_route.destination_connection_id.asSlice(), &adapter_application_server_dcid));
+    try require(server.pendingAckLargest(.application) == 0);
+
+    var read_buf: [128]u8 = undefined;
+    const request_len = (try server.recvOnStream(stream_id, &read_buf)) orelse return error.UnexpectedState;
+    try require(request_len == request.len);
+    try require(std.mem.eql(u8, read_buf[0..request_len], request));
+
+    try server.sendOnStream(stream_id, read_buf[0..request_len], true);
+    var echo_packet_count: usize = 0;
+    var echo_datagram_bytes: usize = 0;
+    var echo_len_or_null: ?usize = null;
+    while (echo_packet_count < 4 and echo_len_or_null == null) : (echo_packet_count += 1) {
+        const echo_datagram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            server,
+            32 + @as(i64, @intCast(echo_packet_count)),
+            &adapter_application_client_dcid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(echo_datagram);
+        echo_datagram_bytes += echo_datagram.len;
+        try server_socket.send(io, &client_socket.address, echo_datagram);
+
+        const echo_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+        const echo_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            client_handle,
+            client,
+            echo_received.path,
+            40 + @as(i64, @intCast(echo_packet_count)),
+            echo_received.data,
+        );
+        try require(echo_route.connection_id == client_handle);
+        try require(std.mem.eql(u8, echo_route.destination_connection_id.asSlice(), &adapter_application_client_dcid));
+        echo_len_or_null = try client.recvOnStream(stream_id, &read_buf);
+    }
+
+    const echo_len = echo_len_or_null orelse return error.UnexpectedState;
+    try require(echo_len == request_len);
+    try require(std.mem.eql(u8, read_buf[0..echo_len], request));
+    const client_inflight_after_echo = client.bytesInFlight(.application);
+    try require(client_inflight_after_echo == 0);
+    try require(client.pendingAckLargest(.application) != null);
+
+    const final_ack = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        client,
+        50,
+        &adapter_application_server_dcid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(final_ack);
+    try require(final_ack.len > 0);
+    try client_socket.send(io, &server_socket.address, final_ack);
+
+    const ack_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const ack_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        server,
+        ack_received.path,
+        51,
+        ack_received.data,
+    );
+    try require(ack_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &adapter_application_server_dcid));
+    const server_inflight_after_final_ack = server.bytesInFlight(.application);
+    try require(server_inflight_after_final_ack == 0);
+
+    return .{
+        .request_bytes = request_len,
+        .request_datagram_bytes = request_datagram.len,
+        .echo_bytes = echo_len,
+        .echo_datagram_bytes = echo_datagram_bytes,
+        .final_ack_bytes = final_ack.len,
+        .client_inflight_after_echo = client_inflight_after_echo,
+        .server_inflight_after_final_ack = server_inflight_after_final_ack,
+    };
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -558,6 +708,7 @@ pub fn main() !void {
     try quicz.transport_parameters.encode(peer_transport_parameter_out.writer(), .{
         .initial_max_data = 8192,
         .initial_max_stream_data_bidi_local = 2048,
+        .initial_max_stream_data_bidi_remote = 2048,
         .initial_max_streams_bidi = 8,
         .original_destination_connection_id = &adapter_original_dcid,
         .initial_source_connection_id = &adapter_server_scid,
@@ -674,6 +825,7 @@ pub fn main() !void {
         .initial_max_data = 4096,
         .initial_max_stream_data = 1024,
         .initial_max_streams_bidi = 4,
+        .max_datagram_size = 8192,
     });
     defer peer.deinit();
     try peer.installOneRttTrafficSecrets(.{
@@ -684,28 +836,11 @@ pub fn main() !void {
     try peer.confirmHandshake();
     try peer.validatePeerAddress();
     try require(peer.hasOneRttProtectionKeys());
-
-    const client_dcid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
-    const server_dcid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
-    try connection.sendPing();
-    const protected_ping = (try connection.pollProtectedShortDatagramWithInstalledKeys(
-        30,
-        &server_dcid,
-    )) orelse return error.UnexpectedState;
-    defer allocator.free(protected_ping);
-    try require(protected_ping.len > 0);
-    try peer.processProtectedShortDatagramWithInstalledKeys(31, server_dcid.len, protected_ping);
-    const server_ack_largest = peer.pendingAckLargest(.application) orelse return error.UnexpectedState;
-    try require(server_ack_largest == 0);
-
-    const protected_ack = (try peer.pollProtectedShortDatagramWithInstalledKeys(
-        32,
-        &client_dcid,
-    )) orelse return error.UnexpectedState;
-    defer allocator.free(protected_ack);
-    try require(protected_ack.len > 0);
-    try connection.processProtectedShortDatagramWithInstalledKeys(33, client_dcid.len, protected_ack);
-    try require(connection.bytesInFlight(.application) == 0);
+    const adapter_application_socket = try verifyAdapterApplicationSocketEcho(
+        allocator,
+        &connection,
+        &peer,
+    );
 
     try require(quicz_openssl_tls_backend_debug_consume_inbound_once(openssl_context) == .ok);
     try require(quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context) == initial_recv_callbacks + 1);
@@ -714,7 +849,7 @@ pub fn main() !void {
     try require(quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_context) == inbound_crypto.len);
 
     std.debug.print(
-        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} adapter_initial_socket={}/{}/{} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} transcript_handshake_bytes={} adapter_handshake_socket={}/{}/{} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} protected_ping_bytes={} protected_ack_bytes={} server_ack_largest={} client_inflight={} confirmed={}\n",
+        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} adapter_initial_socket={}/{}/{} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} transcript_handshake_bytes={} adapter_handshake_socket={}/{}/{} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} adapter_application_socket={}/{}/{}/{}/{}/{}/{} confirmed={}\n",
         .{
             quicz_openssl_tls_backend_callbacks_set(openssl_context),
             quicz_openssl_tls_backend_ssl_is_quic_after_callbacks(openssl_context),
@@ -740,10 +875,13 @@ pub fn main() !void {
             handshake_progress.outbound_chunks,
             handshake_key_progress.handshake_keys_installed,
             application_progress.one_rtt_keys_installed,
-            protected_ping.len,
-            protected_ack.len,
-            server_ack_largest,
-            connection.bytesInFlight(.application),
+            adapter_application_socket.request_bytes,
+            adapter_application_socket.request_datagram_bytes,
+            adapter_application_socket.echo_bytes,
+            adapter_application_socket.echo_datagram_bytes,
+            adapter_application_socket.final_ack_bytes,
+            adapter_application_socket.client_inflight_after_echo,
+            adapter_application_socket.server_inflight_after_final_ack,
             application_progress.handshake_confirmed,
         },
     );
