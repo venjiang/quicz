@@ -453,6 +453,14 @@ const ManualSocketTranscriptDelivery = struct {
     echo_bytes: usize,
     echo_datagram_bytes: usize,
     final_ack_bytes: usize,
+    close_datagram_bytes: usize,
+    server_close_error_code: u64,
+    client_handshake_space_discarded: bool,
+    server_handshake_space_discarded: bool,
+    client_handshake_keys_present: bool,
+    server_handshake_keys_present: bool,
+    client_routes_after_close_timeout: usize,
+    server_routes_after_drain_timeout: usize,
 };
 
 const ProtectedHandshakeDelivery = struct {
@@ -1024,6 +1032,69 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
     try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &server_scid));
     try require(server.bytesInFlight(.application) == 0);
 
+    try client.discardPacketNumberSpace(.handshake);
+    try server.discardPacketNumberSpace(.handshake);
+    try require(client.packetNumberSpaceDiscarded(.handshake));
+    try require(server.packetNumberSpaceDiscarded(.handshake));
+    try require(!client.hasHandshakeProtectionKeys());
+    try require(!server.hasHandshakeProtectionKeys());
+
+    try client.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "manual close");
+    try require(client.connectionState() == .closing);
+    const close_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        130,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(close_datagram);
+    const client_close_deadline = client.closeDeadlineMillis() orelse return error.UnexpectedState;
+    try require(client_close_deadline > 130);
+    try client_socket.send(io, &server_socket.address, close_datagram);
+
+    const close_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const close_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        close_received.path,
+        131,
+        close_received.data,
+    );
+    try require(close_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, close_route.destination_connection_id.asSlice(), &server_scid));
+    try require(server.connectionState() == .draining);
+    const server_drain_deadline = server.closeDeadlineMillis() orelse return error.UnexpectedState;
+    try require(server_drain_deadline > 131);
+    const server_close_error_code = switch (server.peerClose() orelse return error.UnexpectedState) {
+        .connection => |close| blk: {
+            try require(close.error_code == 0);
+            try require(close.frame_type == @intFromEnum(quicz.frame.FrameType.stream));
+            try require(std.mem.eql(u8, close.reason_phrase, "manual close"));
+            break :blk close.error_code;
+        },
+        else => return error.UnexpectedState,
+    };
+
+    const client_retired = (try client_lifecycle.checkCloseTimeoutsAndRetireConnection(
+        client_handle,
+        &client,
+        client_close_deadline,
+    )) orelse return error.UnexpectedState;
+    try require(client_retired.routes_retired == 1);
+    try require(client.connectionState() == .closed);
+    const client_routes_after_close_timeout = client_lifecycle.routeCount();
+    try require(client_routes_after_close_timeout == 0);
+
+    const server_retired = (try server_lifecycle.checkCloseTimeoutsAndRetireConnection(
+        server_handle,
+        &server,
+        server_drain_deadline,
+    )) orelse return error.UnexpectedState;
+    try require(server_retired.routes_retired == 2);
+    try require(server.connectionState() == .closed);
+    const server_routes_after_drain_timeout = server_lifecycle.routeCount();
+    try require(server_routes_after_drain_timeout == 0);
+
     return .{
         .client_initial_crypto_bytes = client_read_len,
         .client_initial_datagram_bytes = client_datagram.len,
@@ -1038,6 +1109,14 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
         .echo_bytes = echo_len,
         .echo_datagram_bytes = echo_datagram_bytes,
         .final_ack_bytes = final_ack.len,
+        .close_datagram_bytes = close_datagram.len,
+        .server_close_error_code = server_close_error_code,
+        .client_handshake_space_discarded = client.packetNumberSpaceDiscarded(.handshake),
+        .server_handshake_space_discarded = server.packetNumberSpaceDiscarded(.handshake),
+        .client_handshake_keys_present = client.hasHandshakeProtectionKeys(),
+        .server_handshake_keys_present = server.hasHandshakeProtectionKeys(),
+        .client_routes_after_close_timeout = client_routes_after_close_timeout,
+        .server_routes_after_drain_timeout = server_routes_after_drain_timeout,
     };
 }
 
@@ -1800,7 +1879,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        " manual_socket_transcript={}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{} protected_handshake={}/{}/{}/{} socket_handshake={}/{}/{}/{}/{}/{} protected_application={}/{}/{}/{} socket_echo={}/{}/{}/{}/{}",
+        " manual_socket_transcript={}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{}/{} manual_socket_cleanup={}/{}/{}/{}/{}/{}/{}/{}",
         .{
             manual_socket_transcript.client_initial_crypto_bytes,
             manual_socket_transcript.client_initial_datagram_bytes,
@@ -1815,6 +1894,19 @@ pub fn main() !void {
             manual_socket_transcript.echo_bytes,
             manual_socket_transcript.echo_datagram_bytes,
             manual_socket_transcript.final_ack_bytes,
+            manual_socket_transcript.close_datagram_bytes,
+            manual_socket_transcript.server_close_error_code,
+            manual_socket_transcript.client_handshake_space_discarded,
+            manual_socket_transcript.server_handshake_space_discarded,
+            manual_socket_transcript.client_handshake_keys_present,
+            manual_socket_transcript.server_handshake_keys_present,
+            manual_socket_transcript.client_routes_after_close_timeout,
+            manual_socket_transcript.server_routes_after_drain_timeout,
+        },
+    );
+    std.debug.print(
+        " protected_handshake={}/{}/{}/{} socket_handshake={}/{}/{}/{}/{}/{} protected_application={}/{}/{}/{} socket_echo={}/{}/{}/{}/{}",
+        .{
             protected_handshake.client_crypto_bytes,
             protected_handshake.client_datagram_bytes,
             protected_handshake.server_crypto_bytes,
