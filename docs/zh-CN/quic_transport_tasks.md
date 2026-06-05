@@ -167,8 +167,11 @@ installation、packet number space、ACK/loss/PTO、key discard、close 和 rout
   client Initial CRYPTO 送入 server connection，通过
   `driveCryptoBackendInSpace(.initial)` 驱动 OpenSSL server backend 产出 server
   Initial CRYPTO，再由 quicz server 组包给 client 解包，并验证 peer transport
-  parameters 与 Handshake keys 回到连接层。完整 server-side Handshake/Application
-  backend loop 仍待接入。
+  parameters 与 Handshake keys 回到连接层。OpenSSL backend adapter 现在也按
+  packet space 分离 CRYPTO buffer，server 连接层可以继续通过
+  `driveCryptoBackendInSpace(.handshake)` 拉取 pending Handshake CRYPTO，并用
+  installed Handshake keys 组 protected Handshake datagram。完整 server-side
+  Handshake/Application backend loop 仍待接入。
 - 2026-06-05：新增 `examples/tls_openssl_pair_transcript.zig` 和一个小 C
   harness，使用固定示例 PSK 完成 OpenSSL client/server callback-mode TLS
   transcript。该 harness 按 OpenSSL protection level 路由 CRYPTO bytes，验证双端无
