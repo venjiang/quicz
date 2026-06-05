@@ -91,7 +91,8 @@ Common runnable examples:
   routes real pair-transcript Handshake CRYPTO as a protected Handshake
   datagram over loopback UDP, reuses the matching Handshake/1-RTT secrets, and
   drives a loopback UDP 1-RTT STREAM echo with adapter-installed client keys
-  and matching peer transcript secrets.
+  and matching peer transcript secrets, followed by protected close delivery
+  and route cleanup through the same lifecycle owners.
 - `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
   transcript, with level-separated CRYPTO handoff plus peer transport-parameter
   and traffic-secret callbacks on both endpoints, then mapped into quicz
@@ -222,7 +223,8 @@ experimental.
   Initial datagram over loopback UDP, routes real pair-transcript Handshake
   CRYPTO through a protected Handshake datagram over loopback UDP, and drives a
   loopback UDP 1-RTT STREAM echo with adapter-installed client keys and
-  matching peer transcript secrets. Run with
+  matching peer transcript secrets, followed by protected close delivery and
+  route cleanup through the same lifecycle owners. Run with
   `zig build run-tls-openssl-backend-adapter`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
   long/short close, invalid ACK/ACK_ECN-range auto-close, semantic frame-error
@@ -413,7 +415,9 @@ experimental.
   inbound CRYPTO through callback boundaries, routes adapter-generated Initial
   CRYPTO and real pair-transcript Handshake CRYPTO over loopback UDP as
   protected Initial/Handshake datagrams, then drives loopback UDP 1-RTT STREAM
-  echo with adapter-installed client keys and matching peer transcript secrets.
+  echo with adapter-installed client keys and matching peer transcript secrets,
+  followed by protected close delivery and route cleanup through the same
+  lifecycle owners.
   A full endpoint-owned live TLS handshake/socket loop is still pending.
 
 ## License

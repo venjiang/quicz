@@ -171,8 +171,12 @@ const AdapterApplicationSocketEcho = struct {
     echo_bytes: usize,
     echo_datagram_bytes: usize,
     final_ack_bytes: usize,
+    close_datagram_bytes: usize,
     client_inflight_after_echo: usize,
     server_inflight_after_final_ack: usize,
+    server_close_error_code: u64,
+    client_routes_after_close_timeout: usize,
+    server_routes_after_drain_timeout: usize,
 };
 
 const adapter_original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
@@ -630,14 +634,74 @@ fn verifyAdapterApplicationSocketEcho(
     const server_inflight_after_final_ack = server.bytesInFlight(.application);
     try require(server_inflight_after_final_ack == 0);
 
+    try client.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "adapter close");
+    try require(client.connectionState() == .closing);
+    const close_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        client,
+        60,
+        &adapter_application_server_dcid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(close_datagram);
+    const client_close_deadline = client.closeDeadlineMillis() orelse return error.UnexpectedState;
+    try require(client_close_deadline > 60);
+    try client_socket.send(io, &server_socket.address, close_datagram);
+
+    const close_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const close_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        server,
+        close_received.path,
+        61,
+        close_received.data,
+    );
+    try require(close_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, close_route.destination_connection_id.asSlice(), &adapter_application_server_dcid));
+    try require(server.connectionState() == .draining);
+    const server_drain_deadline = server.closeDeadlineMillis() orelse return error.UnexpectedState;
+    try require(server_drain_deadline > 61);
+    const server_close_error_code = switch (server.peerClose() orelse return error.UnexpectedState) {
+        .connection => |close| blk: {
+            try require(close.error_code == 0);
+            try require(close.frame_type == @intFromEnum(quicz.frame.FrameType.stream));
+            try require(std.mem.eql(u8, close.reason_phrase, "adapter close"));
+            break :blk close.error_code;
+        },
+        else => return error.UnexpectedState,
+    };
+
+    const client_retired = (try client_lifecycle.checkCloseTimeoutsAndRetireConnection(
+        client_handle,
+        client,
+        client_close_deadline,
+    )) orelse return error.UnexpectedState;
+    try require(client_retired.routes_retired == 1);
+    try require(client.connectionState() == .closed);
+    const client_routes_after_close_timeout = client_lifecycle.routeCount();
+    try require(client_routes_after_close_timeout == 0);
+
+    const server_retired = (try server_lifecycle.checkCloseTimeoutsAndRetireConnection(
+        server_handle,
+        server,
+        server_drain_deadline,
+    )) orelse return error.UnexpectedState;
+    try require(server_retired.routes_retired == 1);
+    try require(server.connectionState() == .closed);
+    const server_routes_after_drain_timeout = server_lifecycle.routeCount();
+    try require(server_routes_after_drain_timeout == 0);
+
     return .{
         .request_bytes = request_len,
         .request_datagram_bytes = request_datagram.len,
         .echo_bytes = echo_len,
         .echo_datagram_bytes = echo_datagram_bytes,
         .final_ack_bytes = final_ack.len,
+        .close_datagram_bytes = close_datagram.len,
         .client_inflight_after_echo = client_inflight_after_echo,
         .server_inflight_after_final_ack = server_inflight_after_final_ack,
+        .server_close_error_code = server_close_error_code,
+        .client_routes_after_close_timeout = client_routes_after_close_timeout,
+        .server_routes_after_drain_timeout = server_routes_after_drain_timeout,
     };
 }
 
@@ -883,6 +947,15 @@ pub fn main() !void {
             adapter_application_socket.client_inflight_after_echo,
             adapter_application_socket.server_inflight_after_final_ack,
             application_progress.handshake_confirmed,
+        },
+    );
+    std.debug.print(
+        "[tls-openssl-backend-adapter] adapter_close_cleanup={}/{}/{}/{}\n",
+        .{
+            adapter_application_socket.close_datagram_bytes,
+            adapter_application_socket.server_close_error_code,
+            adapter_application_socket.client_routes_after_close_timeout,
+            adapter_application_socket.server_routes_after_drain_timeout,
         },
     );
 }
