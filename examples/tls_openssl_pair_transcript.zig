@@ -17,6 +17,10 @@ const OpenSslPairTranscriptResult = extern struct {
     server_yield_secret_callbacks: c_int,
     client_got_transport_params_callbacks: c_int,
     server_got_transport_params_callbacks: c_int,
+    client_keylog_callbacks: c_int,
+    server_keylog_callbacks: c_int,
+    client_keylog_bytes: usize,
+    server_keylog_bytes: usize,
     client_alert_callbacks: c_int,
     server_alert_callbacks: c_int,
     client_last_alert: c_int,
@@ -1046,6 +1050,10 @@ pub fn main() !void {
     try require(result.server_yield_secret_callbacks >= 4);
     try require(result.client_got_transport_params_callbacks == 1);
     try require(result.server_got_transport_params_callbacks == 1);
+    try require(result.client_keylog_callbacks > 0);
+    try require(result.server_keylog_callbacks > 0);
+    try require(result.client_keylog_bytes > @as(usize, @intCast(result.client_keylog_callbacks)));
+    try require(result.server_keylog_bytes > @as(usize, @intCast(result.server_keylog_callbacks)));
     try require(result.client_send_callbacks > 0);
     try require(result.server_send_callbacks > 0);
     try require(result.client_recv_callbacks > 0);
@@ -1150,6 +1158,15 @@ pub fn main() !void {
             result.server_out_level_bytes[1],
             result.server_out_level_bytes[2],
             result.server_out_level_bytes[3],
+        },
+    );
+    std.debug.print(
+        " keylog={}/{}/{}/{}",
+        .{
+            result.client_keylog_callbacks,
+            result.server_keylog_callbacks,
+            result.client_keylog_bytes,
+            result.server_keylog_bytes,
         },
     );
     std.debug.print(

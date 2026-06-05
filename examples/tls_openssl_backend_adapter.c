@@ -42,6 +42,8 @@ struct quicz_openssl_tls_backend {
     int peer_transport_parameters_available;
     int peer_transport_parameters_sent;
     int got_transport_params_callbacks;
+    int keylog_callbacks;
+    size_t keylog_bytes;
     struct quicz_handshake_traffic_secrets handshake_secrets;
     int handshake_local_secret_available;
     int handshake_peer_secret_available;
@@ -187,6 +189,15 @@ static int got_transport_params_cb(SSL *ssl, const unsigned char *params, size_t
     return 1;
 }
 
+static void keylog_cb(const SSL *ssl, const char *line) {
+    struct quicz_openssl_tls_backend *backend = SSL_get_app_data(ssl);
+    if (backend == NULL || line == NULL) {
+        return;
+    }
+    backend->keylog_callbacks += 1;
+    backend->keylog_bytes += strlen(line);
+}
+
 static int alert_cb(SSL *ssl, unsigned char alert_code, void *arg) {
     (void)ssl;
     (void)alert_code;
@@ -223,6 +234,8 @@ void *quicz_openssl_tls_backend_new(void) {
         return NULL;
     }
 
+    SSL_set_app_data(backend->ssl, backend);
+    SSL_CTX_set_keylog_callback(backend->ctx, keylog_cb);
     backend->callbacks_set = SSL_set_quic_tls_cbs(backend->ssl, quicz_openssl_tls_dispatch, backend);
     backend->ssl_is_quic_after_callbacks = SSL_is_quic(backend->ssl);
     SSL_set_connect_state(backend->ssl);
@@ -431,6 +444,16 @@ size_t quicz_openssl_tls_backend_peer_transport_parameters_len(void *context) {
 int quicz_openssl_tls_backend_got_transport_params_callbacks(void *context) {
     const struct quicz_openssl_tls_backend *backend = context;
     return backend != NULL ? backend->got_transport_params_callbacks : 0;
+}
+
+int quicz_openssl_tls_backend_keylog_callbacks(void *context) {
+    const struct quicz_openssl_tls_backend *backend = context;
+    return backend != NULL ? backend->keylog_callbacks : 0;
+}
+
+size_t quicz_openssl_tls_backend_keylog_bytes(void *context) {
+    const struct quicz_openssl_tls_backend *backend = context;
+    return backend != NULL ? backend->keylog_bytes : 0;
 }
 
 int quicz_openssl_tls_backend_yield_secret_callbacks(void *context) {

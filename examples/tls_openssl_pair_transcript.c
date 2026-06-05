@@ -27,6 +27,10 @@ struct quicz_openssl_pair_transcript_result {
     int server_yield_secret_callbacks;
     int client_got_transport_params_callbacks;
     int server_got_transport_params_callbacks;
+    int client_keylog_callbacks;
+    int server_keylog_callbacks;
+    size_t client_keylog_bytes;
+    size_t server_keylog_bytes;
     int client_alert_callbacks;
     int server_alert_callbacks;
     int client_last_alert;
@@ -63,6 +67,8 @@ struct quicz_openssl_endpoint {
     int release_callbacks;
     int yield_secret_callbacks;
     int got_transport_params_callbacks;
+    int keylog_callbacks;
+    size_t keylog_bytes;
     int alert_callbacks;
     int last_alert;
     int handshake_done;
@@ -189,6 +195,15 @@ static int got_transport_params_cb(SSL *ssl, const unsigned char *params, size_t
     return 1;
 }
 
+static void keylog_cb(const SSL *ssl, const char *line) {
+    struct quicz_openssl_endpoint *endpoint = SSL_get_app_data(ssl);
+    if (endpoint == NULL || line == NULL) {
+        return;
+    }
+    endpoint->keylog_callbacks += 1;
+    endpoint->keylog_bytes += strlen(line);
+}
+
 static int alert_cb(SSL *ssl, unsigned char alert_code, void *arg) {
     (void)ssl;
     struct quicz_openssl_endpoint *endpoint = arg;
@@ -276,6 +291,8 @@ static int init_endpoint(struct quicz_openssl_endpoint *endpoint, int is_client)
     if (endpoint->ssl == NULL) {
         return 0;
     }
+    SSL_set_app_data(endpoint->ssl, endpoint);
+    SSL_CTX_set_keylog_callback(endpoint->ctx, keylog_cb);
     if (!SSL_set_quic_tls_cbs(endpoint->ssl, quicz_openssl_tls_dispatch, endpoint) ||
         !SSL_set_quic_tls_transport_params(
             endpoint->ssl,
@@ -334,6 +351,10 @@ static void copy_result_endpoint(
     result->server_yield_secret_callbacks = server->yield_secret_callbacks;
     result->client_got_transport_params_callbacks = client->got_transport_params_callbacks;
     result->server_got_transport_params_callbacks = server->got_transport_params_callbacks;
+    result->client_keylog_callbacks = client->keylog_callbacks;
+    result->server_keylog_callbacks = server->keylog_callbacks;
+    result->client_keylog_bytes = client->keylog_bytes;
+    result->server_keylog_bytes = server->keylog_bytes;
     result->client_alert_callbacks = client->alert_callbacks;
     result->server_alert_callbacks = server->alert_callbacks;
     result->client_last_alert = client->last_alert;

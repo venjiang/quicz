@@ -49,6 +49,8 @@ extern fn quicz_openssl_tls_backend_local_transport_parameters_len(context: *any
 extern fn quicz_openssl_tls_backend_received_crypto_len(context: *anyopaque) usize;
 extern fn quicz_openssl_tls_backend_peer_transport_parameters_len(context: *anyopaque) usize;
 extern fn quicz_openssl_tls_backend_got_transport_params_callbacks(context: *anyopaque) c_int;
+extern fn quicz_openssl_tls_backend_keylog_callbacks(context: *anyopaque) c_int;
+extern fn quicz_openssl_tls_backend_keylog_bytes(context: *anyopaque) usize;
 extern fn quicz_openssl_tls_backend_yield_secret_callbacks(context: *anyopaque) c_int;
 extern fn quicz_openssl_tls_backend_pending_inbound_crypto_len(context: *anyopaque) usize;
 extern fn quicz_openssl_tls_backend_released_inbound_crypto_len(context: *anyopaque) usize;
@@ -90,6 +92,10 @@ const OpenSslPairTranscriptResult = extern struct {
     server_yield_secret_callbacks: c_int,
     client_got_transport_params_callbacks: c_int,
     server_got_transport_params_callbacks: c_int,
+    client_keylog_callbacks: c_int,
+    server_keylog_callbacks: c_int,
+    client_keylog_bytes: usize,
+    server_keylog_bytes: usize,
     client_alert_callbacks: c_int,
     server_alert_callbacks: c_int,
     client_last_alert: c_int,
@@ -768,6 +774,10 @@ pub fn main() !void {
     try require(transcript.server_last_ssl_error == 0);
     try require(transcript.client_yield_secret_callbacks >= 4);
     try require(transcript.server_yield_secret_callbacks >= 4);
+    try require(transcript.client_keylog_callbacks > 0);
+    try require(transcript.server_keylog_callbacks > 0);
+    try require(transcript.client_keylog_bytes > @as(usize, @intCast(transcript.client_keylog_callbacks)));
+    try require(transcript.server_keylog_bytes > @as(usize, @intCast(transcript.server_keylog_callbacks)));
     try require(transcript.server_out_level_bytes[2] > 0);
 
     const openssl_context = quicz_openssl_tls_backend_new() orelse return error.OutOfMemory;
@@ -1016,8 +1026,14 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "[tls-openssl-backend-adapter] adapter_pto={}/{}/{}/{} adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
+        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} adapter_keylog={}/{} adapter_pto={}/{}/{}/{} adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
         .{
+            transcript.client_keylog_callbacks,
+            transcript.server_keylog_callbacks,
+            transcript.client_keylog_bytes,
+            transcript.server_keylog_bytes,
+            quicz_openssl_tls_backend_keylog_callbacks(openssl_context),
+            quicz_openssl_tls_backend_keylog_bytes(openssl_context),
             adapter_application_socket.client_pto_deadline_millis,
             adapter_application_socket.client_pto_datagram_bytes,
             adapter_application_socket.client_pto_route,

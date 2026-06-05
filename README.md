@@ -99,10 +99,11 @@ Common runnable examples:
 - `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
   transcript, with level-separated CRYPTO handoff plus peer transport-parameter
   and traffic-secret callbacks on both endpoints, then mapped into quicz
-  Initial/Handshake/Application CRYPTO queues. The client Initial CRYPTO bytes
-  are also sent through quicz protected Initial long-packet helpers and read
-  back by the server connection, and both Initial flights also run over loopback
-  UDP through the quicz endpoint lifecycle. The OpenSSL Handshake secrets drive
+  Initial/Handshake/Application CRYPTO queues. It records keylog callback
+  count/byte evidence without printing key material. The client Initial CRYPTO
+  bytes are also sent through quicz protected Initial long-packet helpers and
+  read back by the server connection, and both Initial flights also run over
+  loopback UDP through the quicz endpoint lifecycle. The OpenSSL Handshake secrets drive
   installed-key protected Handshake CRYPTO delivery in both directions,
   including loopback UDP delivery through the quicz endpoint lifecycle. The
   OpenSSL 1-RTT secrets also protect a quicz STREAM request/response over
@@ -208,7 +209,8 @@ experimental.
   example, level-separated CRYPTO handoff, peer transport-parameter callbacks,
   Handshake/1-RTT traffic-secret callbacks on both endpoints, and delivery of
   the generated CRYPTO bytes into quicz packet-number-space CRYPTO queues. It
-  also packetizes the client Initial CRYPTO bytes with quicz protected Initial
+  records keylog callback count/byte evidence without printing key material,
+  then packetizes the client Initial CRYPTO bytes with quicz protected Initial
   long-packet helpers, routes both Initial flights over loopback UDP through the
   quicz endpoint lifecycle, installs OpenSSL-produced Handshake secrets, and
   verifies protected Handshake CRYPTO delivery in both directions, including
@@ -414,7 +416,8 @@ experimental.
   delivery for both Initial flights, installed-key protected Handshake delivery,
   including socket-backed delivery, using OpenSSL Handshake secrets
   and installed-key protected STREAM request/response plus socket-backed STREAM
-  echo using OpenSSL 1-RTT secrets;
+  echo using OpenSSL 1-RTT secrets, while recording keylog callback count/byte
+  evidence without printing key material;
   `run-tls-openssl-backend-adapter` wires an OpenSSL object into the adapter
   path far enough to emit the first TLS CRYPTO flight and deliver peer
   transport parameters, real pair-transcript Handshake/1-RTT secrets, and
@@ -425,7 +428,8 @@ experimental.
   services an Application PTO probe through the same lifecycle owner, explicitly
   discards both Handshake packet-number spaces and Handshake keys after modeled
   handshake confirmation, then sends protected close and completes route cleanup
-  through one socket/lifecycle loop owner.
+  through one socket/lifecycle loop owner. The adapter output also prints
+  transcript keylog evidence and the current wrapper keylog boundary.
   A full endpoint-owned live TLS handshake/socket loop is still pending.
 
 ## License
