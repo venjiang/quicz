@@ -175,10 +175,14 @@ const AdapterApplicationSocketEcho = struct {
     client_inflight_after_echo: usize,
     server_inflight_after_final_ack: usize,
     server_close_error_code: u64,
+    client_routes_registered: usize,
+    server_routes_registered: usize,
     client_routes_after_close_timeout: usize,
     server_routes_after_drain_timeout: usize,
 };
 
+const adapter_client_handle: u64 = 501;
+const adapter_server_handle: u64 = 511;
 const adapter_original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
 const adapter_client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
 const adapter_server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
@@ -188,6 +192,95 @@ const adapter_handshake_server_dcid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8 };
 const adapter_handshake_server_scid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8 };
 const adapter_application_client_dcid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
 const adapter_application_server_dcid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+
+const AdapterEndpointSocketLoop = struct {
+    allocator: std.mem.Allocator,
+    threaded: std.Io.Threaded,
+    client_socket: std.Io.net.Socket,
+    server_socket: std.Io.net.Socket,
+    client_lifecycle: quicz.EndpointConnectionLifecycle,
+    server_lifecycle: quicz.EndpointConnectionLifecycle,
+    client_routes_registered: usize,
+    server_routes_registered: usize,
+
+    fn init(allocator: std.mem.Allocator) !AdapterEndpointSocketLoop {
+        var threaded = std.Io.Threaded.init(allocator, .{});
+        errdefer threaded.deinit();
+        const io = threaded.io();
+
+        var client_socket = try bindLoopbackUdp(io);
+        errdefer client_socket.close(io);
+        var server_socket = try bindLoopbackUdp(io);
+        errdefer server_socket.close(io);
+
+        const client_address = try udp4Address(client_socket.address);
+        const server_address = try udp4Address(server_socket.address);
+        try require(client_address.port != 0);
+        try require(server_address.port != 0);
+        try require(client_address.port != server_address.port);
+
+        var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+        errdefer client_lifecycle.deinit();
+        var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+        errdefer server_lifecycle.deinit();
+
+        const client_path = try udp4Tuple(client_socket.address, server_socket.address);
+        const server_path = try udp4Tuple(server_socket.address, client_socket.address);
+        try client_lifecycle.registerConnectionId(adapter_client_handle, &adapter_client_scid, client_path, .{
+            .active_migration_disabled = true,
+        });
+        try client_lifecycle.registerConnectionId(adapter_client_handle, &adapter_handshake_client_dcid, client_path, .{
+            .active_migration_disabled = true,
+        });
+        try client_lifecycle.registerConnectionId(adapter_client_handle, &adapter_application_client_dcid, client_path, .{
+            .active_migration_disabled = true,
+        });
+        try server_lifecycle.registerConnectionId(adapter_server_handle, &adapter_original_dcid, server_path, .{
+            .active_migration_disabled = true,
+        });
+        try server_lifecycle.registerConnectionId(adapter_server_handle, &adapter_server_scid, server_path, .{
+            .active_migration_disabled = true,
+        });
+        try server_lifecycle.registerConnectionId(adapter_server_handle, &adapter_handshake_server_dcid, server_path, .{
+            .active_migration_disabled = true,
+        });
+        try server_lifecycle.registerConnectionId(adapter_server_handle, &adapter_application_server_dcid, server_path, .{
+            .active_migration_disabled = true,
+        });
+
+        return .{
+            .allocator = allocator,
+            .threaded = threaded,
+            .client_socket = client_socket,
+            .server_socket = server_socket,
+            .client_lifecycle = client_lifecycle,
+            .server_lifecycle = server_lifecycle,
+            .client_routes_registered = client_lifecycle.routeCount(),
+            .server_routes_registered = server_lifecycle.routeCount(),
+        };
+    }
+
+    fn deinit(self: *AdapterEndpointSocketLoop) void {
+        const io = self.threaded.io();
+        self.client_lifecycle.deinit();
+        self.server_lifecycle.deinit();
+        self.client_socket.close(io);
+        self.server_socket.close(io);
+        self.threaded.deinit();
+    }
+
+    fn currentIo(self: *AdapterEndpointSocketLoop) std.Io {
+        return self.threaded.io();
+    }
+
+    fn receiveAtClient(self: *AdapterEndpointSocketLoop, buf: []u8) !ReceivedDatagram {
+        return receiveDatagram(self.currentIo(), &self.client_socket, buf);
+    }
+
+    fn receiveAtServer(self: *AdapterEndpointSocketLoop, buf: []u8) !ReceivedDatagram {
+        return receiveDatagram(self.currentIo(), &self.server_socket, buf);
+    }
+};
 
 fn require(condition: bool) ExampleError!void {
     if (!condition) return error.UnexpectedState;
@@ -289,54 +382,15 @@ fn copyOpenSslServerSecret(
 }
 
 fn verifyAdapterInitialSocketDelivery(
-    allocator: std.mem.Allocator,
+    loop: *AdapterEndpointSocketLoop,
     client: *quicz.Connection,
+    server: *quicz.Connection,
     expected_crypto_len: usize,
 ) !AdapterInitialSocketDelivery {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var client_socket = try bindLoopbackUdp(io);
-    defer client_socket.close(io);
-    var server_socket = try bindLoopbackUdp(io);
-    defer server_socket.close(io);
-
-    const client_address = try udp4Address(client_socket.address);
-    const server_address = try udp4Address(server_socket.address);
-    try require(client_address.port != 0);
-    try require(server_address.port != 0);
-    try require(client_address.port != server_address.port);
-
-    const client_handle: u64 = 201;
-    const server_handle: u64 = 211;
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &adapter_original_dcid);
 
-    var server = try quicz.Connection.init(allocator, .server, .{
-        .max_datagram_size = 8192,
-    });
-    defer server.deinit();
-    try server.validatePeerAddress();
-
-    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
-    defer client_lifecycle.deinit();
-    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
-    defer server_lifecycle.deinit();
-
-    const client_path = try udp4Tuple(client_socket.address, server_socket.address);
-    const server_path = try udp4Tuple(server_socket.address, client_socket.address);
-    try client_lifecycle.registerConnectionId(client_handle, &adapter_client_scid, client_path, .{
-        .active_migration_disabled = true,
-    });
-    try server_lifecycle.registerConnectionId(server_handle, &adapter_original_dcid, server_path, .{
-        .active_migration_disabled = true,
-    });
-    try server_lifecycle.registerConnectionId(server_handle, &adapter_server_scid, server_path, .{
-        .active_migration_disabled = true,
-    });
-
-    const client_datagram = (try client_lifecycle.pollProtectedLongDatagram(
-        client_handle,
+    const client_datagram = (try loop.client_lifecycle.pollProtectedLongDatagram(
+        adapter_client_handle,
         client,
         10,
         &adapter_original_dcid,
@@ -344,22 +398,22 @@ fn verifyAdapterInitialSocketDelivery(
         &[_]u8{},
         .{ .initial = secrets.client },
     )) orelse return error.UnexpectedState;
-    defer allocator.free(client_datagram);
+    defer loop.allocator.free(client_datagram);
     try require(client_datagram.len >= 1200);
-    try client_socket.send(io, &server_socket.address, client_datagram);
+    try loop.client_socket.send(loop.currentIo(), &loop.server_socket.address, client_datagram);
 
     var server_receive_buf: [9000]u8 = undefined;
     var client_receive_buf: [9000]u8 = undefined;
-    const client_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
-    const client_route = try server_lifecycle.processRoutedProtectedInitialDatagram(
-        server_handle,
-        &server,
+    const client_received = try loop.receiveAtServer(&server_receive_buf);
+    const client_route = try loop.server_lifecycle.processRoutedProtectedInitialDatagram(
+        adapter_server_handle,
+        server,
         client_received.path,
         11,
         &adapter_original_dcid,
         client_received.data,
     );
-    try require(client_route.connection_id == server_handle);
+    try require(client_route.connection_id == adapter_server_handle);
     try require(std.mem.eql(u8, client_route.destination_connection_id.asSlice(), &adapter_original_dcid));
     try require(server.pendingAckLargest(.initial) == 0);
 
@@ -368,29 +422,29 @@ fn verifyAdapterInitialSocketDelivery(
     try require(crypto_len == expected_crypto_len);
     try require((try server.recvCryptoInSpace(.initial, &crypto_buf)) == null);
 
-    const server_ack = (try server_lifecycle.pollProtectedLongDatagram(
-        server_handle,
-        &server,
+    const server_ack = (try loop.server_lifecycle.pollProtectedLongDatagram(
+        adapter_server_handle,
+        server,
         12,
         &adapter_client_scid,
         &adapter_server_scid,
         &[_]u8{},
         .{ .initial = secrets.server },
     )) orelse return error.UnexpectedState;
-    defer allocator.free(server_ack);
+    defer loop.allocator.free(server_ack);
     try require(server_ack.len > 0);
-    try server_socket.send(io, &client_socket.address, server_ack);
+    try loop.server_socket.send(loop.currentIo(), &loop.client_socket.address, server_ack);
 
-    const ack_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
-    const ack_route = try client_lifecycle.processRoutedProtectedInitialDatagram(
-        client_handle,
+    const ack_received = try loop.receiveAtClient(&client_receive_buf);
+    const ack_route = try loop.client_lifecycle.processRoutedProtectedInitialDatagram(
+        adapter_client_handle,
         client,
         ack_received.path,
         13,
         &adapter_original_dcid,
         ack_received.data,
     );
-    try require(ack_route.connection_id == client_handle);
+    try require(ack_route.connection_id == adapter_client_handle);
     try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &adapter_client_scid));
     try require(client.bytesInFlight(.initial) == 0);
 
@@ -402,101 +456,65 @@ fn verifyAdapterInitialSocketDelivery(
 }
 
 fn verifyAdapterHandshakeSocketDelivery(
-    allocator: std.mem.Allocator,
+    loop: *AdapterEndpointSocketLoop,
     client: *quicz.Connection,
+    server: *quicz.Connection,
     server_local_secret: [quicz.protection.traffic_secret_len]u8,
     server_peer_secret: [quicz.protection.traffic_secret_len]u8,
     inbound_crypto: []const u8,
 ) !AdapterHandshakeSocketDelivery {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var client_socket = try bindLoopbackUdp(io);
-    defer client_socket.close(io);
-    var server_socket = try bindLoopbackUdp(io);
-    defer server_socket.close(io);
-
-    const client_address = try udp4Address(client_socket.address);
-    const server_address = try udp4Address(server_socket.address);
-    try require(client_address.port != 0);
-    try require(server_address.port != 0);
-    try require(client_address.port != server_address.port);
-
-    const client_handle: u64 = 301;
-    const server_handle: u64 = 311;
-
-    var server = try quicz.Connection.init(allocator, .server, .{
-        .max_datagram_size = 8192,
-    });
-    defer server.deinit();
-    try server.validatePeerAddress();
     try server.installHandshakeTrafficSecrets(.{
         .local = server_local_secret,
         .peer = server_peer_secret,
     });
     try require(server.hasHandshakeProtectionKeys());
 
-    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
-    defer client_lifecycle.deinit();
-    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
-    defer server_lifecycle.deinit();
-
-    const client_path = try udp4Tuple(client_socket.address, server_socket.address);
-    const server_path = try udp4Tuple(server_socket.address, client_socket.address);
-    try client_lifecycle.registerConnectionId(client_handle, &adapter_handshake_client_dcid, client_path, .{
-        .active_migration_disabled = true,
-    });
-    try server_lifecycle.registerConnectionId(server_handle, &adapter_handshake_server_dcid, server_path, .{
-        .active_migration_disabled = true,
-    });
-
     try server.sendCryptoInSpace(.handshake, inbound_crypto);
-    const server_datagram = (try server_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
-        server_handle,
-        &server,
+    const server_datagram = (try loop.server_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        adapter_server_handle,
+        server,
         20,
         &adapter_handshake_client_dcid,
         &adapter_handshake_server_scid,
     )) orelse return error.UnexpectedState;
-    defer allocator.free(server_datagram);
+    defer loop.allocator.free(server_datagram);
     try require(server_datagram.len > 0);
-    try server_socket.send(io, &client_socket.address, server_datagram);
+    try loop.server_socket.send(loop.currentIo(), &loop.client_socket.address, server_datagram);
 
     var client_receive_buf: [1500]u8 = undefined;
     var server_receive_buf: [1500]u8 = undefined;
-    const server_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
-    const server_route = try client_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
-        client_handle,
+    const server_received = try loop.receiveAtClient(&client_receive_buf);
+    const server_route = try loop.client_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        adapter_client_handle,
         client,
         server_received.path,
         21,
         server_received.data,
     );
-    try require(server_route.connection_id == client_handle);
+    try require(server_route.connection_id == adapter_client_handle);
     try require(std.mem.eql(u8, server_route.destination_connection_id.asSlice(), &adapter_handshake_client_dcid));
     try require(client.pendingAckLargest(.handshake) == 0);
 
-    const client_ack = (try client_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
-        client_handle,
+    const client_ack = (try loop.client_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        adapter_client_handle,
         client,
         22,
         &adapter_handshake_server_dcid,
         &adapter_handshake_client_scid,
     )) orelse return error.UnexpectedState;
-    defer allocator.free(client_ack);
+    defer loop.allocator.free(client_ack);
     try require(client_ack.len > 0);
-    try client_socket.send(io, &server_socket.address, client_ack);
+    try loop.client_socket.send(loop.currentIo(), &loop.server_socket.address, client_ack);
 
-    const ack_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
-    const ack_route = try server_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
-        server_handle,
-        &server,
+    const ack_received = try loop.receiveAtServer(&server_receive_buf);
+    const ack_route = try loop.server_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        adapter_server_handle,
+        server,
         ack_received.path,
         23,
         ack_received.data,
     );
-    try require(ack_route.connection_id == server_handle);
+    try require(ack_route.connection_id == adapter_server_handle);
     try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &adapter_handshake_server_dcid));
     try require(server.bytesInFlight(.handshake) == 0);
 
@@ -508,66 +526,34 @@ fn verifyAdapterHandshakeSocketDelivery(
 }
 
 fn verifyAdapterApplicationSocketEcho(
-    allocator: std.mem.Allocator,
+    loop: *AdapterEndpointSocketLoop,
     client: *quicz.Connection,
     server: *quicz.Connection,
 ) !AdapterApplicationSocketEcho {
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    var client_socket = try bindLoopbackUdp(io);
-    defer client_socket.close(io);
-    var server_socket = try bindLoopbackUdp(io);
-    defer server_socket.close(io);
-
-    const client_address = try udp4Address(client_socket.address);
-    const server_address = try udp4Address(server_socket.address);
-    try require(client_address.port != 0);
-    try require(server_address.port != 0);
-    try require(client_address.port != server_address.port);
-
-    const client_handle: u64 = 401;
-    const server_handle: u64 = 411;
-
-    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
-    defer client_lifecycle.deinit();
-    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
-    defer server_lifecycle.deinit();
-
-    const client_path = try udp4Tuple(client_socket.address, server_socket.address);
-    const server_path = try udp4Tuple(server_socket.address, client_socket.address);
-    try client_lifecycle.registerConnectionId(client_handle, &adapter_application_client_dcid, client_path, .{
-        .active_migration_disabled = true,
-    });
-    try server_lifecycle.registerConnectionId(server_handle, &adapter_application_server_dcid, server_path, .{
-        .active_migration_disabled = true,
-    });
-
     const request = "adapter openssl one-rtt echo";
     const stream_id = try client.openStream();
     try client.sendOnStream(stream_id, request, true);
-    const request_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
-        client_handle,
+    const request_datagram = (try loop.client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        adapter_client_handle,
         client,
         30,
         &adapter_application_server_dcid,
     )) orelse return error.UnexpectedState;
-    defer allocator.free(request_datagram);
+    defer loop.allocator.free(request_datagram);
     try require(request_datagram.len > 0);
-    try client_socket.send(io, &server_socket.address, request_datagram);
+    try loop.client_socket.send(loop.currentIo(), &loop.server_socket.address, request_datagram);
 
     var server_receive_buf: [1500]u8 = undefined;
     var client_receive_buf: [1500]u8 = undefined;
-    const request_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
-    const request_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
-        server_handle,
+    const request_received = try loop.receiveAtServer(&server_receive_buf);
+    const request_route = try loop.server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        adapter_server_handle,
         server,
         request_received.path,
         31,
         request_received.data,
     );
-    try require(request_route.connection_id == server_handle);
+    try require(request_route.connection_id == adapter_server_handle);
     try require(std.mem.eql(u8, request_route.destination_connection_id.asSlice(), &adapter_application_server_dcid));
     try require(server.pendingAckLargest(.application) == 0);
 
@@ -581,25 +567,25 @@ fn verifyAdapterApplicationSocketEcho(
     var echo_datagram_bytes: usize = 0;
     var echo_len_or_null: ?usize = null;
     while (echo_packet_count < 4 and echo_len_or_null == null) : (echo_packet_count += 1) {
-        const echo_datagram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
-            server_handle,
+        const echo_datagram = (try loop.server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            adapter_server_handle,
             server,
             32 + @as(i64, @intCast(echo_packet_count)),
             &adapter_application_client_dcid,
         )) orelse return error.UnexpectedState;
-        defer allocator.free(echo_datagram);
+        defer loop.allocator.free(echo_datagram);
         echo_datagram_bytes += echo_datagram.len;
-        try server_socket.send(io, &client_socket.address, echo_datagram);
+        try loop.server_socket.send(loop.currentIo(), &loop.client_socket.address, echo_datagram);
 
-        const echo_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
-        const echo_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
-            client_handle,
+        const echo_received = try loop.receiveAtClient(&client_receive_buf);
+        const echo_route = try loop.client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            adapter_client_handle,
             client,
             echo_received.path,
             40 + @as(i64, @intCast(echo_packet_count)),
             echo_received.data,
         );
-        try require(echo_route.connection_id == client_handle);
+        try require(echo_route.connection_id == adapter_client_handle);
         try require(std.mem.eql(u8, echo_route.destination_connection_id.asSlice(), &adapter_application_client_dcid));
         echo_len_or_null = try client.recvOnStream(stream_id, &read_buf);
     }
@@ -611,51 +597,51 @@ fn verifyAdapterApplicationSocketEcho(
     try require(client_inflight_after_echo == 0);
     try require(client.pendingAckLargest(.application) != null);
 
-    const final_ack = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
-        client_handle,
+    const final_ack = (try loop.client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        adapter_client_handle,
         client,
         50,
         &adapter_application_server_dcid,
     )) orelse return error.UnexpectedState;
-    defer allocator.free(final_ack);
+    defer loop.allocator.free(final_ack);
     try require(final_ack.len > 0);
-    try client_socket.send(io, &server_socket.address, final_ack);
+    try loop.client_socket.send(loop.currentIo(), &loop.server_socket.address, final_ack);
 
-    const ack_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
-    const ack_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
-        server_handle,
+    const ack_received = try loop.receiveAtServer(&server_receive_buf);
+    const ack_route = try loop.server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        adapter_server_handle,
         server,
         ack_received.path,
         51,
         ack_received.data,
     );
-    try require(ack_route.connection_id == server_handle);
+    try require(ack_route.connection_id == adapter_server_handle);
     try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &adapter_application_server_dcid));
     const server_inflight_after_final_ack = server.bytesInFlight(.application);
     try require(server_inflight_after_final_ack == 0);
 
     try client.closeConnection(0, @intFromEnum(quicz.frame.FrameType.stream), "adapter close");
     try require(client.connectionState() == .closing);
-    const close_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
-        client_handle,
+    const close_datagram = (try loop.client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        adapter_client_handle,
         client,
         60,
         &adapter_application_server_dcid,
     )) orelse return error.UnexpectedState;
-    defer allocator.free(close_datagram);
+    defer loop.allocator.free(close_datagram);
     const client_close_deadline = client.closeDeadlineMillis() orelse return error.UnexpectedState;
     try require(client_close_deadline > 60);
-    try client_socket.send(io, &server_socket.address, close_datagram);
+    try loop.client_socket.send(loop.currentIo(), &loop.server_socket.address, close_datagram);
 
-    const close_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
-    const close_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
-        server_handle,
+    const close_received = try loop.receiveAtServer(&server_receive_buf);
+    const close_route = try loop.server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        adapter_server_handle,
         server,
         close_received.path,
         61,
         close_received.data,
     );
-    try require(close_route.connection_id == server_handle);
+    try require(close_route.connection_id == adapter_server_handle);
     try require(std.mem.eql(u8, close_route.destination_connection_id.asSlice(), &adapter_application_server_dcid));
     try require(server.connectionState() == .draining);
     const server_drain_deadline = server.closeDeadlineMillis() orelse return error.UnexpectedState;
@@ -670,24 +656,24 @@ fn verifyAdapterApplicationSocketEcho(
         else => return error.UnexpectedState,
     };
 
-    const client_retired = (try client_lifecycle.checkCloseTimeoutsAndRetireConnection(
-        client_handle,
+    const client_retired = (try loop.client_lifecycle.checkCloseTimeoutsAndRetireConnection(
+        adapter_client_handle,
         client,
         client_close_deadline,
     )) orelse return error.UnexpectedState;
-    try require(client_retired.routes_retired == 1);
+    try require(client_retired.routes_retired == loop.client_routes_registered);
     try require(client.connectionState() == .closed);
-    const client_routes_after_close_timeout = client_lifecycle.routeCount();
+    const client_routes_after_close_timeout = loop.client_lifecycle.routeCount();
     try require(client_routes_after_close_timeout == 0);
 
-    const server_retired = (try server_lifecycle.checkCloseTimeoutsAndRetireConnection(
-        server_handle,
+    const server_retired = (try loop.server_lifecycle.checkCloseTimeoutsAndRetireConnection(
+        adapter_server_handle,
         server,
         server_drain_deadline,
     )) orelse return error.UnexpectedState;
-    try require(server_retired.routes_retired == 1);
+    try require(server_retired.routes_retired == loop.server_routes_registered);
     try require(server.connectionState() == .closed);
-    const server_routes_after_drain_timeout = server_lifecycle.routeCount();
+    const server_routes_after_drain_timeout = loop.server_lifecycle.routeCount();
     try require(server_routes_after_drain_timeout == 0);
 
     return .{
@@ -700,6 +686,8 @@ fn verifyAdapterApplicationSocketEcho(
         .client_inflight_after_echo = client_inflight_after_echo,
         .server_inflight_after_final_ack = server_inflight_after_final_ack,
         .server_close_error_code = server_close_error_code,
+        .client_routes_registered = loop.client_routes_registered,
+        .server_routes_registered = loop.server_routes_registered,
         .client_routes_after_close_timeout = client_routes_after_close_timeout,
         .server_routes_after_drain_timeout = server_routes_after_drain_timeout,
     };
@@ -740,6 +728,18 @@ pub fn main() !void {
     });
     defer connection.deinit();
 
+    var peer = try quicz.Connection.init(allocator, .server, .{
+        .initial_max_data = 4096,
+        .initial_max_stream_data = 1024,
+        .initial_max_streams_bidi = 4,
+        .max_datagram_size = 8192,
+    });
+    defer peer.deinit();
+    try peer.validatePeerAddress();
+
+    var endpoint_loop = try AdapterEndpointSocketLoop.init(allocator);
+    defer endpoint_loop.deinit();
+
     var scratch: [4096]u8 = undefined;
     const initial_progress = try connection.driveCryptoBackendInSpace(
         .initial,
@@ -760,8 +760,9 @@ pub fn main() !void {
     try require(!initial_progress.handshake_keys_installed);
     try require(!initial_progress.handshake_confirmed);
     const adapter_initial_socket = try verifyAdapterInitialSocketDelivery(
-        allocator,
+        &endpoint_loop,
         &connection,
+        &peer,
         initial_progress.outbound_bytes,
     );
     const initial_recv_callbacks = quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context);
@@ -824,8 +825,9 @@ pub fn main() !void {
     const inbound_crypto = try copyOpenSslServerCrypto(2, &inbound_crypto_buf);
     try require(inbound_crypto.len == transcript.server_out_level_bytes[2]);
     const adapter_handshake_socket = try verifyAdapterHandshakeSocketDelivery(
-        allocator,
+        &endpoint_loop,
         &connection,
+        &peer,
         server_handshake_local,
         server_handshake_peer,
         inbound_crypto,
@@ -885,23 +887,15 @@ pub fn main() !void {
     try require(!application_progress.handshake_confirmed);
     try require(connection.hasOneRttProtectionKeys());
 
-    var peer = try quicz.Connection.init(allocator, .server, .{
-        .initial_max_data = 4096,
-        .initial_max_stream_data = 1024,
-        .initial_max_streams_bidi = 4,
-        .max_datagram_size = 8192,
-    });
-    defer peer.deinit();
     try peer.installOneRttTrafficSecrets(.{
         .local = server_application_local,
         .peer = server_application_peer,
     });
     try connection.confirmHandshake();
     try peer.confirmHandshake();
-    try peer.validatePeerAddress();
     try require(peer.hasOneRttProtectionKeys());
     const adapter_application_socket = try verifyAdapterApplicationSocketEcho(
-        allocator,
+        &endpoint_loop,
         &connection,
         &peer,
     );
@@ -950,12 +944,14 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "[tls-openssl-backend-adapter] adapter_close_cleanup={}/{}/{}/{}\n",
+        "[tls-openssl-backend-adapter] adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
         .{
-            adapter_application_socket.close_datagram_bytes,
-            adapter_application_socket.server_close_error_code,
+            adapter_application_socket.client_routes_registered,
+            adapter_application_socket.server_routes_registered,
             adapter_application_socket.client_routes_after_close_timeout,
             adapter_application_socket.server_routes_after_drain_timeout,
+            adapter_application_socket.close_datagram_bytes,
+            adapter_application_socket.server_close_error_code,
         },
     );
 }
