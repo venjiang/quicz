@@ -175,6 +175,12 @@ const AdapterApplicationSocketEcho = struct {
     client_inflight_after_echo: usize,
     server_inflight_after_final_ack: usize,
     server_close_error_code: u64,
+    client_handshake_confirmed: bool,
+    server_handshake_confirmed: bool,
+    client_handshake_space_discarded: bool,
+    server_handshake_space_discarded: bool,
+    client_handshake_keys_present: bool,
+    server_handshake_keys_present: bool,
     client_routes_registered: usize,
     server_routes_registered: usize,
     client_routes_after_close_timeout: usize,
@@ -531,6 +537,13 @@ fn verifyAdapterApplicationSocketEcho(
     server: *quicz.Connection,
 ) !AdapterApplicationSocketEcho {
     const request = "adapter openssl one-rtt echo";
+    try require(client.handshakeConfirmed());
+    try require(server.handshakeConfirmed());
+    try require(client.packetNumberSpaceDiscarded(.handshake));
+    try require(server.packetNumberSpaceDiscarded(.handshake));
+    try require(!client.hasHandshakeProtectionKeys());
+    try require(!server.hasHandshakeProtectionKeys());
+
     const stream_id = try client.openStream();
     try client.sendOnStream(stream_id, request, true);
     const request_datagram = (try loop.client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
@@ -686,6 +699,12 @@ fn verifyAdapterApplicationSocketEcho(
         .client_inflight_after_echo = client_inflight_after_echo,
         .server_inflight_after_final_ack = server_inflight_after_final_ack,
         .server_close_error_code = server_close_error_code,
+        .client_handshake_confirmed = client.handshakeConfirmed(),
+        .server_handshake_confirmed = server.handshakeConfirmed(),
+        .client_handshake_space_discarded = client.packetNumberSpaceDiscarded(.handshake),
+        .server_handshake_space_discarded = server.packetNumberSpaceDiscarded(.handshake),
+        .client_handshake_keys_present = client.hasHandshakeProtectionKeys(),
+        .server_handshake_keys_present = server.hasHandshakeProtectionKeys(),
         .client_routes_registered = loop.client_routes_registered,
         .server_routes_registered = loop.server_routes_registered,
         .client_routes_after_close_timeout = client_routes_after_close_timeout,
@@ -891,8 +910,18 @@ pub fn main() !void {
         .local = server_application_local,
         .peer = server_application_peer,
     });
+    try require(connection.hasHandshakeProtectionKeys());
+    try require(peer.hasHandshakeProtectionKeys());
     try connection.confirmHandshake();
     try peer.confirmHandshake();
+    try connection.discardPacketNumberSpace(.handshake);
+    try peer.discardPacketNumberSpace(.handshake);
+    try require(connection.handshakeConfirmed());
+    try require(peer.handshakeConfirmed());
+    try require(connection.packetNumberSpaceDiscarded(.handshake));
+    try require(peer.packetNumberSpaceDiscarded(.handshake));
+    try require(!connection.hasHandshakeProtectionKeys());
+    try require(!peer.hasHandshakeProtectionKeys());
     try require(peer.hasOneRttProtectionKeys());
     const adapter_application_socket = try verifyAdapterApplicationSocketEcho(
         &endpoint_loop,
@@ -907,7 +936,7 @@ pub fn main() !void {
     try require(quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_context) == inbound_crypto.len);
 
     std.debug.print(
-        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} adapter_initial_socket={}/{}/{} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} transcript_handshake_bytes={} adapter_handshake_socket={}/{}/{} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} adapter_application_socket={}/{}/{}/{}/{}/{}/{} confirmed={}\n",
+        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} adapter_initial_socket={}/{}/{} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} transcript_handshake_bytes={} adapter_handshake_socket={}/{}/{} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} adapter_application_socket={}/{}/{}/{}/{}/{}/{} backend_confirmed={}\n",
         .{
             quicz_openssl_tls_backend_callbacks_set(openssl_context),
             quicz_openssl_tls_backend_ssl_is_quic_after_callbacks(openssl_context),
@@ -944,8 +973,14 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "[tls-openssl-backend-adapter] adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
+        "[tls-openssl-backend-adapter] adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
         .{
+            adapter_application_socket.client_handshake_confirmed,
+            adapter_application_socket.server_handshake_confirmed,
+            adapter_application_socket.client_handshake_space_discarded,
+            adapter_application_socket.server_handshake_space_discarded,
+            adapter_application_socket.client_handshake_keys_present,
+            adapter_application_socket.server_handshake_keys_present,
             adapter_application_socket.client_routes_registered,
             adapter_application_socket.server_routes_registered,
             adapter_application_socket.client_routes_after_close_timeout,
