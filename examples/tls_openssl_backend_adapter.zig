@@ -47,6 +47,8 @@ const AdapterServerInitialBackendConnectionDrive = struct {
     client_received_crypto_bytes: usize,
     peer_transport_parameters_bytes: usize,
     handshake_keys_installed: bool,
+    peer_bidi_stream_limit: u64,
+    peer_bidi_open_blocked: bool,
     handshake_crypto_bytes: usize,
     handshake_datagram_bytes: usize,
     client_handshake_crypto_bytes: usize,
@@ -548,6 +550,17 @@ fn verifyAdapterServerInitialBackendConnectionDrive(
     try require(second_progress.inbound_bytes == 0);
     try require(second_progress.outbound_chunks == 0);
     try require(!second_progress.handshake_confirmed);
+    var peer_bidi_stream_limit: u64 = 0;
+    while (peer_bidi_stream_limit < 8) : (peer_bidi_stream_limit += 1) {
+        _ = try server.openStream();
+    }
+    const peer_bidi_open_blocked = if (server.openStream()) |_| false else |err| switch (err) {
+        error.FlowControlBlocked => true,
+        else => return err,
+    };
+    if (!peer_bidi_open_blocked) {
+        return error.UnexpectedState;
+    }
 
     const server_datagram = (try server.pollProtectedLongDatagram(
         42,
@@ -661,6 +674,8 @@ fn verifyAdapterServerInitialBackendConnectionDrive(
         .client_received_crypto_bytes = client_received_crypto_len,
         .peer_transport_parameters_bytes = second_progress.peer_transport_parameters_bytes,
         .handshake_keys_installed = second_progress.handshake_keys_installed,
+        .peer_bidi_stream_limit = peer_bidi_stream_limit,
+        .peer_bidi_open_blocked = peer_bidi_open_blocked,
         .handshake_crypto_bytes = handshake_progress.outbound_bytes,
         .handshake_datagram_bytes = server_handshake_datagram.len,
         .client_handshake_crypto_bytes = client_handshake_crypto.len,
@@ -1558,7 +1573,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_initial={}/{}/{} server_connection_initial={}/{}/{}/{}/{}/{} server_connection_handshake={}/{}/{}/{}/{} server_connection_application={}/{}/{}/{} server_probe_confirmed={}\n",
+        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_initial={}/{}/{} server_connection_initial={}/{}/{}/{}/{}/{}/{}/{} server_connection_handshake={}/{}/{}/{}/{} server_connection_application={}/{}/{}/{} server_probe_confirmed={}\n",
         .{
             transcript.client_keylog_callbacks,
             transcript.server_keylog_callbacks,
@@ -1575,6 +1590,8 @@ pub fn main() !void {
             server_connection_probe.client_received_crypto_bytes,
             server_connection_probe.peer_transport_parameters_bytes,
             server_connection_probe.handshake_keys_installed,
+            server_connection_probe.peer_bidi_stream_limit,
+            server_connection_probe.peer_bidi_open_blocked,
             server_connection_probe.handshake_crypto_bytes,
             server_connection_probe.handshake_datagram_bytes,
             server_connection_probe.client_handshake_crypto_bytes,

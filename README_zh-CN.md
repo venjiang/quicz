@@ -217,7 +217,8 @@ pub fn main() !void {
   Handshake CRYPTO 后，OpenSSL-backed `handshake_confirmed` callback 确认 client，
   并通过 no-output Handshake drive 丢弃 client Handshake packet-number space 和 keys；
   server connection probe 也会通过 backend 拉取真实 pair-transcript 1-RTT secrets，
-  确认 server connection，并丢弃 server Handshake packet-number space 和 keys；随后通过同一个
+  确认 server connection，并证明已应用 transport parameters 里的 peer stream-count
+  limit，随后丢弃 server Handshake packet-number space 和 keys；再通过同一个
   socket/lifecycle loop owner 投递 protected close 并完成 route cleanup。输出也会证明
   已消费的 transcript transport-parameter bytes 与连接层应用的 peer bytes 一致，同时打印
   transcript keylog 证据和当前 wrapper keylog 边界。
@@ -332,7 +333,8 @@ pub fn main() !void {
   Handshake CRYPTO 后，OpenSSL-backed `handshake_confirmed` callback 确认 client，
   并通过 no-output Handshake drive 丢弃 client Handshake packet-number space 和 keys；
   server connection probe 也会通过 backend 拉取真实 pair-transcript 1-RTT secrets，
-  确认 server connection，并丢弃 server Handshake packet-number space 和 keys；配对
+  确认 server connection，并证明已应用 transport parameters 里的 peer stream-count
+  limit，随后丢弃 server Handshake packet-number space 和 keys；配对
   loopback server 也会通过 loopback UDP 消费 client Handshake CRYPTO，经 backend 拉取
   peer transport parameters 和 Handshake/1-RTT secrets，完成确认并清理 Handshake
   keys；direct server probe 也会消费 Handshake CRYPTO 并报告

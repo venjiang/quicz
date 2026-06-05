@@ -256,7 +256,8 @@ experimental.
   Handshake CRYPTO, the OpenSSL-backed `handshake_confirmed` callback confirms
   the client; the server connection probe also pulls real pair-transcript
   1-RTT secrets through the backend, confirms the server connection, and
-  discards its Handshake packet-number space and keys. The paired loopback
+  proves peer stream-count limits from the applied transport parameters before
+  discarding its Handshake packet-number space and keys. The paired loopback
   endpoint then sends
   protected close and completes route cleanup through one socket/lifecycle loop
   owner. Run with
@@ -462,7 +463,8 @@ experimental.
   discards the client Handshake packet-number space and keys through a
   backend-confirmed no-output Handshake drive, and uses the server connection
   probe to pull real pair-transcript 1-RTT secrets, confirm the server
-  connection, and discard its Handshake packet-number space and keys. The
+  connection, prove peer stream-count limits from the applied transport
+  parameters, and discard its Handshake packet-number space and keys. The
   paired loopback server also consumes client Handshake CRYPTO over loopback
   UDP, pulls peer transport parameters and Handshake/1-RTT secrets through the
   backend, confirms, and clears its Handshake keys; the direct server probe
