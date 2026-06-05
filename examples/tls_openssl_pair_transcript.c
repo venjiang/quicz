@@ -8,6 +8,10 @@
 
 #define QUICZ_OPENSSL_LEVEL_COUNT 4
 #define QUICZ_OPENSSL_CRYPTO_BUF_LEN 65536
+#define QUICZ_OPENSSL_SECRET_LEN 32
+#define QUICZ_OPENSSL_READ_SECRET 0
+#define QUICZ_OPENSSL_WRITE_SECRET 1
+#define QUICZ_OPENSSL_SECRET_DIRECTION_COUNT 2
 
 struct quicz_openssl_pair_transcript_result {
     int initialized;
@@ -50,6 +54,8 @@ struct quicz_openssl_endpoint {
     size_t out_total_len[QUICZ_OPENSSL_LEVEL_COUNT];
     unsigned char out_history[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_CRYPTO_BUF_LEN];
     size_t out_history_len[QUICZ_OPENSSL_LEVEL_COUNT];
+    unsigned char secrets[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_SECRET_DIRECTION_COUNT][QUICZ_OPENSSL_SECRET_LEN];
+    int secret_available[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_SECRET_DIRECTION_COUNT];
     uint32_t read_level;
     uint32_t write_level;
     int send_callbacks;
@@ -68,6 +74,10 @@ static unsigned char quicz_openssl_last_client_crypto[QUICZ_OPENSSL_LEVEL_COUNT]
 static size_t quicz_openssl_last_client_crypto_len[QUICZ_OPENSSL_LEVEL_COUNT];
 static unsigned char quicz_openssl_last_server_crypto[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_CRYPTO_BUF_LEN];
 static size_t quicz_openssl_last_server_crypto_len[QUICZ_OPENSSL_LEVEL_COUNT];
+static unsigned char quicz_openssl_last_client_secrets[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_SECRET_DIRECTION_COUNT][QUICZ_OPENSSL_SECRET_LEN];
+static int quicz_openssl_last_client_secret_available[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_SECRET_DIRECTION_COUNT];
+static unsigned char quicz_openssl_last_server_secrets[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_SECRET_DIRECTION_COUNT][QUICZ_OPENSSL_SECRET_LEN];
+static int quicz_openssl_last_server_secret_available[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_SECRET_DIRECTION_COUNT];
 
 static const unsigned char quicz_openssl_demo_psk[] = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
@@ -157,6 +167,11 @@ static int yield_secret_cb(
         endpoint->read_level = prot_level;
     } else if (direction == 1) {
         endpoint->write_level = prot_level;
+    }
+    if ((direction == QUICZ_OPENSSL_READ_SECRET || direction == QUICZ_OPENSSL_WRITE_SECRET) &&
+        secret_len == QUICZ_OPENSSL_SECRET_LEN) {
+        memcpy(endpoint->secrets[prot_level][direction], secret, secret_len);
+        endpoint->secret_available[prot_level][direction] = 1;
     }
     endpoint->yield_secret_callbacks += 1;
     return 1;
@@ -349,11 +364,41 @@ static void copy_last_crypto(
     }
 }
 
+static void copy_last_secrets(
+    const struct quicz_openssl_endpoint *client,
+    const struct quicz_openssl_endpoint *server
+) {
+    memset(quicz_openssl_last_client_secret_available, 0, sizeof(quicz_openssl_last_client_secret_available));
+    memset(quicz_openssl_last_server_secret_available, 0, sizeof(quicz_openssl_last_server_secret_available));
+    for (uint32_t level = 0; level < QUICZ_OPENSSL_LEVEL_COUNT; level += 1) {
+        for (uint32_t direction = 0; direction < QUICZ_OPENSSL_SECRET_DIRECTION_COUNT; direction += 1) {
+            if (client->secret_available[level][direction]) {
+                memcpy(
+                    quicz_openssl_last_client_secrets[level][direction],
+                    client->secrets[level][direction],
+                    QUICZ_OPENSSL_SECRET_LEN
+                );
+                quicz_openssl_last_client_secret_available[level][direction] = 1;
+            }
+            if (server->secret_available[level][direction]) {
+                memcpy(
+                    quicz_openssl_last_server_secrets[level][direction],
+                    server->secrets[level][direction],
+                    QUICZ_OPENSSL_SECRET_LEN
+                );
+                quicz_openssl_last_server_secret_available[level][direction] = 1;
+            }
+        }
+    }
+}
+
 struct quicz_openssl_pair_transcript_result quicz_openssl_pair_transcript_run(void) {
     struct quicz_openssl_pair_transcript_result result;
     memset(&result, 0, sizeof(result));
     memset(quicz_openssl_last_client_crypto_len, 0, sizeof(quicz_openssl_last_client_crypto_len));
     memset(quicz_openssl_last_server_crypto_len, 0, sizeof(quicz_openssl_last_server_crypto_len));
+    memset(quicz_openssl_last_client_secret_available, 0, sizeof(quicz_openssl_last_client_secret_available));
+    memset(quicz_openssl_last_server_secret_available, 0, sizeof(quicz_openssl_last_server_secret_available));
 
     struct quicz_openssl_endpoint *client = calloc(1, sizeof(*client));
     struct quicz_openssl_endpoint *server = calloc(1, sizeof(*server));
@@ -387,6 +432,7 @@ struct quicz_openssl_pair_transcript_result quicz_openssl_pair_transcript_run(vo
 
     copy_result_endpoint(&result, client, server);
     copy_last_crypto(client, server);
+    copy_last_secrets(client, server);
     result.error_queue_code = ERR_peek_error();
     free_endpoint(client);
     free_endpoint(server);
@@ -443,6 +489,69 @@ int quicz_openssl_pair_transcript_copy_server_crypto(
         quicz_openssl_last_server_crypto,
         quicz_openssl_last_server_crypto_len,
         level,
+        out,
+        out_len,
+        written_len
+    );
+}
+
+static int copy_secret(
+    const unsigned char secrets[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_SECRET_DIRECTION_COUNT][QUICZ_OPENSSL_SECRET_LEN],
+    const int available[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_SECRET_DIRECTION_COUNT],
+    int level,
+    int direction,
+    unsigned char *out,
+    size_t out_len,
+    size_t *written_len
+) {
+    if (written_len == NULL ||
+        level < 0 ||
+        level >= QUICZ_OPENSSL_LEVEL_COUNT ||
+        direction < 0 ||
+        direction >= QUICZ_OPENSSL_SECRET_DIRECTION_COUNT ||
+        !available[level][direction] ||
+        out_len < QUICZ_OPENSSL_SECRET_LEN ||
+        out == NULL) {
+        if (written_len != NULL) {
+            *written_len = 0;
+        }
+        return 0;
+    }
+    memcpy(out, secrets[level][direction], QUICZ_OPENSSL_SECRET_LEN);
+    *written_len = QUICZ_OPENSSL_SECRET_LEN;
+    return 1;
+}
+
+int quicz_openssl_pair_transcript_copy_client_secret(
+    int level,
+    int direction,
+    unsigned char *out,
+    size_t out_len,
+    size_t *written_len
+) {
+    return copy_secret(
+        quicz_openssl_last_client_secrets,
+        quicz_openssl_last_client_secret_available,
+        level,
+        direction,
+        out,
+        out_len,
+        written_len
+    );
+}
+
+int quicz_openssl_pair_transcript_copy_server_secret(
+    int level,
+    int direction,
+    unsigned char *out,
+    size_t out_len,
+    size_t *written_len
+) {
+    return copy_secret(
+        quicz_openssl_last_server_secrets,
+        quicz_openssl_last_server_secret_available,
+        level,
+        direction,
         out,
         out_len,
         written_len

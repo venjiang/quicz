@@ -46,6 +46,20 @@ extern fn quicz_openssl_pair_transcript_copy_server_crypto(
     out_len: usize,
     written_len: *usize,
 ) c_int;
+extern fn quicz_openssl_pair_transcript_copy_client_secret(
+    level: c_int,
+    direction: c_int,
+    out: [*]u8,
+    out_len: usize,
+    written_len: *usize,
+) c_int;
+extern fn quicz_openssl_pair_transcript_copy_server_secret(
+    level: c_int,
+    direction: c_int,
+    out: [*]u8,
+    out_len: usize,
+    written_len: *usize,
+) c_int;
 
 const FixedWriter = struct {
     buffer: []u8,
@@ -109,6 +123,34 @@ fn copyOpenSslCrypto(is_client: bool, level: usize, out: []u8) ExampleError![]co
     return out[0..written_len];
 }
 
+fn copyOpenSslSecret(
+    is_client: bool,
+    level: usize,
+    direction: usize,
+) ExampleError![quicz.protection.traffic_secret_len]u8 {
+    var secret: [quicz.protection.traffic_secret_len]u8 = undefined;
+    var written_len: usize = 0;
+    const copied = if (is_client)
+        quicz_openssl_pair_transcript_copy_client_secret(
+            @intCast(level),
+            @intCast(direction),
+            &secret,
+            secret.len,
+            &written_len,
+        )
+    else
+        quicz_openssl_pair_transcript_copy_server_secret(
+            @intCast(level),
+            @intCast(direction),
+            &secret,
+            secret.len,
+            &written_len,
+        );
+    try require(copied == 1);
+    try require(written_len == secret.len);
+    return secret;
+}
+
 fn injectCryptoFrame(
     receiver: *quicz.Connection,
     space: quicz.PacketNumberSpace,
@@ -148,6 +190,13 @@ fn verifyCryptoDelivery(
 const ProtectedInitialDelivery = struct {
     crypto_bytes: usize,
     datagram_bytes: usize,
+};
+
+const ProtectedHandshakeDelivery = struct {
+    client_crypto_bytes: usize,
+    client_datagram_bytes: usize,
+    server_crypto_bytes: usize,
+    server_datagram_bytes: usize,
 };
 
 fn verifyProtectedInitialCryptoDelivery(expected_len: usize) !ProtectedInitialDelivery {
@@ -195,6 +244,96 @@ fn verifyProtectedInitialCryptoDelivery(expected_len: usize) !ProtectedInitialDe
     return .{
         .crypto_bytes = read_len,
         .datagram_bytes = protected.len,
+    };
+}
+
+fn verifyProtectedHandshakeCryptoDelivery(
+    expected_client_len: usize,
+    expected_server_len: usize,
+) !ProtectedHandshakeDelivery {
+    var client_handshake_crypto: [8192]u8 = undefined;
+    var server_handshake_crypto: [8192]u8 = undefined;
+    const copied_client = try copyOpenSslCrypto(true, 2, &client_handshake_crypto);
+    const copied_server = try copyOpenSslCrypto(false, 2, &server_handshake_crypto);
+    try require(copied_client.len == expected_client_len);
+    try require(copied_server.len == expected_server_len);
+    try require(copied_client.len > 0);
+    try require(copied_server.len > 0);
+
+    const client_local = try copyOpenSslSecret(true, 2, 1);
+    const client_peer = try copyOpenSslSecret(true, 2, 0);
+    const server_local = try copyOpenSslSecret(false, 2, 1);
+    const server_peer = try copyOpenSslSecret(false, 2, 0);
+    try require(std.mem.eql(u8, &client_local, &server_peer));
+    try require(std.mem.eql(u8, &server_local, &client_peer));
+
+    const allocator = std.heap.page_allocator;
+    const client_dcid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
+    const client_scid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const server_dcid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_scid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+
+    var protected_client = try quicz.Connection.init(allocator, .client, .{
+        .max_datagram_size = 8192,
+    });
+    defer protected_client.deinit();
+    var protected_server = try quicz.Connection.init(allocator, .server, .{
+        .max_datagram_size = 8192,
+    });
+    defer protected_server.deinit();
+    try protected_server.validatePeerAddress();
+
+    try protected_client.installHandshakeTrafficSecrets(.{
+        .local = client_local,
+        .peer = client_peer,
+    });
+    try protected_server.installHandshakeTrafficSecrets(.{
+        .local = server_local,
+        .peer = server_peer,
+    });
+    try require(protected_client.hasHandshakeProtectionKeys());
+    try require(protected_server.hasHandshakeProtectionKeys());
+
+    try protected_client.sendCryptoInSpace(.handshake, copied_client);
+    const protected_client_handshake = (try protected_client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(protected_client_handshake);
+    try require(protected_client.sentPacketCount(.handshake) == 1);
+    try protected_server.processProtectedHandshakeDatagramWithInstalledKeys(11, protected_client_handshake);
+
+    var read_buf: [8192]u8 = undefined;
+    const client_read_len = (try protected_server.recvCryptoInSpace(.handshake, &read_buf)) orelse return error.UnexpectedState;
+    try require(client_read_len == copied_client.len);
+    try require(std.mem.eql(u8, read_buf[0..client_read_len], copied_client));
+    try require((try protected_server.recvCryptoInSpace(.handshake, &read_buf)) == null);
+    try require(protected_server.nextPeerPacketNumber(.handshake) == 1);
+    try require(protected_server.pendingAckLargest(.handshake) == 0);
+
+    try protected_server.sendCryptoInSpace(.handshake, copied_server);
+    const protected_server_handshake = (try protected_server.pollProtectedHandshakeDatagramWithInstalledKeys(
+        12,
+        &client_dcid,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(protected_server_handshake);
+    try require(protected_server.sentPacketCount(.handshake) == 1);
+    try protected_client.processProtectedHandshakeDatagramWithInstalledKeys(13, protected_server_handshake);
+
+    const server_read_len = (try protected_client.recvCryptoInSpace(.handshake, &read_buf)) orelse return error.UnexpectedState;
+    try require(server_read_len == copied_server.len);
+    try require(std.mem.eql(u8, read_buf[0..server_read_len], copied_server));
+    try require((try protected_client.recvCryptoInSpace(.handshake, &read_buf)) == null);
+    try require(protected_client.nextPeerPacketNumber(.handshake) == 1);
+    try require(protected_client.pendingAckLargest(.handshake) == 0);
+
+    return .{
+        .client_crypto_bytes = client_read_len,
+        .client_datagram_bytes = protected_client_handshake.len,
+        .server_crypto_bytes = server_read_len,
+        .server_datagram_bytes = protected_server_handshake.len,
     };
 }
 
@@ -277,6 +416,10 @@ pub fn main() !void {
         &client_connection,
     );
     const protected_initial = try verifyProtectedInitialCryptoDelivery(result.client_out_level_bytes[0]);
+    const protected_handshake = try verifyProtectedHandshakeCryptoDelivery(
+        result.client_out_level_bytes[2],
+        result.server_out_level_bytes[2],
+    );
 
     std.debug.print(
         "[tls-openssl-pair-transcript] initialized={} client_done={} server_done={} client_send={} server_send={} client_recv={} server_recv={} client_release={} server_release={} client_yield={} server_yield={} client_tp={} server_tp={} client_levels={}/{}/{}/{} server_levels={}/{}/{}/{}",
@@ -305,7 +448,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        " quicz_delivery={}/{}/{}/{}/{}/{} protected_initial={}/{} iterations={} alerts={}/{} errors={}/{}\n",
+        " quicz_delivery={}/{}/{}/{}/{}/{} protected_initial={}/{} protected_handshake={}/{}/{}/{} iterations={} alerts={}/{} errors={}/{}\n",
         .{
             client_initial_bytes,
             server_initial_bytes,
@@ -315,6 +458,10 @@ pub fn main() !void {
             server_application_bytes,
             protected_initial.crypto_bytes,
             protected_initial.datagram_bytes,
+            protected_handshake.client_crypto_bytes,
+            protected_handshake.client_datagram_bytes,
+            protected_handshake.server_crypto_bytes,
+            protected_handshake.server_datagram_bytes,
             result.drive_iterations,
             result.client_alert_callbacks,
             result.server_alert_callbacks,
