@@ -832,3 +832,30 @@ int quicz_openssl_pair_transcript_context_copy_pending_crypto(
     endpoint->out_len[level] = 0;
     return 1;
 }
+
+int quicz_openssl_pair_transcript_context_copy_secret(
+    void *opaque_context,
+    int is_client,
+    int level,
+    int direction,
+    unsigned char *out,
+    size_t out_len,
+    size_t *written_len
+) {
+    struct quicz_openssl_endpoint *endpoint = context_endpoint(opaque_context, is_client);
+    if (endpoint == NULL) {
+        if (written_len != NULL) {
+            *written_len = 0;
+        }
+        return 0;
+    }
+    return copy_secret(
+        endpoint->secrets,
+        endpoint->secret_available,
+        level,
+        direction,
+        out,
+        out_len,
+        written_len
+    );
+}

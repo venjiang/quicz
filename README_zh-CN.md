@@ -95,8 +95,8 @@ zig build run-initial-keys
   material；client Initial CRYPTO bytes 还会经 quicz protected
   Initial long-packet helper 发送，并由 server connection 读回；
   双向 Initial flight 也会通过 quicz endpoint lifecycle 在 loopback UDP 上投递；
-  另有手动 OpenSSL context 检查会把 live Initial TLS CRYPTO bytes 通过同一
-  socket/lifecycle 边界路由；
+  另有手动 OpenSSL context 检查会把 live Initial/Handshake TLS CRYPTO bytes
+  通过同一 socket/lifecycle 边界路由；
   OpenSSL Handshake secrets 也会驱动双向 installed-key protected Handshake CRYPTO
   投递，包括通过同一个 lifecycle 的 loopback UDP 投递；OpenSSL 1-RTT secrets 还会保护
   一次 quicz STREAM request/response，并通过同一个 lifecycle 驱动 loopback UDP STREAM echo。
@@ -186,9 +186,9 @@ pub fn main() !void {
   配置给 OpenSSL，记录并解析 OpenSSL callback 收到的 peer bytes，也会记录 keylog
   callback 次数和字节数，但不打印 key material；同时会把 client Initial CRYPTO bytes 经 quicz protected Initial
   long-packet helper 组包，并通过 quicz endpoint lifecycle 在
-  loopback UDP 上投递双向 Initial flight，并验证一段手动 OpenSSL Initial transcript
-  也能走同一 socket 路径；安装 OpenSSL 产出的 Handshake secrets，并验证
-  双向 protected Handshake CRYPTO 投递，包括通过同一个 lifecycle 的 loopback UDP 投递；
+  loopback UDP 上投递双向 Initial flight，并验证一段手动 OpenSSL
+  Initial/Handshake transcript 也能走同一 socket 路径；安装 OpenSSL 产出的
+  Handshake secrets，并验证双向 protected Handshake CRYPTO 投递，包括通过同一个 lifecycle 的 loopback UDP 投递；
   OpenSSL 产出的 1-RTT secrets 也会驱动 installed-key protected STREAM request/response，
   并通过同一个 lifecycle 驱动 loopback UDP STREAM echo。运行：
   `zig build run-tls-openssl-pair-transcript`。
@@ -300,8 +300,8 @@ pub fn main() !void {
   `run-tls-openssl-pair-transcript` 已完成 OpenSSL client/server callback-mode TLS
   transcript，按 protection level 分离 CRYPTO handoff，把生成的 bytes 映射进 quicz
   CRYPTO 队列，并验证 protected Initial long-packet 投递和双向 Initial flight 的
-  socket-backed 投递，以及手动 OpenSSL Initial transcript 通过同一 socket/lifecycle
-  边界路由；还会验证使用 OpenSSL Handshake secrets 的 installed-key protected
+  socket-backed 投递，以及手动 OpenSSL Initial/Handshake transcript 通过同一
+  socket/lifecycle 边界路由；还会验证使用 OpenSSL Handshake secrets 的 installed-key protected
   Handshake 投递（含 socket-backed 投递）和使用
   OpenSSL 1-RTT secrets 的 installed-key protected STREAM request/response 与
   socket-backed STREAM echo；

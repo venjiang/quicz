@@ -101,6 +101,15 @@ extern fn quicz_openssl_pair_transcript_context_copy_pending_crypto(
     out_len: usize,
     written_len: *usize,
 ) c_int;
+extern fn quicz_openssl_pair_transcript_context_copy_secret(
+    context: *anyopaque,
+    is_client: c_int,
+    level: c_int,
+    direction: c_int,
+    out: [*]u8,
+    out_len: usize,
+    written_len: *usize,
+) c_int;
 
 const FixedWriter = struct {
     buffer: []u8,
@@ -281,6 +290,28 @@ fn copyManualOpenSslCrypto(
     return out[0..written_len];
 }
 
+fn copyManualOpenSslSecret(
+    context: *anyopaque,
+    is_client: bool,
+    level: usize,
+    direction: usize,
+) ExampleError![quicz.protection.traffic_secret_len]u8 {
+    var secret: [quicz.protection.traffic_secret_len]u8 = undefined;
+    var written_len: usize = 0;
+    const copied = quicz_openssl_pair_transcript_context_copy_secret(
+        context,
+        if (is_client) 1 else 0,
+        @intCast(level),
+        @intCast(direction),
+        &secret,
+        secret.len,
+        &written_len,
+    );
+    try require(copied == 1);
+    try require(written_len == secret.len);
+    return secret;
+}
+
 fn provideManualOpenSslCrypto(
     context: *anyopaque,
     is_client: bool,
@@ -408,11 +439,15 @@ const SocketInitialDelivery = struct {
     client_ack_bytes: usize,
 };
 
-const ManualSocketInitialDelivery = struct {
-    client_crypto_bytes: usize,
-    client_datagram_bytes: usize,
-    server_crypto_bytes: usize,
-    server_datagram_bytes: usize,
+const ManualSocketTranscriptDelivery = struct {
+    client_initial_crypto_bytes: usize,
+    client_initial_datagram_bytes: usize,
+    server_initial_crypto_bytes: usize,
+    server_initial_datagram_bytes: usize,
+    client_handshake_crypto_bytes: usize,
+    client_handshake_datagram_bytes: usize,
+    server_handshake_crypto_bytes: usize,
+    server_handshake_datagram_bytes: usize,
 };
 
 const ProtectedHandshakeDelivery = struct {
@@ -656,7 +691,7 @@ fn verifySocketBackedInitialCryptoDelivery(
     };
 }
 
-fn verifyManualSocketInitialTranscript() !ManualSocketInitialDelivery {
+fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
     const context = quicz_openssl_pair_transcript_context_new() orelse return error.UnexpectedState;
     defer quicz_openssl_pair_transcript_context_free(context);
 
@@ -784,18 +819,109 @@ fn verifyManualSocketInitialTranscript() !ManualSocketInitialDelivery {
     try provideManualOpenSslCrypto(context, true, 0, read_buf[0..server_read_len]);
 
     try require(quicz_openssl_pair_transcript_context_drive(context, 1) == 1);
+
+    const client_local = try copyManualOpenSslSecret(context, true, 2, 1);
+    const client_peer = try copyManualOpenSslSecret(context, true, 2, 0);
+    const server_local = try copyManualOpenSslSecret(context, false, 2, 1);
+    const server_peer = try copyManualOpenSslSecret(context, false, 2, 0);
+    try require(std.mem.eql(u8, &client_local, &server_peer));
+    try require(std.mem.eql(u8, &server_local, &client_peer));
+
+    try client.installHandshakeTrafficSecrets(.{
+        .local = client_local,
+        .peer = client_peer,
+    });
+    try server.installHandshakeTrafficSecrets(.{
+        .local = server_local,
+        .peer = server_peer,
+    });
+    try require(client.hasHandshakeProtectionKeys());
+    try require(server.hasHandshakeProtectionKeys());
+
+    var server_handshake_crypto: [8192]u8 = undefined;
+    const copied_server_handshake = try copyManualOpenSslCrypto(context, false, 2, &server_handshake_crypto);
+    try require(copied_server_handshake.len > 0);
+
+    try server.sendCryptoInSpace(.handshake, copied_server_handshake);
+    const server_handshake_datagram = (try server_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        94,
+        &client_scid,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(server_handshake_datagram);
+    try server_socket.send(io, &client_socket.address, server_handshake_datagram);
+
+    const server_handshake_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+    const server_handshake_route = try client_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        server_handshake_received.path,
+        95,
+        server_handshake_received.data,
+    );
+    try require(server_handshake_route.connection_id == client_handle);
+    try require(std.mem.eql(u8, server_handshake_route.destination_connection_id.asSlice(), &client_scid));
+
+    const server_handshake_read_len = (try client.recvCryptoInSpace(.handshake, &read_buf)) orelse
+        return error.UnexpectedState;
+    try require(server_handshake_read_len == copied_server_handshake.len);
+    try require(std.mem.eql(u8, read_buf[0..server_handshake_read_len], copied_server_handshake));
+    try provideManualOpenSslCrypto(context, true, 2, read_buf[0..server_handshake_read_len]);
+
+    try require(quicz_openssl_pair_transcript_context_drive(context, 1) == 1);
+    var client_handshake_crypto: [8192]u8 = undefined;
+    const copied_client_handshake = try copyManualOpenSslCrypto(context, true, 2, &client_handshake_crypto);
+    try require(copied_client_handshake.len > 0);
+
+    try client.sendCryptoInSpace(.handshake, copied_client_handshake);
+    const client_handshake_datagram = (try client_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        96,
+        &server_scid,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_handshake_datagram);
+    try client_socket.send(io, &server_socket.address, client_handshake_datagram);
+
+    const client_handshake_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const client_handshake_route = try server_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        client_handshake_received.path,
+        97,
+        client_handshake_received.data,
+    );
+    try require(client_handshake_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, client_handshake_route.destination_connection_id.asSlice(), &server_scid));
+
+    const client_handshake_read_len = (try server.recvCryptoInSpace(.handshake, &read_buf)) orelse
+        return error.UnexpectedState;
+    try require(client_handshake_read_len == copied_client_handshake.len);
+    try require(std.mem.eql(u8, read_buf[0..client_handshake_read_len], copied_client_handshake));
+    try provideManualOpenSslCrypto(context, false, 2, read_buf[0..client_handshake_read_len]);
+
+    try require(quicz_openssl_pair_transcript_context_drive(context, 0) == 1);
     const manual_result = quicz_openssl_pair_transcript_context_result(context);
     try require(manual_result.initialized == 1);
+    try require(manual_result.client_done == 1);
+    try require(manual_result.server_done == 1);
     try require(manual_result.server_got_transport_params_callbacks == 1);
     try require(manual_result.server_peer_transport_parameters_len > 0);
     try require(manual_result.client_alert_callbacks == 0);
     try require(manual_result.server_alert_callbacks == 0);
 
     return .{
-        .client_crypto_bytes = client_read_len,
-        .client_datagram_bytes = client_datagram.len,
-        .server_crypto_bytes = server_read_len,
-        .server_datagram_bytes = server_datagram.len,
+        .client_initial_crypto_bytes = client_read_len,
+        .client_initial_datagram_bytes = client_datagram.len,
+        .server_initial_crypto_bytes = server_read_len,
+        .server_initial_datagram_bytes = server_datagram.len,
+        .client_handshake_crypto_bytes = client_handshake_read_len,
+        .client_handshake_datagram_bytes = client_handshake_datagram.len,
+        .server_handshake_crypto_bytes = server_handshake_read_len,
+        .server_handshake_datagram_bytes = server_handshake_datagram.len,
     };
 }
 
@@ -1490,7 +1616,7 @@ pub fn main() !void {
         result.client_out_level_bytes[0],
         result.server_out_level_bytes[0],
     );
-    const manual_socket_initial = try verifyManualSocketInitialTranscript();
+    const manual_socket_transcript = try verifyManualSocketTranscriptDelivery();
     const protected_handshake = try verifyProtectedHandshakeCryptoDelivery(
         result.client_out_level_bytes[2],
         result.server_out_level_bytes[2],
@@ -1558,12 +1684,16 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        " manual_socket_initial={}/{}/{}/{} protected_handshake={}/{}/{}/{} socket_handshake={}/{}/{}/{}/{}/{} protected_application={}/{}/{}/{} socket_echo={}/{}/{}/{}/{}",
+        " manual_socket_transcript={}/{}/{}/{}/{}/{}/{}/{} protected_handshake={}/{}/{}/{} socket_handshake={}/{}/{}/{}/{}/{} protected_application={}/{}/{}/{} socket_echo={}/{}/{}/{}/{}",
         .{
-            manual_socket_initial.client_crypto_bytes,
-            manual_socket_initial.client_datagram_bytes,
-            manual_socket_initial.server_crypto_bytes,
-            manual_socket_initial.server_datagram_bytes,
+            manual_socket_transcript.client_initial_crypto_bytes,
+            manual_socket_transcript.client_initial_datagram_bytes,
+            manual_socket_transcript.server_initial_crypto_bytes,
+            manual_socket_transcript.server_initial_datagram_bytes,
+            manual_socket_transcript.client_handshake_crypto_bytes,
+            manual_socket_transcript.client_handshake_datagram_bytes,
+            manual_socket_transcript.server_handshake_crypto_bytes,
+            manual_socket_transcript.server_handshake_datagram_bytes,
             protected_handshake.client_crypto_bytes,
             protected_handshake.client_datagram_bytes,
             protected_handshake.server_crypto_bytes,
