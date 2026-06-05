@@ -181,7 +181,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   `handshake_confirmed` callback that reports confirmation after peer transport
   parameters, Handshake/1-RTT secrets, and OpenSSL recv/release consumption of
   inbound Handshake CRYPTO are available, so
-  `run-tls-openssl-backend-adapter` now prints `backend_confirmed=true`.
+  `run-tls-openssl-backend-adapter` now prints `backend_confirmed=true`. The same
+  translate-c header also exposes an OpenSSL server-role backend constructor and
+  verifies that the server context can install local transport parameters without
+  reporting confirmed before the handshake is driven; full server-side backend
+  driving remains pending.
 - 2026-06-05: Added `examples/tls_openssl_pair_transcript.zig` plus a small C
   harness that completes an OpenSSL client/server callback-mode TLS transcript
   using a fixed example PSK. The harness routes CRYPTO bytes by OpenSSL

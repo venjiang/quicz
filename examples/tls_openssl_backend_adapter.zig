@@ -831,6 +831,19 @@ pub fn main() !void {
     try require(transcript.server_keylog_bytes > @as(usize, @intCast(transcript.server_keylog_callbacks)));
     try require(transcript.server_out_level_bytes[2] > 0);
 
+    const openssl_server_probe_context = c.quicz_openssl_tls_backend_new_server() orelse return error.OutOfMemory;
+    defer c.quicz_openssl_tls_backend_free(openssl_server_probe_context);
+    try require(c.quicz_openssl_tls_backend_callbacks_set(openssl_server_probe_context) == 1);
+    try require(c.quicz_openssl_tls_backend_ssl_is_quic_after_callbacks(openssl_server_probe_context) == 0);
+    try require(statusIsOk(c.quicz_openssl_tls_backend_set_local_transport_parameters(
+        openssl_server_probe_context,
+        transcript_local_transport_parameters.server.ptr,
+        transcript_local_transport_parameters.server.len,
+    )));
+    try require(c.quicz_openssl_tls_backend_local_transport_parameters_set(openssl_server_probe_context) == 1);
+    try require(c.quicz_openssl_tls_backend_local_transport_parameters_len(openssl_server_probe_context) == transcript_local_transport_parameters.server.len);
+    try require(!c.quicz_openssl_tls_backend_handshake_confirmed(openssl_server_probe_context));
+
     const openssl_context = c.quicz_openssl_tls_backend_new() orelse return error.OutOfMemory;
     defer c.quicz_openssl_tls_backend_free(openssl_context);
 
@@ -1096,13 +1109,15 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} adapter_keylog={}/{} adapter_pto={}/{}/{}/{} adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
+        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_confirmed={} adapter_keylog={}/{} adapter_pto={}/{}/{}/{} adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
         .{
             transcript.client_keylog_callbacks,
             transcript.server_keylog_callbacks,
             transcript.client_keylog_bytes,
             transcript.server_keylog_bytes,
             transcript.client_peer_transport_parameters_len,
+            c.quicz_openssl_tls_backend_local_transport_parameters_len(openssl_server_probe_context),
+            c.quicz_openssl_tls_backend_handshake_confirmed(openssl_server_probe_context),
             c.quicz_openssl_tls_backend_keylog_callbacks(openssl_context),
             c.quicz_openssl_tls_backend_keylog_bytes(openssl_context),
             adapter_application_socket.client_pto_deadline_millis,

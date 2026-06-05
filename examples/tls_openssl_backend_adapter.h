@@ -5,6 +5,7 @@
 #include "tls_openssl_pair_transcript.h"
 
 void *quicz_openssl_tls_backend_new(void);
+void *quicz_openssl_tls_backend_new_server(void);
 void quicz_openssl_tls_backend_free(void *context);
 enum quicz_tls_backend_status quicz_openssl_tls_backend_receive(
     void *context,

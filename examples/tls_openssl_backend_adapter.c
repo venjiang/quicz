@@ -191,13 +191,13 @@ static const OSSL_DISPATCH quicz_openssl_tls_dispatch[] = {
     { 0, NULL },
 };
 
-void *quicz_openssl_tls_backend_new(void) {
+static void *quicz_openssl_tls_backend_new_for_role(int is_client) {
     struct quicz_openssl_tls_backend *backend = calloc(1, sizeof(*backend));
     if (backend == NULL) {
         return NULL;
     }
 
-    backend->ctx = SSL_CTX_new(TLS_client_method());
+    backend->ctx = SSL_CTX_new(is_client ? TLS_client_method() : TLS_server_method());
     if (backend->ctx == NULL) {
         free(backend);
         return NULL;
@@ -214,8 +214,20 @@ void *quicz_openssl_tls_backend_new(void) {
     SSL_CTX_set_keylog_callback(backend->ctx, keylog_cb);
     backend->callbacks_set = SSL_set_quic_tls_cbs(backend->ssl, quicz_openssl_tls_dispatch, backend);
     backend->ssl_is_quic_after_callbacks = SSL_is_quic(backend->ssl);
-    SSL_set_connect_state(backend->ssl);
+    if (is_client) {
+        SSL_set_connect_state(backend->ssl);
+    } else {
+        SSL_set_accept_state(backend->ssl);
+    }
     return backend;
+}
+
+void *quicz_openssl_tls_backend_new(void) {
+    return quicz_openssl_tls_backend_new_for_role(1);
+}
+
+void *quicz_openssl_tls_backend_new_server(void) {
+    return quicz_openssl_tls_backend_new_for_role(0);
 }
 
 void quicz_openssl_tls_backend_free(void *context) {
