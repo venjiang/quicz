@@ -145,6 +145,59 @@ fn verifyCryptoDelivery(
     return read_len;
 }
 
+const ProtectedInitialDelivery = struct {
+    crypto_bytes: usize,
+    datagram_bytes: usize,
+};
+
+fn verifyProtectedInitialCryptoDelivery(expected_len: usize) !ProtectedInitialDelivery {
+    var client_initial_crypto: [8192]u8 = undefined;
+    const copied = try copyOpenSslCrypto(true, 0, &client_initial_crypto);
+    try require(copied.len == expected_len);
+    try require(copied.len > 0);
+
+    const allocator = std.heap.page_allocator;
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var protected_client = try quicz.Connection.init(allocator, .client, .{
+        .max_datagram_size = 8192,
+    });
+    defer protected_client.deinit();
+    var protected_server = try quicz.Connection.init(allocator, .server, .{
+        .max_datagram_size = 8192,
+    });
+    defer protected_server.deinit();
+
+    try protected_client.sendCryptoInSpace(.initial, copied);
+    const protected = (try protected_client.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        0,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(protected);
+    try require(protected.len >= 1200);
+    try require(protected_client.sentPacketCount(.initial) == 1);
+
+    try protected_server.processProtectedLongDatagramInSpace(.initial, 1, secrets.client, protected);
+    var read_buf: [8192]u8 = undefined;
+    const read_len = (try protected_server.recvCryptoInSpace(.initial, &read_buf)) orelse return error.UnexpectedState;
+    try require(read_len == copied.len);
+    try require(std.mem.eql(u8, read_buf[0..read_len], copied));
+    try require((try protected_server.recvCryptoInSpace(.initial, &read_buf)) == null);
+    try require(protected_server.nextPeerPacketNumber(.initial) == 1);
+    try require(protected_server.pendingAckLargest(.initial) == 0);
+
+    return .{
+        .crypto_bytes = read_len,
+        .datagram_bytes = protected.len,
+    };
+}
+
 pub fn main() !void {
     const result = quicz_openssl_pair_transcript_run();
 
@@ -223,9 +276,10 @@ pub fn main() !void {
         result.server_out_level_bytes[3],
         &client_connection,
     );
+    const protected_initial = try verifyProtectedInitialCryptoDelivery(result.client_out_level_bytes[0]);
 
     std.debug.print(
-        "[tls-openssl-pair-transcript] initialized={} client_done={} server_done={} client_send={} server_send={} client_recv={} server_recv={} client_release={} server_release={} client_yield={} server_yield={} client_tp={} server_tp={} client_levels={}/{}/{}/{} server_levels={}/{}/{}/{} quicz_delivery={}/{}/{}/{}/{}/{} iterations={} alerts={}/{} errors={}/{}\n",
+        "[tls-openssl-pair-transcript] initialized={} client_done={} server_done={} client_send={} server_send={} client_recv={} server_recv={} client_release={} server_release={} client_yield={} server_yield={} client_tp={} server_tp={} client_levels={}/{}/{}/{} server_levels={}/{}/{}/{}",
         .{
             result.initialized,
             result.client_done,
@@ -248,12 +302,19 @@ pub fn main() !void {
             result.server_out_level_bytes[1],
             result.server_out_level_bytes[2],
             result.server_out_level_bytes[3],
+        },
+    );
+    std.debug.print(
+        " quicz_delivery={}/{}/{}/{}/{}/{} protected_initial={}/{} iterations={} alerts={}/{} errors={}/{}\n",
+        .{
             client_initial_bytes,
             server_initial_bytes,
             client_handshake_bytes,
             server_handshake_bytes,
             client_application_bytes,
             server_application_bytes,
+            protected_initial.crypto_bytes,
+            protected_initial.datagram_bytes,
             result.drive_iterations,
             result.client_alert_callbacks,
             result.server_alert_callbacks,

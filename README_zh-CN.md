@@ -81,7 +81,8 @@ zig build run-initial-keys
 - `run-tls-openssl-pair-transcript`：OpenSSL client/server callback-mode TLS
   transcript，覆盖按 protection level 分离的 CRYPTO handoff，以及双端 peer
   transport-parameter 和 traffic-secret callback，并把生成的 CRYPTO bytes 映射进
-  quicz Initial/Handshake/Application CRYPTO 队列。
+  quicz Initial/Handshake/Application CRYPTO 队列；client Initial CRYPTO bytes
+  还会经 quicz protected Initial long-packet helper 发送，并由 server connection 读回。
 - `run-udp-echo-loopback`：socket-backed installed-key STREAM echo 证据，包含
   payload equality、ACK cleanup 和 recovery timer cleanup。
 - `run-udp-pto-recovery-loopback`、`run-udp-loss-recovery-loopback` 和
@@ -164,7 +165,8 @@ pub fn main() !void {
   PSK 的 OpenSSL client/server callback-mode TLS transcript 示例，覆盖按
   protection level 分离的 CRYPTO handoff、peer transport-parameter callback，以及双端
   Handshake/1-RTT traffic-secret callback，并把生成的 CRYPTO bytes 投递到 quicz
-  packet-number-space CRYPTO 队列。运行：
+  packet-number-space CRYPTO 队列；同时会把 client Initial CRYPTO bytes 经 quicz
+  protected Initial long-packet helper 组包，并验证 server 侧投递。运行：
   `zig build run-tls-openssl-pair-transcript`。
 - [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig)：把
   OpenSSL-backed `TlsBackend` wrapper 接到现有 drive 路径，通过
@@ -263,11 +265,12 @@ pub fn main() !void {
 - TLS 状态：已有 mock `CryptoBackend` handoff 和很小的 C-ABI `TlsBackend` adapter；
   `run-tls-openssl-probe` 已链接 OpenSSL 并验证 QUIC TLS callback API，
   `run-tls-openssl-pair-transcript` 已完成 OpenSSL client/server callback-mode TLS
-  transcript，按 protection level 分离 CRYPTO handoff，并把生成的 bytes 映射进 quicz
-  CRYPTO 队列；`run-tls-openssl-backend-adapter` 已把 OpenSSL object 接入 adapter 路径并
+  transcript，按 protection level 分离 CRYPTO handoff，把生成的 bytes 映射进 quicz
+  CRYPTO 队列，并验证 client Initial flight 的 protected Initial long-packet 投递；
+  `run-tls-openssl-backend-adapter` 已把 OpenSSL object 接入 adapter 路径并
   产出第一段 TLS CRYPTO flight，也能让 peer transport parameters、Handshake/1-RTT secrets
-  和入站 CRYPTO 经 callback 边界进入连接层；protected packetization 和真实 TLS-owned
-  socket echo 仍待实现。
+  和入站 CRYPTO 经 callback 边界进入连接层；protected Handshake/Application
+  packetization 和真实 TLS-owned socket echo 仍待实现。
 
 ## 许可证
 
