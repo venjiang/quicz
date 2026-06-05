@@ -1020,14 +1020,22 @@ pub fn main() !void {
     try require(connection.handshakeConfirmed());
     try require(connection.hasOneRttProtectionKeys());
 
+    const client_discard_progress = try connection.driveCryptoBackendInSpace(
+        .handshake,
+        tls_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(client_discard_progress.handshake_confirmed);
+    try require(client_discard_progress.outbound_chunks == 0);
+    try require(connection.packetNumberSpaceDiscarded(.handshake));
+    try require(!connection.hasHandshakeProtectionKeys());
+
     try peer.installOneRttTrafficSecrets(.{
         .local = server_application_local,
         .peer = server_application_peer,
     });
-    try require(connection.hasHandshakeProtectionKeys());
     try require(peer.hasHandshakeProtectionKeys());
     try peer.confirmHandshake();
-    try connection.discardPacketNumberSpace(.handshake);
     try peer.discardPacketNumberSpace(.handshake);
     try require(connection.handshakeConfirmed());
     try require(peer.handshakeConfirmed());

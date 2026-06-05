@@ -94,8 +94,9 @@ Common runnable examples:
   secrets, and drives a loopback UDP 1-RTT STREAM echo with adapter-installed
   client keys and matching peer transcript secrets, including Application PTO
   service through the same lifecycle owner. After the OpenSSL-backed
-  `handshake_confirmed` callback confirms the client, it explicitly discards
-  both Handshake packet-number spaces and Handshake keys,
+  `handshake_confirmed` callback confirms the client, a no-output Handshake
+  drive discards the client Handshake packet-number space and keys, while the
+  peer side is explicitly discarded for the paired loopback endpoint,
   then sends protected close and completes route cleanup through one
   socket/lifecycle loop owner.
 - `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
@@ -247,8 +248,9 @@ experimental.
   loopback UDP 1-RTT STREAM echo with adapter-installed client keys and
   matching peer transcript secrets, including Application PTO service through
   the same lifecycle owner. After the OpenSSL-backed `handshake_confirmed`
-  callback confirms the client, it explicitly discards both Handshake
-  packet-number spaces and Handshake keys, then sends
+  callback confirms the client, a no-output Handshake drive discards the client
+  Handshake packet-number space and keys, while the peer side is explicitly
+  discarded for the paired loopback endpoint, then sends
   protected close and completes route cleanup through one socket/lifecycle loop
   owner. Run with
   `zig build run-tls-openssl-backend-adapter`.
@@ -448,7 +450,9 @@ experimental.
   echo with adapter-installed client keys and matching peer transcript secrets,
   services an Application PTO probe through the same lifecycle owner, confirms
   the client through the OpenSSL-backed `handshake_confirmed` callback,
-  explicitly discards both Handshake packet-number spaces and Handshake keys,
+  discards the client Handshake packet-number space and keys through a
+  backend-confirmed no-output Handshake drive, explicitly discards the paired
+  server side,
   then sends protected close and completes route cleanup
   through one socket/lifecycle loop owner. The adapter output also prints that
   the consumed transcript transport-parameter bytes match the connection-applied
