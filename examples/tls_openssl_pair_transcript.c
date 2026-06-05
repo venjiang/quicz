@@ -1,54 +1,11 @@
+#include "tls_openssl_pair_transcript.h"
+
 #include <openssl/core_dispatch.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
-#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-
-#define QUICZ_OPENSSL_LEVEL_COUNT 4
-#define QUICZ_OPENSSL_CRYPTO_BUF_LEN 65536
-#define QUICZ_OPENSSL_SECRET_LEN 32
-#define QUICZ_OPENSSL_TRANSPORT_PARAMS_BUF_LEN 512
-#define QUICZ_OPENSSL_READ_SECRET 0
-#define QUICZ_OPENSSL_WRITE_SECRET 1
-#define QUICZ_OPENSSL_SECRET_DIRECTION_COUNT 2
-
-struct quicz_openssl_pair_transcript_result {
-    int initialized;
-    int client_done;
-    int server_done;
-    int client_send_callbacks;
-    int server_send_callbacks;
-    int client_recv_callbacks;
-    int server_recv_callbacks;
-    int client_release_callbacks;
-    int server_release_callbacks;
-    int client_yield_secret_callbacks;
-    int server_yield_secret_callbacks;
-    int client_got_transport_params_callbacks;
-    int server_got_transport_params_callbacks;
-    size_t client_peer_transport_parameters_len;
-    size_t server_peer_transport_parameters_len;
-    int client_keylog_callbacks;
-    int server_keylog_callbacks;
-    size_t client_keylog_bytes;
-    size_t server_keylog_bytes;
-    int client_alert_callbacks;
-    int server_alert_callbacks;
-    int client_last_alert;
-    int server_last_alert;
-    int client_last_ssl_error;
-    int server_last_ssl_error;
-    int client_read_level;
-    int server_read_level;
-    int client_write_level;
-    int server_write_level;
-    int drive_iterations;
-    unsigned long error_queue_code;
-    size_t client_out_level_bytes[QUICZ_OPENSSL_LEVEL_COUNT];
-    size_t server_out_level_bytes[QUICZ_OPENSSL_LEVEL_COUNT];
-};
 
 struct quicz_openssl_endpoint {
     SSL_CTX *ctx;

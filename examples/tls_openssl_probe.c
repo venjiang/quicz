@@ -1,3 +1,5 @@
+#include "tls_openssl_probe.h"
+
 #include <openssl/core_dispatch.h>
 #include <openssl/opensslv.h>
 #include <openssl/quic.h>
@@ -69,23 +71,6 @@ static const OSSL_DISPATCH quicz_openssl_quic_tls_dispatch[] = {
     { OSSL_FUNC_SSL_QUIC_TLS_GOT_TRANSPORT_PARAMS, (void (*)(void))got_transport_params_cb },
     { OSSL_FUNC_SSL_QUIC_TLS_ALERT, (void (*)(void))alert_cb },
     { 0, NULL },
-};
-
-struct quicz_openssl_probe_result {
-    unsigned long version_number;
-    int has_quic_method;
-    int quic_ctx_created;
-    int quic_ssl_created;
-    int quic_ssl_is_quic;
-    int tls_ctx_created;
-    int tls_ssl_created;
-    int tls_ssl_is_quic_before_callbacks;
-    int tls_ssl_is_quic_after_callbacks;
-    int callbacks_set;
-    int transport_params_set;
-    int crypto_send_id;
-    int yield_secret_id;
-    int got_transport_params_id;
 };
 
 struct quicz_openssl_probe_result quicz_openssl_probe_run(void) {

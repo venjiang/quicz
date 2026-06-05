@@ -1,115 +1,8 @@
 const std = @import("std");
+const c = @import("c");
 const quicz = @import("quicz");
 
 const ExampleError = error{UnexpectedState};
-
-const OpenSslPairTranscriptResult = extern struct {
-    initialized: c_int,
-    client_done: c_int,
-    server_done: c_int,
-    client_send_callbacks: c_int,
-    server_send_callbacks: c_int,
-    client_recv_callbacks: c_int,
-    server_recv_callbacks: c_int,
-    client_release_callbacks: c_int,
-    server_release_callbacks: c_int,
-    client_yield_secret_callbacks: c_int,
-    server_yield_secret_callbacks: c_int,
-    client_got_transport_params_callbacks: c_int,
-    server_got_transport_params_callbacks: c_int,
-    client_peer_transport_parameters_len: usize,
-    server_peer_transport_parameters_len: usize,
-    client_keylog_callbacks: c_int,
-    server_keylog_callbacks: c_int,
-    client_keylog_bytes: usize,
-    server_keylog_bytes: usize,
-    client_alert_callbacks: c_int,
-    server_alert_callbacks: c_int,
-    client_last_alert: c_int,
-    server_last_alert: c_int,
-    client_last_ssl_error: c_int,
-    server_last_ssl_error: c_int,
-    client_read_level: c_int,
-    server_read_level: c_int,
-    client_write_level: c_int,
-    server_write_level: c_int,
-    drive_iterations: c_int,
-    error_queue_code: c_ulong,
-    client_out_level_bytes: [4]usize,
-    server_out_level_bytes: [4]usize,
-};
-
-extern fn quicz_openssl_pair_transcript_run() OpenSslPairTranscriptResult;
-extern fn quicz_openssl_pair_transcript_configure_transport_parameters(
-    client_params: [*]const u8,
-    client_params_len: usize,
-    server_params: [*]const u8,
-    server_params_len: usize,
-) c_int;
-extern fn quicz_openssl_pair_transcript_copy_client_crypto(
-    level: c_int,
-    out: [*]u8,
-    out_len: usize,
-    written_len: *usize,
-) c_int;
-extern fn quicz_openssl_pair_transcript_copy_server_crypto(
-    level: c_int,
-    out: [*]u8,
-    out_len: usize,
-    written_len: *usize,
-) c_int;
-extern fn quicz_openssl_pair_transcript_copy_client_peer_transport_parameters(
-    out: [*]u8,
-    out_len: usize,
-    written_len: *usize,
-) c_int;
-extern fn quicz_openssl_pair_transcript_copy_server_peer_transport_parameters(
-    out: [*]u8,
-    out_len: usize,
-    written_len: *usize,
-) c_int;
-extern fn quicz_openssl_pair_transcript_copy_client_secret(
-    level: c_int,
-    direction: c_int,
-    out: [*]u8,
-    out_len: usize,
-    written_len: *usize,
-) c_int;
-extern fn quicz_openssl_pair_transcript_copy_server_secret(
-    level: c_int,
-    direction: c_int,
-    out: [*]u8,
-    out_len: usize,
-    written_len: *usize,
-) c_int;
-extern fn quicz_openssl_pair_transcript_context_new() ?*anyopaque;
-extern fn quicz_openssl_pair_transcript_context_free(context: *anyopaque) void;
-extern fn quicz_openssl_pair_transcript_context_drive(context: *anyopaque, is_client: c_int) c_int;
-extern fn quicz_openssl_pair_transcript_context_result(context: *anyopaque) OpenSslPairTranscriptResult;
-extern fn quicz_openssl_pair_transcript_context_provide_crypto(
-    context: *anyopaque,
-    is_client: c_int,
-    level: c_int,
-    data: [*]const u8,
-    data_len: usize,
-) c_int;
-extern fn quicz_openssl_pair_transcript_context_copy_pending_crypto(
-    context: *anyopaque,
-    is_client: c_int,
-    level: c_int,
-    out: [*]u8,
-    out_len: usize,
-    written_len: *usize,
-) c_int;
-extern fn quicz_openssl_pair_transcript_context_copy_secret(
-    context: *anyopaque,
-    is_client: c_int,
-    level: c_int,
-    direction: c_int,
-    out: [*]u8,
-    out_len: usize,
-    written_len: *usize,
-) c_int;
 
 const FixedWriter = struct {
     buffer: []u8,
@@ -208,14 +101,14 @@ fn packetNumberSpaceForOpenSslLevel(level: usize) ?quicz.PacketNumberSpace {
 fn copyOpenSslCrypto(is_client: bool, level: usize, out: []u8) ExampleError![]const u8 {
     var written_len: usize = 0;
     const copied = if (is_client)
-        quicz_openssl_pair_transcript_copy_client_crypto(
+        c.quicz_openssl_pair_transcript_copy_client_crypto(
             @intCast(level),
             out.ptr,
             out.len,
             &written_len,
         )
     else
-        quicz_openssl_pair_transcript_copy_server_crypto(
+        c.quicz_openssl_pair_transcript_copy_server_crypto(
             @intCast(level),
             out.ptr,
             out.len,
@@ -228,13 +121,13 @@ fn copyOpenSslCrypto(is_client: bool, level: usize, out: []u8) ExampleError![]co
 fn copyOpenSslPeerTransportParameters(is_client: bool, out: []u8) ExampleError![]const u8 {
     var written_len: usize = 0;
     const copied = if (is_client)
-        quicz_openssl_pair_transcript_copy_client_peer_transport_parameters(
+        c.quicz_openssl_pair_transcript_copy_client_peer_transport_parameters(
             out.ptr,
             out.len,
             &written_len,
         )
     else
-        quicz_openssl_pair_transcript_copy_server_peer_transport_parameters(
+        c.quicz_openssl_pair_transcript_copy_server_peer_transport_parameters(
             out.ptr,
             out.len,
             &written_len,
@@ -251,7 +144,7 @@ fn copyOpenSslSecret(
     var secret: [quicz.protection.traffic_secret_len]u8 = undefined;
     var written_len: usize = 0;
     const copied = if (is_client)
-        quicz_openssl_pair_transcript_copy_client_secret(
+        c.quicz_openssl_pair_transcript_copy_client_secret(
             @intCast(level),
             @intCast(direction),
             &secret,
@@ -259,7 +152,7 @@ fn copyOpenSslSecret(
             &written_len,
         )
     else
-        quicz_openssl_pair_transcript_copy_server_secret(
+        c.quicz_openssl_pair_transcript_copy_server_secret(
             @intCast(level),
             @intCast(direction),
             &secret,
@@ -278,7 +171,7 @@ fn copyManualOpenSslCrypto(
     out: []u8,
 ) ExampleError![]const u8 {
     var written_len: usize = 0;
-    const copied = quicz_openssl_pair_transcript_context_copy_pending_crypto(
+    const copied = c.quicz_openssl_pair_transcript_context_copy_pending_crypto(
         context,
         if (is_client) 1 else 0,
         @intCast(level),
@@ -298,7 +191,7 @@ fn copyManualOpenSslSecret(
 ) ExampleError![quicz.protection.traffic_secret_len]u8 {
     var secret: [quicz.protection.traffic_secret_len]u8 = undefined;
     var written_len: usize = 0;
-    const copied = quicz_openssl_pair_transcript_context_copy_secret(
+    const copied = c.quicz_openssl_pair_transcript_context_copy_secret(
         context,
         if (is_client) 1 else 0,
         @intCast(level),
@@ -318,7 +211,7 @@ fn provideManualOpenSslCrypto(
     level: usize,
     data: []const u8,
 ) ExampleError!void {
-    try require(quicz_openssl_pair_transcript_context_provide_crypto(
+    try require(c.quicz_openssl_pair_transcript_context_provide_crypto(
         context,
         if (is_client) 1 else 0,
         @intCast(level),
@@ -705,10 +598,10 @@ fn verifySocketBackedInitialCryptoDelivery(
 }
 
 fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
-    const context = quicz_openssl_pair_transcript_context_new() orelse return error.UnexpectedState;
-    defer quicz_openssl_pair_transcript_context_free(context);
+    const context = c.quicz_openssl_pair_transcript_context_new() orelse return error.UnexpectedState;
+    defer c.quicz_openssl_pair_transcript_context_free(context);
 
-    try require(quicz_openssl_pair_transcript_context_drive(context, 1) == 1);
+    try require(c.quicz_openssl_pair_transcript_context_drive(context, 1) == 1);
     var client_initial_crypto: [8192]u8 = undefined;
     const copied_client = try copyManualOpenSslCrypto(context, true, 0, &client_initial_crypto);
     try require(copied_client.len > 0);
@@ -802,7 +695,7 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
     try require(std.mem.eql(u8, read_buf[0..client_read_len], copied_client));
     try provideManualOpenSslCrypto(context, false, 0, read_buf[0..client_read_len]);
 
-    try require(quicz_openssl_pair_transcript_context_drive(context, 0) == 1);
+    try require(c.quicz_openssl_pair_transcript_context_drive(context, 0) == 1);
     var server_initial_crypto: [8192]u8 = undefined;
     const copied_server = try copyManualOpenSslCrypto(context, false, 0, &server_initial_crypto);
     try require(copied_server.len > 0);
@@ -837,7 +730,7 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
     try require(std.mem.eql(u8, read_buf[0..server_read_len], copied_server));
     try provideManualOpenSslCrypto(context, true, 0, read_buf[0..server_read_len]);
 
-    try require(quicz_openssl_pair_transcript_context_drive(context, 1) == 1);
+    try require(c.quicz_openssl_pair_transcript_context_drive(context, 1) == 1);
 
     const client_local = try copyManualOpenSslSecret(context, true, 2, 1);
     const client_peer = try copyManualOpenSslSecret(context, true, 2, 0);
@@ -889,7 +782,7 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
     try require(std.mem.eql(u8, read_buf[0..server_handshake_read_len], copied_server_handshake));
     try provideManualOpenSslCrypto(context, true, 2, read_buf[0..server_handshake_read_len]);
 
-    try require(quicz_openssl_pair_transcript_context_drive(context, 1) == 1);
+    try require(c.quicz_openssl_pair_transcript_context_drive(context, 1) == 1);
     var client_handshake_crypto: [8192]u8 = undefined;
     const copied_client_handshake = try copyManualOpenSslCrypto(context, true, 2, &client_handshake_crypto);
     try require(copied_client_handshake.len > 0);
@@ -922,8 +815,8 @@ fn verifyManualSocketTranscriptDelivery() !ManualSocketTranscriptDelivery {
     try require(std.mem.eql(u8, read_buf[0..client_handshake_read_len], copied_client_handshake));
     try provideManualOpenSslCrypto(context, false, 2, read_buf[0..client_handshake_read_len]);
 
-    try require(quicz_openssl_pair_transcript_context_drive(context, 0) == 1);
-    const manual_result = quicz_openssl_pair_transcript_context_result(context);
+    try require(c.quicz_openssl_pair_transcript_context_drive(context, 0) == 1);
+    const manual_result = c.quicz_openssl_pair_transcript_context_result(context);
     try require(manual_result.initialized == 1);
     try require(manual_result.client_done == 1);
     try require(manual_result.server_done == 1);
@@ -1672,14 +1565,14 @@ pub fn main() !void {
         &client_local_transport_parameter_buf,
         &server_local_transport_parameter_buf,
     );
-    try require(quicz_openssl_pair_transcript_configure_transport_parameters(
+    try require(c.quicz_openssl_pair_transcript_configure_transport_parameters(
         local_transport_parameters.client.ptr,
         local_transport_parameters.client.len,
         local_transport_parameters.server.ptr,
         local_transport_parameters.server.len,
     ) == 1);
 
-    const result = quicz_openssl_pair_transcript_run();
+    const result = c.quicz_openssl_pair_transcript_run();
 
     try require(result.initialized == 1);
     try require(result.client_done == 1);

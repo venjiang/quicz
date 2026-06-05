@@ -1,44 +1,8 @@
 const std = @import("std");
+const c = @import("c");
 const quicz = @import("quicz");
 
 const ExampleError = error{UnexpectedState};
-
-extern fn quicz_tls_c_demo_reset() void;
-extern fn quicz_tls_c_demo_set_peer_transport_parameters(data: [*]const u8, data_len: usize) quicz.TlsBackendStatus;
-extern fn quicz_tls_c_demo_set_outbound_crypto(data: [*]const u8, data_len: usize) quicz.TlsBackendStatus;
-extern fn quicz_tls_c_demo_set_handshake_secrets(local: [*]const u8, peer: [*]const u8, secret_len: usize) void;
-extern fn quicz_tls_c_demo_receive(
-    context: *anyopaque,
-    space: quicz.TlsBackendPacketSpace,
-    data: [*]const u8,
-    data_len: usize,
-) callconv(.c) quicz.TlsBackendStatus;
-extern fn quicz_tls_c_demo_pull(
-    context: *anyopaque,
-    space: quicz.TlsBackendPacketSpace,
-    out: [*]u8,
-    out_len: usize,
-    written_len: *usize,
-) callconv(.c) quicz.TlsBackendStatus;
-extern fn quicz_tls_c_demo_set_local_transport_parameters(
-    context: *anyopaque,
-    data: [*]const u8,
-    data_len: usize,
-) callconv(.c) quicz.TlsBackendStatus;
-extern fn quicz_tls_c_demo_pull_peer_transport_parameters(
-    context: *anyopaque,
-    out: [*]u8,
-    out_len: usize,
-    written_len: *usize,
-) callconv(.c) quicz.TlsBackendStatus;
-extern fn quicz_tls_c_demo_pull_handshake_traffic_secrets(
-    context: *anyopaque,
-    out: *quicz.HandshakeTrafficSecrets,
-) callconv(.c) quicz.TlsBackendStatus;
-extern fn quicz_tls_c_demo_handshake_confirmed(context: *anyopaque) callconv(.c) bool;
-extern fn quicz_tls_c_demo_local_transport_parameters_len() usize;
-extern fn quicz_tls_c_demo_inbound_crypto_len() usize;
-extern fn quicz_tls_c_demo_inbound_crypto_matches(data: [*]const u8, data_len: usize) bool;
 
 const FixedWriter = struct {
     buffer: []u8,
@@ -73,6 +37,73 @@ fn requireStatus(status: quicz.TlsBackendStatus) ExampleError!void {
     try require(status == .ok);
 }
 
+fn requireCStatus(status: anytype) ExampleError!void {
+    try require(@as(c_int, @intCast(status)) == c.QUICZ_TLS_BACKEND_OK);
+}
+
+fn tlsStatus(status: anytype) quicz.TlsBackendStatus {
+    return @enumFromInt(@as(c_int, @intCast(status)));
+}
+
+fn cPacketSpace(space: quicz.TlsBackendPacketSpace) c.enum_quicz_tls_backend_packet_space {
+    return @intCast(@intFromEnum(space));
+}
+
+fn cDemoReceive(
+    context: *anyopaque,
+    space: quicz.TlsBackendPacketSpace,
+    data: [*]const u8,
+    data_len: usize,
+) callconv(.c) quicz.TlsBackendStatus {
+    return tlsStatus(c.quicz_tls_c_demo_receive(context, cPacketSpace(space), data, data_len));
+}
+
+fn cDemoPull(
+    context: *anyopaque,
+    space: quicz.TlsBackendPacketSpace,
+    out: [*]u8,
+    out_len: usize,
+    written_len: *usize,
+) callconv(.c) quicz.TlsBackendStatus {
+    return tlsStatus(c.quicz_tls_c_demo_pull(context, cPacketSpace(space), out, out_len, written_len));
+}
+
+fn cDemoSetLocalTransportParameters(
+    context: *anyopaque,
+    data: [*]const u8,
+    data_len: usize,
+) callconv(.c) quicz.TlsBackendStatus {
+    return tlsStatus(c.quicz_tls_c_demo_set_local_transport_parameters(context, data, data_len));
+}
+
+fn cDemoPullPeerTransportParameters(
+    context: *anyopaque,
+    out: [*]u8,
+    out_len: usize,
+    written_len: *usize,
+) callconv(.c) quicz.TlsBackendStatus {
+    return tlsStatus(c.quicz_tls_c_demo_pull_peer_transport_parameters(context, out, out_len, written_len));
+}
+
+fn cDemoPullHandshakeTrafficSecrets(
+    context: *anyopaque,
+    out: *quicz.HandshakeTrafficSecrets,
+) callconv(.c) quicz.TlsBackendStatus {
+    var c_secrets: c.struct_quicz_handshake_traffic_secrets = undefined;
+    const status = c.quicz_tls_c_demo_pull_handshake_traffic_secrets(context, &c_secrets);
+    if (@as(c_int, @intCast(status)) == c.QUICZ_TLS_BACKEND_OK) {
+        out.* = .{
+            .local = c_secrets.local,
+            .peer = c_secrets.peer,
+        };
+    }
+    return tlsStatus(status);
+}
+
+fn cDemoHandshakeConfirmed(context: *anyopaque) callconv(.c) bool {
+    return c.quicz_tls_c_demo_handshake_confirmed(context);
+}
+
 fn fixedWriter(buffer: []u8) FixedWriter {
     return .{ .buffer = buffer };
 }
@@ -80,7 +111,7 @@ fn fixedWriter(buffer: []u8) FixedWriter {
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
-    quicz_tls_c_demo_reset();
+    c.quicz_tls_c_demo_reset();
 
     var peer_transport_parameter_buf: [128]u8 = undefined;
     var peer_transport_parameter_out = fixedWriter(&peer_transport_parameter_buf);
@@ -90,20 +121,20 @@ pub fn main() !void {
         .initial_max_streams_bidi = 2,
     });
     const peer_transport_parameters = peer_transport_parameter_out.getWritten();
-    try requireStatus(quicz_tls_c_demo_set_peer_transport_parameters(
+    try requireCStatus(c.quicz_tls_c_demo_set_peer_transport_parameters(
         peer_transport_parameters.ptr,
         peer_transport_parameters.len,
     ));
 
     const outbound_crypto = "c tls server flight";
-    try requireStatus(quicz_tls_c_demo_set_outbound_crypto(
+    try requireCStatus(c.quicz_tls_c_demo_set_outbound_crypto(
         outbound_crypto.ptr,
         outbound_crypto.len,
     ));
 
     const original_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd, 0x10, 0x20, 0x30, 0x40 };
     const initial_secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
-    quicz_tls_c_demo_set_handshake_secrets(
+    c.quicz_tls_c_demo_set_handshake_secrets(
         &initial_secrets.server.secret,
         &initial_secrets.client.secret,
         initial_secrets.server.secret.len,
@@ -112,12 +143,12 @@ pub fn main() !void {
     var c_context: u8 = 0;
     var tls_backend = quicz.TlsBackend{
         .context = &c_context,
-        .receive = quicz_tls_c_demo_receive,
-        .pull = quicz_tls_c_demo_pull,
-        .set_local_transport_parameters = quicz_tls_c_demo_set_local_transport_parameters,
-        .pull_peer_transport_parameters = quicz_tls_c_demo_pull_peer_transport_parameters,
-        .pull_handshake_traffic_secrets = quicz_tls_c_demo_pull_handshake_traffic_secrets,
-        .handshake_confirmed = quicz_tls_c_demo_handshake_confirmed,
+        .receive = cDemoReceive,
+        .pull = cDemoPull,
+        .set_local_transport_parameters = cDemoSetLocalTransportParameters,
+        .pull_peer_transport_parameters = cDemoPullPeerTransportParameters,
+        .pull_handshake_traffic_secrets = cDemoPullHandshakeTrafficSecrets,
+        .handshake_confirmed = cDemoHandshakeConfirmed,
     };
 
     var connection = try quicz.Connection.init(allocator, .server, .{
@@ -142,9 +173,9 @@ pub fn main() !void {
         &scratch,
     );
 
-    try require(quicz_tls_c_demo_local_transport_parameters_len() > 0);
-    try require(quicz_tls_c_demo_inbound_crypto_matches(inbound_crypto.ptr, inbound_crypto.len));
-    try require(quicz_tls_c_demo_inbound_crypto_len() == inbound_crypto.len);
+    try require(c.quicz_tls_c_demo_local_transport_parameters_len() > 0);
+    try require(c.quicz_tls_c_demo_inbound_crypto_matches(inbound_crypto.ptr, inbound_crypto.len));
+    try require(c.quicz_tls_c_demo_inbound_crypto_len() == inbound_crypto.len);
     try require(progress.peer_transport_parameters_applied);
     try require(progress.peer_transport_parameters_bytes == peer_transport_parameters.len);
     try require(progress.inbound_bytes == inbound_crypto.len);
@@ -157,7 +188,7 @@ pub fn main() !void {
     std.debug.print(
         "[tls-c-abi-adapter] local_tp_bytes={} peer_tp_bytes={} inbound_bytes={} outbound_bytes={} handshake_keys={} confirmed={}\n",
         .{
-            quicz_tls_c_demo_local_transport_parameters_len(),
+            c.quicz_tls_c_demo_local_transport_parameters_len(),
             progress.peer_transport_parameters_bytes,
             progress.inbound_bytes,
             progress.outbound_bytes,

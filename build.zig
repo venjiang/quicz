@@ -182,6 +182,12 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const translate_tls_c_abi_adapter = b.addTranslateC(.{
+        .root_source_file = b.path("examples/tls_c_abi_demo_backend.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_tls_c_abi_adapter.root_module.addImport("c", translate_tls_c_abi_adapter.createModule());
     exe_tls_c_abi_adapter.root_module.addCSourceFile(.{
         .file = b.path("examples/tls_c_abi_demo_backend.c"),
         .flags = &.{},
@@ -198,6 +204,12 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    const translate_tls_openssl_probe = b.addTranslateC(.{
+        .root_source_file = b.path("examples/tls_openssl_probe.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_tls_openssl_probe.root_module.addImport("c", translate_tls_openssl_probe.createModule());
     exe_tls_openssl_probe.root_module.addCSourceFile(.{
         .file = b.path("examples/tls_openssl_probe.c"),
         .flags = &.{},
@@ -219,6 +231,12 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const translate_tls_openssl_backend_adapter = b.addTranslateC(.{
+        .root_source_file = b.path("examples/tls_openssl_backend_adapter.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_tls_openssl_backend_adapter.root_module.addImport("c", translate_tls_openssl_backend_adapter.createModule());
     exe_tls_openssl_backend_adapter.root_module.addCSourceFile(.{
         .file = b.path("examples/tls_openssl_backend_adapter.c"),
         .flags = &.{},
@@ -244,6 +262,12 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const translate_tls_openssl_pair_transcript = b.addTranslateC(.{
+        .root_source_file = b.path("examples/tls_openssl_pair_transcript.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_tls_openssl_pair_transcript.root_module.addImport("c", translate_tls_openssl_pair_transcript.createModule());
     exe_tls_openssl_pair_transcript.root_module.addCSourceFile(.{
         .file = b.path("examples/tls_openssl_pair_transcript.c"),
         .flags = &.{},

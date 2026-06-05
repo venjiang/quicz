@@ -1,32 +1,14 @@
 const std = @import("std");
+const c = @import("c");
 
 const ExampleError = error{UnexpectedState};
-
-const OpenSslProbeResult = extern struct {
-    version_number: c_ulong,
-    has_quic_method: c_int,
-    quic_ctx_created: c_int,
-    quic_ssl_created: c_int,
-    quic_ssl_is_quic: c_int,
-    tls_ctx_created: c_int,
-    tls_ssl_created: c_int,
-    tls_ssl_is_quic_before_callbacks: c_int,
-    tls_ssl_is_quic_after_callbacks: c_int,
-    callbacks_set: c_int,
-    transport_params_set: c_int,
-    crypto_send_id: c_int,
-    yield_secret_id: c_int,
-    got_transport_params_id: c_int,
-};
-
-extern fn quicz_openssl_probe_run() OpenSslProbeResult;
 
 fn require(condition: bool) ExampleError!void {
     if (!condition) return error.UnexpectedState;
 }
 
 pub fn main() !void {
-    const result = quicz_openssl_probe_run();
+    const result = c.quicz_openssl_probe_run();
 
     try require(result.version_number != 0);
     try require(result.has_quic_method == 1);
