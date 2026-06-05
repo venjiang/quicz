@@ -90,7 +90,8 @@ zig build run-initial-keys
   transcript，覆盖按 protection level 分离的 CRYPTO handoff，以及双端 peer
   transport-parameter 和 traffic-secret callback，并把生成的 CRYPTO bytes 映射进
   quicz Initial/Handshake/Application CRYPTO 队列；示例会记录并解析按角色区分的 peer
-  transport-parameter bytes，也会记录 keylog callback 次数和字节数，但不打印 key
+  transport-parameter bytes，这些 bytes 来自 quicz 本端 transport-parameter export
+  后配置给 OpenSSL 的 TLS extension，也会记录 keylog callback 次数和字节数，但不打印 key
   material；client Initial CRYPTO bytes 还会经 quicz protected
   Initial long-packet helper 发送，并由 server connection 读回；
   双向 Initial flight 也会通过 quicz endpoint lifecycle 在 loopback UDP 上投递；
@@ -179,8 +180,9 @@ pub fn main() !void {
   PSK 的 OpenSSL client/server callback-mode TLS transcript 示例，覆盖按
   protection level 分离的 CRYPTO handoff、peer transport-parameter callback，以及双端
   Handshake/1-RTT traffic-secret callback，并把生成的 CRYPTO bytes 投递到 quicz
-  packet-number-space CRYPTO 队列；示例会记录并解析 peer transport-parameter bytes，
-  也会记录 keylog callback 次数和字节数，但不打印 key material；同时会把 client Initial CRYPTO bytes 经 quicz protected Initial
+  packet-number-space CRYPTO 队列；示例会把 quicz 编码的本端 transport-parameter bytes
+  配置给 OpenSSL，记录并解析 OpenSSL callback 收到的 peer bytes，也会记录 keylog
+  callback 次数和字节数，但不打印 key material；同时会把 client Initial CRYPTO bytes 经 quicz protected Initial
   long-packet helper 组包，并通过 quicz endpoint lifecycle 在
   loopback UDP 上投递双向 Initial flight；安装 OpenSSL 产出的 Handshake secrets，并验证
   双向 protected Handshake CRYPTO 投递，包括通过同一个 lifecycle 的 loopback UDP 投递；
@@ -191,7 +193,7 @@ pub fn main() !void {
   OpenSSL-backed `TlsBackend` wrapper 接到现有 drive 路径，通过
   `SSL_set_quic_tls_transport_params()` 接收 quicz 本端 transport parameters，驱动
   `SSL_do_handshake()` 产出第一段 TLS CRYPTO flight，并让 pair-transcript server
-  transport parameters、真实 pair-transcript Handshake/1-RTT secrets 和入站
+  transport parameters（由 quicz 本端 export 编码后配置到 OpenSSL）、真实 pair-transcript Handshake/1-RTT secrets 和入站
   Handshake CRYPTO bytes 经 OpenSSL callback 边界进入连接层；同时把 adapter 产出的
   Initial CRYPTO flight 作为 protected Initial datagram 通过 loopback UDP 投递，把真实
   pair-transcript Handshake CRYPTO 作为 protected Handshake datagram 通过 loopback UDP

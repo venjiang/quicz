@@ -9,6 +9,7 @@
 #define QUICZ_OPENSSL_LEVEL_COUNT 4
 #define QUICZ_OPENSSL_CRYPTO_BUF_LEN 65536
 #define QUICZ_OPENSSL_SECRET_LEN 32
+#define QUICZ_OPENSSL_TRANSPORT_PARAMS_BUF_LEN 512
 #define QUICZ_OPENSSL_READ_SECRET 0
 #define QUICZ_OPENSSL_WRITE_SECRET 1
 #define QUICZ_OPENSSL_SECRET_DIRECTION_COUNT 2
@@ -69,7 +70,7 @@ struct quicz_openssl_endpoint {
     int release_callbacks;
     int yield_secret_callbacks;
     int got_transport_params_callbacks;
-    unsigned char peer_transport_parameters[512];
+    unsigned char peer_transport_parameters[QUICZ_OPENSSL_TRANSPORT_PARAMS_BUF_LEN];
     size_t peer_transport_parameters_len;
     int keylog_callbacks;
     size_t keylog_bytes;
@@ -77,7 +78,7 @@ struct quicz_openssl_endpoint {
     int last_alert;
     int handshake_done;
     int last_ssl_error;
-    unsigned char local_transport_parameters[64];
+    unsigned char local_transport_parameters[QUICZ_OPENSSL_TRANSPORT_PARAMS_BUF_LEN];
     size_t local_transport_parameters_len;
 };
 
@@ -85,14 +86,19 @@ static unsigned char quicz_openssl_last_client_crypto[QUICZ_OPENSSL_LEVEL_COUNT]
 static size_t quicz_openssl_last_client_crypto_len[QUICZ_OPENSSL_LEVEL_COUNT];
 static unsigned char quicz_openssl_last_server_crypto[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_CRYPTO_BUF_LEN];
 static size_t quicz_openssl_last_server_crypto_len[QUICZ_OPENSSL_LEVEL_COUNT];
-static unsigned char quicz_openssl_last_client_peer_transport_parameters[512];
+static unsigned char quicz_openssl_last_client_peer_transport_parameters[QUICZ_OPENSSL_TRANSPORT_PARAMS_BUF_LEN];
 static size_t quicz_openssl_last_client_peer_transport_parameters_len;
-static unsigned char quicz_openssl_last_server_peer_transport_parameters[512];
+static unsigned char quicz_openssl_last_server_peer_transport_parameters[QUICZ_OPENSSL_TRANSPORT_PARAMS_BUF_LEN];
 static size_t quicz_openssl_last_server_peer_transport_parameters_len;
 static unsigned char quicz_openssl_last_client_secrets[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_SECRET_DIRECTION_COUNT][QUICZ_OPENSSL_SECRET_LEN];
 static int quicz_openssl_last_client_secret_available[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_SECRET_DIRECTION_COUNT];
 static unsigned char quicz_openssl_last_server_secrets[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_SECRET_DIRECTION_COUNT][QUICZ_OPENSSL_SECRET_LEN];
 static int quicz_openssl_last_server_secret_available[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_SECRET_DIRECTION_COUNT];
+static unsigned char quicz_openssl_configured_client_transport_parameters[QUICZ_OPENSSL_TRANSPORT_PARAMS_BUF_LEN];
+static size_t quicz_openssl_configured_client_transport_parameters_len;
+static unsigned char quicz_openssl_configured_server_transport_parameters[QUICZ_OPENSSL_TRANSPORT_PARAMS_BUF_LEN];
+static size_t quicz_openssl_configured_server_transport_parameters_len;
+static int quicz_openssl_transport_parameters_configured;
 
 static const unsigned char quicz_openssl_demo_psk[] = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
@@ -282,6 +288,40 @@ static void free_endpoint(struct quicz_openssl_endpoint *endpoint) {
     free(endpoint);
 }
 
+int quicz_openssl_pair_transcript_configure_transport_parameters(
+    const unsigned char *client_params,
+    size_t client_params_len,
+    const unsigned char *server_params,
+    size_t server_params_len
+) {
+    if ((client_params_len > 0 && client_params == NULL) ||
+        (server_params_len > 0 && server_params == NULL) ||
+        client_params_len > sizeof(quicz_openssl_configured_client_transport_parameters) ||
+        server_params_len > sizeof(quicz_openssl_configured_server_transport_parameters)) {
+        return 0;
+    }
+    memset(
+        quicz_openssl_configured_client_transport_parameters,
+        0,
+        sizeof(quicz_openssl_configured_client_transport_parameters)
+    );
+    memset(
+        quicz_openssl_configured_server_transport_parameters,
+        0,
+        sizeof(quicz_openssl_configured_server_transport_parameters)
+    );
+    if (client_params_len > 0) {
+        memcpy(quicz_openssl_configured_client_transport_parameters, client_params, client_params_len);
+    }
+    if (server_params_len > 0) {
+        memcpy(quicz_openssl_configured_server_transport_parameters, server_params, server_params_len);
+    }
+    quicz_openssl_configured_client_transport_parameters_len = client_params_len;
+    quicz_openssl_configured_server_transport_parameters_len = server_params_len;
+    quicz_openssl_transport_parameters_configured = 1;
+    return 1;
+}
+
 static int init_endpoint(struct quicz_openssl_endpoint *endpoint, int is_client) {
     static const unsigned char client_transport_parameters[] = {
         0x0f, 0x04, 0x21, 0x22, 0x23, 0x24,
@@ -299,7 +339,15 @@ static int init_endpoint(struct quicz_openssl_endpoint *endpoint, int is_client)
         0x08, 0x01, 0x08
     };
     const unsigned char *transport_parameters = is_client ? client_transport_parameters : server_transport_parameters;
-    const size_t transport_parameters_len = is_client ? sizeof(client_transport_parameters) : sizeof(server_transport_parameters);
+    size_t transport_parameters_len = is_client ? sizeof(client_transport_parameters) : sizeof(server_transport_parameters);
+    if (quicz_openssl_transport_parameters_configured) {
+        transport_parameters = is_client ?
+            quicz_openssl_configured_client_transport_parameters :
+            quicz_openssl_configured_server_transport_parameters;
+        transport_parameters_len = is_client ?
+            quicz_openssl_configured_client_transport_parameters_len :
+            quicz_openssl_configured_server_transport_parameters_len;
+    }
 
     memset(endpoint, 0, sizeof(*endpoint));
     if (transport_parameters_len > sizeof(endpoint->local_transport_parameters)) {

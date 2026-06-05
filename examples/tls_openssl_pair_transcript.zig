@@ -40,6 +40,12 @@ const OpenSslPairTranscriptResult = extern struct {
 };
 
 extern fn quicz_openssl_pair_transcript_run() OpenSslPairTranscriptResult;
+extern fn quicz_openssl_pair_transcript_configure_transport_parameters(
+    client_params: [*]const u8,
+    client_params_len: usize,
+    server_params: [*]const u8,
+    server_params_len: usize,
+) c_int;
 extern fn quicz_openssl_pair_transcript_copy_client_crypto(
     level: c_int,
     out: [*]u8,
@@ -235,6 +241,69 @@ fn copyOpenSslSecret(
     try require(copied == 1);
     try require(written_len == secret.len);
     return secret;
+}
+
+const EncodedTranscriptTransportParameters = struct {
+    client: []const u8,
+    server: []const u8,
+};
+
+fn encodeTranscriptTransportParameters(
+    allocator: std.mem.Allocator,
+    client_out: []u8,
+    server_out: []u8,
+) !EncodedTranscriptTransportParameters {
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &transcript_original_dcid);
+
+    var client = try quicz.Connection.init(allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try quicz.Connection.init(allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+
+    try client.sendCryptoInSpace(.initial, "quicz transcript client tp seed");
+    const client_initial = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        1,
+        &transcript_original_dcid,
+        &transcript_client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_initial);
+    try server.recordPeerAddressBytesReceived(client_initial.len);
+    try server.processProtectedLongDatagramInSpace(.initial, 2, secrets.client, client_initial);
+
+    try server.sendPingInSpace(.initial);
+    const server_initial = (try server.pollProtectedLongDatagram(
+        3,
+        &transcript_client_scid,
+        &transcript_server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(server_initial);
+
+    const client_local_scid = client.localInitialSourceConnectionId() orelse return error.UnexpectedState;
+    const server_original_dcid = server.originalDestinationConnectionId() orelse return error.UnexpectedState;
+    const server_local_scid = server.localInitialSourceConnectionId() orelse return error.UnexpectedState;
+    try require(std.mem.eql(u8, client_local_scid, &transcript_client_scid));
+    try require(std.mem.eql(u8, server_original_dcid, &transcript_original_dcid));
+    try require(std.mem.eql(u8, server_local_scid, &transcript_server_scid));
+
+    return .{
+        .client = try client.encodeLocalTransportParameters(client_out),
+        .server = try server.encodeLocalTransportParameters(server_out),
+    };
 }
 
 fn injectCryptoFrame(
@@ -1071,6 +1140,21 @@ fn verifySocketBackedApplicationEchoDelivery() !SocketApplicationEcho {
 }
 
 pub fn main() !void {
+    const allocator = std.heap.page_allocator;
+    var client_local_transport_parameter_buf: [512]u8 = undefined;
+    var server_local_transport_parameter_buf: [512]u8 = undefined;
+    const local_transport_parameters = try encodeTranscriptTransportParameters(
+        allocator,
+        &client_local_transport_parameter_buf,
+        &server_local_transport_parameter_buf,
+    );
+    try require(quicz_openssl_pair_transcript_configure_transport_parameters(
+        local_transport_parameters.client.ptr,
+        local_transport_parameters.client.len,
+        local_transport_parameters.server.ptr,
+        local_transport_parameters.server.len,
+    ) == 1);
+
     const result = quicz_openssl_pair_transcript_run();
 
     try require(result.initialized == 1);
@@ -1108,7 +1192,6 @@ pub fn main() !void {
     try require(result.server_out_level_bytes[3] > 0);
     try require(result.error_queue_code == 0);
 
-    const allocator = std.heap.page_allocator;
     var client_peer_transport_parameter_buf: [512]u8 = undefined;
     var server_peer_transport_parameter_buf: [512]u8 = undefined;
     const client_peer_transport_parameters = try copyOpenSslPeerTransportParameters(
@@ -1121,6 +1204,10 @@ pub fn main() !void {
     );
     try require(client_peer_transport_parameters.len == result.client_peer_transport_parameters_len);
     try require(server_peer_transport_parameters.len == result.server_peer_transport_parameters_len);
+    try require(client_peer_transport_parameters.len == local_transport_parameters.server.len);
+    try require(server_peer_transport_parameters.len == local_transport_parameters.client.len);
+    try require(std.mem.eql(u8, client_peer_transport_parameters, local_transport_parameters.server));
+    try require(std.mem.eql(u8, server_peer_transport_parameters, local_transport_parameters.client));
     var parsed_client_peer_transport_parameters = try quicz.transport_parameters.parse(
         client_peer_transport_parameters,
         allocator,
