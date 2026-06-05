@@ -1256,6 +1256,35 @@ pub fn main() !void {
     try require(std.mem.eql(u8, &server_handshake_local, &client_handshake_peer));
     try require(std.mem.eql(u8, &client_application_local, &server_application_peer));
     try require(std.mem.eql(u8, &server_application_local, &client_application_peer));
+
+    const server_probe_initial_released_len = c.quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_server_probe_context);
+    try require(server_probe_initial_released_len == server_probe_client_initial.len);
+    try require(statusIsOk(c.quicz_openssl_tls_backend_receive(
+        openssl_server_probe_context,
+        c.QUICZ_TLS_BACKEND_HANDSHAKE,
+        server_probe_client_handshake.ptr,
+        server_probe_client_handshake.len,
+    )));
+    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_consume_inbound_once(openssl_server_probe_context)));
+    const server_probe_handshake_released_len =
+        c.quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_server_probe_context) -
+        server_probe_initial_released_len;
+    try require(server_probe_handshake_released_len == server_probe_client_handshake.len);
+    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_yield_application_secret(
+        openssl_server_probe_context,
+        1,
+        &server_application_local,
+        server_application_local.len,
+    )));
+    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_yield_application_secret(
+        openssl_server_probe_context,
+        0,
+        &server_application_peer,
+        server_application_peer.len,
+    )));
+    try require(c.quicz_openssl_tls_backend_yield_secret_callbacks(openssl_server_probe_context) >= 4);
+    try require(c.quicz_openssl_tls_backend_handshake_confirmed(openssl_server_probe_context));
+
     const server_connection_probe = try verifyAdapterServerInitialBackendConnectionDrive(
         allocator,
         server_probe_client_initial,
@@ -1529,7 +1558,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_initial={}/{} server_connection_initial={}/{}/{}/{}/{}/{} server_connection_handshake={}/{}/{}/{}/{} server_connection_application={}/{}/{}/{} server_probe_confirmed={}\n",
+        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_initial={}/{}/{} server_connection_initial={}/{}/{}/{}/{}/{} server_connection_handshake={}/{}/{}/{}/{} server_connection_application={}/{}/{}/{} server_probe_confirmed={}\n",
         .{
             transcript.client_keylog_callbacks,
             transcript.server_keylog_callbacks,
@@ -1539,6 +1568,7 @@ pub fn main() !void {
             c.quicz_openssl_tls_backend_local_transport_parameters_len(openssl_server_probe_context),
             c.quicz_openssl_tls_backend_received_crypto_len(openssl_server_probe_context),
             server_probe_initial_out_len,
+            server_probe_handshake_released_len,
             server_connection_probe.inbound_crypto_bytes,
             server_connection_probe.outbound_crypto_bytes,
             server_connection_probe.server_datagram_bytes,

@@ -101,8 +101,9 @@ Common runnable examples:
   Handshake packet-number space and keys. The paired loopback server also
   consumes client Handshake CRYPTO over loopback UDP, pulls peer transport
   parameters and Handshake/1-RTT secrets through the backend, confirms, and
-  clears its Handshake keys before protected close and route cleanup through one
-  socket/lifecycle loop owner.
+  clears its Handshake keys; the direct server probe also consumes Handshake
+  CRYPTO and reports `server_probe_confirmed=true` before protected close and
+  route cleanup through one socket/lifecycle loop owner.
 - `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
   transcript, with level-separated CRYPTO handoff plus peer transport-parameter
   and traffic-secret callbacks on both endpoints, then mapped into quicz
@@ -464,8 +465,9 @@ experimental.
   connection, and discard its Handshake packet-number space and keys. The
   paired loopback server also consumes client Handshake CRYPTO over loopback
   UDP, pulls peer transport parameters and Handshake/1-RTT secrets through the
-  backend, confirms, and clears its Handshake keys before protected close and
-  route cleanup
+  backend, confirms, and clears its Handshake keys; the direct server probe
+  also consumes Handshake CRYPTO and reports `server_probe_confirmed=true`
+  before protected close and route cleanup
   through one socket/lifecycle loop owner. The adapter output also prints that
   the consumed transcript transport-parameter bytes match the connection-applied
   peer bytes, plus transcript keylog evidence and the current wrapper keylog
