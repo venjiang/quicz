@@ -199,6 +199,13 @@ const ProtectedHandshakeDelivery = struct {
     server_datagram_bytes: usize,
 };
 
+const ProtectedApplicationDelivery = struct {
+    request_bytes: usize,
+    request_datagram_bytes: usize,
+    response_bytes: usize,
+    response_datagram_bytes: usize,
+};
+
 fn verifyProtectedInitialCryptoDelivery(expected_len: usize) !ProtectedInitialDelivery {
     var client_initial_crypto: [8192]u8 = undefined;
     const copied = try copyOpenSslCrypto(true, 0, &client_initial_crypto);
@@ -337,6 +344,99 @@ fn verifyProtectedHandshakeCryptoDelivery(
     };
 }
 
+fn verifyProtectedApplicationStreamDelivery() !ProtectedApplicationDelivery {
+    const client_local = try copyOpenSslSecret(true, 3, 1);
+    const client_peer = try copyOpenSslSecret(true, 3, 0);
+    const server_local = try copyOpenSslSecret(false, 3, 1);
+    const server_peer = try copyOpenSslSecret(false, 3, 0);
+    try require(std.mem.eql(u8, &client_local, &server_peer));
+    try require(std.mem.eql(u8, &server_local, &client_peer));
+
+    const allocator = std.heap.page_allocator;
+    const client_dcid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const server_dcid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const request = "openssl one-rtt stream request";
+    const response = "openssl one-rtt stream response";
+
+    var protected_client = try quicz.Connection.init(allocator, .client, .{
+        .initial_max_data = 4096,
+        .initial_max_stream_data = 1024,
+        .initial_max_streams_bidi = 4,
+        .max_datagram_size = 8192,
+    });
+    defer protected_client.deinit();
+    var protected_server = try quicz.Connection.init(allocator, .server, .{
+        .initial_max_data = 4096,
+        .initial_max_stream_data = 1024,
+        .initial_max_streams_bidi = 4,
+        .max_datagram_size = 8192,
+    });
+    defer protected_server.deinit();
+    try protected_server.validatePeerAddress();
+
+    try protected_client.installOneRttTrafficSecrets(.{
+        .local = client_local,
+        .peer = client_peer,
+    });
+    try protected_server.installOneRttTrafficSecrets(.{
+        .local = server_local,
+        .peer = server_peer,
+    });
+    try require(protected_client.hasOneRttProtectionKeys());
+    try require(protected_server.hasOneRttProtectionKeys());
+
+    const stream_id = try protected_client.openStream();
+    try protected_client.sendOnStream(stream_id, request, false);
+    const protected_request = (try protected_client.pollProtectedShortDatagramWithInstalledKeys(
+        20,
+        &server_dcid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(protected_request);
+    try require(protected_client.sentPacketCount(.application) == 1);
+    try protected_server.processProtectedShortDatagramWithInstalledKeys(21, server_dcid.len, protected_request);
+
+    var read_buf: [128]u8 = undefined;
+    const request_len = (try protected_server.recvOnStream(stream_id, &read_buf)) orelse return error.UnexpectedState;
+    try require(request_len == request.len);
+    try require(std.mem.eql(u8, read_buf[0..request_len], request));
+    try require(protected_server.nextPeerPacketNumber(.application) == 1);
+    try require(protected_server.pendingAckLargest(.application) == 0);
+
+    try protected_server.sendOnStream(stream_id, response, false);
+    var response_datagram_bytes: usize = 0;
+    var response_len: ?usize = null;
+    for (0..4) |packet_index| {
+        const protected_response = (try protected_server.pollProtectedShortDatagramWithInstalledKeys(
+            22 + @as(i64, @intCast(packet_index)),
+            &client_dcid,
+        )) orelse return error.UnexpectedState;
+        response_datagram_bytes += protected_response.len;
+        try protected_client.processProtectedShortDatagramWithInstalledKeys(
+            30 + @as(i64, @intCast(packet_index)),
+            client_dcid.len,
+            protected_response,
+        );
+        allocator.free(protected_response);
+        if ((try protected_client.recvOnStream(stream_id, &read_buf))) |read_len| {
+            response_len = read_len;
+            break;
+        }
+    }
+    try require(protected_server.sentPacketCount(.application) >= 1);
+    const confirmed_response_len = response_len orelse return error.UnexpectedState;
+    try require(confirmed_response_len == response.len);
+    try require(std.mem.eql(u8, read_buf[0..confirmed_response_len], response));
+    try require(protected_client.nextPeerPacketNumber(.application) >= 1);
+    try require(protected_client.pendingAckLargest(.application) != null);
+
+    return .{
+        .request_bytes = request_len,
+        .request_datagram_bytes = protected_request.len,
+        .response_bytes = confirmed_response_len,
+        .response_datagram_bytes = response_datagram_bytes,
+    };
+}
+
 pub fn main() !void {
     const result = quicz_openssl_pair_transcript_run();
 
@@ -420,6 +520,7 @@ pub fn main() !void {
         result.client_out_level_bytes[2],
         result.server_out_level_bytes[2],
     );
+    const protected_application = try verifyProtectedApplicationStreamDelivery();
 
     std.debug.print(
         "[tls-openssl-pair-transcript] initialized={} client_done={} server_done={} client_send={} server_send={} client_recv={} server_recv={} client_release={} server_release={} client_yield={} server_yield={} client_tp={} server_tp={} client_levels={}/{}/{}/{} server_levels={}/{}/{}/{}",
@@ -448,7 +549,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        " quicz_delivery={}/{}/{}/{}/{}/{} protected_initial={}/{} protected_handshake={}/{}/{}/{} iterations={} alerts={}/{} errors={}/{}\n",
+        " quicz_delivery={}/{}/{}/{}/{}/{} protected_initial={}/{} protected_handshake={}/{}/{}/{} protected_application={}/{}/{}/{} iterations={} alerts={}/{} errors={}/{}\n",
         .{
             client_initial_bytes,
             server_initial_bytes,
@@ -462,6 +563,10 @@ pub fn main() !void {
             protected_handshake.client_datagram_bytes,
             protected_handshake.server_crypto_bytes,
             protected_handshake.server_datagram_bytes,
+            protected_application.request_bytes,
+            protected_application.request_datagram_bytes,
+            protected_application.response_bytes,
+            protected_application.response_datagram_bytes,
             result.drive_iterations,
             result.client_alert_callbacks,
             result.server_alert_callbacks,
