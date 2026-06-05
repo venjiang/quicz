@@ -394,7 +394,9 @@ bool quicz_openssl_tls_backend_handshake_confirmed(void *context) {
         backend->handshake_local_secret_available &&
         backend->handshake_peer_secret_available &&
         backend->one_rtt_local_secret_available &&
-        backend->one_rtt_peer_secret_available;
+        backend->one_rtt_peer_secret_available &&
+        backend->received_crypto_len != 0 &&
+        backend->inbound_crypto_released_len == backend->received_crypto_len;
 }
 
 int quicz_openssl_tls_backend_callbacks_set(void *context) {

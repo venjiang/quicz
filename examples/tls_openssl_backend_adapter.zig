@@ -983,6 +983,14 @@ pub fn main() !void {
     try require(handshake_progress.outbound_chunks == 0);
     try require(!handshake_progress.handshake_confirmed);
     try require(connection.hasHandshakeProtectionKeys());
+    try require(!c.quicz_openssl_tls_backend_handshake_confirmed(openssl_context));
+
+    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_consume_inbound_once(openssl_context)));
+    try require(c.quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context) == initial_recv_callbacks + 1);
+    try require(c.quicz_openssl_tls_backend_inbound_crypto_release_callbacks(openssl_context) == initial_release_callbacks + 1);
+    try require(c.quicz_openssl_tls_backend_pending_inbound_crypto_len(openssl_context) == 0);
+    try require(c.quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_context) == inbound_crypto.len);
+    try require(!c.quicz_openssl_tls_backend_handshake_confirmed(openssl_context));
 
     const client_application_local = try copyOpenSslClientSecret(3, 1);
     const client_application_peer = try copyOpenSslClientSecret(3, 0);
@@ -1049,12 +1057,6 @@ pub fn main() !void {
         &connection,
         &peer,
     );
-
-    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_consume_inbound_once(openssl_context)));
-    try require(c.quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context) == initial_recv_callbacks + 1);
-    try require(c.quicz_openssl_tls_backend_inbound_crypto_release_callbacks(openssl_context) == initial_release_callbacks + 1);
-    try require(c.quicz_openssl_tls_backend_pending_inbound_crypto_len(openssl_context) == 0);
-    try require(c.quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_context) == inbound_crypto.len);
 
     std.debug.print(
         "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} adapter_initial_socket={}/{}/{} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} transcript_handshake_bytes={} adapter_handshake_socket={}/{}/{} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} adapter_application_socket={}/{}/{}/{}/{}/{}/{} backend_confirmed={}\n",

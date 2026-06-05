@@ -93,9 +93,10 @@ Common runnable examples:
   Handshake datagram over loopback UDP, reuses the matching Handshake/1-RTT
   secrets, and drives a loopback UDP 1-RTT STREAM echo with adapter-installed
   client keys and matching peer transcript secrets, including Application PTO
-  service through the same lifecycle owner. After the OpenSSL-backed
-  `handshake_confirmed` callback confirms the client, a no-output Handshake
-  drive discards the client Handshake packet-number space and keys, while the
+  service through the same lifecycle owner. After OpenSSL recv/release consumes
+  inbound Handshake CRYPTO, the OpenSSL-backed `handshake_confirmed` callback
+  confirms the client and a no-output Handshake drive discards the client
+  Handshake packet-number space and keys, while the
   peer side is explicitly discarded for the paired loopback endpoint,
   then sends protected close and completes route cleanup through one
   socket/lifecycle loop owner.
@@ -247,10 +248,11 @@ experimental.
   CRYPTO through a protected Handshake datagram over loopback UDP, and drives a
   loopback UDP 1-RTT STREAM echo with adapter-installed client keys and
   matching peer transcript secrets, including Application PTO service through
-  the same lifecycle owner. After the OpenSSL-backed `handshake_confirmed`
-  callback confirms the client, a no-output Handshake drive discards the client
-  Handshake packet-number space and keys, while the peer side is explicitly
-  discarded for the paired loopback endpoint, then sends
+  the same lifecycle owner. After OpenSSL recv/release consumes inbound
+  Handshake CRYPTO, the OpenSSL-backed `handshake_confirmed` callback confirms
+  the client and a no-output Handshake drive discards the client Handshake
+  packet-number space and keys, while the peer side is explicitly discarded for
+  the paired loopback endpoint, then sends
   protected close and completes route cleanup through one socket/lifecycle loop
   owner. Run with
   `zig build run-tls-openssl-backend-adapter`.
@@ -449,7 +451,8 @@ experimental.
   protected Initial/Handshake datagrams, then drives loopback UDP 1-RTT STREAM
   echo with adapter-installed client keys and matching peer transcript secrets,
   services an Application PTO probe through the same lifecycle owner, confirms
-  the client through the OpenSSL-backed `handshake_confirmed` callback,
+  the client through the OpenSSL-backed `handshake_confirmed` callback after
+  OpenSSL recv/release consumes inbound Handshake CRYPTO,
   discards the client Handshake packet-number space and keys through a
   backend-confirmed no-output Handshake drive, explicitly discards the paired
   server side,
