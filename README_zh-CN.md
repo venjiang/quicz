@@ -89,8 +89,9 @@ zig build run-initial-keys
 - `run-tls-openssl-pair-transcript`：OpenSSL client/server callback-mode TLS
   transcript，覆盖按 protection level 分离的 CRYPTO handoff，以及双端 peer
   transport-parameter 和 traffic-secret callback，并把生成的 CRYPTO bytes 映射进
-  quicz Initial/Handshake/Application CRYPTO 队列；示例会记录 keylog callback 次数和
-  字节数，但不打印 key material；client Initial CRYPTO bytes 还会经 quicz protected
+  quicz Initial/Handshake/Application CRYPTO 队列；示例会记录并解析 peer
+  transport-parameter bytes，也会记录 keylog callback 次数和字节数，但不打印 key
+  material；client Initial CRYPTO bytes 还会经 quicz protected
   Initial long-packet helper 发送，并由 server connection 读回；
   双向 Initial flight 也会通过 quicz endpoint lifecycle 在 loopback UDP 上投递；
   OpenSSL Handshake secrets 也会驱动双向 installed-key protected Handshake CRYPTO
@@ -178,8 +179,8 @@ pub fn main() !void {
   PSK 的 OpenSSL client/server callback-mode TLS transcript 示例，覆盖按
   protection level 分离的 CRYPTO handoff、peer transport-parameter callback，以及双端
   Handshake/1-RTT traffic-secret callback，并把生成的 CRYPTO bytes 投递到 quicz
-  packet-number-space CRYPTO 队列；示例会记录 keylog callback 次数和字节数，但不打印
-  key material；同时会把 client Initial CRYPTO bytes 经 quicz protected Initial
+  packet-number-space CRYPTO 队列；示例会记录并解析 peer transport-parameter bytes，
+  也会记录 keylog callback 次数和字节数，但不打印 key material；同时会把 client Initial CRYPTO bytes 经 quicz protected Initial
   long-packet helper 组包，并通过 quicz endpoint lifecycle 在
   loopback UDP 上投递双向 Initial flight；安装 OpenSSL 产出的 Handshake secrets，并验证
   双向 protected Handshake CRYPTO 投递，包括通过同一个 lifecycle 的 loopback UDP 投递；
@@ -198,7 +199,8 @@ pub fn main() !void {
   同时通过同一个 lifecycle owner 服务 Application PTO；建模 handshake confirmation 后
   显式丢弃双端 Handshake packet-number space 和 Handshake keys，随后通过同一个
   socket/lifecycle loop owner 投递 protected close 并完成 route cleanup。输出也会打印
-  transcript keylog 证据和当前 wrapper keylog 边界。
+  transcript peer transport-parameter byte 证据、transcript keylog 证据和当前 wrapper
+  keylog 边界。
   运行：`zig build run-tls-openssl-backend-adapter`。
 - [Graceful close](examples/graceful_close.zig)：本端/对端关闭、protected long/short close、非法 ACK/ACK_ECN range auto-close、包含非法 ACK/ACK_ECN、0-RTT ACK/ACK_ECN packet-type 违规、非法 STREAMS_BLOCKED limit、冲突 STREAM data 和非法 stream control frame 的语义 frame 错误 auto-close、protected receive auto-close、lifecycle-routed protected auto-close、protected long/0-RTT close-state discard、draining 行为和关闭触发校验。
   运行：`zig build run-graceful-close`。

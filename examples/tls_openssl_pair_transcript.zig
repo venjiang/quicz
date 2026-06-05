@@ -17,6 +17,8 @@ const OpenSslPairTranscriptResult = extern struct {
     server_yield_secret_callbacks: c_int,
     client_got_transport_params_callbacks: c_int,
     server_got_transport_params_callbacks: c_int,
+    client_peer_transport_parameters_len: usize,
+    server_peer_transport_parameters_len: usize,
     client_keylog_callbacks: c_int,
     server_keylog_callbacks: c_int,
     client_keylog_bytes: usize,
@@ -46,6 +48,16 @@ extern fn quicz_openssl_pair_transcript_copy_client_crypto(
 ) c_int;
 extern fn quicz_openssl_pair_transcript_copy_server_crypto(
     level: c_int,
+    out: [*]u8,
+    out_len: usize,
+    written_len: *usize,
+) c_int;
+extern fn quicz_openssl_pair_transcript_copy_client_peer_transport_parameters(
+    out: [*]u8,
+    out_len: usize,
+    written_len: *usize,
+) c_int;
+extern fn quicz_openssl_pair_transcript_copy_server_peer_transport_parameters(
     out: [*]u8,
     out_len: usize,
     written_len: *usize,
@@ -167,6 +179,24 @@ fn copyOpenSslCrypto(is_client: bool, level: usize, out: []u8) ExampleError![]co
     else
         quicz_openssl_pair_transcript_copy_server_crypto(
             @intCast(level),
+            out.ptr,
+            out.len,
+            &written_len,
+        );
+    try require(copied == 1);
+    return out[0..written_len];
+}
+
+fn copyOpenSslPeerTransportParameters(is_client: bool, out: []u8) ExampleError![]const u8 {
+    var written_len: usize = 0;
+    const copied = if (is_client)
+        quicz_openssl_pair_transcript_copy_client_peer_transport_parameters(
+            out.ptr,
+            out.len,
+            &written_len,
+        )
+    else
+        quicz_openssl_pair_transcript_copy_server_peer_transport_parameters(
             out.ptr,
             out.len,
             &written_len,
@@ -1050,6 +1080,8 @@ pub fn main() !void {
     try require(result.server_yield_secret_callbacks >= 4);
     try require(result.client_got_transport_params_callbacks == 1);
     try require(result.server_got_transport_params_callbacks == 1);
+    try require(result.client_peer_transport_parameters_len > 0);
+    try require(result.server_peer_transport_parameters_len > 0);
     try require(result.client_keylog_callbacks > 0);
     try require(result.server_keylog_callbacks > 0);
     try require(result.client_keylog_bytes > @as(usize, @intCast(result.client_keylog_callbacks)));
@@ -1073,6 +1105,36 @@ pub fn main() !void {
     try require(result.error_queue_code == 0);
 
     const allocator = std.heap.page_allocator;
+    var client_peer_transport_parameter_buf: [512]u8 = undefined;
+    var server_peer_transport_parameter_buf: [512]u8 = undefined;
+    const client_peer_transport_parameters = try copyOpenSslPeerTransportParameters(
+        true,
+        &client_peer_transport_parameter_buf,
+    );
+    const server_peer_transport_parameters = try copyOpenSslPeerTransportParameters(
+        false,
+        &server_peer_transport_parameter_buf,
+    );
+    try require(client_peer_transport_parameters.len == result.client_peer_transport_parameters_len);
+    try require(server_peer_transport_parameters.len == result.server_peer_transport_parameters_len);
+    try require(std.mem.eql(u8, client_peer_transport_parameters, server_peer_transport_parameters));
+    var parsed_client_peer_transport_parameters = try quicz.transport_parameters.parse(
+        client_peer_transport_parameters,
+        allocator,
+    );
+    defer parsed_client_peer_transport_parameters.deinit(allocator);
+    var parsed_server_peer_transport_parameters = try quicz.transport_parameters.parse(
+        server_peer_transport_parameters,
+        allocator,
+    );
+    defer parsed_server_peer_transport_parameters.deinit(allocator);
+    const client_peer_original_dcid = parsed_client_peer_transport_parameters.original_destination_connection_id orelse
+        return error.UnexpectedState;
+    const server_peer_original_dcid = parsed_server_peer_transport_parameters.original_destination_connection_id orelse
+        return error.UnexpectedState;
+    try require(std.mem.eql(u8, client_peer_original_dcid, server_peer_original_dcid));
+    try require(std.mem.eql(u8, client_peer_original_dcid, &.{ 0x80, 0x00, 0x75, 0x30 }));
+
     var client_connection = try quicz.Connection.init(allocator, .client, .{
         .max_datagram_size = 8192,
     });
@@ -1135,7 +1197,7 @@ pub fn main() !void {
     const socket_echo = try verifySocketBackedApplicationEchoDelivery();
 
     std.debug.print(
-        "[tls-openssl-pair-transcript] initialized={} client_done={} server_done={} client_send={} server_send={} client_recv={} server_recv={} client_release={} server_release={} client_yield={} server_yield={} client_tp={} server_tp={} client_levels={}/{}/{}/{} server_levels={}/{}/{}/{}",
+        "[tls-openssl-pair-transcript] initialized={} client_done={} server_done={} client_send={} server_send={} client_recv={} server_recv={} client_release={} server_release={} client_yield={} server_yield={} client_tp_callbacks={} server_tp_callbacks={} peer_tp_bytes={}/{} client_levels={}/{}/{}/{} server_levels={}/{}/{}/{}",
         .{
             result.initialized,
             result.client_done,
@@ -1150,6 +1212,8 @@ pub fn main() !void {
             result.server_yield_secret_callbacks,
             result.client_got_transport_params_callbacks,
             result.server_got_transport_params_callbacks,
+            client_peer_transport_parameters.len,
+            server_peer_transport_parameters.len,
             result.client_out_level_bytes[0],
             result.client_out_level_bytes[1],
             result.client_out_level_bytes[2],

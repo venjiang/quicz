@@ -92,6 +92,8 @@ const OpenSslPairTranscriptResult = extern struct {
     server_yield_secret_callbacks: c_int,
     client_got_transport_params_callbacks: c_int,
     server_got_transport_params_callbacks: c_int,
+    client_peer_transport_parameters_len: usize,
+    server_peer_transport_parameters_len: usize,
     client_keylog_callbacks: c_int,
     server_keylog_callbacks: c_int,
     client_keylog_bytes: usize,
@@ -774,6 +776,11 @@ pub fn main() !void {
     try require(transcript.server_last_ssl_error == 0);
     try require(transcript.client_yield_secret_callbacks >= 4);
     try require(transcript.server_yield_secret_callbacks >= 4);
+    try require(transcript.client_got_transport_params_callbacks == 1);
+    try require(transcript.server_got_transport_params_callbacks == 1);
+    try require(transcript.client_peer_transport_parameters_len > 0);
+    try require(transcript.server_peer_transport_parameters_len > 0);
+    try require(transcript.client_peer_transport_parameters_len == transcript.server_peer_transport_parameters_len);
     try require(transcript.client_keylog_callbacks > 0);
     try require(transcript.server_keylog_callbacks > 0);
     try require(transcript.client_keylog_bytes > @as(usize, @intCast(transcript.client_keylog_callbacks)));
@@ -1026,12 +1033,13 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} adapter_keylog={}/{} adapter_pto={}/{}/{}/{} adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
+        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} adapter_keylog={}/{} adapter_pto={}/{}/{}/{} adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
         .{
             transcript.client_keylog_callbacks,
             transcript.server_keylog_callbacks,
             transcript.client_keylog_bytes,
             transcript.server_keylog_bytes,
+            transcript.client_peer_transport_parameters_len,
             quicz_openssl_tls_backend_keylog_callbacks(openssl_context),
             quicz_openssl_tls_backend_keylog_bytes(openssl_context),
             adapter_application_socket.client_pto_deadline_millis,

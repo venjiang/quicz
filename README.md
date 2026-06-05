@@ -99,11 +99,12 @@ Common runnable examples:
 - `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
   transcript, with level-separated CRYPTO handoff plus peer transport-parameter
   and traffic-secret callbacks on both endpoints, then mapped into quicz
-  Initial/Handshake/Application CRYPTO queues. It records keylog callback
-  count/byte evidence without printing key material. The client Initial CRYPTO
-  bytes are also sent through quicz protected Initial long-packet helpers and
-  read back by the server connection, and both Initial flights also run over
-  loopback UDP through the quicz endpoint lifecycle. The OpenSSL Handshake secrets drive
+  Initial/Handshake/Application CRYPTO queues. It records and parses peer
+  transport-parameter bytes and records keylog callback count/byte evidence
+  without printing key material. The client Initial CRYPTO bytes are also sent
+  through quicz protected Initial long-packet helpers and read back by the
+  server connection, and both Initial flights also run over loopback UDP
+  through the quicz endpoint lifecycle. The OpenSSL Handshake secrets drive
   installed-key protected Handshake CRYPTO delivery in both directions,
   including loopback UDP delivery through the quicz endpoint lifecycle. The
   OpenSSL 1-RTT secrets also protect a quicz STREAM request/response over
@@ -209,10 +210,11 @@ experimental.
   example, level-separated CRYPTO handoff, peer transport-parameter callbacks,
   Handshake/1-RTT traffic-secret callbacks on both endpoints, and delivery of
   the generated CRYPTO bytes into quicz packet-number-space CRYPTO queues. It
-  records keylog callback count/byte evidence without printing key material,
-  then packetizes the client Initial CRYPTO bytes with quicz protected Initial
-  long-packet helpers, routes both Initial flights over loopback UDP through the
-  quicz endpoint lifecycle, installs OpenSSL-produced Handshake secrets, and
+  records and parses peer transport-parameter bytes, records keylog callback
+  count/byte evidence without printing key material, then packetizes the client
+  Initial CRYPTO bytes with quicz protected Initial long-packet helpers, routes
+  both Initial flights over loopback UDP through the quicz endpoint lifecycle,
+  installs OpenSSL-produced Handshake secrets, and
   verifies protected Handshake CRYPTO delivery in both directions, including
   loopback UDP delivery through the same lifecycle. OpenSSL-produced 1-RTT
   secrets also drive an installed-key protected STREAM request/response and a
@@ -429,7 +431,8 @@ experimental.
   discards both Handshake packet-number spaces and Handshake keys after modeled
   handshake confirmation, then sends protected close and completes route cleanup
   through one socket/lifecycle loop owner. The adapter output also prints
-  transcript keylog evidence and the current wrapper keylog boundary.
+  transcript peer transport-parameter byte evidence, transcript keylog evidence,
+  and the current wrapper keylog boundary.
   A full endpoint-owned live TLS handshake/socket loop is still pending.
 
 ## License
