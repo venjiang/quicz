@@ -78,6 +78,9 @@ zig build run-initial-keys
 - `run-tls-openssl-backend-adapter`：当前真实 C TLS adapter 边界，覆盖本端
   transport parameters、第一段 TLS CRYPTO flight，以及 peer transport-parameter、
   Handshake/1-RTT secret 和入站 CRYPTO 经 OpenSSL callback 边界投递到连接层。
+- `run-tls-openssl-pair-transcript`：OpenSSL client/server callback-mode TLS
+  transcript，覆盖按 protection level 分离的 CRYPTO handoff，以及双端 peer
+  transport-parameter 和 traffic-secret callback。
 - `run-udp-echo-loopback`：socket-backed installed-key STREAM echo 证据，包含
   payload equality、ACK cleanup 和 recovery timer cleanup。
 - `run-udp-pto-recovery-loopback`、`run-udp-loss-recovery-loopback` 和
@@ -156,6 +159,11 @@ pub fn main() !void {
   OpenSSL，验证 OpenSSL QUIC method 与 QUIC TLS callback/transport-parameter
   API，并记录 callback mode 不等于 OpenSSL 完整 QUIC connection mode。
   运行：`zig build run-tls-openssl-probe`。
+- [TLS OpenSSL pair transcript](examples/tls_openssl_pair_transcript.zig)：使用固定
+  PSK 的 OpenSSL client/server callback-mode TLS transcript 示例，覆盖按
+  protection level 分离的 CRYPTO handoff、peer transport-parameter callback，以及双端
+  Handshake/1-RTT traffic-secret callback。运行：
+  `zig build run-tls-openssl-pair-transcript`。
 - [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig)：把
   OpenSSL-backed `TlsBackend` wrapper 接到现有 drive 路径，通过
   `SSL_set_quic_tls_transport_params()` 接收 quicz 本端 transport parameters，驱动
@@ -252,9 +260,11 @@ pub fn main() !void {
 - 恢复与拥塞：简化 RFC 9002 ACK/loss/PTO/NewReno/ECN 模型，并有确定性测试覆盖。
 - TLS 状态：已有 mock `CryptoBackend` handoff 和很小的 C-ABI `TlsBackend` adapter；
   `run-tls-openssl-probe` 已链接 OpenSSL 并验证 QUIC TLS callback API，
-  `run-tls-openssl-backend-adapter` 已把 OpenSSL object 接入 adapter 路径并产出第一段
-  TLS CRYPTO flight，也能让 peer transport parameters、Handshake/1-RTT secrets 和入站
-  CRYPTO 经 callback 边界进入连接层；完整对端 transcript 和真实 TLS-owned socket echo 仍待实现。
+  `run-tls-openssl-pair-transcript` 已完成 OpenSSL client/server callback-mode TLS
+  transcript，并按 protection level 分离 CRYPTO handoff；`run-tls-openssl-backend-adapter`
+  已把 OpenSSL object 接入 adapter 路径并产出第一段 TLS CRYPTO flight，也能让 peer
+  transport parameters、Handshake/1-RTT secrets 和入站 CRYPTO 经 callback 边界进入连接层；
+  该 transcript 接入 quicz packetization 和真实 TLS-owned socket echo 仍待实现。
 
 ## 许可证
 

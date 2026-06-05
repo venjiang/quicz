@@ -228,6 +228,24 @@ pub fn build(b: *std.Build) void {
     exe_tls_openssl_backend_adapter.root_module.linkSystemLibrary("crypto", .{});
     b.installArtifact(exe_tls_openssl_backend_adapter);
 
+    // OpenSSL client/server TLS transcript executable
+    const exe_tls_openssl_pair_transcript = b.addExecutable(.{
+        .name = "quicz-tls-openssl-pair-transcript",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tls_openssl_pair_transcript.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    exe_tls_openssl_pair_transcript.root_module.addCSourceFile(.{
+        .file = b.path("examples/tls_openssl_pair_transcript.c"),
+        .flags = &.{},
+    });
+    exe_tls_openssl_pair_transcript.root_module.link_libc = true;
+    exe_tls_openssl_pair_transcript.root_module.linkSystemLibrary("ssl", .{});
+    exe_tls_openssl_pair_transcript.root_module.linkSystemLibrary("crypto", .{});
+    b.installArtifact(exe_tls_openssl_pair_transcript);
+
     // Graceful close executable
     const exe_graceful_close = b.addExecutable(.{
         .name = "quicz-graceful-close",
@@ -903,6 +921,15 @@ pub fn build(b: *std.Build) void {
     run_tls_openssl_backend_adapter_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_tls_openssl_backend_adapter_cmd.addArgs(args);
+    }
+
+    // zig build run-tls-openssl-pair-transcript
+    const run_tls_openssl_pair_transcript = b.step("run-tls-openssl-pair-transcript", "Run quicz OpenSSL client/server TLS transcript example");
+    const run_tls_openssl_pair_transcript_cmd = b.addRunArtifact(exe_tls_openssl_pair_transcript);
+    run_tls_openssl_pair_transcript.dependOn(&run_tls_openssl_pair_transcript_cmd.step);
+    run_tls_openssl_pair_transcript_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_tls_openssl_pair_transcript_cmd.addArgs(args);
     }
 
     // zig build run-graceful-close

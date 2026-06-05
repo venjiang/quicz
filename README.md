@@ -87,6 +87,9 @@ Common verification examples:
   including local transport parameters, first outbound TLS CRYPTO flight, and
   peer transport-parameter, Handshake/1-RTT secret, and inbound CRYPTO delivery
   through OpenSSL callback boundaries.
+- `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
+  transcript, with level-separated CRYPTO handoff plus peer transport-parameter
+  and traffic-secret callbacks on both endpoints.
 - `run-udp-echo-loopback`: socket-backed installed-key STREAM echo evidence,
   including payload equality, ACK cleanup, and recovery timer cleanup.
 - `run-udp-pto-recovery-loopback`, `run-udp-loss-recovery-loopback`, and
@@ -182,6 +185,11 @@ experimental.
   `pkg-config`, verifies the OpenSSL QUIC method and QUIC TLS callback/
   transport-parameter APIs, and records that callback mode is distinct from
   OpenSSL's full QUIC connection mode. Run with `zig build run-tls-openssl-probe`.
+- [TLS OpenSSL pair transcript](examples/tls_openssl_pair_transcript.zig):
+  OpenSSL client/server callback-mode TLS transcript using a fixed PSK for the
+  example, level-separated CRYPTO handoff, peer transport-parameter callbacks,
+  and Handshake/1-RTT traffic-secret callbacks on both endpoints. Run with
+  `zig build run-tls-openssl-pair-transcript`.
 - [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig):
   OpenSSL-backed `TlsBackend` wrapper that accepts quicz local transport
   parameters through `SSL_set_quic_tls_transport_params()`, drives
@@ -363,11 +371,13 @@ experimental.
 - Recovery and congestion: simplified RFC 9002 ACK/loss/PTO/NewReno/ECN model with deterministic tests.
 - TLS status: mock `CryptoBackend` handoff and a narrow C-ABI `TlsBackend`
   adapter are present; `run-tls-openssl-probe` links OpenSSL and verifies its
-  QUIC TLS callback APIs, and `run-tls-openssl-backend-adapter` wires an
-  OpenSSL object into the adapter path far enough to emit the first TLS CRYPTO
-  flight and deliver peer transport parameters, Handshake/1-RTT secrets, and
-  inbound CRYPTO through callback boundaries. Completing the full peer
-  transcript and real TLS-owned socket echo is still pending.
+  QUIC TLS callback APIs, `run-tls-openssl-pair-transcript` completes an
+  OpenSSL client/server callback-mode TLS transcript with level-separated
+  CRYPTO handoff, and `run-tls-openssl-backend-adapter` wires an OpenSSL object
+  into the adapter path far enough to emit the first TLS CRYPTO flight and
+  deliver peer transport parameters, Handshake/1-RTT secrets, and inbound
+  CRYPTO through callback boundaries. Integrating that transcript with quicz
+  packetization and real TLS-owned socket echo is still pending.
 
 ## License
 
