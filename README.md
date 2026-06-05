@@ -98,9 +98,10 @@ Common runnable examples:
   service through the same lifecycle owner. After OpenSSL recv/release consumes
   inbound Handshake CRYPTO, the OpenSSL-backed `handshake_confirmed` callback
   confirms the client and a no-output Handshake drive discards the client
-  Handshake packet-number space and keys, while the
-  peer side is explicitly discarded for the paired loopback endpoint,
-  then sends protected close and completes route cleanup through one
+  Handshake packet-number space and keys. The paired loopback server also
+  consumes client Handshake CRYPTO over loopback UDP, pulls peer transport
+  parameters and Handshake/1-RTT secrets through the backend, confirms, and
+  clears its Handshake keys before protected close and route cleanup through one
   socket/lifecycle loop owner.
 - `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
   transcript, with level-separated CRYPTO handoff plus peer transport-parameter
@@ -460,8 +461,11 @@ experimental.
   discards the client Handshake packet-number space and keys through a
   backend-confirmed no-output Handshake drive, and uses the server connection
   probe to pull real pair-transcript 1-RTT secrets, confirm the server
-  connection, and discard its Handshake packet-number space and keys,
-  then sends protected close and completes route cleanup
+  connection, and discard its Handshake packet-number space and keys. The
+  paired loopback server also consumes client Handshake CRYPTO over loopback
+  UDP, pulls peer transport parameters and Handshake/1-RTT secrets through the
+  backend, confirms, and clears its Handshake keys before protected close and
+  route cleanup
   through one socket/lifecycle loop owner. The adapter output also prints that
   the consumed transcript transport-parameter bytes match the connection-applied
   peer bytes, plus transcript keylog evidence and the current wrapper keylog

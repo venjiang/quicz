@@ -87,8 +87,9 @@ zig build run-initial-keys
   loopback UDP 1-RTT STREAM echo，并通过同一个 lifecycle owner 服务 Application
   PTO；OpenSSL recv/release 消费入站 Handshake CRYPTO 后，OpenSSL-backed
   `handshake_confirmed` callback 确认 client，并通过 no-output Handshake drive
-  丢弃 client Handshake packet-number space 和 keys，
-  配对 loopback endpoint 的 server 侧仍显式丢弃，随后通过同一个
+  丢弃 client Handshake packet-number space 和 keys；配对 loopback server 也会通过
+  loopback UDP 消费 client Handshake CRYPTO，经 backend 拉取 peer transport
+  parameters 和 Handshake/1-RTT secrets，完成确认并清理 Handshake keys，随后通过同一个
   socket/lifecycle loop owner 投递 protected close 并完成 route cleanup。
 - `run-tls-openssl-pair-transcript`：OpenSSL client/server callback-mode TLS
   transcript，覆盖按 protection level 分离的 CRYPTO handoff，以及双端 peer
@@ -330,7 +331,10 @@ pub fn main() !void {
   Handshake CRYPTO 后，OpenSSL-backed `handshake_confirmed` callback 确认 client，
   并通过 no-output Handshake drive 丢弃 client Handshake packet-number space 和 keys；
   server connection probe 也会通过 backend 拉取真实 pair-transcript 1-RTT secrets，
-  确认 server connection，并丢弃 server Handshake packet-number space 和 keys；随后通过同一个
+  确认 server connection，并丢弃 server Handshake packet-number space 和 keys；配对
+  loopback server 也会通过 loopback UDP 消费 client Handshake CRYPTO，经 backend 拉取
+  peer transport parameters 和 Handshake/1-RTT secrets，完成确认并清理 Handshake
+  keys；随后通过同一个
   socket/lifecycle loop owner 投递 protected close 与清理 route；完整 endpoint-owned live
   TLS handshake/socket loop 仍待实现。
 

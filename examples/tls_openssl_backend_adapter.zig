@@ -64,6 +64,19 @@ const AdapterHandshakeSocketDelivery = struct {
     ack_bytes: usize,
 };
 
+const AdapterPeerBackendConfirmation = struct {
+    client_handshake_crypto_bytes: usize,
+    client_handshake_datagram_bytes: usize,
+    peer_transport_parameters_bytes: usize,
+    server_handshake_inbound_bytes: usize,
+    server_handshake_released_bytes: usize,
+    handshake_keys_installed: bool,
+    one_rtt_keys_installed: bool,
+    server_handshake_confirmed: bool,
+    server_handshake_space_discarded: bool,
+    server_handshake_keys_present: bool,
+};
+
 const AdapterApplicationSocketEcho = struct {
     request_bytes: usize,
     request_datagram_bytes: usize,
@@ -804,6 +817,133 @@ fn verifyAdapterHandshakeSocketDelivery(
     };
 }
 
+fn verifyAdapterPeerBackendConfirmation(
+    loop: *AdapterEndpointSocketLoop,
+    client: *quicz.Connection,
+    server: *quicz.Connection,
+    server_tls_backend: *quicz.TlsBackend,
+    server_backend_context: *anyopaque,
+    client_handshake_crypto: []const u8,
+    peer_transport_parameters: []const u8,
+    server_handshake_local: [quicz.protection.traffic_secret_len]u8,
+    server_handshake_peer: [quicz.protection.traffic_secret_len]u8,
+    server_application_local: [quicz.protection.traffic_secret_len]u8,
+    server_application_peer: [quicz.protection.traffic_secret_len]u8,
+) !AdapterPeerBackendConfirmation {
+    try require(client.hasHandshakeProtectionKeys());
+    try require(server.hasHandshakeProtectionKeys());
+    try require(!server.handshakeConfirmed());
+
+    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_got_transport_parameters(
+        server_backend_context,
+        peer_transport_parameters.ptr,
+        peer_transport_parameters.len,
+    )));
+    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_yield_handshake_secret(
+        server_backend_context,
+        1,
+        &server_handshake_local,
+        server_handshake_local.len,
+    )));
+    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_yield_handshake_secret(
+        server_backend_context,
+        0,
+        &server_handshake_peer,
+        server_handshake_peer.len,
+    )));
+
+    try client.sendCryptoInSpace(.handshake, client_handshake_crypto);
+    const client_handshake_datagram = (try loop.client_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        adapter_client_handle,
+        client,
+        24,
+        &adapter_handshake_server_dcid,
+        &adapter_handshake_client_scid,
+    )) orelse return error.UnexpectedState;
+    defer loop.allocator.free(client_handshake_datagram);
+    try require(client_handshake_datagram.len > 0);
+    try loop.client_socket.send(loop.currentIo(), &loop.server_socket.address, client_handshake_datagram);
+
+    var server_receive_buf: [1500]u8 = undefined;
+    const client_handshake_received = try loop.receiveAtServer(&server_receive_buf);
+    const client_handshake_route = try loop.server_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        adapter_server_handle,
+        server,
+        client_handshake_received.path,
+        25,
+        client_handshake_received.data,
+    );
+    try require(client_handshake_route.connection_id == adapter_server_handle);
+    try require(std.mem.eql(u8, client_handshake_route.destination_connection_id.asSlice(), &adapter_handshake_server_dcid));
+
+    var scratch: [8192]u8 = undefined;
+    const server_handshake_release_before = c.quicz_openssl_tls_backend_released_inbound_crypto_len(server_backend_context);
+    const server_handshake_progress = try server.driveCryptoBackendInSpace(
+        .handshake,
+        server_tls_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(server_handshake_progress.peer_transport_parameters_applied);
+    try require(server_handshake_progress.peer_transport_parameters_bytes == peer_transport_parameters.len);
+    try require(server_handshake_progress.handshake_keys_installed);
+    try require(server_handshake_progress.inbound_chunks == 1);
+    try require(server_handshake_progress.inbound_bytes == client_handshake_crypto.len);
+    try require(server_handshake_progress.outbound_chunks == 0);
+    try require(!server_handshake_progress.handshake_confirmed);
+
+    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_consume_inbound_once(server_backend_context)));
+    try require(c.quicz_openssl_tls_backend_released_inbound_crypto_len(server_backend_context) == server_handshake_release_before + client_handshake_crypto.len);
+
+    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_yield_application_secret(
+        server_backend_context,
+        1,
+        &server_application_local,
+        server_application_local.len,
+    )));
+    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_yield_application_secret(
+        server_backend_context,
+        0,
+        &server_application_peer,
+        server_application_peer.len,
+    )));
+
+    const server_application_progress = try server.driveCryptoBackendInSpace(
+        .application,
+        server_tls_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(server_application_progress.one_rtt_keys_installed);
+    try require(!server_application_progress.peer_transport_parameters_applied);
+    try require(!server_application_progress.handshake_keys_installed);
+    try require(server_application_progress.inbound_bytes == 0);
+    try require(server_application_progress.outbound_chunks == 0);
+    try require(server_application_progress.handshake_confirmed);
+    try require(server.handshakeConfirmed());
+
+    const server_discard_progress = try server.driveCryptoBackendInSpace(
+        .handshake,
+        server_tls_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(server_discard_progress.handshake_confirmed);
+    try require(server_discard_progress.outbound_chunks == 0);
+    try require(server.packetNumberSpaceDiscarded(.handshake));
+    try require(!server.hasHandshakeProtectionKeys());
+
+    return .{
+        .client_handshake_crypto_bytes = client_handshake_crypto.len,
+        .client_handshake_datagram_bytes = client_handshake_datagram.len,
+        .peer_transport_parameters_bytes = server_handshake_progress.peer_transport_parameters_bytes,
+        .server_handshake_inbound_bytes = server_handshake_progress.inbound_bytes,
+        .server_handshake_released_bytes = c.quicz_openssl_tls_backend_released_inbound_crypto_len(server_backend_context) - server_handshake_release_before,
+        .handshake_keys_installed = server_handshake_progress.handshake_keys_installed,
+        .one_rtt_keys_installed = server_application_progress.one_rtt_keys_installed,
+        .server_handshake_confirmed = server_application_progress.handshake_confirmed,
+        .server_handshake_space_discarded = server.packetNumberSpaceDiscarded(.handshake),
+        .server_handshake_keys_present = server.hasHandshakeProtectionKeys(),
+    };
+}
+
 fn verifyAdapterApplicationSocketEcho(
     loop: *AdapterEndpointSocketLoop,
     client: *quicz.Connection,
@@ -1125,6 +1265,19 @@ pub fn main() !void {
         transcript_local_transport_parameters.client.len,
     );
 
+    const paired_server_backend_context = c.quicz_openssl_tls_backend_new_server() orelse return error.OutOfMemory;
+    defer c.quicz_openssl_tls_backend_free(paired_server_backend_context);
+    var paired_server_tls_backend = quicz.TlsBackend{
+        .context = paired_server_backend_context,
+        .receive = opensslBackendReceive,
+        .pull = opensslBackendPull,
+        .set_local_transport_parameters = opensslBackendSetLocalTransportParameters,
+        .pull_peer_transport_parameters = opensslBackendPullPeerTransportParameters,
+        .pull_handshake_traffic_secrets = opensslBackendPullHandshakeTrafficSecrets,
+        .pull_1rtt_traffic_secrets = opensslBackendPullOneRttTrafficSecrets,
+        .handshake_confirmed = opensslBackendHandshakeConfirmed,
+    };
+
     const openssl_context = c.quicz_openssl_tls_backend_new() orelse return error.OutOfMemory;
     defer c.quicz_openssl_tls_backend_free(openssl_context);
 
@@ -1308,23 +1461,23 @@ pub fn main() !void {
     try require(connection.handshakeConfirmed());
     try require(connection.hasOneRttProtectionKeys());
 
-    const client_discard_progress = try connection.driveCryptoBackendInSpace(
-        .handshake,
-        tls_backend.cryptoBackend(),
-        &scratch,
+    const peer_backend_confirmation = try verifyAdapterPeerBackendConfirmation(
+        &endpoint_loop,
+        &connection,
+        &peer,
+        &paired_server_tls_backend,
+        paired_server_backend_context,
+        server_probe_client_handshake,
+        transcript_local_transport_parameters.client,
+        server_handshake_local,
+        server_handshake_peer,
+        server_application_local,
+        server_application_peer,
     );
-    try require(client_discard_progress.handshake_confirmed);
-    try require(client_discard_progress.outbound_chunks == 0);
+
     try require(connection.packetNumberSpaceDiscarded(.handshake));
     try require(!connection.hasHandshakeProtectionKeys());
 
-    try peer.installOneRttTrafficSecrets(.{
-        .local = server_application_local,
-        .peer = server_application_peer,
-    });
-    try require(peer.hasHandshakeProtectionKeys());
-    try peer.confirmHandshake();
-    try peer.discardPacketNumberSpace(.handshake);
     try require(connection.handshakeConfirmed());
     try require(peer.handshakeConfirmed());
     try require(connection.packetNumberSpaceDiscarded(.handshake));
@@ -1402,6 +1555,21 @@ pub fn main() !void {
             server_connection_probe.server_handshake_space_discarded,
             server_connection_probe.server_handshake_keys_present,
             c.quicz_openssl_tls_backend_handshake_confirmed(openssl_server_probe_context),
+        },
+    );
+    std.debug.print(
+        "[tls-openssl-backend-adapter] peer_backend={}/{}/{}/{}/{}/{}/{}/{}/{}/{}\n",
+        .{
+            peer_backend_confirmation.client_handshake_crypto_bytes,
+            peer_backend_confirmation.client_handshake_datagram_bytes,
+            peer_backend_confirmation.peer_transport_parameters_bytes,
+            peer_backend_confirmation.server_handshake_inbound_bytes,
+            peer_backend_confirmation.server_handshake_released_bytes,
+            peer_backend_confirmation.handshake_keys_installed,
+            peer_backend_confirmation.one_rtt_keys_installed,
+            peer_backend_confirmation.server_handshake_confirmed,
+            peer_backend_confirmation.server_handshake_space_discarded,
+            peer_backend_confirmation.server_handshake_keys_present,
         },
     );
     std.debug.print(
