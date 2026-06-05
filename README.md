@@ -252,9 +252,10 @@ experimental.
   matching peer transcript secrets, including Application PTO service through
   the same lifecycle owner. After OpenSSL recv/release consumes inbound
   Handshake CRYPTO, the OpenSSL-backed `handshake_confirmed` callback confirms
-  the client and a no-output Handshake drive discards the client Handshake
-  packet-number space and keys, while the peer side is explicitly discarded for
-  the paired loopback endpoint, then sends
+  the client; the server connection probe also pulls real pair-transcript
+  1-RTT secrets through the backend, confirms the server connection, and
+  discards its Handshake packet-number space and keys. The paired loopback
+  endpoint then sends
   protected close and completes route cleanup through one socket/lifecycle loop
   owner. Run with
   `zig build run-tls-openssl-backend-adapter`.
@@ -457,8 +458,9 @@ experimental.
   the client through the OpenSSL-backed `handshake_confirmed` callback after
   OpenSSL recv/release consumes inbound Handshake CRYPTO,
   discards the client Handshake packet-number space and keys through a
-  backend-confirmed no-output Handshake drive, explicitly discards the paired
-  server side,
+  backend-confirmed no-output Handshake drive, and uses the server connection
+  probe to pull real pair-transcript 1-RTT secrets, confirm the server
+  connection, and discard its Handshake packet-number space and keys,
   then sends protected close and completes route cleanup
   through one socket/lifecycle loop owner. The adapter output also prints that
   the consumed transcript transport-parameter bytes match the connection-applied

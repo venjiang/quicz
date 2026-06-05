@@ -213,8 +213,9 @@ pub fn main() !void {
   投递，并用 adapter 安装的 client keys 和匹配 peer transcript secrets 驱动 loopback UDP 1-RTT STREAM echo，
   同时通过同一个 lifecycle owner 服务 Application PTO；OpenSSL recv/release 消费入站
   Handshake CRYPTO 后，OpenSSL-backed `handshake_confirmed` callback 确认 client，
-  并通过 no-output Handshake drive 丢弃 client Handshake packet-number space 和 keys，配对 loopback endpoint 的
-  server 侧仍显式丢弃，随后通过同一个
+  并通过 no-output Handshake drive 丢弃 client Handshake packet-number space 和 keys；
+  server connection probe 也会通过 backend 拉取真实 pair-transcript 1-RTT secrets，
+  确认 server connection，并丢弃 server Handshake packet-number space 和 keys；随后通过同一个
   socket/lifecycle loop owner 投递 protected close 并完成 route cleanup。输出也会证明
   已消费的 transcript transport-parameter bytes 与连接层应用的 peer bytes 一致，同时打印
   transcript keylog 证据和当前 wrapper keylog 边界。
@@ -327,8 +328,9 @@ pub fn main() !void {
   安装的 client keys 和匹配 peer transcript secrets 驱动 loopback UDP 1-RTT STREAM
   echo，并通过同一个 lifecycle owner 服务 Application PTO；OpenSSL recv/release 消费入站
   Handshake CRYPTO 后，OpenSSL-backed `handshake_confirmed` callback 确认 client，
-  并通过 no-output Handshake drive 丢弃 client Handshake packet-number space 和 keys，配对 loopback endpoint 的
-  server 侧仍显式丢弃，并通过同一个
+  并通过 no-output Handshake drive 丢弃 client Handshake packet-number space 和 keys；
+  server connection probe 也会通过 backend 拉取真实 pair-transcript 1-RTT secrets，
+  确认 server connection，并丢弃 server Handshake packet-number space 和 keys；随后通过同一个
   socket/lifecycle loop owner 投递 protected close 与清理 route；完整 endpoint-owned live
   TLS handshake/socket loop 仍待实现。
 
