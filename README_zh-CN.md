@@ -73,9 +73,9 @@ zig build run-initial-keys
 
 `zig build` 会构建 `zig-out/lib/libquicz.a` 静态库，以及 `zig-out/bin/` 下的所有示例二进制。当前示例是确定性的协议行为练习，还不是可互操作的 QUIC-over-UDP 程序。
 
-常用验证示例：
+常用可运行示例：
 
-- `run-tls-openssl-backend-adapter`：当前真实 C TLS adapter 边界，覆盖本端
+- `run-tls-openssl-backend-adapter`：OpenSSL-backed C TLS adapter 路径，覆盖本端
   transport parameters、第一段 TLS CRYPTO flight，以及 peer transport-parameter、
   Handshake/1-RTT secret 和入站 CRYPTO 经 OpenSSL callback 边界投递到连接层；现在也会
   把 adapter 产出的 Initial CRYPTO flight 作为 protected Initial datagram 通过
@@ -92,7 +92,7 @@ zig build run-initial-keys
   OpenSSL Handshake secrets 也会驱动双向 installed-key protected Handshake CRYPTO
   投递，包括通过同一个 lifecycle 的 loopback UDP 投递；OpenSSL 1-RTT secrets 还会保护
   一次 quicz STREAM request/response，并通过同一个 lifecycle 驱动 loopback UDP STREAM echo。
-- `run-udp-echo-loopback`：socket-backed installed-key STREAM echo 证据，包含
+- `run-udp-echo-loopback`：socket-backed installed-key STREAM echo，包含
   payload equality、ACK cleanup 和 recovery timer cleanup。
 - `run-udp-pto-recovery-loopback`、`run-udp-loss-recovery-loopback` 和
   `run-udp-congestion-recovery-loopback`：loopback UDP 上 lifecycle-routed recovery

@@ -81,9 +81,9 @@ zig build run-initial-keys
 example binaries under `zig-out/bin/`. The examples are deterministic protocol
 exercises, not interoperable QUIC-over-UDP programs yet.
 
-Common verification examples:
+Common runnable examples:
 
-- `run-tls-openssl-backend-adapter`: current real C TLS adapter boundary,
+- `run-tls-openssl-backend-adapter`: OpenSSL-backed C TLS adapter path,
   including local transport parameters, first outbound TLS CRYPTO flight, and
   peer transport-parameter, Handshake/1-RTT secret, and inbound CRYPTO delivery
   through OpenSSL callback boundaries. It now sends the adapter-generated
@@ -104,7 +104,7 @@ Common verification examples:
   OpenSSL 1-RTT secrets also protect a quicz STREAM request/response over
   installed-key short packets and drive a loopback UDP STREAM echo through the
   same lifecycle.
-- `run-udp-echo-loopback`: socket-backed installed-key STREAM echo evidence,
+- `run-udp-echo-loopback`: socket-backed installed-key STREAM echo,
   including payload equality, ACK cleanup, and recovery timer cleanup.
 - `run-udp-pto-recovery-loopback`, `run-udp-loss-recovery-loopback`, and
   `run-udp-congestion-recovery-loopback`: lifecycle-routed recovery and
