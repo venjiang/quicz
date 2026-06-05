@@ -627,6 +627,21 @@ enum quicz_tls_backend_status quicz_openssl_tls_backend_debug_consume_inbound_on
     return QUICZ_TLS_BACKEND_OK;
 }
 
+enum quicz_tls_backend_status quicz_openssl_tls_backend_debug_copy_handshake_traffic_secrets(
+    void *context,
+    struct quicz_handshake_traffic_secrets *out
+) {
+    const struct quicz_openssl_tls_backend *backend = context;
+    if (backend == NULL || out == NULL) {
+        return QUICZ_TLS_BACKEND_INTERNAL;
+    }
+    if (!backend->handshake_local_secret_available || !backend->handshake_peer_secret_available) {
+        return QUICZ_TLS_BACKEND_PENDING;
+    }
+    *out = backend->handshake_secrets;
+    return QUICZ_TLS_BACKEND_OK;
+}
+
 enum quicz_tls_backend_status quicz_openssl_tls_backend_debug_got_transport_parameters(
     void *context,
     const uint8_t *params,

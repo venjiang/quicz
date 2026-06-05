@@ -195,7 +195,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   backend adapter now also keeps CRYPTO buffers separated by packet space, so the
   server connection can pull pending Handshake CRYPTO through
   `driveCryptoBackendInSpace(.handshake)` and packetize it with installed
-  Handshake keys. The full server-side Handshake/Application backend loop
+  Handshake keys. The verification client also sends protected Handshake CRYPTO
+  back with the same backend session's Handshake keys, and the server connection
+  delivers those bytes into the OpenSSL recv/release callbacks. Full server-side
+  `SSL_do_handshake()` progression through Handshake/Application and confirmed
   remains pending.
 - 2026-06-05: Added `examples/tls_openssl_pair_transcript.zig` plus a small C
   harness that completes an OpenSSL client/server callback-mode TLS transcript

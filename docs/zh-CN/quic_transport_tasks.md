@@ -170,8 +170,10 @@ installation、packet number space、ACK/loss/PTO、key discard、close 和 rout
   parameters 与 Handshake keys 回到连接层。OpenSSL backend adapter 现在也按
   packet space 分离 CRYPTO buffer，server 连接层可以继续通过
   `driveCryptoBackendInSpace(.handshake)` 拉取 pending Handshake CRYPTO，并用
-  installed Handshake keys 组 protected Handshake datagram。完整 server-side
-  Handshake/Application backend loop 仍待接入。
+  installed Handshake keys 组 protected Handshake datagram；验证用 client 也会用同一
+  backend 会话的 Handshake keys 回送 protected Handshake CRYPTO，server connection
+  再把该 CRYPTO 投递给 OpenSSL recv/release callback 消费。完整 server-side
+  `SSL_do_handshake()` Handshake/Application 推进与 confirmed 仍待接入。
 - 2026-06-05：新增 `examples/tls_openssl_pair_transcript.zig` 和一个小 C
   harness，使用固定示例 PSK 完成 OpenSSL client/server callback-mode TLS
   transcript。该 harness 按 OpenSSL protection level 路由 CRYPTO bytes，验证双端无

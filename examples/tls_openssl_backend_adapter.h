@@ -58,6 +58,10 @@ size_t quicz_openssl_tls_backend_generated_crypto_len(void *context);
 int quicz_openssl_tls_backend_handshake_drive_calls(void *context);
 int quicz_openssl_tls_backend_last_ssl_error(void *context);
 enum quicz_tls_backend_status quicz_openssl_tls_backend_debug_consume_inbound_once(void *context);
+enum quicz_tls_backend_status quicz_openssl_tls_backend_debug_copy_handshake_traffic_secrets(
+    void *context,
+    struct quicz_handshake_traffic_secrets *out
+);
 enum quicz_tls_backend_status quicz_openssl_tls_backend_debug_got_transport_parameters(
     void *context,
     const uint8_t *params,

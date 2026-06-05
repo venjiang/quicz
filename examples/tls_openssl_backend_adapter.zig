@@ -49,6 +49,9 @@ const AdapterServerInitialBackendConnectionDrive = struct {
     handshake_keys_installed: bool,
     handshake_crypto_bytes: usize,
     handshake_datagram_bytes: usize,
+    client_handshake_crypto_bytes: usize,
+    server_handshake_inbound_bytes: usize,
+    server_handshake_released_bytes: usize,
 };
 
 const AdapterHandshakeSocketDelivery = struct {
@@ -454,6 +457,7 @@ fn encodeTranscriptTransportParameters(
 fn verifyAdapterServerInitialBackendConnectionDrive(
     allocator: std.mem.Allocator,
     client_initial_crypto: []const u8,
+    client_handshake_crypto: []const u8,
     expected_peer_transport_parameters_len: usize,
 ) !AdapterServerInitialBackendConnectionDrive {
     const server_backend_context = c.quicz_openssl_tls_backend_new_server() orelse return error.OutOfMemory;
@@ -559,6 +563,43 @@ fn verifyAdapterServerInitialBackendConnectionDrive(
     defer allocator.free(server_handshake_datagram);
     try require(server_handshake_datagram.len > 0);
 
+    var server_backend_handshake_secrets: c.struct_quicz_handshake_traffic_secrets = undefined;
+    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_copy_handshake_traffic_secrets(
+        server_backend_context,
+        &server_backend_handshake_secrets,
+    )));
+    try client.installHandshakeTrafficSecrets(.{
+        .local = server_backend_handshake_secrets.peer,
+        .peer = server_backend_handshake_secrets.local,
+    });
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(45, server_handshake_datagram);
+    const client_received_handshake_len = (try client.recvCryptoInSpace(.handshake, &scratch)) orelse return error.UnexpectedState;
+    try require(client_received_handshake_len == handshake_progress.outbound_bytes);
+    try require((try client.recvCryptoInSpace(.handshake, &scratch)) == null);
+
+    try client.sendCryptoInSpace(.handshake, client_handshake_crypto);
+    const client_handshake_datagram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        46,
+        &adapter_handshake_server_dcid,
+        &adapter_handshake_client_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_handshake_datagram);
+    try require(client_handshake_datagram.len > 0);
+
+    try server.processProtectedHandshakeDatagramWithInstalledKeys(47, client_handshake_datagram);
+    const server_handshake_release_before = c.quicz_openssl_tls_backend_released_inbound_crypto_len(server_backend_context);
+    const server_handshake_inbound_progress = try server.driveCryptoBackendInSpace(
+        .handshake,
+        server_tls_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(server_handshake_inbound_progress.inbound_chunks == 1);
+    try require(server_handshake_inbound_progress.inbound_bytes == client_handshake_crypto.len);
+    try require(server_handshake_inbound_progress.outbound_chunks == 0);
+    try require(!server_handshake_inbound_progress.handshake_confirmed);
+    try require(statusIsOk(c.quicz_openssl_tls_backend_debug_consume_inbound_once(server_backend_context)));
+    try require(c.quicz_openssl_tls_backend_released_inbound_crypto_len(server_backend_context) == server_handshake_release_before + client_handshake_crypto.len);
+
     return .{
         .inbound_crypto_bytes = first_progress.inbound_bytes,
         .outbound_crypto_bytes = first_progress.outbound_bytes,
@@ -568,6 +609,9 @@ fn verifyAdapterServerInitialBackendConnectionDrive(
         .handshake_keys_installed = second_progress.handshake_keys_installed,
         .handshake_crypto_bytes = handshake_progress.outbound_bytes,
         .handshake_datagram_bytes = server_handshake_datagram.len,
+        .client_handshake_crypto_bytes = client_handshake_crypto.len,
+        .server_handshake_inbound_bytes = server_handshake_inbound_progress.inbound_bytes,
+        .server_handshake_released_bytes = c.quicz_openssl_tls_backend_released_inbound_crypto_len(server_backend_context) - server_handshake_release_before,
     };
 }
 
@@ -1012,9 +1056,19 @@ pub fn main() !void {
     try require(c.quicz_openssl_tls_backend_got_transport_params_callbacks(openssl_server_probe_context) == 1);
     try require(c.quicz_openssl_tls_backend_yield_secret_callbacks(openssl_server_probe_context) >= 2);
     try require(!c.quicz_openssl_tls_backend_handshake_confirmed(openssl_server_probe_context));
+    var server_probe_client_handshake_buf: [8192]u8 = undefined;
+    const server_probe_client_handshake = try copyOpenSslClientCrypto(2, &server_probe_client_handshake_buf);
+    try require(server_probe_client_handshake.len == transcript.client_out_level_bytes[2]);
+    const client_handshake_local = try copyOpenSslClientSecret(2, 1);
+    const client_handshake_peer = try copyOpenSslClientSecret(2, 0);
+    const server_handshake_local = try copyOpenSslServerSecret(2, 1);
+    const server_handshake_peer = try copyOpenSslServerSecret(2, 0);
+    try require(std.mem.eql(u8, &client_handshake_local, &server_handshake_peer));
+    try require(std.mem.eql(u8, &server_handshake_local, &client_handshake_peer));
     const server_connection_probe = try verifyAdapterServerInitialBackendConnectionDrive(
         allocator,
         server_probe_client_initial,
+        server_probe_client_handshake,
         transcript_local_transport_parameters.client.len,
     );
 
@@ -1103,13 +1157,6 @@ pub fn main() !void {
         peer_transport_parameters.ptr,
         peer_transport_parameters.len,
     )));
-
-    const client_handshake_local = try copyOpenSslClientSecret(2, 1);
-    const client_handshake_peer = try copyOpenSslClientSecret(2, 0);
-    const server_handshake_local = try copyOpenSslServerSecret(2, 1);
-    const server_handshake_peer = try copyOpenSslServerSecret(2, 0);
-    try require(std.mem.eql(u8, &client_handshake_local, &server_handshake_peer));
-    try require(std.mem.eql(u8, &server_handshake_local, &client_handshake_peer));
 
     try require(statusIsOk(c.quicz_openssl_tls_backend_debug_yield_handshake_secret(
         openssl_context,
@@ -1283,7 +1330,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_initial={}/{} server_connection_initial={}/{}/{}/{}/{}/{} server_connection_handshake={}/{} server_probe_confirmed={}\n",
+        "[tls-openssl-backend-adapter] transcript_keylog={}/{}/{}/{} transcript_tp={} server_probe_tp={} server_probe_initial={}/{} server_connection_initial={}/{}/{}/{}/{}/{} server_connection_handshake={}/{}/{}/{}/{} server_probe_confirmed={}\n",
         .{
             transcript.client_keylog_callbacks,
             transcript.server_keylog_callbacks,
@@ -1301,6 +1348,9 @@ pub fn main() !void {
             server_connection_probe.handshake_keys_installed,
             server_connection_probe.handshake_crypto_bytes,
             server_connection_probe.handshake_datagram_bytes,
+            server_connection_probe.client_handshake_crypto_bytes,
+            server_connection_probe.server_handshake_inbound_bytes,
+            server_connection_probe.server_handshake_released_bytes,
             c.quicz_openssl_tls_backend_handshake_confirmed(openssl_server_probe_context),
         },
     );
