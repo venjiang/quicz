@@ -82,6 +82,11 @@ struct quicz_openssl_endpoint {
     size_t local_transport_parameters_len;
 };
 
+struct quicz_openssl_pair_transcript_context {
+    struct quicz_openssl_endpoint *client;
+    struct quicz_openssl_endpoint *server;
+};
+
 static unsigned char quicz_openssl_last_client_crypto[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_CRYPTO_BUF_LEN];
 static size_t quicz_openssl_last_client_crypto_len[QUICZ_OPENSSL_LEVEL_COUNT];
 static unsigned char quicz_openssl_last_server_crypto[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_CRYPTO_BUF_LEN];
@@ -717,4 +722,113 @@ int quicz_openssl_pair_transcript_copy_server_secret(
         out_len,
         written_len
     );
+}
+
+void *quicz_openssl_pair_transcript_context_new(void) {
+    struct quicz_openssl_pair_transcript_context *context = calloc(1, sizeof(*context));
+    if (context == NULL) {
+        return NULL;
+    }
+    context->client = calloc(1, sizeof(*context->client));
+    context->server = calloc(1, sizeof(*context->server));
+    if (context->client == NULL ||
+        context->server == NULL ||
+        !init_endpoint(context->client, 1) ||
+        !init_endpoint(context->server, 0)) {
+        free_endpoint(context->client);
+        free_endpoint(context->server);
+        free(context);
+        return NULL;
+    }
+    return context;
+}
+
+void quicz_openssl_pair_transcript_context_free(void *opaque_context) {
+    struct quicz_openssl_pair_transcript_context *context = opaque_context;
+    if (context == NULL) {
+        return;
+    }
+    free_endpoint(context->client);
+    free_endpoint(context->server);
+    free(context);
+}
+
+static struct quicz_openssl_endpoint *context_endpoint(
+    struct quicz_openssl_pair_transcript_context *context,
+    int is_client
+) {
+    if (context == NULL) {
+        return NULL;
+    }
+    return is_client ? context->client : context->server;
+}
+
+int quicz_openssl_pair_transcript_context_drive(void *opaque_context, int is_client) {
+    struct quicz_openssl_endpoint *endpoint = context_endpoint(opaque_context, is_client);
+    if (endpoint == NULL) {
+        return 0;
+    }
+    drive_handshake(endpoint);
+    return 1;
+}
+
+struct quicz_openssl_pair_transcript_result quicz_openssl_pair_transcript_context_result(void *opaque_context) {
+    struct quicz_openssl_pair_transcript_result result;
+    memset(&result, 0, sizeof(result));
+    struct quicz_openssl_pair_transcript_context *context = opaque_context;
+    if (context == NULL || context->client == NULL || context->server == NULL) {
+        return result;
+    }
+    result.initialized = 1;
+    copy_result_endpoint(&result, context->client, context->server);
+    result.error_queue_code = ERR_peek_error();
+    return result;
+}
+
+int quicz_openssl_pair_transcript_context_provide_crypto(
+    void *opaque_context,
+    int is_client,
+    int level,
+    const unsigned char *data,
+    size_t data_len
+) {
+    struct quicz_openssl_endpoint *endpoint = context_endpoint(opaque_context, is_client);
+    if (endpoint == NULL ||
+        level < 0 ||
+        level >= QUICZ_OPENSSL_LEVEL_COUNT ||
+        (data_len > 0 && data == NULL) ||
+        data_len > sizeof(endpoint->in[level]) - endpoint->in_len[level]) {
+        return 0;
+    }
+    if (data_len > 0) {
+        memcpy(endpoint->in[level] + endpoint->in_len[level], data, data_len);
+    }
+    endpoint->in_len[level] += data_len;
+    return 1;
+}
+
+int quicz_openssl_pair_transcript_context_copy_pending_crypto(
+    void *opaque_context,
+    int is_client,
+    int level,
+    unsigned char *out,
+    size_t out_len,
+    size_t *written_len
+) {
+    struct quicz_openssl_endpoint *endpoint = context_endpoint(opaque_context, is_client);
+    if (written_len == NULL ||
+        endpoint == NULL ||
+        level < 0 ||
+        level >= QUICZ_OPENSSL_LEVEL_COUNT ||
+        endpoint->out_len[level] > out_len ||
+        (endpoint->out_len[level] > 0 && out == NULL)) {
+        if (written_len != NULL) {
+            *written_len = 0;
+        }
+        return 0;
+    }
+    memcpy(out, endpoint->out[level], endpoint->out_len[level]);
+    *written_len = endpoint->out_len[level];
+    endpoint->out_len[level] = 0;
+    return 1;
 }
