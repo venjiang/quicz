@@ -85,26 +85,26 @@ Common runnable examples:
 
 - `run-tls-openssl-backend-adapter`: OpenSSL-backed C TLS adapter path,
   including local transport parameters, first outbound TLS CRYPTO flight, and
-  peer transport-parameter, Handshake/1-RTT secret, and inbound CRYPTO delivery
-  through OpenSSL callback boundaries. It now sends the adapter-generated
-  Initial CRYPTO flight as a protected Initial datagram over loopback UDP,
-  routes real pair-transcript Handshake CRYPTO as a protected Handshake
-  datagram over loopback UDP, reuses the matching Handshake/1-RTT secrets, and
-  drives a loopback UDP 1-RTT STREAM echo with adapter-installed client keys
-  and matching peer transcript secrets, including Application PTO service
-  through the same lifecycle owner. After modeled handshake confirmation, it
+  pair-transcript server transport-parameter, Handshake/1-RTT secret, and
+  inbound CRYPTO delivery through OpenSSL callback boundaries. It now sends the
+  adapter-generated Initial CRYPTO flight as a protected Initial datagram over
+  loopback UDP, routes real pair-transcript Handshake CRYPTO as a protected
+  Handshake datagram over loopback UDP, reuses the matching Handshake/1-RTT
+  secrets, and drives a loopback UDP 1-RTT STREAM echo with adapter-installed
+  client keys and matching peer transcript secrets, including Application PTO
+  service through the same lifecycle owner. After modeled handshake confirmation, it
   explicitly discards both Handshake packet-number spaces and Handshake keys,
   then sends protected close and completes route cleanup through one
   socket/lifecycle loop owner.
 - `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
   transcript, with level-separated CRYPTO handoff plus peer transport-parameter
   and traffic-secret callbacks on both endpoints, then mapped into quicz
-  Initial/Handshake/Application CRYPTO queues. It records and parses peer
-  transport-parameter bytes and records keylog callback count/byte evidence
-  without printing key material. The client Initial CRYPTO bytes are also sent
-  through quicz protected Initial long-packet helpers and read back by the
-  server connection, and both Initial flights also run over loopback UDP
-  through the quicz endpoint lifecycle. The OpenSSL Handshake secrets drive
+  Initial/Handshake/Application CRYPTO queues. It records and parses
+  role-specific peer transport-parameter bytes and records keylog callback
+  count/byte evidence without printing key material. The client Initial CRYPTO
+  bytes are also sent through quicz protected Initial long-packet helpers and
+  read back by the server connection, and both Initial flights also run over
+  loopback UDP through the quicz endpoint lifecycle. The OpenSSL Handshake secrets drive
   installed-key protected Handshake CRYPTO delivery in both directions,
   including loopback UDP delivery through the quicz endpoint lifecycle. The
   OpenSSL 1-RTT secrets also protect a quicz STREAM request/response over
@@ -223,9 +223,10 @@ experimental.
 - [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig):
   OpenSSL-backed `TlsBackend` wrapper that accepts quicz local transport
   parameters through `SSL_set_quic_tls_transport_params()`, drives
-  `SSL_do_handshake()` to emit the first TLS CRYPTO flight, and carries peer
-  transport parameters, real pair-transcript Handshake/1-RTT secrets, and
-  inbound Handshake CRYPTO bytes through OpenSSL callback boundaries. It also
+  `SSL_do_handshake()` to emit the first TLS CRYPTO flight, and carries
+  pair-transcript server transport parameters, real pair-transcript
+  Handshake/1-RTT secrets, and inbound Handshake CRYPTO bytes through OpenSSL
+  callback boundaries. It also
   routes the adapter-generated Initial CRYPTO flight through a protected
   Initial datagram over loopback UDP, routes real pair-transcript Handshake
   CRYPTO through a protected Handshake datagram over loopback UDP, and drives a
@@ -430,9 +431,10 @@ experimental.
   services an Application PTO probe through the same lifecycle owner, explicitly
   discards both Handshake packet-number spaces and Handshake keys after modeled
   handshake confirmation, then sends protected close and completes route cleanup
-  through one socket/lifecycle loop owner. The adapter output also prints
-  transcript peer transport-parameter byte evidence, transcript keylog evidence,
-  and the current wrapper keylog boundary.
+  through one socket/lifecycle loop owner. The adapter output also prints that
+  the consumed transcript transport-parameter bytes match the connection-applied
+  peer bytes, plus transcript keylog evidence and the current wrapper keylog
+  boundary.
   A full endpoint-owned live TLS handshake/socket loop is still pending.
 
 ## License

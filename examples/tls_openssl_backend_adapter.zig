@@ -115,6 +115,11 @@ const OpenSslPairTranscriptResult = extern struct {
 };
 
 extern fn quicz_openssl_pair_transcript_run() OpenSslPairTranscriptResult;
+extern fn quicz_openssl_pair_transcript_copy_client_peer_transport_parameters(
+    out: [*]u8,
+    out_len: usize,
+    written_len: *usize,
+) c_int;
 extern fn quicz_openssl_pair_transcript_copy_server_crypto(
     level: c_int,
     out: [*]u8,
@@ -355,6 +360,17 @@ fn copyOpenSslServerCrypto(level: usize, out: []u8) ExampleError![]const u8 {
     var written_len: usize = 0;
     const copied = quicz_openssl_pair_transcript_copy_server_crypto(
         @intCast(level),
+        out.ptr,
+        out.len,
+        &written_len,
+    );
+    try require(copied == 1);
+    return out[0..written_len];
+}
+
+fn copyOpenSslClientPeerTransportParameters(out: []u8) ExampleError![]const u8 {
+    var written_len: usize = 0;
+    const copied = quicz_openssl_pair_transcript_copy_client_peer_transport_parameters(
         out.ptr,
         out.len,
         &written_len,
@@ -780,7 +796,8 @@ pub fn main() !void {
     try require(transcript.server_got_transport_params_callbacks == 1);
     try require(transcript.client_peer_transport_parameters_len > 0);
     try require(transcript.server_peer_transport_parameters_len > 0);
-    try require(transcript.client_peer_transport_parameters_len == transcript.server_peer_transport_parameters_len);
+    try require(transcript.client_peer_transport_parameters_len == 31);
+    try require(transcript.server_peer_transport_parameters_len == 21);
     try require(transcript.client_keylog_callbacks > 0);
     try require(transcript.server_keylog_callbacks > 0);
     try require(transcript.client_keylog_bytes > @as(usize, @intCast(transcript.client_keylog_callbacks)));
@@ -847,17 +864,24 @@ pub fn main() !void {
     const initial_recv_callbacks = quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context);
     const initial_release_callbacks = quicz_openssl_tls_backend_inbound_crypto_release_callbacks(openssl_context);
 
-    var peer_transport_parameter_buf: [128]u8 = undefined;
-    var peer_transport_parameter_out = fixedWriter(&peer_transport_parameter_buf);
-    try quicz.transport_parameters.encode(peer_transport_parameter_out.writer(), .{
-        .initial_max_data = 8192,
-        .initial_max_stream_data_bidi_local = 2048,
-        .initial_max_stream_data_bidi_remote = 2048,
-        .initial_max_streams_bidi = 8,
-        .original_destination_connection_id = &adapter_original_dcid,
-        .initial_source_connection_id = &adapter_server_scid,
-    });
-    const peer_transport_parameters = peer_transport_parameter_out.getWritten();
+    var peer_transport_parameter_buf: [512]u8 = undefined;
+    const peer_transport_parameters = try copyOpenSslClientPeerTransportParameters(&peer_transport_parameter_buf);
+    try require(peer_transport_parameters.len == transcript.client_peer_transport_parameters_len);
+    var parsed_transcript_peer_transport_parameters = try quicz.transport_parameters.parse(
+        peer_transport_parameters,
+        allocator,
+    );
+    defer parsed_transcript_peer_transport_parameters.deinit(allocator);
+    const transcript_peer_original_dcid = parsed_transcript_peer_transport_parameters.original_destination_connection_id orelse
+        return error.UnexpectedState;
+    const transcript_peer_initial_scid = parsed_transcript_peer_transport_parameters.initial_source_connection_id orelse
+        return error.UnexpectedState;
+    try require(std.mem.eql(u8, transcript_peer_original_dcid, &adapter_original_dcid));
+    try require(std.mem.eql(u8, transcript_peer_initial_scid, &adapter_server_scid));
+    try require(parsed_transcript_peer_transport_parameters.initial_max_data == 8192);
+    try require(parsed_transcript_peer_transport_parameters.initial_max_stream_data_bidi_local == 2048);
+    try require(parsed_transcript_peer_transport_parameters.initial_max_stream_data_bidi_remote == 2048);
+    try require(parsed_transcript_peer_transport_parameters.initial_max_streams_bidi == 8);
     try require(quicz_openssl_tls_backend_debug_got_transport_parameters(
         openssl_context,
         peer_transport_parameters.ptr,

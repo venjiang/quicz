@@ -107,6 +107,10 @@ const ReceivedDatagram = struct {
     path: quicz.endpoint.Udp4Tuple,
 };
 
+const transcript_original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+const transcript_client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+const transcript_server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+
 fn require(condition: bool) ExampleError!void {
     if (!condition) return error.UnexpectedState;
 }
@@ -1117,7 +1121,6 @@ pub fn main() !void {
     );
     try require(client_peer_transport_parameters.len == result.client_peer_transport_parameters_len);
     try require(server_peer_transport_parameters.len == result.server_peer_transport_parameters_len);
-    try require(std.mem.eql(u8, client_peer_transport_parameters, server_peer_transport_parameters));
     var parsed_client_peer_transport_parameters = try quicz.transport_parameters.parse(
         client_peer_transport_parameters,
         allocator,
@@ -1130,10 +1133,22 @@ pub fn main() !void {
     defer parsed_server_peer_transport_parameters.deinit(allocator);
     const client_peer_original_dcid = parsed_client_peer_transport_parameters.original_destination_connection_id orelse
         return error.UnexpectedState;
-    const server_peer_original_dcid = parsed_server_peer_transport_parameters.original_destination_connection_id orelse
+    const client_peer_initial_scid = parsed_client_peer_transport_parameters.initial_source_connection_id orelse
         return error.UnexpectedState;
-    try require(std.mem.eql(u8, client_peer_original_dcid, server_peer_original_dcid));
-    try require(std.mem.eql(u8, client_peer_original_dcid, &.{ 0x80, 0x00, 0x75, 0x30 }));
+    const server_peer_initial_scid = parsed_server_peer_transport_parameters.initial_source_connection_id orelse
+        return error.UnexpectedState;
+    try require(parsed_server_peer_transport_parameters.original_destination_connection_id == null);
+    try require(std.mem.eql(u8, client_peer_original_dcid, &transcript_original_dcid));
+    try require(std.mem.eql(u8, client_peer_initial_scid, &transcript_server_scid));
+    try require(std.mem.eql(u8, server_peer_initial_scid, &transcript_client_scid));
+    try require(parsed_client_peer_transport_parameters.initial_max_data == 8192);
+    try require(parsed_client_peer_transport_parameters.initial_max_stream_data_bidi_local == 2048);
+    try require(parsed_client_peer_transport_parameters.initial_max_stream_data_bidi_remote == 2048);
+    try require(parsed_client_peer_transport_parameters.initial_max_streams_bidi == 8);
+    try require(parsed_server_peer_transport_parameters.initial_max_data == 8192);
+    try require(parsed_server_peer_transport_parameters.initial_max_stream_data_bidi_local == 2048);
+    try require(parsed_server_peer_transport_parameters.initial_max_stream_data_bidi_remote == 2048);
+    try require(parsed_server_peer_transport_parameters.initial_max_streams_bidi == 8);
 
     var client_connection = try quicz.Connection.init(allocator, .client, .{
         .max_datagram_size = 8192,

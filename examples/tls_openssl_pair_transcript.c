@@ -77,7 +77,8 @@ struct quicz_openssl_endpoint {
     int last_alert;
     int handshake_done;
     int last_ssl_error;
-    unsigned char local_transport_parameters[6];
+    unsigned char local_transport_parameters[64];
+    size_t local_transport_parameters_len;
 };
 
 static unsigned char quicz_openssl_last_client_crypto[QUICZ_OPENSSL_LEVEL_COUNT][QUICZ_OPENSSL_CRYPTO_BUF_LEN];
@@ -282,10 +283,30 @@ static void free_endpoint(struct quicz_openssl_endpoint *endpoint) {
 }
 
 static int init_endpoint(struct quicz_openssl_endpoint *endpoint, int is_client) {
-    static const unsigned char transport_parameters[] = { 0x00, 0x04, 0x80, 0x00, 0x75, 0x30 };
+    static const unsigned char client_transport_parameters[] = {
+        0x0f, 0x04, 0x21, 0x22, 0x23, 0x24,
+        0x04, 0x02, 0x60, 0x00,
+        0x05, 0x02, 0x48, 0x00,
+        0x06, 0x02, 0x48, 0x00,
+        0x08, 0x01, 0x08
+    };
+    static const unsigned char server_transport_parameters[] = {
+        0x00, 0x08, 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08,
+        0x0f, 0x04, 0x31, 0x32, 0x33, 0x34,
+        0x04, 0x02, 0x60, 0x00,
+        0x05, 0x02, 0x48, 0x00,
+        0x06, 0x02, 0x48, 0x00,
+        0x08, 0x01, 0x08
+    };
+    const unsigned char *transport_parameters = is_client ? client_transport_parameters : server_transport_parameters;
+    const size_t transport_parameters_len = is_client ? sizeof(client_transport_parameters) : sizeof(server_transport_parameters);
 
     memset(endpoint, 0, sizeof(*endpoint));
-    memcpy(endpoint->local_transport_parameters, transport_parameters, sizeof(transport_parameters));
+    if (transport_parameters_len > sizeof(endpoint->local_transport_parameters)) {
+        return 0;
+    }
+    memcpy(endpoint->local_transport_parameters, transport_parameters, transport_parameters_len);
+    endpoint->local_transport_parameters_len = transport_parameters_len;
     endpoint->ctx = SSL_CTX_new(is_client ? TLS_client_method() : TLS_server_method());
     if (endpoint->ctx == NULL) {
         return 0;
@@ -309,7 +330,7 @@ static int init_endpoint(struct quicz_openssl_endpoint *endpoint, int is_client)
         !SSL_set_quic_tls_transport_params(
             endpoint->ssl,
             endpoint->local_transport_parameters,
-            sizeof(endpoint->local_transport_parameters)
+            endpoint->local_transport_parameters_len
         )) {
         return 0;
     }
