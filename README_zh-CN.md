@@ -18,7 +18,7 @@
 - [x] 简化 RFC 9002 风格 ACK、loss、PTO、NewReno congestion、ECN、retransmission 和 endpoint recovery-timer 模型，并有 socket-backed UDP loopback 覆盖。
 - [x] 内存态 endpoint routing/lifecycle helper，覆盖 DCID 和 IPv4 UDP tuple routing、Version Negotiation、zero-length CID routing、preferred/replacement CID routing、route retirement、stateless reset emission 和 protected UDP loopback。
 - [ ] 完整 connection state machine 与 TLS-owned protected-packet packet number space routing。
-- [ ] TLS-owned socket-backed client/server echo，具备真实 CRYPTO transcript、traffic-secret 安装和 1-RTT STREAM delivery。
+- [ ] Endpoint-owned TLS-backed socket client/server echo，由 live TLS handshake 驱动 UDP packet routing、自动 traffic-secret 安装和 1-RTT STREAM delivery。
 - [ ] 可嵌入 socket API，让调用方自持 UDP socket、connection map、timer 和 datagram 输出队列。
 - [ ] 面向 `handshake` 和 `transfer` 的最小外部互通入口。
 - [ ] 完整 RFC 9002 loss detection / congestion control，含 socket-owned protected-packet loss/PTO lifecycle integration 与剩余 NewReno 边界。
@@ -84,7 +84,8 @@ zig build run-initial-keys
   quicz Initial/Handshake/Application CRYPTO 队列；client Initial CRYPTO bytes
   还会经 quicz protected Initial long-packet helper 发送，并由 server connection 读回；
   OpenSSL Handshake secrets 也会驱动双向 installed-key protected Handshake CRYPTO 投递；
-  OpenSSL 1-RTT secrets 还会保护一次 quicz STREAM request/response。
+  OpenSSL 1-RTT secrets 还会保护一次 quicz STREAM request/response，并通过 quicz
+  endpoint lifecycle 驱动 loopback UDP STREAM echo。
 - `run-udp-echo-loopback`：socket-backed installed-key STREAM echo 证据，包含
   payload equality、ACK cleanup 和 recovery timer cleanup。
 - `run-udp-pto-recovery-loopback`、`run-udp-loss-recovery-loopback` 和
@@ -170,7 +171,8 @@ pub fn main() !void {
   packet-number-space CRYPTO 队列；同时会把 client Initial CRYPTO bytes 经 quicz
   protected Initial long-packet helper 组包，安装 OpenSSL 产出的 Handshake secrets，
   并验证双向 protected Handshake CRYPTO 投递；OpenSSL 产出的 1-RTT secrets 也会驱动
-  installed-key protected STREAM request/response。运行：
+  installed-key protected STREAM request/response，并通过 quicz endpoint lifecycle
+  驱动 loopback UDP STREAM echo。运行：
   `zig build run-tls-openssl-pair-transcript`。
 - [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig)：把
   OpenSSL-backed `TlsBackend` wrapper 接到现有 drive 路径，通过
@@ -272,10 +274,12 @@ pub fn main() !void {
   transcript，按 protection level 分离 CRYPTO handoff，把生成的 bytes 映射进 quicz
   CRYPTO 队列，并验证 client Initial flight 的 protected Initial long-packet 投递，以及
   使用 OpenSSL Handshake secrets 的 installed-key protected Handshake 投递和使用
-  OpenSSL 1-RTT secrets 的 installed-key protected STREAM request/response；
+  OpenSSL 1-RTT secrets 的 installed-key protected STREAM request/response 与
+  socket-backed STREAM echo；
   `run-tls-openssl-backend-adapter` 已把 OpenSSL object 接入 adapter 路径并
   产出第一段 TLS CRYPTO flight，也能让 peer transport parameters、Handshake/1-RTT secrets
-  和入站 CRYPTO 经 callback 边界进入连接层；真实 TLS-owned socket echo 仍待实现。
+  和入站 CRYPTO 经 callback 边界进入连接层；完整 endpoint-owned live TLS
+  handshake/socket loop 仍待实现。
 
 ## 许可证
 

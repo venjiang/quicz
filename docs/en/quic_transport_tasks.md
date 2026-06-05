@@ -46,7 +46,7 @@ packet/key/token and RFC 9368 version-information primitives:
 | Feature | Practical target | quicz status |
 | --- | --- | --- |
 | UDP client/server endpoint | Required for first usable milestone. One endpoint owner must drive accept/connect, packet receive/send, timers, route cleanup, and close. | Partial: socket-backed loopback examples and endpoint lifecycle helpers exist; production client/server event loop is missing. |
-| TLS 1.3 integration | Required. Use a C TLS library with QUIC transport-parameter and traffic-secret hooks through a narrow Zig `TlsBackend` adapter. Do not implement TLS in-tree. | Partial: mock `CryptoBackend`, installed-key handoff, a tested C-ABI `TlsBackend` adapter, a C-object adapter probe, an OpenSSL QUIC TLS API/link probe, an OpenSSL client/server callback-mode transcript check with level-separated CRYPTO handoff mapped into quicz CRYPTO queues, protected Initial long-packet delivery for the client Initial flight, installed-key protected Handshake delivery using OpenSSL-produced Handshake secrets, and installed-key protected STREAM request/response using OpenSSL-produced 1-RTT secrets, plus an OpenSSL-backed adapter wrapper that emits the first TLS CRYPTO flight and delivers peer transport parameters, Handshake/1-RTT secrets, and inbound CRYPTO through OpenSSL callback boundaries exist; real TLS-owned socket echo is missing. |
+| TLS 1.3 integration | Required. Use a C TLS library with QUIC transport-parameter and traffic-secret hooks through a narrow Zig `TlsBackend` adapter. Do not implement TLS in-tree. | Partial: mock `CryptoBackend`, installed-key handoff, a tested C-ABI `TlsBackend` adapter, a C-object adapter probe, an OpenSSL QUIC TLS API/link probe, an OpenSSL client/server callback-mode transcript check with level-separated CRYPTO handoff mapped into quicz CRYPTO queues, protected Initial long-packet delivery for the client Initial flight, installed-key protected Handshake delivery using OpenSSL-produced Handshake secrets, installed-key protected STREAM request/response plus socket-backed STREAM echo using OpenSSL-produced 1-RTT secrets, and an OpenSSL-backed adapter wrapper that emits the first TLS CRYPTO flight and delivers peer transport parameters, Handshake/1-RTT secrets, and inbound CRYPTO through OpenSSL callback boundaries exist; full endpoint-owned live TLS handshake/socket loop is missing. |
 | QUIC v1 packet protection | Required. Initial, Handshake, 0-RTT when enabled, and 1-RTT packets must be produced and consumed by the TLS-owned path. | Partial: v1/v2 Initial, Retry integrity, protected long/short helpers, and mock installed-key paths exist. |
 | Streams | Required. Bidirectional and unidirectional stream open, read, write, FIN, reset, STOP_SENDING, and stream limits must work over protected UDP. | Partial: in-memory stream state and protected loopback exercises exist; TLS-owned UDP stream API is missing. |
 | Flow control | Required. Connection, stream, and stream-count flow control must work over protected UDP. | Partial: frame-payload and protected loopback coverage exists; full socket-owned path is missing. |
@@ -108,12 +108,12 @@ properties must remain `Partial` rather than `Done`.
 
 The main task remains the IETF QUIC transport implementation. The next-stage
 direction refines execution order and evidence requirements without replacing
-the transport task matrix below: prioritize the TLS-owned socket-backed echo
-path first, then the embeddable socket API, minimal interop entry, and
-TLS/interop observability.
+the transport task matrix below: prioritize the endpoint-owned live TLS
+handshake/socket loop first, then the embeddable socket API, minimal interop
+entry, and TLS/interop observability.
 
-The next implementation milestone is a TLS-owned socket-backed client/server
-echo loop. The minimum proof for that milestone is:
+The next implementation milestone is an endpoint-owned live TLS
+handshake/socket loop. The minimum proof for that milestone is:
 
 - a C TLS library backend that exposes QUIC transport-parameter and traffic
   secret hooks through a small Zig `TlsBackend` adapter, rather than a new
@@ -186,7 +186,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   Handshake secrets into quicz and verifies protected Handshake CRYPTO delivery
   in both directions. It also installs OpenSSL-produced 1-RTT secrets and
   verifies an installed-key protected STREAM request/response over short
-  packets. Real socket-owned echo remains pending.
+  packets, then drives a loopback UDP STREAM echo through the quicz endpoint
+  lifecycle with those same 1-RTT secrets. Full endpoint-owned live TLS
+  handshake/socket loop remains pending.
 - 2026-06-04: Extended `examples/tls_openssl_backend_adapter.zig` so the
   OpenSSL-backed `TlsBackend` wrapper drives `SSL_do_handshake()` and emits the
   first TLS CRYPTO flight through the existing quicz CRYPTO output path after
@@ -235,11 +237,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   mock/installed-key plus endpoint-lifecycle verification phase. The task plan
   now states that the existing socket-backed loopbacks prove protected routing,
   recovery-timer service, and endpoint lifecycle behavior for the experimental
-  skeleton, but do not prove full TLS-owned QUIC. The next milestone is a
-  TLS-owned socket-backed client/server echo loop backed by a C TLS library via
-  a narrow Zig `TlsBackend` adapter, with transport-parameter transcript
-  handoff, traffic-secret ownership, lifecycle cleanup, and external interop
-  evidence or a documented interop blocker.
+  skeleton, but do not prove full TLS-owned QUIC. The next milestone is an
+  endpoint-owned live TLS handshake/socket loop backed by a C TLS library via a
+  narrow Zig `TlsBackend` adapter, with transport-parameter transcript handoff,
+  traffic-secret ownership, lifecycle cleanup, and external interop evidence or
+  a documented interop blocker.
 - 2026-06-02: Switched UDP Version Negotiation follow-up server
   transport-parameter validation to TLS extension bytes. The server now encodes
   local transport parameters and the follow-up client parses/applies those
@@ -2820,7 +2822,7 @@ run from `build.zig`.
 | `tls_backend_adapter` | Runnable C-ABI `TlsBackend` adapter contract check: local/peer transport-parameter byte handoff, inbound/outbound CRYPTO byte delivery, Handshake traffic-secret installation, and handshake confirmation through the existing `CryptoBackend` drive path before binding a concrete C TLS library. | Present |
 | `tls_c_abi_adapter` | Runnable C-object-backed `TlsBackend` check: a C-compiled callback object drives the same transport-parameter, CRYPTO byte, Handshake-secret, and confirmation path through the Zig adapter before replacing the demo object with a mature C TLS library binding. | Present |
 | `tls_openssl_probe` | Runnable OpenSSL QUIC TLS API/link probe: uses `pkg-config` OpenSSL, creates OpenSSL's full QUIC client method object, sets QUIC TLS callbacks and local transport parameters on the callback-mode TLS object, and prints the dispatch IDs needed for crypto send, secret yield, and peer transport-parameter callbacks. | Present |
-| `tls_openssl_pair_transcript` | Runnable OpenSSL client/server callback-mode transcript check: a fixed example PSK avoids certificate fixture noise, CRYPTO bytes are routed by OpenSSL protection level, both endpoints complete TLS 1.3 without alerts, peer transport-parameter plus Handshake/1-RTT secret callbacks fire on both endpoints, generated CRYPTO bytes are delivered into quicz Initial/Handshake/Application CRYPTO queues, the client Initial CRYPTO bytes are packetized with quicz protected Initial long-packet helpers and delivered to the server connection, OpenSSL-produced Handshake secrets drive installed-key protected Handshake CRYPTO delivery in both directions, and OpenSSL-produced 1-RTT secrets drive an installed-key protected STREAM request/response over short packets. | Present |
+| `tls_openssl_pair_transcript` | Runnable OpenSSL client/server callback-mode transcript check: a fixed example PSK avoids certificate fixture noise, CRYPTO bytes are routed by OpenSSL protection level, both endpoints complete TLS 1.3 without alerts, peer transport-parameter plus Handshake/1-RTT secret callbacks fire on both endpoints, generated CRYPTO bytes are delivered into quicz Initial/Handshake/Application CRYPTO queues, the client Initial CRYPTO bytes are packetized with quicz protected Initial long-packet helpers and delivered to the server connection, OpenSSL-produced Handshake secrets drive installed-key protected Handshake CRYPTO delivery in both directions, and OpenSSL-produced 1-RTT secrets drive an installed-key protected STREAM request/response over short packets plus a loopback UDP STREAM echo through the quicz endpoint lifecycle. | Present |
 | `tls_openssl_backend_adapter` | Runnable OpenSSL-backed `TlsBackend` wrapper check: the existing drive path sets quicz local transport parameters on an OpenSSL TLS object, drives `SSL_do_handshake()` to emit the first TLS CRYPTO flight, and delivers peer transport parameters, Handshake/1-RTT secrets, and Handshake CRYPTO bytes through OpenSSL callback boundaries while leaving full peer transcript driving pending. | Present |
 | `initial_keys` | RFC 9001 QUIC v1 and RFC 9369 QUIC v2 Initial secret/key/IV/header-protection key derivation, RFC 9001 `quic ku` key-update derivation, protected Initial long-packet seal/open, configured v2 connection Initial packetization, and AES header-protection masking from a client Initial DCID. | Present |
 | `endpoint_routing` | Current in-memory endpoint DCID/IPv4 UDP tuple routing, long-header DCID peeking, unsupported-version RFC 8999 Version Negotiation response generation, client Initial Source CID route registration, supported-version unknown-DCID Initial accept classification, accepted Initial Original DCID/server Initial SCID route registration, short-header registered-CID matching, zero-length CID tuple routing, Retry Source CID route switching, caller-validated preferred-address migration commit, sequence/retire-prior-to/connection-handle route retirement, stateless reset token reuse rejection, caller-validated path update, active-migration-disabled rejection, route retirement, stateless reset token lookup for inactive CIDs, reset datagram construction with caller-supplied unpredictable bytes, and route/version-negotiation/reset/drop/accept receive action classification. | Present |

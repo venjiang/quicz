@@ -86,12 +86,60 @@ const FixedWriter = struct {
     }
 };
 
+const ReceivedDatagram = struct {
+    data: []const u8,
+    path: quicz.endpoint.Udp4Tuple,
+};
+
 fn require(condition: bool) ExampleError!void {
     if (!condition) return error.UnexpectedState;
 }
 
 fn fixedWriter(buffer: []u8) FixedWriter {
     return .{ .buffer = buffer };
+}
+
+fn receiveTimeout() std.Io.Timeout {
+    return .{
+        .duration = .{
+            .clock = .awake,
+            .raw = std.Io.Duration.fromMilliseconds(500),
+        },
+    };
+}
+
+fn bindLoopbackUdp(io: std.Io) !std.Io.net.Socket {
+    var address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    return address.bind(io, .{
+        .mode = .dgram,
+        .protocol = .udp,
+    });
+}
+
+fn udp4Address(address: std.Io.net.IpAddress) ExampleError!quicz.endpoint.Udp4Address {
+    return switch (address) {
+        .ip4 => |ip4| quicz.endpoint.Udp4Address.init(ip4.bytes, ip4.port),
+        .ip6 => error.UnexpectedState,
+    };
+}
+
+fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.endpoint.Udp4Tuple {
+    return .{
+        .local = try udp4Address(local),
+        .remote = try udp4Address(remote),
+    };
+}
+
+fn receiveDatagram(
+    io: std.Io,
+    socket: *std.Io.net.Socket,
+    receive_buf: []u8,
+) !ReceivedDatagram {
+    const received = try socket.receiveTimeout(io, receive_buf, receiveTimeout());
+    return .{
+        .data = received.data,
+        .path = try udp4Tuple(socket.address, received.from),
+    };
 }
 
 fn packetNumberSpaceForOpenSslLevel(level: usize) ?quicz.PacketNumberSpace {
@@ -204,6 +252,14 @@ const ProtectedApplicationDelivery = struct {
     request_datagram_bytes: usize,
     response_bytes: usize,
     response_datagram_bytes: usize,
+};
+
+const SocketApplicationEcho = struct {
+    request_bytes: usize,
+    request_datagram_bytes: usize,
+    echo_bytes: usize,
+    echo_datagram_bytes: usize,
+    echo_packets: usize,
 };
 
 fn verifyProtectedInitialCryptoDelivery(expected_len: usize) !ProtectedInitialDelivery {
@@ -437,6 +493,173 @@ fn verifyProtectedApplicationStreamDelivery() !ProtectedApplicationDelivery {
     };
 }
 
+fn verifySocketBackedApplicationEchoDelivery() !SocketApplicationEcho {
+    const client_local = try copyOpenSslSecret(true, 3, 1);
+    const client_peer = try copyOpenSslSecret(true, 3, 0);
+    const server_local = try copyOpenSslSecret(false, 3, 1);
+    const server_peer = try copyOpenSslSecret(false, 3, 0);
+    try require(std.mem.eql(u8, &client_local, &server_peer));
+    try require(std.mem.eql(u8, &server_local, &client_peer));
+
+    const allocator = std.heap.page_allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client_socket = try bindLoopbackUdp(io);
+    defer client_socket.close(io);
+    var server_socket = try bindLoopbackUdp(io);
+    defer server_socket.close(io);
+
+    const client_address = try udp4Address(client_socket.address);
+    const server_address = try udp4Address(server_socket.address);
+    try require(client_address.port != 0);
+    try require(server_address.port != 0);
+    try require(client_address.port != server_address.port);
+
+    const client_dcid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const server_dcid = [_]u8{ 0xf1, 0xf2, 0xf3, 0xf4 };
+    const client_handle: u64 = 61;
+    const server_handle: u64 = 71;
+
+    var client = try quicz.Connection.init(allocator, .client, .{
+        .initial_max_data = 4096,
+        .initial_max_stream_data = 1024,
+        .initial_max_streams_bidi = 4,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try quicz.Connection.init(allocator, .server, .{
+        .initial_max_data = 4096,
+        .initial_max_stream_data = 1024,
+        .initial_max_streams_bidi = 4,
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = client_local,
+        .peer = client_peer,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = server_local,
+        .peer = server_peer,
+    });
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+    try server.validatePeerAddress();
+    try require(client.hasOneRttProtectionKeys());
+    try require(server.hasOneRttProtectionKeys());
+
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+
+    const client_path = try udp4Tuple(client_socket.address, server_socket.address);
+    const server_path = try udp4Tuple(server_socket.address, client_socket.address);
+    try client_lifecycle.registerConnectionId(client_handle, &client_dcid, client_path, .{
+        .active_migration_disabled = true,
+    });
+    try server_lifecycle.registerConnectionId(server_handle, &server_dcid, server_path, .{
+        .active_migration_disabled = true,
+    });
+
+    const stream_id = try client.openStream();
+    const request = "openssl udp one-rtt echo";
+    try client.sendOnStream(stream_id, request, true);
+    const request_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        40,
+        &server_dcid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(request_datagram);
+    try client_socket.send(io, &server_socket.address, request_datagram);
+
+    var server_receive_buf: [1500]u8 = undefined;
+    var client_receive_buf: [1500]u8 = undefined;
+    const request_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const request_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        request_received.path,
+        41,
+        request_received.data,
+    );
+    try require(request_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, request_route.destination_connection_id.asSlice(), &server_dcid));
+    try require(server.pendingAckLargest(.application) == 0);
+
+    var read_buf: [128]u8 = undefined;
+    const request_len = (try server.recvOnStream(stream_id, &read_buf)) orelse return error.UnexpectedState;
+    const request_payload = read_buf[0..request_len];
+    try require(std.mem.eql(u8, request_payload, request));
+
+    try server.sendOnStream(stream_id, request_payload, true);
+    var echo_packet_count: usize = 0;
+    var echo_datagram_bytes: usize = 0;
+    var echo_len_or_null: ?usize = null;
+    while (echo_packet_count < 4 and echo_len_or_null == null) : (echo_packet_count += 1) {
+        const echo_datagram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &server,
+            42 + @as(i64, @intCast(echo_packet_count)),
+            &client_dcid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(echo_datagram);
+        echo_datagram_bytes += echo_datagram.len;
+        try server_socket.send(io, &client_socket.address, echo_datagram);
+
+        const echo_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+        const echo_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            client_handle,
+            &client,
+            echo_received.path,
+            50 + @as(i64, @intCast(echo_packet_count)),
+            echo_received.data,
+        );
+        try require(echo_route.connection_id == client_handle);
+        try require(std.mem.eql(u8, echo_route.destination_connection_id.asSlice(), &client_dcid));
+        echo_len_or_null = try client.recvOnStream(stream_id, &read_buf);
+    }
+
+    const echo_len = echo_len_or_null orelse return error.UnexpectedState;
+    const echo_payload = read_buf[0..echo_len];
+    try require(std.mem.eql(u8, echo_payload, request_payload));
+    try require(client.bytesInFlight(.application) == 0);
+    try require(client.pendingAckLargest(.application) != null);
+
+    const final_ack = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        60,
+        &server_dcid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(final_ack);
+    try client_socket.send(io, &server_socket.address, final_ack);
+
+    const ack_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const ack_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        ack_received.path,
+        61,
+        ack_received.data,
+    );
+    try require(ack_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &server_dcid));
+    try require(server.bytesInFlight(.application) == 0);
+
+    return .{
+        .request_bytes = request_len,
+        .request_datagram_bytes = request_datagram.len,
+        .echo_bytes = echo_len,
+        .echo_datagram_bytes = echo_datagram_bytes,
+        .echo_packets = echo_packet_count,
+    };
+}
+
 pub fn main() !void {
     const result = quicz_openssl_pair_transcript_run();
 
@@ -521,6 +744,7 @@ pub fn main() !void {
         result.server_out_level_bytes[2],
     );
     const protected_application = try verifyProtectedApplicationStreamDelivery();
+    const socket_echo = try verifySocketBackedApplicationEchoDelivery();
 
     std.debug.print(
         "[tls-openssl-pair-transcript] initialized={} client_done={} server_done={} client_send={} server_send={} client_recv={} server_recv={} client_release={} server_release={} client_yield={} server_yield={} client_tp={} server_tp={} client_levels={}/{}/{}/{} server_levels={}/{}/{}/{}",
@@ -549,7 +773,7 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        " quicz_delivery={}/{}/{}/{}/{}/{} protected_initial={}/{} protected_handshake={}/{}/{}/{} protected_application={}/{}/{}/{} iterations={} alerts={}/{} errors={}/{}\n",
+        " quicz_delivery={}/{}/{}/{}/{}/{} protected_initial={}/{} protected_handshake={}/{}/{}/{} protected_application={}/{}/{}/{} socket_echo={}/{}/{}/{}/{} iterations={} alerts={}/{} errors={}/{}\n",
         .{
             client_initial_bytes,
             server_initial_bytes,
@@ -567,6 +791,11 @@ pub fn main() !void {
             protected_application.request_datagram_bytes,
             protected_application.response_bytes,
             protected_application.response_datagram_bytes,
+            socket_echo.request_bytes,
+            socket_echo.request_datagram_bytes,
+            socket_echo.echo_bytes,
+            socket_echo.echo_datagram_bytes,
+            socket_echo.echo_packets,
             result.drive_iterations,
             result.client_alert_callbacks,
             result.server_alert_callbacks,
