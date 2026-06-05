@@ -159,9 +159,19 @@ const AdapterInitialSocketDelivery = struct {
     ack_bytes: usize,
 };
 
+const AdapterHandshakeSocketDelivery = struct {
+    crypto_bytes: usize,
+    datagram_bytes: usize,
+    ack_bytes: usize,
+};
+
 const adapter_original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
 const adapter_client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
 const adapter_server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+const adapter_handshake_client_dcid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+const adapter_handshake_client_scid = [_]u8{ 0x91, 0x92, 0x93, 0x94 };
+const adapter_handshake_server_dcid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8 };
+const adapter_handshake_server_scid = [_]u8{ 0xb5, 0xb6, 0xb7, 0xb8 };
 
 fn require(condition: bool) ExampleError!void {
     if (!condition) return error.UnexpectedState;
@@ -375,6 +385,112 @@ fn verifyAdapterInitialSocketDelivery(
     };
 }
 
+fn verifyAdapterHandshakeSocketDelivery(
+    allocator: std.mem.Allocator,
+    client: *quicz.Connection,
+    server_local_secret: [quicz.protection.traffic_secret_len]u8,
+    server_peer_secret: [quicz.protection.traffic_secret_len]u8,
+    inbound_crypto: []const u8,
+) !AdapterHandshakeSocketDelivery {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client_socket = try bindLoopbackUdp(io);
+    defer client_socket.close(io);
+    var server_socket = try bindLoopbackUdp(io);
+    defer server_socket.close(io);
+
+    const client_address = try udp4Address(client_socket.address);
+    const server_address = try udp4Address(server_socket.address);
+    try require(client_address.port != 0);
+    try require(server_address.port != 0);
+    try require(client_address.port != server_address.port);
+
+    const client_handle: u64 = 301;
+    const server_handle: u64 = 311;
+
+    var server = try quicz.Connection.init(allocator, .server, .{
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = server_local_secret,
+        .peer = server_peer_secret,
+    });
+    try require(server.hasHandshakeProtectionKeys());
+
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+
+    const client_path = try udp4Tuple(client_socket.address, server_socket.address);
+    const server_path = try udp4Tuple(server_socket.address, client_socket.address);
+    try client_lifecycle.registerConnectionId(client_handle, &adapter_handshake_client_dcid, client_path, .{
+        .active_migration_disabled = true,
+    });
+    try server_lifecycle.registerConnectionId(server_handle, &adapter_handshake_server_dcid, server_path, .{
+        .active_migration_disabled = true,
+    });
+
+    try server.sendCryptoInSpace(.handshake, inbound_crypto);
+    const server_datagram = (try server_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        20,
+        &adapter_handshake_client_dcid,
+        &adapter_handshake_server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(server_datagram);
+    try require(server_datagram.len > 0);
+    try server_socket.send(io, &client_socket.address, server_datagram);
+
+    var client_receive_buf: [1500]u8 = undefined;
+    var server_receive_buf: [1500]u8 = undefined;
+    const server_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+    const server_route = try client_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        client_handle,
+        client,
+        server_received.path,
+        21,
+        server_received.data,
+    );
+    try require(server_route.connection_id == client_handle);
+    try require(std.mem.eql(u8, server_route.destination_connection_id.asSlice(), &adapter_handshake_client_dcid));
+    try require(client.pendingAckLargest(.handshake) == 0);
+
+    const client_ack = (try client_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        client_handle,
+        client,
+        22,
+        &adapter_handshake_server_dcid,
+        &adapter_handshake_client_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_ack);
+    try require(client_ack.len > 0);
+    try client_socket.send(io, &server_socket.address, client_ack);
+
+    const ack_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const ack_route = try server_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        ack_received.path,
+        23,
+        ack_received.data,
+    );
+    try require(ack_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &adapter_handshake_server_dcid));
+    try require(server.bytesInFlight(.handshake) == 0);
+
+    return .{
+        .crypto_bytes = inbound_crypto.len,
+        .datagram_bytes = server_datagram.len,
+        .ack_bytes = client_ack.len,
+    };
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -455,6 +571,11 @@ pub fn main() !void {
 
     const client_handshake_local = try copyOpenSslClientSecret(2, 1);
     const client_handshake_peer = try copyOpenSslClientSecret(2, 0);
+    const server_handshake_local = try copyOpenSslServerSecret(2, 1);
+    const server_handshake_peer = try copyOpenSslServerSecret(2, 0);
+    try require(std.mem.eql(u8, &client_handshake_local, &server_handshake_peer));
+    try require(std.mem.eql(u8, &server_handshake_local, &client_handshake_peer));
+
     try require(quicz_openssl_tls_backend_debug_yield_handshake_secret(
         openssl_context,
         1,
@@ -468,16 +589,32 @@ pub fn main() !void {
         client_handshake_peer.len,
     ) == .ok);
 
+    const handshake_key_progress = try connection.driveCryptoBackendInSpace(
+        .handshake,
+        tls_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(quicz_openssl_tls_backend_peer_transport_parameters_len(openssl_context) == peer_transport_parameters.len);
+    try require(quicz_openssl_tls_backend_got_transport_params_callbacks(openssl_context) == 1);
+    try require(quicz_openssl_tls_backend_yield_secret_callbacks(openssl_context) == 2);
+    try require(handshake_key_progress.peer_transport_parameters_applied);
+    try require(handshake_key_progress.peer_transport_parameters_bytes == peer_transport_parameters.len);
+    try require(handshake_key_progress.handshake_keys_installed);
+    try require(handshake_key_progress.inbound_bytes == 0);
+    try require(handshake_key_progress.outbound_chunks == 0);
+    try require(!handshake_key_progress.handshake_confirmed);
+    try require(connection.hasHandshakeProtectionKeys());
+
     var inbound_crypto_buf: [8192]u8 = undefined;
     const inbound_crypto = try copyOpenSslServerCrypto(2, &inbound_crypto_buf);
     try require(inbound_crypto.len == transcript.server_out_level_bytes[2]);
-    var inbound_payload_buf: [96]u8 = undefined;
-    var inbound_payload = fixedWriter(&inbound_payload_buf);
-    try quicz.frame.encodeFrame(inbound_payload.writer(), .{ .crypto = .{
-        .offset = 0,
-        .data = inbound_crypto,
-    } });
-    try connection.processDatagramInSpace(.handshake, 0, inbound_payload.getWritten());
+    const adapter_handshake_socket = try verifyAdapterHandshakeSocketDelivery(
+        allocator,
+        &connection,
+        server_handshake_local,
+        server_handshake_peer,
+        inbound_crypto,
+    );
 
     const handshake_progress = try connection.driveCryptoBackendInSpace(
         .handshake,
@@ -490,9 +627,9 @@ pub fn main() !void {
     try require(quicz_openssl_tls_backend_got_transport_params_callbacks(openssl_context) == 1);
     try require(quicz_openssl_tls_backend_yield_secret_callbacks(openssl_context) == 2);
     try require(quicz_openssl_tls_backend_pending_inbound_crypto_len(openssl_context) == inbound_crypto.len);
-    try require(handshake_progress.peer_transport_parameters_applied);
-    try require(handshake_progress.peer_transport_parameters_bytes == peer_transport_parameters.len);
-    try require(handshake_progress.handshake_keys_installed);
+    try require(!handshake_progress.peer_transport_parameters_applied);
+    try require(handshake_progress.peer_transport_parameters_bytes == 0);
+    try require(!handshake_progress.handshake_keys_installed);
     try require(handshake_progress.inbound_bytes == inbound_crypto.len);
     try require(handshake_progress.outbound_chunks == 0);
     try require(!handshake_progress.handshake_confirmed);
@@ -577,7 +714,7 @@ pub fn main() !void {
     try require(quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_context) == inbound_crypto.len);
 
     std.debug.print(
-        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} adapter_initial_socket={}/{}/{} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} transcript_handshake_bytes={} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} protected_ping_bytes={} protected_ack_bytes={} server_ack_largest={} client_inflight={} confirmed={}\n",
+        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} adapter_initial_socket={}/{}/{} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} transcript_handshake_bytes={} adapter_handshake_socket={}/{}/{} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} protected_ping_bytes={} protected_ack_bytes={} server_ack_largest={} client_inflight={} confirmed={}\n",
         .{
             quicz_openssl_tls_backend_callbacks_set(openssl_context),
             quicz_openssl_tls_backend_ssl_is_quic_after_callbacks(openssl_context),
@@ -589,16 +726,19 @@ pub fn main() !void {
             adapter_initial_socket.ack_bytes,
             quicz_openssl_tls_backend_handshake_drive_calls(openssl_context),
             quicz_openssl_tls_backend_last_ssl_error(openssl_context),
-            handshake_progress.peer_transport_parameters_bytes,
+            handshake_key_progress.peer_transport_parameters_bytes,
             quicz_openssl_tls_backend_got_transport_params_callbacks(openssl_context),
             quicz_openssl_tls_backend_yield_secret_callbacks(openssl_context),
             transcript.server_out_level_bytes[2],
+            adapter_handshake_socket.crypto_bytes,
+            adapter_handshake_socket.datagram_bytes,
+            adapter_handshake_socket.ack_bytes,
             handshake_progress.inbound_bytes,
             quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context),
             quicz_openssl_tls_backend_inbound_crypto_release_callbacks(openssl_context),
             quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_context),
             handshake_progress.outbound_chunks,
-            handshake_progress.handshake_keys_installed,
+            handshake_key_progress.handshake_keys_installed,
             application_progress.one_rtt_keys_installed,
             protected_ping.len,
             protected_ack.len,

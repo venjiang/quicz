@@ -88,10 +88,10 @@ Common verification examples:
   peer transport-parameter, Handshake/1-RTT secret, and inbound CRYPTO delivery
   through OpenSSL callback boundaries. It now sends the adapter-generated
   Initial CRYPTO flight as a protected Initial datagram over loopback UDP,
-  reuses real OpenSSL pair transcript Handshake CRYPTO plus Handshake/1-RTT
-  secrets, and verifies the adapter-installed client 1-RTT keys can protect a
-  short packet that a peer connection decrypts and ACKs with matching
-  transcript secrets.
+  routes real pair-transcript Handshake CRYPTO as a protected Handshake
+  datagram over loopback UDP, reuses the matching Handshake/1-RTT secrets, and
+  verifies the adapter-installed client 1-RTT keys can protect a short packet
+  that a peer connection decrypts and ACKs with matching transcript secrets.
 - `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
   transcript, with level-separated CRYPTO handoff plus peer transport-parameter
   and traffic-secret callbacks on both endpoints, then mapped into quicz
@@ -219,9 +219,10 @@ experimental.
   transport parameters, real pair-transcript Handshake/1-RTT secrets, and
   inbound Handshake CRYPTO bytes through OpenSSL callback boundaries. It also
   routes the adapter-generated Initial CRYPTO flight through a protected
-  Initial datagram over loopback UDP and verifies adapter-installed client
-  1-RTT keys can protect a short packet that a peer connection decrypts and
-  ACKs with matching transcript secrets. Run with
+  Initial datagram over loopback UDP, routes real pair-transcript Handshake
+  CRYPTO through a protected Handshake datagram over loopback UDP, and verifies
+  adapter-installed client 1-RTT keys can protect a short packet that a peer
+  connection decrypts and ACKs with matching transcript secrets. Run with
   `zig build run-tls-openssl-backend-adapter`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
   long/short close, invalid ACK/ACK_ECN-range auto-close, semantic frame-error
@@ -410,10 +411,11 @@ experimental.
   path far enough to emit the first TLS CRYPTO flight and deliver peer
   transport parameters, real pair-transcript Handshake/1-RTT secrets, and
   inbound CRYPTO through callback boundaries, routes adapter-generated Initial
-  CRYPTO over loopback UDP as a protected Initial datagram, then proves
-  adapter-installed client 1-RTT keys can protect a short packet that a peer
-  connection decrypts and ACKs with matching transcript secrets. A full
-  endpoint-owned live TLS handshake/socket loop is still pending.
+  CRYPTO and real pair-transcript Handshake CRYPTO over loopback UDP as
+  protected Initial/Handshake datagrams, then proves adapter-installed client
+  1-RTT keys can protect a short packet that a peer connection decrypts and
+  ACKs with matching transcript secrets. A full endpoint-owned live TLS
+  handshake/socket loop is still pending.
 
 ## License
 
