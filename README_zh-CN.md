@@ -77,7 +77,9 @@ zig build run-initial-keys
 
 - `run-tls-openssl-backend-adapter`：当前真实 C TLS adapter 边界，覆盖本端
   transport parameters、第一段 TLS CRYPTO flight，以及 peer transport-parameter、
-  Handshake/1-RTT secret 和入站 CRYPTO 经 OpenSSL callback 边界投递到连接层。
+  Handshake/1-RTT secret 和入站 CRYPTO 经 OpenSSL callback 边界投递到连接层；现在也会
+  复用真实 OpenSSL pair transcript 的 Handshake CRYPTO 与 Handshake/1-RTT secrets，
+  并验证安装后的 1-RTT keys 可以保护 short packet。
 - `run-tls-openssl-pair-transcript`：OpenSSL client/server callback-mode TLS
   transcript，覆盖按 protection level 分离的 CRYPTO handoff，以及双端 peer
   transport-parameter 和 traffic-secret callback，并把生成的 CRYPTO bytes 映射进
@@ -180,7 +182,8 @@ pub fn main() !void {
   OpenSSL-backed `TlsBackend` wrapper 接到现有 drive 路径，通过
   `SSL_set_quic_tls_transport_params()` 接收 quicz 本端 transport parameters，驱动
   `SSL_do_handshake()` 产出第一段 TLS CRYPTO flight，并让 peer transport parameters、
-  Handshake/1-RTT secrets 和入站 Handshake CRYPTO bytes 经 OpenSSL callback 边界进入连接层。
+  真实 pair-transcript Handshake/1-RTT secrets 和入站 Handshake CRYPTO bytes 经
+  OpenSSL callback 边界进入连接层；同时验证安装后的 1-RTT keys 可以保护 short packet。
   运行：`zig build run-tls-openssl-backend-adapter`。
 - [Graceful close](examples/graceful_close.zig)：本端/对端关闭、protected long/short close、非法 ACK/ACK_ECN range auto-close、包含非法 ACK/ACK_ECN、0-RTT ACK/ACK_ECN packet-type 违规、非法 STREAMS_BLOCKED limit、冲突 STREAM data 和非法 stream control frame 的语义 frame 错误 auto-close、protected receive auto-close、lifecycle-routed protected auto-close、protected long/0-RTT close-state discard、draining 行为和关闭触发校验。
   运行：`zig build run-graceful-close`。
@@ -280,9 +283,10 @@ pub fn main() !void {
   OpenSSL 1-RTT secrets 的 installed-key protected STREAM request/response 与
   socket-backed STREAM echo；
   `run-tls-openssl-backend-adapter` 已把 OpenSSL object 接入 adapter 路径并
-  产出第一段 TLS CRYPTO flight，也能让 peer transport parameters、Handshake/1-RTT secrets
-  和入站 CRYPTO 经 callback 边界进入连接层；完整 endpoint-owned live TLS
-  handshake/socket loop 仍待实现。
+  产出第一段 TLS CRYPTO flight，也能让 peer transport parameters、真实
+  pair-transcript Handshake/1-RTT secrets 和入站 CRYPTO 经 callback 边界进入连接层，并验证
+  安装后的 1-RTT keys 可以保护 short packet；完整 endpoint-owned live TLS handshake/socket
+  loop 仍待实现。
 
 ## 许可证
 

@@ -223,6 +223,10 @@ pub fn build(b: *std.Build) void {
         .file = b.path("examples/tls_openssl_backend_adapter.c"),
         .flags = &.{},
     });
+    exe_tls_openssl_backend_adapter.root_module.addCSourceFile(.{
+        .file = b.path("examples/tls_openssl_pair_transcript.c"),
+        .flags = &.{},
+    });
     exe_tls_openssl_backend_adapter.root_module.link_libc = true;
     exe_tls_openssl_backend_adapter.root_module.linkSystemLibrary("ssl", .{});
     exe_tls_openssl_backend_adapter.root_module.linkSystemLibrary("crypto", .{});

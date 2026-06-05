@@ -71,6 +71,51 @@ extern fn quicz_openssl_tls_backend_debug_yield_application_secret(
     secret_len: usize,
 ) quicz.TlsBackendStatus;
 
+const OpenSslPairTranscriptResult = extern struct {
+    initialized: c_int,
+    client_done: c_int,
+    server_done: c_int,
+    client_send_callbacks: c_int,
+    server_send_callbacks: c_int,
+    client_recv_callbacks: c_int,
+    server_recv_callbacks: c_int,
+    client_release_callbacks: c_int,
+    server_release_callbacks: c_int,
+    client_yield_secret_callbacks: c_int,
+    server_yield_secret_callbacks: c_int,
+    client_got_transport_params_callbacks: c_int,
+    server_got_transport_params_callbacks: c_int,
+    client_alert_callbacks: c_int,
+    server_alert_callbacks: c_int,
+    client_last_alert: c_int,
+    server_last_alert: c_int,
+    client_last_ssl_error: c_int,
+    server_last_ssl_error: c_int,
+    client_read_level: c_int,
+    server_read_level: c_int,
+    client_write_level: c_int,
+    server_write_level: c_int,
+    drive_iterations: c_int,
+    error_queue_code: c_ulong,
+    client_out_level_bytes: [4]usize,
+    server_out_level_bytes: [4]usize,
+};
+
+extern fn quicz_openssl_pair_transcript_run() OpenSslPairTranscriptResult;
+extern fn quicz_openssl_pair_transcript_copy_server_crypto(
+    level: c_int,
+    out: [*]u8,
+    out_len: usize,
+    written_len: *usize,
+) c_int;
+extern fn quicz_openssl_pair_transcript_copy_client_secret(
+    level: c_int,
+    direction: c_int,
+    out: [*]u8,
+    out_len: usize,
+    written_len: *usize,
+) c_int;
+
 const FixedWriter = struct {
     buffer: []u8,
     pos: usize = 0,
@@ -104,8 +149,50 @@ fn fixedWriter(buffer: []u8) FixedWriter {
     return .{ .buffer = buffer };
 }
 
+fn copyOpenSslServerCrypto(level: usize, out: []u8) ExampleError![]const u8 {
+    var written_len: usize = 0;
+    const copied = quicz_openssl_pair_transcript_copy_server_crypto(
+        @intCast(level),
+        out.ptr,
+        out.len,
+        &written_len,
+    );
+    try require(copied == 1);
+    return out[0..written_len];
+}
+
+fn copyOpenSslClientSecret(
+    level: usize,
+    direction: usize,
+) ExampleError![quicz.protection.traffic_secret_len]u8 {
+    var secret: [quicz.protection.traffic_secret_len]u8 = undefined;
+    var written_len: usize = 0;
+    const copied = quicz_openssl_pair_transcript_copy_client_secret(
+        @intCast(level),
+        @intCast(direction),
+        &secret,
+        secret.len,
+        &written_len,
+    );
+    try require(copied == 1);
+    try require(written_len == secret.len);
+    return secret;
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
+
+    const transcript = quicz_openssl_pair_transcript_run();
+    try require(transcript.initialized == 1);
+    try require(transcript.client_done == 1);
+    try require(transcript.server_done == 1);
+    try require(transcript.client_alert_callbacks == 0);
+    try require(transcript.server_alert_callbacks == 0);
+    try require(transcript.client_last_ssl_error == 0);
+    try require(transcript.server_last_ssl_error == 0);
+    try require(transcript.client_yield_secret_callbacks >= 4);
+    try require(transcript.server_yield_secret_callbacks >= 4);
+    try require(transcript.server_out_level_bytes[2] > 0);
 
     const openssl_context = quicz_openssl_tls_backend_new() orelse return error.OutOfMemory;
     defer quicz_openssl_tls_backend_free(openssl_context);
@@ -162,22 +249,24 @@ pub fn main() !void {
         peer_transport_parameters.len,
     ) == .ok);
 
-    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
-    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_handshake_local = try copyOpenSslClientSecret(2, 1);
+    const client_handshake_peer = try copyOpenSslClientSecret(2, 0);
     try require(quicz_openssl_tls_backend_debug_yield_handshake_secret(
         openssl_context,
         1,
-        &secrets.client.secret,
-        secrets.client.secret.len,
+        &client_handshake_local,
+        client_handshake_local.len,
     ) == .ok);
     try require(quicz_openssl_tls_backend_debug_yield_handshake_secret(
         openssl_context,
         0,
-        &secrets.server.secret,
-        secrets.server.secret.len,
+        &client_handshake_peer,
+        client_handshake_peer.len,
     ) == .ok);
 
-    const inbound_crypto = "openssl wrapper receives crypto";
+    var inbound_crypto_buf: [8192]u8 = undefined;
+    const inbound_crypto = try copyOpenSslServerCrypto(2, &inbound_crypto_buf);
+    try require(inbound_crypto.len == transcript.server_out_level_bytes[2]);
     var inbound_payload_buf: [96]u8 = undefined;
     var inbound_payload = fixedWriter(&inbound_payload_buf);
     try quicz.frame.encodeFrame(inbound_payload.writer(), .{ .crypto = .{
@@ -205,14 +294,8 @@ pub fn main() !void {
     try require(!handshake_progress.handshake_confirmed);
     try require(connection.hasHandshakeProtectionKeys());
 
-    var local_application_secret: [quicz.protection.traffic_secret_len]u8 = undefined;
-    var peer_application_secret: [quicz.protection.traffic_secret_len]u8 = undefined;
-    for (&local_application_secret, 0..) |*byte, index| {
-        byte.* = @as(u8, @intCast(index + 1));
-    }
-    for (&peer_application_secret, 0..) |*byte, index| {
-        byte.* = @as(u8, @intCast(index + 33));
-    }
+    const local_application_secret = try copyOpenSslClientSecret(3, 1);
+    const peer_application_secret = try copyOpenSslClientSecret(3, 0);
     try require(quicz_openssl_tls_backend_debug_yield_application_secret(
         openssl_context,
         1,
@@ -241,6 +324,14 @@ pub fn main() !void {
     try require(!application_progress.handshake_confirmed);
     try require(connection.hasOneRttProtectionKeys());
 
+    try connection.sendPing();
+    const protected_ping = (try connection.pollProtectedShortDatagramWithInstalledKeys(
+        30,
+        &[_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 },
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(protected_ping);
+    try require(protected_ping.len > 0);
+
     try require(quicz_openssl_tls_backend_debug_consume_inbound_once(openssl_context) == .ok);
     try require(quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context) == initial_recv_callbacks + 1);
     try require(quicz_openssl_tls_backend_inbound_crypto_release_callbacks(openssl_context) == initial_release_callbacks + 1);
@@ -248,7 +339,7 @@ pub fn main() !void {
     try require(quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_context) == inbound_crypto.len);
 
     std.debug.print(
-        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} confirmed={}\n",
+        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} transcript_handshake_bytes={} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} protected_ping_bytes={} confirmed={}\n",
         .{
             quicz_openssl_tls_backend_callbacks_set(openssl_context),
             quicz_openssl_tls_backend_ssl_is_quic_after_callbacks(openssl_context),
@@ -260,6 +351,7 @@ pub fn main() !void {
             handshake_progress.peer_transport_parameters_bytes,
             quicz_openssl_tls_backend_got_transport_params_callbacks(openssl_context),
             quicz_openssl_tls_backend_yield_secret_callbacks(openssl_context),
+            transcript.server_out_level_bytes[2],
             handshake_progress.inbound_bytes,
             quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context),
             quicz_openssl_tls_backend_inbound_crypto_release_callbacks(openssl_context),
@@ -267,6 +359,7 @@ pub fn main() !void {
             handshake_progress.outbound_chunks,
             handshake_progress.handshake_keys_installed,
             application_progress.one_rtt_keys_installed,
+            protected_ping.len,
             application_progress.handshake_confirmed,
         },
     );

@@ -86,7 +86,9 @@ Common verification examples:
 - `run-tls-openssl-backend-adapter`: current real C TLS adapter boundary,
   including local transport parameters, first outbound TLS CRYPTO flight, and
   peer transport-parameter, Handshake/1-RTT secret, and inbound CRYPTO delivery
-  through OpenSSL callback boundaries.
+  through OpenSSL callback boundaries. It now reuses real OpenSSL pair
+  transcript Handshake CRYPTO plus Handshake/1-RTT secrets and verifies the
+  installed 1-RTT keys can protect a short packet.
 - `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
   transcript, with level-separated CRYPTO handoff plus peer transport-parameter
   and traffic-secret callbacks on both endpoints, then mapped into quicz
@@ -211,8 +213,10 @@ experimental.
   OpenSSL-backed `TlsBackend` wrapper that accepts quicz local transport
   parameters through `SSL_set_quic_tls_transport_params()`, drives
   `SSL_do_handshake()` to emit the first TLS CRYPTO flight, and carries peer
-  transport parameters, Handshake/1-RTT secrets, and inbound Handshake CRYPTO bytes
-  through OpenSSL callback boundaries. Run with `zig build run-tls-openssl-backend-adapter`.
+  transport parameters, real pair-transcript Handshake/1-RTT secrets, and
+  inbound Handshake CRYPTO bytes through OpenSSL callback boundaries. It also
+  verifies the installed 1-RTT keys can protect a short packet. Run with
+  `zig build run-tls-openssl-backend-adapter`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
   long/short close, invalid ACK/ACK_ECN-range auto-close, semantic frame-error
   auto-close including invalid ACK/ACK_ECN, 0-RTT ACK/ACK_ECN packet-type
@@ -398,9 +402,10 @@ experimental.
   echo using OpenSSL 1-RTT secrets;
   `run-tls-openssl-backend-adapter` wires an OpenSSL object into the adapter
   path far enough to emit the first TLS CRYPTO flight and deliver peer
-  transport parameters, Handshake/1-RTT secrets, and inbound CRYPTO through
-  callback boundaries. A full endpoint-owned live TLS handshake/socket loop is
-  still pending.
+  transport parameters, real pair-transcript Handshake/1-RTT secrets, and
+  inbound CRYPTO through callback boundaries, then proves the installed 1-RTT
+  keys can protect a short packet. A full endpoint-owned live TLS
+  handshake/socket loop is still pending.
 
 ## License
 
