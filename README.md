@@ -91,9 +91,10 @@ Common runnable examples:
   routes real pair-transcript Handshake CRYPTO as a protected Handshake
   datagram over loopback UDP, reuses the matching Handshake/1-RTT secrets, and
   drives a loopback UDP 1-RTT STREAM echo with adapter-installed client keys
-  and matching peer transcript secrets. After modeled handshake confirmation,
-  it explicitly discards both Handshake packet-number spaces and Handshake
-  keys, then sends protected close and completes route cleanup through one
+  and matching peer transcript secrets, including Application PTO service
+  through the same lifecycle owner. After modeled handshake confirmation, it
+  explicitly discards both Handshake packet-number spaces and Handshake keys,
+  then sends protected close and completes route cleanup through one
   socket/lifecycle loop owner.
 - `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
   transcript, with level-separated CRYPTO handoff plus peer transport-parameter
@@ -225,10 +226,11 @@ experimental.
   Initial datagram over loopback UDP, routes real pair-transcript Handshake
   CRYPTO through a protected Handshake datagram over loopback UDP, and drives a
   loopback UDP 1-RTT STREAM echo with adapter-installed client keys and
-  matching peer transcript secrets. After modeled handshake confirmation, it
-  explicitly discards both Handshake packet-number spaces and Handshake keys,
-  then sends protected close and completes route cleanup through one
-  socket/lifecycle loop owner. Run with
+  matching peer transcript secrets, including Application PTO service through
+  the same lifecycle owner. After modeled handshake confirmation, it explicitly
+  discards both Handshake packet-number spaces and Handshake keys, then sends
+  protected close and completes route cleanup through one socket/lifecycle loop
+  owner. Run with
   `zig build run-tls-openssl-backend-adapter`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
   long/short close, invalid ACK/ACK_ECN-range auto-close, semantic frame-error
@@ -420,9 +422,10 @@ experimental.
   CRYPTO and real pair-transcript Handshake CRYPTO over loopback UDP as
   protected Initial/Handshake datagrams, then drives loopback UDP 1-RTT STREAM
   echo with adapter-installed client keys and matching peer transcript secrets,
-  explicitly discards both Handshake packet-number spaces and Handshake keys
-  after modeled handshake confirmation, then sends protected close and
-  completes route cleanup through one socket/lifecycle loop owner.
+  services an Application PTO probe through the same lifecycle owner, explicitly
+  discards both Handshake packet-number spaces and Handshake keys after modeled
+  handshake confirmation, then sends protected close and completes route cleanup
+  through one socket/lifecycle loop owner.
   A full endpoint-owned live TLS handshake/socket loop is still pending.
 
 ## License

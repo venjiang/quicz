@@ -168,6 +168,10 @@ const AdapterHandshakeSocketDelivery = struct {
 const AdapterApplicationSocketEcho = struct {
     request_bytes: usize,
     request_datagram_bytes: usize,
+    client_pto_deadline_millis: i64,
+    client_pto_datagram_bytes: usize,
+    client_pto_route: u64,
+    server_pto_ack_largest: u64,
     echo_bytes: usize,
     echo_datagram_bytes: usize,
     final_ack_bytes: usize,
@@ -554,6 +558,11 @@ fn verifyAdapterApplicationSocketEcho(
     )) orelse return error.UnexpectedState;
     defer loop.allocator.free(request_datagram);
     try require(request_datagram.len > 0);
+    try require(loop.client_lifecycle.recoveryTimerCount() == 1);
+    const client_stream_timer = loop.client_lifecycle.earliestRecoveryDeadline() orelse return error.UnexpectedState;
+    try require(client_stream_timer.connection_id == adapter_client_handle);
+    try require(client_stream_timer.timer.space == .application);
+    try require(client_stream_timer.timer.kind == .pto);
     try loop.client_socket.send(loop.currentIo(), &loop.server_socket.address, request_datagram);
 
     var server_receive_buf: [1500]u8 = undefined;
@@ -574,6 +583,36 @@ fn verifyAdapterApplicationSocketEcho(
     const request_len = (try server.recvOnStream(stream_id, &read_buf)) orelse return error.UnexpectedState;
     try require(request_len == request.len);
     try require(std.mem.eql(u8, read_buf[0..request_len], request));
+
+    const client_pto_result = try loop.client_lifecycle.serviceRecoveryTimerAndPollProtectedShortDatagramWithInstalledKeys(
+        adapter_client_handle,
+        client,
+        client_stream_timer.timer.deadline_millis,
+        &adapter_application_server_dcid,
+    );
+    const client_pto_serviced = client_pto_result.serviced orelse return error.UnexpectedState;
+    try require(client_pto_serviced.connection_id == adapter_client_handle);
+    try require(client_pto_serviced.timer.space == .application);
+    try require(client_pto_serviced.timer.kind == .pto);
+    const client_pto_probe = client_pto_result.datagram orelse return error.UnexpectedState;
+    defer loop.allocator.free(client_pto_probe);
+    try require(client_pto_probe.len > 0);
+    try require(loop.client_lifecycle.recoveryTimerCount() == 1);
+    try loop.client_socket.send(loop.currentIo(), &loop.server_socket.address, client_pto_probe);
+
+    const pto_received = try loop.receiveAtServer(&server_receive_buf);
+    const pto_route = try loop.server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        adapter_server_handle,
+        server,
+        pto_received.path,
+        client_stream_timer.timer.deadline_millis + 1,
+        pto_received.data,
+    );
+    try require(pto_route.connection_id == adapter_server_handle);
+    try require(std.mem.eql(u8, pto_route.destination_connection_id.asSlice(), &adapter_application_server_dcid));
+    const server_pto_ack_largest = server.pendingAckLargest(.application) orelse return error.UnexpectedState;
+    try require(server_pto_ack_largest > 0);
+    try require((try server.recvOnStream(stream_id, &read_buf)) == null);
 
     try server.sendOnStream(stream_id, read_buf[0..request_len], true);
     var echo_packet_count: usize = 0;
@@ -692,6 +731,10 @@ fn verifyAdapterApplicationSocketEcho(
     return .{
         .request_bytes = request_len,
         .request_datagram_bytes = request_datagram.len,
+        .client_pto_deadline_millis = client_stream_timer.timer.deadline_millis,
+        .client_pto_datagram_bytes = client_pto_probe.len,
+        .client_pto_route = pto_route.connection_id,
+        .server_pto_ack_largest = server_pto_ack_largest,
         .echo_bytes = echo_len,
         .echo_datagram_bytes = echo_datagram_bytes,
         .final_ack_bytes = final_ack.len,
@@ -973,8 +1016,12 @@ pub fn main() !void {
         },
     );
     std.debug.print(
-        "[tls-openssl-backend-adapter] adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
+        "[tls-openssl-backend-adapter] adapter_pto={}/{}/{}/{} adapter_key_discard={}/{}/{}/{}/{}/{} adapter_endpoint_routes={}/{}/{}/{} adapter_close_cleanup={}/{}\n",
         .{
+            adapter_application_socket.client_pto_deadline_millis,
+            adapter_application_socket.client_pto_datagram_bytes,
+            adapter_application_socket.client_pto_route,
+            adapter_application_socket.server_pto_ack_largest,
             adapter_application_socket.client_handshake_confirmed,
             adapter_application_socket.server_handshake_confirmed,
             adapter_application_socket.client_handshake_space_discarded,
