@@ -235,6 +235,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("examples/tls_openssl_pair_transcript.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
         }),
     });
     exe_tls_openssl_pair_transcript.root_module.addCSourceFile(.{
