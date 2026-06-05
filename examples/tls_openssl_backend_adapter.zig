@@ -3,6 +3,11 @@ const quicz = @import("quicz");
 
 const ExampleError = error{UnexpectedState};
 
+const ReceivedDatagram = struct {
+    path: quicz.endpoint.Udp4Tuple,
+    data: []const u8,
+};
+
 extern fn quicz_openssl_tls_backend_new() ?*anyopaque;
 extern fn quicz_openssl_tls_backend_free(context: *anyopaque) void;
 extern fn quicz_openssl_tls_backend_receive(
@@ -148,12 +153,65 @@ const FixedWriter = struct {
     }
 };
 
+const AdapterInitialSocketDelivery = struct {
+    crypto_bytes: usize,
+    datagram_bytes: usize,
+    ack_bytes: usize,
+};
+
+const adapter_original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+const adapter_client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+const adapter_server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+
 fn require(condition: bool) ExampleError!void {
     if (!condition) return error.UnexpectedState;
 }
 
 fn fixedWriter(buffer: []u8) FixedWriter {
     return .{ .buffer = buffer };
+}
+
+fn receiveTimeout() std.Io.Timeout {
+    return .{
+        .duration = .{
+            .clock = .awake,
+            .raw = std.Io.Duration.fromMilliseconds(500),
+        },
+    };
+}
+
+fn bindLoopbackUdp(io: std.Io) !std.Io.net.Socket {
+    var address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    return address.bind(io, .{
+        .mode = .dgram,
+        .protocol = .udp,
+    });
+}
+
+fn udp4Address(address: std.Io.net.IpAddress) ExampleError!quicz.endpoint.Udp4Address {
+    return switch (address) {
+        .ip4 => |ip4| quicz.endpoint.Udp4Address.init(ip4.bytes, ip4.port),
+        else => error.UnexpectedState,
+    };
+}
+
+fn udp4Tuple(local: std.Io.net.IpAddress, remote: std.Io.net.IpAddress) !quicz.endpoint.Udp4Tuple {
+    return .{
+        .local = try udp4Address(local),
+        .remote = try udp4Address(remote),
+    };
+}
+
+fn receiveDatagram(
+    io: std.Io,
+    socket: *std.Io.net.Socket,
+    buf: []u8,
+) !ReceivedDatagram {
+    const received = try socket.receiveTimeout(io, buf, receiveTimeout());
+    return .{
+        .path = try udp4Tuple(socket.address, received.from),
+        .data = received.data,
+    };
 }
 
 fn copyOpenSslServerCrypto(level: usize, out: []u8) ExampleError![]const u8 {
@@ -204,6 +262,119 @@ fn copyOpenSslServerSecret(
     return secret;
 }
 
+fn verifyAdapterInitialSocketDelivery(
+    allocator: std.mem.Allocator,
+    client: *quicz.Connection,
+    expected_crypto_len: usize,
+) !AdapterInitialSocketDelivery {
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var client_socket = try bindLoopbackUdp(io);
+    defer client_socket.close(io);
+    var server_socket = try bindLoopbackUdp(io);
+    defer server_socket.close(io);
+
+    const client_address = try udp4Address(client_socket.address);
+    const server_address = try udp4Address(server_socket.address);
+    try require(client_address.port != 0);
+    try require(server_address.port != 0);
+    try require(client_address.port != server_address.port);
+
+    const client_handle: u64 = 201;
+    const server_handle: u64 = 211;
+    const secrets = try quicz.protection.deriveInitialSecrets(.v1, &adapter_original_dcid);
+
+    var server = try quicz.Connection.init(allocator, .server, .{
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var client_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = quicz.EndpointConnectionLifecycle.init(allocator);
+    defer server_lifecycle.deinit();
+
+    const client_path = try udp4Tuple(client_socket.address, server_socket.address);
+    const server_path = try udp4Tuple(server_socket.address, client_socket.address);
+    try client_lifecycle.registerConnectionId(client_handle, &adapter_client_scid, client_path, .{
+        .active_migration_disabled = true,
+    });
+    try server_lifecycle.registerConnectionId(server_handle, &adapter_original_dcid, server_path, .{
+        .active_migration_disabled = true,
+    });
+    try server_lifecycle.registerConnectionId(server_handle, &adapter_server_scid, server_path, .{
+        .active_migration_disabled = true,
+    });
+
+    const client_datagram = (try client_lifecycle.pollProtectedLongDatagram(
+        client_handle,
+        client,
+        10,
+        &adapter_original_dcid,
+        &adapter_client_scid,
+        &[_]u8{},
+        .{ .initial = secrets.client },
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_datagram);
+    try require(client_datagram.len >= 1200);
+    try client_socket.send(io, &server_socket.address, client_datagram);
+
+    var server_receive_buf: [9000]u8 = undefined;
+    var client_receive_buf: [9000]u8 = undefined;
+    const client_received = try receiveDatagram(io, &server_socket, &server_receive_buf);
+    const client_route = try server_lifecycle.processRoutedProtectedInitialDatagram(
+        server_handle,
+        &server,
+        client_received.path,
+        11,
+        &adapter_original_dcid,
+        client_received.data,
+    );
+    try require(client_route.connection_id == server_handle);
+    try require(std.mem.eql(u8, client_route.destination_connection_id.asSlice(), &adapter_original_dcid));
+    try require(server.pendingAckLargest(.initial) == 0);
+
+    var crypto_buf: [8192]u8 = undefined;
+    const crypto_len = (try server.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.UnexpectedState;
+    try require(crypto_len == expected_crypto_len);
+    try require((try server.recvCryptoInSpace(.initial, &crypto_buf)) == null);
+
+    const server_ack = (try server_lifecycle.pollProtectedLongDatagram(
+        server_handle,
+        &server,
+        12,
+        &adapter_client_scid,
+        &adapter_server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(server_ack);
+    try require(server_ack.len > 0);
+    try server_socket.send(io, &client_socket.address, server_ack);
+
+    const ack_received = try receiveDatagram(io, &client_socket, &client_receive_buf);
+    const ack_route = try client_lifecycle.processRoutedProtectedInitialDatagram(
+        client_handle,
+        client,
+        ack_received.path,
+        13,
+        &adapter_original_dcid,
+        ack_received.data,
+    );
+    try require(ack_route.connection_id == client_handle);
+    try require(std.mem.eql(u8, ack_route.destination_connection_id.asSlice(), &adapter_client_scid));
+    try require(client.bytesInFlight(.initial) == 0);
+
+    return .{
+        .crypto_bytes = crypto_len,
+        .datagram_bytes = client_datagram.len,
+        .ack_bytes = server_ack.len,
+    };
+}
+
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
@@ -235,6 +406,7 @@ pub fn main() !void {
     var connection = try quicz.Connection.init(allocator, .client, .{
         .initial_max_data = 4096,
         .initial_max_stream_data = 1024,
+        .max_datagram_size = 8192,
     });
     defer connection.deinit();
 
@@ -257,6 +429,11 @@ pub fn main() !void {
     try require(!initial_progress.peer_transport_parameters_applied);
     try require(!initial_progress.handshake_keys_installed);
     try require(!initial_progress.handshake_confirmed);
+    const adapter_initial_socket = try verifyAdapterInitialSocketDelivery(
+        allocator,
+        &connection,
+        initial_progress.outbound_bytes,
+    );
     const initial_recv_callbacks = quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context);
     const initial_release_callbacks = quicz_openssl_tls_backend_inbound_crypto_release_callbacks(openssl_context);
 
@@ -266,6 +443,8 @@ pub fn main() !void {
         .initial_max_data = 8192,
         .initial_max_stream_data_bidi_local = 2048,
         .initial_max_streams_bidi = 8,
+        .original_destination_connection_id = &adapter_original_dcid,
+        .initial_source_connection_id = &adapter_server_scid,
     });
     const peer_transport_parameters = peer_transport_parameter_out.getWritten();
     try require(quicz_openssl_tls_backend_debug_got_transport_parameters(
@@ -398,13 +577,16 @@ pub fn main() !void {
     try require(quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_context) == inbound_crypto.len);
 
     std.debug.print(
-        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} transcript_handshake_bytes={} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} protected_ping_bytes={} protected_ack_bytes={} server_ack_largest={} client_inflight={} confirmed={}\n",
+        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} adapter_initial_socket={}/{}/{} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} transcript_handshake_bytes={} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} protected_ping_bytes={} protected_ack_bytes={} server_ack_largest={} client_inflight={} confirmed={}\n",
         .{
             quicz_openssl_tls_backend_callbacks_set(openssl_context),
             quicz_openssl_tls_backend_ssl_is_quic_after_callbacks(openssl_context),
             initial_progress.local_transport_parameters_bytes,
             initial_progress.outbound_bytes,
             quicz_openssl_tls_backend_generated_crypto_len(openssl_context),
+            adapter_initial_socket.crypto_bytes,
+            adapter_initial_socket.datagram_bytes,
+            adapter_initial_socket.ack_bytes,
             quicz_openssl_tls_backend_handshake_drive_calls(openssl_context),
             quicz_openssl_tls_backend_last_ssl_error(openssl_context),
             handshake_progress.peer_transport_parameters_bytes,

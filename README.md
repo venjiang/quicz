@@ -86,10 +86,12 @@ Common verification examples:
 - `run-tls-openssl-backend-adapter`: current real C TLS adapter boundary,
   including local transport parameters, first outbound TLS CRYPTO flight, and
   peer transport-parameter, Handshake/1-RTT secret, and inbound CRYPTO delivery
-  through OpenSSL callback boundaries. It now reuses real OpenSSL pair
-  transcript Handshake CRYPTO plus Handshake/1-RTT secrets and verifies the
-  adapter-installed client 1-RTT keys can protect a short packet that a peer
-  connection decrypts and ACKs with matching transcript secrets.
+  through OpenSSL callback boundaries. It now sends the adapter-generated
+  Initial CRYPTO flight as a protected Initial datagram over loopback UDP,
+  reuses real OpenSSL pair transcript Handshake CRYPTO plus Handshake/1-RTT
+  secrets, and verifies the adapter-installed client 1-RTT keys can protect a
+  short packet that a peer connection decrypts and ACKs with matching
+  transcript secrets.
 - `run-tls-openssl-pair-transcript`: OpenSSL client/server callback-mode TLS
   transcript, with level-separated CRYPTO handoff plus peer transport-parameter
   and traffic-secret callbacks on both endpoints, then mapped into quicz
@@ -216,9 +218,11 @@ experimental.
   `SSL_do_handshake()` to emit the first TLS CRYPTO flight, and carries peer
   transport parameters, real pair-transcript Handshake/1-RTT secrets, and
   inbound Handshake CRYPTO bytes through OpenSSL callback boundaries. It also
-  verifies adapter-installed client 1-RTT keys can protect a short packet that
-  a peer connection decrypts and ACKs with matching transcript secrets. Run
-  with `zig build run-tls-openssl-backend-adapter`.
+  routes the adapter-generated Initial CRYPTO flight through a protected
+  Initial datagram over loopback UDP and verifies adapter-installed client
+  1-RTT keys can protect a short packet that a peer connection decrypts and
+  ACKs with matching transcript secrets. Run with
+  `zig build run-tls-openssl-backend-adapter`.
 - [Graceful close](examples/graceful_close.zig): Local/peer close, protected
   long/short close, invalid ACK/ACK_ECN-range auto-close, semantic frame-error
   auto-close including invalid ACK/ACK_ECN, 0-RTT ACK/ACK_ECN packet-type
@@ -405,10 +409,11 @@ experimental.
   `run-tls-openssl-backend-adapter` wires an OpenSSL object into the adapter
   path far enough to emit the first TLS CRYPTO flight and deliver peer
   transport parameters, real pair-transcript Handshake/1-RTT secrets, and
-  inbound CRYPTO through callback boundaries, then proves adapter-installed
-  client 1-RTT keys can protect a short packet that a peer connection decrypts
-  and ACKs with matching transcript secrets. A full endpoint-owned live TLS
-  handshake/socket loop is still pending.
+  inbound CRYPTO through callback boundaries, routes adapter-generated Initial
+  CRYPTO over loopback UDP as a protected Initial datagram, then proves
+  adapter-installed client 1-RTT keys can protect a short packet that a peer
+  connection decrypts and ACKs with matching transcript secrets. A full
+  endpoint-owned live TLS handshake/socket loop is still pending.
 
 ## License
 
