@@ -115,6 +115,13 @@ extern fn quicz_openssl_pair_transcript_copy_client_secret(
     out_len: usize,
     written_len: *usize,
 ) c_int;
+extern fn quicz_openssl_pair_transcript_copy_server_secret(
+    level: c_int,
+    direction: c_int,
+    out: [*]u8,
+    out_len: usize,
+    written_len: *usize,
+) c_int;
 
 const FixedWriter = struct {
     buffer: []u8,
@@ -168,6 +175,24 @@ fn copyOpenSslClientSecret(
     var secret: [quicz.protection.traffic_secret_len]u8 = undefined;
     var written_len: usize = 0;
     const copied = quicz_openssl_pair_transcript_copy_client_secret(
+        @intCast(level),
+        @intCast(direction),
+        &secret,
+        secret.len,
+        &written_len,
+    );
+    try require(copied == 1);
+    try require(written_len == secret.len);
+    return secret;
+}
+
+fn copyOpenSslServerSecret(
+    level: usize,
+    direction: usize,
+) ExampleError![quicz.protection.traffic_secret_len]u8 {
+    var secret: [quicz.protection.traffic_secret_len]u8 = undefined;
+    var written_len: usize = 0;
+    const copied = quicz_openssl_pair_transcript_copy_server_secret(
         @intCast(level),
         @intCast(direction),
         &secret,
@@ -294,19 +319,24 @@ pub fn main() !void {
     try require(!handshake_progress.handshake_confirmed);
     try require(connection.hasHandshakeProtectionKeys());
 
-    const local_application_secret = try copyOpenSslClientSecret(3, 1);
-    const peer_application_secret = try copyOpenSslClientSecret(3, 0);
+    const client_application_local = try copyOpenSslClientSecret(3, 1);
+    const client_application_peer = try copyOpenSslClientSecret(3, 0);
+    const server_application_local = try copyOpenSslServerSecret(3, 1);
+    const server_application_peer = try copyOpenSslServerSecret(3, 0);
+    try require(std.mem.eql(u8, &client_application_local, &server_application_peer));
+    try require(std.mem.eql(u8, &server_application_local, &client_application_peer));
+
     try require(quicz_openssl_tls_backend_debug_yield_application_secret(
         openssl_context,
         1,
-        &local_application_secret,
-        local_application_secret.len,
+        &client_application_local,
+        client_application_local.len,
     ) == .ok);
     try require(quicz_openssl_tls_backend_debug_yield_application_secret(
         openssl_context,
         0,
-        &peer_application_secret,
-        peer_application_secret.len,
+        &client_application_peer,
+        client_application_peer.len,
     ) == .ok);
 
     const application_progress = try connection.driveCryptoBackendInSpace(
@@ -324,13 +354,42 @@ pub fn main() !void {
     try require(!application_progress.handshake_confirmed);
     try require(connection.hasOneRttProtectionKeys());
 
+    var peer = try quicz.Connection.init(allocator, .server, .{
+        .initial_max_data = 4096,
+        .initial_max_stream_data = 1024,
+        .initial_max_streams_bidi = 4,
+    });
+    defer peer.deinit();
+    try peer.installOneRttTrafficSecrets(.{
+        .local = server_application_local,
+        .peer = server_application_peer,
+    });
+    try connection.confirmHandshake();
+    try peer.confirmHandshake();
+    try peer.validatePeerAddress();
+    try require(peer.hasOneRttProtectionKeys());
+
+    const client_dcid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const server_dcid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
     try connection.sendPing();
     const protected_ping = (try connection.pollProtectedShortDatagramWithInstalledKeys(
         30,
-        &[_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 },
+        &server_dcid,
     )) orelse return error.UnexpectedState;
     defer allocator.free(protected_ping);
     try require(protected_ping.len > 0);
+    try peer.processProtectedShortDatagramWithInstalledKeys(31, server_dcid.len, protected_ping);
+    const server_ack_largest = peer.pendingAckLargest(.application) orelse return error.UnexpectedState;
+    try require(server_ack_largest == 0);
+
+    const protected_ack = (try peer.pollProtectedShortDatagramWithInstalledKeys(
+        32,
+        &client_dcid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(protected_ack);
+    try require(protected_ack.len > 0);
+    try connection.processProtectedShortDatagramWithInstalledKeys(33, client_dcid.len, protected_ack);
+    try require(connection.bytesInFlight(.application) == 0);
 
     try require(quicz_openssl_tls_backend_debug_consume_inbound_once(openssl_context) == .ok);
     try require(quicz_openssl_tls_backend_inbound_crypto_recv_callbacks(openssl_context) == initial_recv_callbacks + 1);
@@ -339,7 +398,7 @@ pub fn main() !void {
     try require(quicz_openssl_tls_backend_released_inbound_crypto_len(openssl_context) == inbound_crypto.len);
 
     std.debug.print(
-        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} transcript_handshake_bytes={} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} protected_ping_bytes={} confirmed={}\n",
+        "[tls-openssl-backend-adapter] callbacks={} ssl_is_quic={} local_tp_bytes={} initial_outbound_bytes={} generated_crypto_bytes={} handshake_drive_calls={} last_ssl_error={} peer_tp_bytes={} got_tp_callbacks={} yield_secret_callbacks={} transcript_handshake_bytes={} handshake_inbound_bytes={} inbound_recv_callbacks={} inbound_release_callbacks={} inbound_released_bytes={} handshake_outbound_chunks={} handshake_keys={} one_rtt_keys={} protected_ping_bytes={} protected_ack_bytes={} server_ack_largest={} client_inflight={} confirmed={}\n",
         .{
             quicz_openssl_tls_backend_callbacks_set(openssl_context),
             quicz_openssl_tls_backend_ssl_is_quic_after_callbacks(openssl_context),
@@ -360,6 +419,9 @@ pub fn main() !void {
             handshake_progress.handshake_keys_installed,
             application_progress.one_rtt_keys_installed,
             protected_ping.len,
+            protected_ack.len,
+            server_ack_largest,
+            connection.bytesInFlight(.application),
             application_progress.handshake_confirmed,
         },
     );
