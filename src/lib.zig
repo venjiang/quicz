@@ -859,6 +859,22 @@ pub const EndpointPendingWorkSweepResult = struct {
     recovery_serviced_count: usize = 0,
 };
 
+/// Result from a pending-work sweep followed by output polling.
+pub const EndpointPendingWorkSweepDatagramResult = struct {
+    /// Pending-work actions applied before output processing.
+    pending_work: EndpointPendingWorkSweepResult,
+    /// Protected datagram emitted after pending recovery work, if any.
+    datagram: ?EndpointPolledDatagramResult = null,
+};
+
+/// Result from a pending-work sweep followed by bounded output draining.
+pub const EndpointPendingWorkSweepDatagramDrainResult = struct {
+    /// Pending-work actions applied before output processing.
+    pending_work: EndpointPendingWorkSweepResult,
+    /// Bounded output drain result after pending recovery work.
+    drain: EndpointDatagramDrainResult,
+};
+
 /// Result from pending-work sweep followed by backend drive and output polling.
 pub const EndpointPendingWorkCryptoBackendDatagramResult = struct {
     /// Pending-work actions applied before backend/output processing.
@@ -3962,6 +3978,74 @@ pub const EndpointConnectionLifecycle = struct {
             }
         }
         return sweep;
+    }
+
+    /// Process pending work across connections, then poll installed-key output.
+    ///
+    /// This is the no-backend cross-connection timer tick for socket loops.
+    /// It first sweeps idle/close cleanup and recovery timer service across
+    /// caller-owned connections. If no recovery timer was serviced, it does
+    /// not poll ordinary queued output; callers should use
+    /// `pollDatagramAcrossConnections()` for normal send readiness.
+    pub fn processPendingWorkAcrossConnectionsAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!EndpointPendingWorkSweepDatagramResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        if (pending_work.recovery_serviced_count == 0) {
+            return .{ .pending_work = pending_work };
+        }
+
+        return .{
+            .pending_work = pending_work,
+            .datagram = try self.pollDatagramAcrossConnections(
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Process pending work across connections, then drain installed-key output.
+    ///
+    /// This is the bounded-output form of
+    /// `processPendingWorkAcrossConnectionsAndPollDatagram()`. The caller-owned
+    /// output slice bounds how much timer-triggered send work one socket-loop
+    /// iteration performs.
+    pub fn processPendingWorkAcrossConnectionsAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkSweepDatagramDrainResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        if (pending_work.recovery_serviced_count == 0) {
+            return .{
+                .pending_work = pending_work,
+                .drain = .{},
+            };
+        }
+
+        return .{
+            .pending_work = pending_work,
+            .drain = self.drainDatagramsAcrossConnections(
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
     }
 
     /// Process pending work, drive crypto backends, then poll installed-key output.
@@ -22905,6 +22989,157 @@ test "EndpointConnectionLifecycle sweeps pending work across caller-owned connec
     try std.testing.expectEqual(ConnectionState.active, recovery_conn.connectionState());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(u8, 1), recovery_conn.recovery_state.pto_count);
+}
+
+test "EndpointConnectionLifecycle pending-work cross-connection poll waits for recovery service" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xca, 0xcb, 0xcc, 0xcd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try client.sendPing();
+
+    const pending_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 201,
+        .connection = &client,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 201,
+        .connection = &client,
+        .destination_connection_id = &server_dcid,
+    }};
+
+    const no_recovery = try lifecycle.processPendingWorkAcrossConnectionsAndPollDatagram(
+        &pending_connections,
+        10,
+        &poll_views,
+        .application,
+    );
+    try std.testing.expectEqual(@as(usize, 0), no_recovery.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(?EndpointPolledDatagramResult, null), no_recovery.datagram);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+
+    const first = (try lifecycle.pollDatagram(201, &client, 20, .{
+        .space = .application,
+        .destination_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    const deadline = lifecycle.nextDeadline(201, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, deadline.kind);
+
+    const recovered = try lifecycle.processPendingWorkAcrossConnectionsAndPollDatagram(
+        &pending_connections,
+        deadline.deadline_millis,
+        &poll_views,
+        .application,
+    );
+    try std.testing.expectEqual(@as(usize, 0), recovered.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), recovered.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), recovered.pending_work.recovery_serviced_count);
+    const probe = recovered.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe.datagram);
+    try std.testing.expectEqual(@as(u64, 201), probe.connection_id);
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+}
+
+test "EndpointConnectionLifecycle pending-work cross-connection drain returns bounded recovery output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const first_dcid = [_]u8{ 0xda, 0xdb, 0xdc, 0x01 };
+    const second_dcid = [_]u8{ 0xda, 0xdb, 0xdc, 0x02 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var first = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer first.deinit();
+    try first.confirmHandshake();
+    try first.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try first.sendPing();
+
+    var second = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer second.deinit();
+    try second.confirmHandshake();
+    try second.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try second.sendPing();
+
+    const first_sent = (try lifecycle.pollDatagram(202, &first, 20, .{
+        .space = .application,
+        .destination_connection_id = &first_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first_sent);
+    const second_sent = (try lifecycle.pollDatagram(203, &second, 20, .{
+        .space = .application,
+        .destination_connection_id = &second_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_sent);
+
+    const first_deadline = lifecycle.nextDeadline(202, &first) orelse return error.TestUnexpectedResult;
+    const second_deadline = lifecycle.nextDeadline(203, &second) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, first_deadline.kind);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, second_deadline.kind);
+    const now_millis = @max(first_deadline.deadline_millis, second_deadline.deadline_millis);
+
+    const pending_connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 202, .connection = &first },
+        .{ .connection_id = 203, .connection = &second },
+    };
+    const poll_views = [_]EndpointConnectionPollView{
+        .{
+            .connection_id = 202,
+            .connection = &first,
+            .destination_connection_id = &first_dcid,
+        },
+        .{
+            .connection_id = 203,
+            .connection = &second,
+            .destination_connection_id = &second_dcid,
+        },
+    };
+    var out: [2]EndpointPolledDatagramResult = undefined;
+
+    const drained = try lifecycle.processPendingWorkAcrossConnectionsAndDrainDatagrams(
+        &pending_connections,
+        now_millis,
+        &poll_views,
+        .application,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), drained.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), drained.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 2), drained.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 2), drained.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), drained.drain.first_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    defer std.testing.allocator.free(out[1].datagram);
+    try std.testing.expectEqual(@as(u64, 202), out[0].connection_id);
+    try std.testing.expectEqual(@as(u64, 203), out[1].connection_id);
+    try std.testing.expectEqual(@as(u8, 1), first.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 1), second.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 2), first.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 2), second.sentPacketCount(.application));
 }
 
 test "EndpointConnectionLifecycle pending-work backend loop step polls PTO output" {

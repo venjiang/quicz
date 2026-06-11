@@ -194,6 +194,8 @@ loop entrypoints `feedDatagram`, `feedDatagramWithInstalledKeys`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processPendingWorkAcrossConnections`, `processPendingWorkAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndDrainDatagrams`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
@@ -264,6 +266,8 @@ cross-connection pending-work sweep, due-deadline service, cross-connection
 due-deadline dispatch, recovery wakeup packet output, installed-key packet
 output, bounded caller-owned output draining, bounded long-header CRYPTO output
 draining, cross-connection output dispatch,
+cross-connection pending-work-to-output loop steps,
+cross-connection pending-work-to-bounded-drain loop steps,
 receive-to-backend-to-output loop steps, receive-to-backend-to-bounded-drain
 loop steps, cross-connection TLS backend drive,
 backend-drive-to-datagram output steps, backend-drive-to-bounded-drain output

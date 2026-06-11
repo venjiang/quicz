@@ -176,6 +176,8 @@ socket-loop 和 TLS-backend loop 入口 `feedDatagram`、`feedDatagramWithInstal
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `processPendingWorkAcrossConnections`、`processPendingWorkAndPollDatagram`、
+`processPendingWorkAcrossConnectionsAndPollDatagram`、
+`processPendingWorkAcrossConnectionsAndDrainDatagrams`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
@@ -244,7 +246,8 @@ socket-loop 和 TLS-backend loop 入口 `feedDatagram`、`feedDatagramWithInstal
 installed-key packet receive、跨连接 receive dispatch、accepted Initial 到 backend server
 response 和 close propagation、timeout/timer work、due-deadline
 service、跨连接 pending-work sweep、跨连接 due-deadline dispatch、recovery wakeup packet
-output、installed-key packet output、bounded long-header CRYPTO output drain、跨连接 output dispatch、receive-to-backend-to-output
+output、installed-key packet output、bounded long-header CRYPTO output drain、跨连接 output dispatch、
+cross-connection pending-work-to-output loop step、cross-connection pending-work-to-bounded-drain loop step、receive-to-backend-to-output
 loop step、receive-to-backend-to-bounded-drain loop step、caller-owned output queue 的 bounded drain、跨连接 TLS backend drive、
 backend-drive-to-datagram output step、backend-drive-to-bounded-drain output step、
 single-connection backend-drive-to-datagram output step、

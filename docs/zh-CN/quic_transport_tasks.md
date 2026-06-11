@@ -138,6 +138,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `processPendingWork`、`processPendingWorkAcrossConnections`、`processPendingWorkAndPollDatagram`、
+`processPendingWorkAcrossConnectionsAndPollDatagram`、
+`processPendingWorkAcrossConnectionsAndDrainDatagrams`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
@@ -193,7 +195,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 installed-key packet receive、跨连接 receive dispatch、due-deadline service、
 跨连接 pending-work sweep、跨连接 due-deadline dispatch、recovery-wakeup packet output、
 installed-key packet output、caller-owned output queue 的 bounded drain、跨连接
-output dispatch、receive-to-backend-to-output loop step、receive-to-backend-to-bounded-drain
+output dispatch、cross-connection pending-work-to-output loop step、
+cross-connection pending-work-to-bounded-drain loop step、receive-to-backend-to-output loop step、receive-to-backend-to-bounded-drain
 loop step、跨连接 TLS backend drive、
 backend-drive-to-datagram output step、backend-drive-to-bounded-drain output step、
 backend-drive-to-caller-keyed long-header drain step、
@@ -589,6 +592,16 @@ close 和 route cleanup 事件。
   未选出 compatible version 时会排队 CONNECTION_CLOSE 并在 output draining 前停止。
   dropped datagram 不会驱动 backend，close-propagating peer-parameter 错误会在
   output draining 前停止。
+- 2026-06-11：新增 cross-connection pending-work-to-output 和
+  pending-work-to-bounded-drain loop step：
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndPollDatagram()`
+  和
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDrainDatagrams()`。
+  这些 no-backend helper 会先对 caller-owned connection sweep idle/close/recovery
+  work，再执行 installed-key output poll 或 bounded drain。单元测试证明无 recovery
+  timer 被 service 时不会偷跑普通 queued output；PTO wakeup 被 service 后可以返回一个
+  protected output datagram；bounded drain 可在一个 loop step 中返回两个
+  caller-owned connection 的 PTO output。
 - 2026-06-10：新增 pending-work-to-backend-to-output 和
   pending-work-to-backend-to-bounded-drain loop step：
   `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram()`、

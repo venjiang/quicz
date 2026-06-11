@@ -151,6 +151,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processPendingWork`,
 `processPendingWorkAcrossConnections`, `processPendingWorkAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndDrainDatagrams`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
@@ -213,7 +215,9 @@ timers, route cleanup, close, installed-key packet receive, cross-connection
 receive dispatch, cross-connection pending-work sweep, due-deadline service,
 cross-connection due-deadline dispatch, recovery-wakeup packet output,
 installed-key packet output, bounded caller-owned output draining,
-cross-connection output dispatch, receive-to-backend-to-output loop steps,
+cross-connection output dispatch, cross-connection pending-work-to-output loop
+steps, cross-connection pending-work-to-bounded-drain loop steps,
+receive-to-backend-to-output loop steps,
 receive-to-backend-to-bounded-drain loop steps, cross-connection TLS backend drive, backend-drive-to-datagram output steps,
 backend-drive-to-bounded-drain output steps,
 backend-drive-to-caller-keyed long-header drain steps,
@@ -670,6 +674,17 @@ QUIC unless the gap is named and the verification evidence is added here.
   OrClose form queues CONNECTION_CLOSE and stops before output draining when no
   compatible version is selected. Dropped datagrams do not drive any backend,
   and close-propagating peer-parameter errors stop before output draining.
+- 2026-06-11: Added cross-connection pending-work-to-output and
+  pending-work-to-bounded-drain loop steps:
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndPollDatagram()`
+  and
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDrainDatagrams()`.
+  These no-backend helpers sweep idle/close/recovery work across caller-owned
+  connections before polling or draining installed-key output. Unit coverage
+  proves ordinary queued output is not polled when no recovery timer is
+  serviced, a serviced PTO wakeup can return one protected output datagram, and
+  bounded draining can return PTO output from two caller-owned connections in
+  one loop step.
 - 2026-06-10: Added pending-work-to-backend-to-output and
   pending-work-to-backend-to-bounded-drain loop steps:
   `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram()`,
