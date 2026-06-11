@@ -897,7 +897,9 @@ fn verifyAdapterPeerBackendConfirmation(
 
     var scratch: [8192]u8 = undefined;
     const server_handshake_release_before = c.quicz_openssl_tls_backend_released_inbound_crypto_len(server_backend_context);
-    const server_handshake_progress = try server.driveCryptoBackendInSpace(
+    const server_handshake_progress = try loop.server_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+        adapter_server_handle,
+        server,
         .handshake,
         server_tls_backend.cryptoBackend(),
         &scratch,
@@ -926,7 +928,9 @@ fn verifyAdapterPeerBackendConfirmation(
         server_application_peer.len,
     )));
 
-    const server_application_progress = try server.driveCryptoBackendInSpace(
+    const server_application_progress = try loop.server_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+        adapter_server_handle,
+        server,
         .application,
         server_tls_backend.cryptoBackend(),
         &scratch,
@@ -939,7 +943,9 @@ fn verifyAdapterPeerBackendConfirmation(
     try require(server_application_progress.handshake_confirmed);
     try require(server.handshakeConfirmed());
 
-    const server_discard_progress = try server.driveCryptoBackendInSpace(
+    const server_discard_progress = try loop.server_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+        adapter_server_handle,
+        server,
         .handshake,
         server_tls_backend.cryptoBackend(),
         &scratch,
@@ -1360,7 +1366,9 @@ pub fn main() !void {
     defer endpoint_loop.deinit();
 
     var scratch: [4096]u8 = undefined;
-    const initial_progress = try connection.driveCryptoBackendInSpace(
+    const initial_progress = try endpoint_loop.client_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+        adapter_client_handle,
+        &connection,
         .initial,
         tls_backend.cryptoBackend(),
         &scratch,
@@ -1425,7 +1433,9 @@ pub fn main() !void {
         client_handshake_peer.len,
     )));
 
-    const handshake_key_progress = try connection.driveCryptoBackendInSpace(
+    const handshake_key_progress = try endpoint_loop.client_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+        adapter_client_handle,
+        &connection,
         .handshake,
         tls_backend.cryptoBackend(),
         &scratch,
@@ -1453,7 +1463,9 @@ pub fn main() !void {
         inbound_crypto,
     );
 
-    const handshake_progress = try connection.driveCryptoBackendInSpace(
+    const handshake_progress = try endpoint_loop.client_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+        adapter_client_handle,
+        &connection,
         .handshake,
         tls_backend.cryptoBackend(),
         &scratch,
@@ -1493,7 +1505,9 @@ pub fn main() !void {
         client_application_peer.len,
     )));
 
-    const application_progress = try connection.driveCryptoBackendInSpace(
+    const application_progress = try endpoint_loop.client_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+        adapter_client_handle,
+        &connection,
         .application,
         tls_backend.cryptoBackend(),
         &scratch,

@@ -86,8 +86,8 @@ zig build run-initial-keys
   secrets，并用 adapter 安装的 client keys 和匹配 peer transcript secrets 驱动
   loopback UDP 1-RTT STREAM echo，并通过同一个 lifecycle owner 服务 Application
   PTO；OpenSSL recv/release 消费入站 Handshake CRYPTO 后，OpenSSL-backed
-  `handshake_confirmed` callback 确认 client，并通过 no-output Handshake drive
-  丢弃 client Handshake packet-number space 和 keys；配对 loopback server 也会通过
+  `handshake_confirmed` callback 确认 client，并通过 endpoint lifecycle-owned no-output
+  Handshake drive 丢弃 client Handshake packet-number space 和 keys；配对 loopback server 也会通过
   loopback UDP 消费 client Handshake CRYPTO，经 backend 拉取 peer transport
   parameters 和 Handshake/1-RTT secrets，完成确认并清理 Handshake keys；direct
   server probe 也会消费 Handshake CRYPTO 并报告 `server_probe_confirmed=true`，随后通过同一个
@@ -152,7 +152,125 @@ pub fn main() !void {
 }
 ```
 
-当前 `pollTx()` / `processDatagram()` 路径传输未加密的 frame payload 字节。Protected packet helper、endpoint routing、recovery timer 和 mock TLS handoff 已可用于确定性协议测试；完整 TLS-owned UDP packetization 仍待实现。
+当前 `pollTx()` / `processDatagram()` 路径传输未加密的 frame payload 字节。Protected
+packet helper、endpoint routing、recovery timer 和 mock TLS handoff 已可用于确定性协议测试；
+完整 TLS-owned UDP packetization 仍待实现。`EndpointConnectionLifecycle` 现在提供核心
+socket-loop 和 TLS-backend loop 入口 `feedDatagram`、`feedDatagramWithInstalledKeys`、
+`feedDatagramWithInstalledKeysAcrossConnections`、`processPendingWork`、
+`processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`、
+`processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`、
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`、
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`、
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`processPendingWorkAcrossConnections`、`processPendingWorkAndPollDatagram`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`processPendingWorkAndDrainDatagrams`、
+`processDueDeadlineAndPollDatagram`、`processDueDeadlineAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`processDueDeadlineAcrossConnectionsAndPollDatagram`、
+`processDueDeadlineAcrossConnectionsAndDrainDatagrams`、
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`、
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`、
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`、
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`、
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`pollDatagram`、`drainDatagramsAcrossConnections`、`pollDatagramAcrossConnections`、
+`driveCryptoBackendsInSpaceAndArmConnections`、
+`driveCryptoBackendsInSpaceAndPollDatagram`、
+`driveCryptoBackendInSpaceAndPollDatagram`、
+`driveCryptoBackendsInSpaceAndDrainDatagrams`、
+`driveCryptoBackendInSpaceAndDrainDatagrams`、
+`driveCryptoBackendsInSpaceOrCloseAndArmConnections`、
+`driveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
+`driveCryptoBackendInSpaceOrCloseAndPollDatagram`、
+`driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`、
+`driveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections`、
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`、
+`driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`、
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`driveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections`、
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
+`driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams`、
+`processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`、
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`drainProtectedLongCryptoDatagramsInSpace`、
+`processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`、
+`nextDeadline` 和
+`nextDeadlineAcrossConnections`，用于 routing、
+installed-key packet receive、跨连接 receive dispatch、accepted Initial 到 backend server
+response 和 close propagation、timeout/timer work、due-deadline
+service、跨连接 pending-work sweep、跨连接 due-deadline dispatch、recovery wakeup packet
+output、installed-key packet output、bounded long-header CRYPTO output drain、跨连接 output dispatch、receive-to-backend-to-output
+loop step、receive-to-backend-to-bounded-drain loop step、caller-owned output queue 的 bounded drain、跨连接 TLS backend drive、
+backend-drive-to-datagram output step、backend-drive-to-bounded-drain output step、
+single-connection backend-drive-to-datagram output step、
+single-connection backend-drive-to-bounded-drain output step、
+single-connection compatible-version backend-drive-to-datagram output step、
+single-connection compatible-version backend-drive-to-bounded-drain output step、
+backend-drive-to-caller-keyed long-header drain step、
+caller-keyed receive-to-backend-to-bounded-drain loop step、
+installed-key Handshake receive-to-backend-to-bounded-drain loop step、
+close-propagating installed-key Handshake backend-drain loop step、
+single-connection installed-key receive-to-backend-to-output loop step、
+single-connection installed-key receive-to-backend-to-bounded-drain loop step、
+single-connection installed-key receive-to-backend-close-to-output loop step、
+single-connection installed-key receive-to-backend-close-to-bounded-drain loop step、
+single-connection compatible-version receive-to-backend-to-output loop step、
+single-connection compatible-version receive-to-backend-to-bounded-drain loop step、
+single-connection compatible-version receive-to-backend-close-to-output loop step、
+single-connection compatible-version receive-to-backend-close-to-bounded-drain loop step、
+single-connection pending-work-to-backend-to-bounded-drain loop step、
+single-connection pending-work-to-backend-close-to-bounded-drain loop step、
+single-connection compatible-version pending-work-to-backend-to-bounded-drain loop step、
+single-connection compatible-version pending-work-to-backend-close-to-bounded-drain loop step、
+single-connection due-deadline-to-backend-to-bounded-drain loop step、
+single-connection due-deadline-to-backend-close-to-bounded-drain loop step、
+single-connection compatible-version due-deadline-to-backend-to-bounded-drain loop step、
+single-connection compatible-version due-deadline-to-backend-close-to-bounded-drain loop step、
+pending-work-to-bounded-drain loop step、pending-work-to-backend-to-output loop step、pending-work-to-backend-to-bounded-drain
+loop step、due-deadline-to-backend-to-output loop
+step、due-deadline-to-bounded-drain loop step、due-deadline-to-backend-to-bounded-drain
+loop step、close-propagating TLS backend drive、RFC 9368 compatible-version backend sweep，
+以及 caller-owned connection map 上的 event-loop wakeup selection；
+`EndpointConnectionDeadline.installedKeyPollOptions()`
+会把 `nextDeadline()` 返回的 recovery wakeup 映射为 Handshake 和 1-RTT 路径的
+installed-key poll options；生产级 TLS-owned socket event loop 仍待实现。
 
 `Connection` 是当前推荐的公开连接句柄；`QuicConnection` 作为兼容别名保留，便于旧调用方在实验性 API 继续演进期间平滑迁移。
 
@@ -205,7 +323,7 @@ pub fn main() !void {
   STREAM echo。运行：
   `zig build run-tls-openssl-pair-transcript`。
 - [TLS OpenSSL backend adapter](examples/tls_openssl_backend_adapter.zig)：把
-  OpenSSL-backed `TlsBackend` wrapper 接到现有 drive 路径，通过
+  OpenSSL-backed `TlsBackend` wrapper 接到 endpoint lifecycle-owned backend drive 路径，通过
   `SSL_set_quic_tls_transport_params()` 接收 quicz 本端 transport parameters，驱动
   `SSL_do_handshake()` 产出第一段 TLS CRYPTO flight，并让 pair-transcript server
   transport parameters（由 quicz 本端 export 编码后配置到 OpenSSL）、真实 pair-transcript Handshake/1-RTT secrets 和入站
@@ -332,7 +450,7 @@ pub fn main() !void {
   安装的 client keys 和匹配 peer transcript secrets 驱动 loopback UDP 1-RTT STREAM
   echo，并通过同一个 lifecycle owner 服务 Application PTO；OpenSSL recv/release 消费入站
   Handshake CRYPTO 后，OpenSSL-backed `handshake_confirmed` callback 确认 client，
-  并通过 no-output Handshake drive 丢弃 client Handshake packet-number space 和 keys；
+  并通过 lifecycle-owned no-output Handshake drive 丢弃 client Handshake packet-number space 和 keys；
   server connection probe 也会通过 backend 拉取真实 pair-transcript 1-RTT secrets，
   确认 server connection，并记录 OpenSSL secret callbacks 和已应用 transport
   parameters 里的 peer stream-count limit，随后丢弃 server Handshake packet-number

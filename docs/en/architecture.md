@@ -101,10 +101,11 @@ still in progress, while loopback examples already cover several key paths.
 
 ### Examples and Verifiers
 
-The `examples/` directory is the main runnable verification surface. Each
-example should print stable evidence lines that can be checked without exposing
-key material. When adding a feature, prefer a small standalone verifier first,
-then cover the same behavior in Zig tests.
+The `examples/` directory verifies that core capabilities can run
+independently. Each example should print stable evidence lines that can be
+checked without exposing key material. When adding a feature, land the core
+implementation and unit coverage first, then use a verifier to prove the same
+behavior runs end to end.
 
 ## Core Protocol Flows
 

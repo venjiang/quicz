@@ -97,8 +97,9 @@ Common runnable examples:
   client keys and matching peer transcript secrets, including Application PTO
   service through the same lifecycle owner. After OpenSSL recv/release consumes
   inbound Handshake CRYPTO, the OpenSSL-backed `handshake_confirmed` callback
-  confirms the client and a no-output Handshake drive discards the client
-  Handshake packet-number space and keys. The paired loopback server also
+  confirms the client and an endpoint lifecycle-owned no-output Handshake
+  drive discards the client Handshake packet-number space and keys. The paired
+  loopback server also
   consumes client Handshake CRYPTO over loopback UDP, pulls peer transport
   parameters and Handshake/1-RTT secrets through the backend, confirms, and
   clears its Handshake keys; the direct server probe also consumes Handshake
@@ -171,6 +172,127 @@ The current `pollTx()` / `processDatagram()` path moves unencrypted frame
 payload bytes. Protected packet helpers, endpoint routing, recovery timers, and
 mock TLS handoff are available for deterministic protocol tests; full TLS-owned
 UDP packetization is still pending.
+`EndpointConnectionLifecycle` now exposes the core socket-loop and TLS-backend
+loop entrypoints `feedDatagram`, `feedDatagramWithInstalledKeys`,
+`feedDatagramWithInstalledKeysAcrossConnections`, `processPendingWork`,
+`processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`,
+`processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`processPendingWorkAcrossConnections`, `processPendingWorkAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`processPendingWorkAndDrainDatagrams`, `processDueDeadlineAndPollDatagram`,
+`processDueDeadlineAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndPollDatagram`,
+`processDueDeadlineAcrossConnectionsAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`pollDatagram`, `drainDatagramsAcrossConnections`,
+`pollDatagramAcrossConnections`, `driveCryptoBackendsInSpaceAndArmConnections`,
+`driveCryptoBackendsInSpaceAndPollDatagram`,
+`driveCryptoBackendInSpaceAndPollDatagram`,
+`driveCryptoBackendsInSpaceAndDrainDatagrams`,
+`driveCryptoBackendInSpaceAndDrainDatagrams`,
+`driveCryptoBackendsInSpaceOrCloseAndArmConnections`,
+`driveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
+`driveCryptoBackendInSpaceOrCloseAndPollDatagram`,
+`driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`,
+`driveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
+`driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`driveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams`,
+`processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`drainProtectedLongCryptoDatagramsInSpace`,
+`processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
+`nextDeadline`, and `nextDeadlineAcrossConnections` for routing, installed-key
+packet receive, cross-connection receive dispatch, accepted-Initial-to-backend
+server response and close propagation, timeout/timer work,
+cross-connection pending-work sweep, due-deadline service, cross-connection
+due-deadline dispatch, recovery wakeup packet output, installed-key packet
+output, bounded caller-owned output draining, bounded long-header CRYPTO output
+draining, cross-connection output dispatch,
+receive-to-backend-to-output loop steps, receive-to-backend-to-bounded-drain
+loop steps, cross-connection TLS backend drive,
+backend-drive-to-datagram output steps, backend-drive-to-bounded-drain output
+steps, single-connection backend-drive-to-datagram output steps,
+single-connection backend-drive-to-bounded-drain output steps,
+single-connection compatible-version backend-drive-to-datagram output steps,
+single-connection compatible-version backend-drive-to-bounded-drain output steps,
+backend-drive-to-caller-keyed long-header drain steps,
+caller-keyed receive-to-backend-to-bounded-drain loop steps,
+installed-key Handshake receive-to-backend-to-bounded-drain loop steps,
+close-propagating installed-key Handshake backend-drain loop steps,
+single-connection installed-key receive-to-backend-to-output loop steps,
+single-connection installed-key receive-to-backend-to-bounded-drain loop steps,
+single-connection installed-key receive-to-backend-close-to-output loop steps,
+single-connection installed-key receive-to-backend-close-to-bounded-drain loop steps,
+single-connection compatible-version receive-to-backend-to-output loop steps,
+single-connection compatible-version receive-to-backend-to-bounded-drain loop steps,
+single-connection compatible-version receive-to-backend-close-to-output loop steps,
+single-connection compatible-version receive-to-backend-close-to-bounded-drain loop steps,
+single-connection pending-work-to-backend-to-bounded-drain loop steps,
+single-connection pending-work-to-backend-close-to-bounded-drain loop steps,
+single-connection compatible-version pending-work-to-backend-to-bounded-drain loop steps,
+single-connection compatible-version pending-work-to-backend-close-to-bounded-drain loop steps,
+single-connection due-deadline-to-backend-to-bounded-drain loop steps,
+single-connection due-deadline-to-backend-close-to-bounded-drain loop steps,
+single-connection compatible-version due-deadline-to-backend-to-bounded-drain loop steps,
+single-connection compatible-version due-deadline-to-backend-close-to-bounded-drain loop steps,
+pending-work-to-bounded-drain loop steps, pending-work-to-backend-to-output loop steps,
+pending-work-to-backend-to-bounded-drain loop steps, due-deadline-to-backend-to-output
+loop steps, due-deadline-to-bounded-drain loop steps,
+due-deadline-to-backend-to-bounded-drain loop steps,
+close-propagating TLS backend drive, RFC 9368 compatible-version
+backend sweeps, and event-loop wakeup selection across caller-owned connection
+maps.
+`EndpointConnectionDeadline.installedKeyPollOptions()` maps recovery wakeups
+from `nextDeadline()` into installed-key poll options for Handshake and 1-RTT
+paths. A production TLS-owned socket event loop is still pending.
 
 `Connection` is the canonical public connection handle. `QuicConnection` remains
 available as a compatibility alias for older callers while the API is
@@ -254,11 +376,11 @@ experimental.
   matching peer transcript secrets, including Application PTO service through
   the same lifecycle owner. After OpenSSL recv/release consumes inbound
   Handshake CRYPTO, the OpenSSL-backed `handshake_confirmed` callback confirms
-  the client; the server connection probe also pulls real pair-transcript
-  1-RTT secrets through the backend, confirms the server connection, and
-  records OpenSSL secret callbacks plus peer stream-count limits from the
-  applied transport parameters before discarding its Handshake packet-number
-  space and keys. The paired loopback
+  the client through the endpoint lifecycle-owned backend drive; the server
+  connection probe also pulls real pair-transcript 1-RTT secrets through the
+  backend, confirms the server connection, and records OpenSSL secret callbacks
+  plus peer stream-count limits from the applied transport parameters before
+  discarding its Handshake packet-number space and keys. The paired loopback
   endpoint then sends
   protected close and completes route cleanup through one socket/lifecycle loop
   owner. Run with
@@ -462,10 +584,10 @@ experimental.
   the client through the OpenSSL-backed `handshake_confirmed` callback after
   OpenSSL recv/release consumes inbound Handshake CRYPTO,
   discards the client Handshake packet-number space and keys through a
-  backend-confirmed no-output Handshake drive, and uses the server connection
-  probe to pull real pair-transcript 1-RTT secrets, confirm the server
-  connection, record OpenSSL secret callbacks plus peer stream-count limits
-  from the applied transport parameters, and discard its Handshake packet-number
+  lifecycle-owned backend-confirmed no-output Handshake drive, and uses the
+  server connection probe to pull real pair-transcript 1-RTT secrets, confirm
+  the server connection, record OpenSSL secret callbacks plus peer stream-count
+  limits from the applied transport parameters, and discard its Handshake packet-number
   space and keys. The
   paired loopback server also consumes client Handshake CRYPTO over loopback
   UDP, pulls peer transport parameters and Handshake/1-RTT secrets through the

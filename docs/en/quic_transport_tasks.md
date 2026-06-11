@@ -45,7 +45,7 @@ packet/key/token and RFC 9368 version-information primitives:
 
 | Feature | Practical target | quicz status |
 | --- | --- | --- |
-| UDP client/server endpoint | Required for first usable milestone. One endpoint owner must drive accept/connect, packet receive/send, timers, route cleanup, and close. | Partial: socket-backed loopback examples and endpoint lifecycle helpers exist; production client/server event loop is missing. |
+| UDP client/server endpoint | Required for first usable milestone. One endpoint owner must drive accept/connect, packet receive/send, timers, route cleanup, and close. | Partial: socket-backed loopback examples, endpoint lifecycle helpers, and core socket-loop entrypoints for receive, accepted Initial backend response/close propagation, bounded long-header CRYPTO output draining, pending-work, due-deadline, TLS-backend drive, output polling, close propagation, compatible-version backend drive, and wakeup selection exist; production client/server event loop is missing. |
 | TLS 1.3 integration | Required. Use a C TLS library with QUIC transport-parameter and traffic-secret hooks through a narrow Zig `TlsBackend` adapter. Do not implement TLS in-tree. | Partial: mock `CryptoBackend`, installed-key handoff, a tested C-ABI `TlsBackend` adapter, a C-object adapter probe, an OpenSSL QUIC TLS API/link probe, an OpenSSL client/server callback-mode transcript check with level-separated CRYPTO handoff mapped into quicz CRYPTO queues, role-specific peer transport-parameter byte parsing, keylog callback count/byte evidence without printing key material, protected Initial long-packet delivery plus socket-backed Initial delivery and manual OpenSSL Initial/Handshake transcript plus same-context 1-RTT STREAM echo, Handshake key discard, protected close, and route cleanup through the same socket/lifecycle boundary, installed-key protected Handshake delivery plus socket-backed Handshake delivery using OpenSSL-produced Handshake secrets, installed-key protected STREAM request/response plus socket-backed STREAM echo using OpenSSL-produced 1-RTT secrets, and an OpenSSL-backed adapter wrapper that emits the first TLS CRYPTO flight, consumes the pair-transcript server transport parameters, delivers real pair-transcript Handshake/1-RTT secrets and inbound CRYPTO through OpenSSL callback boundaries, routes adapter-generated Initial CRYPTO and real pair-transcript Handshake CRYPTO over loopback UDP as protected Initial/Handshake datagrams, drives loopback UDP 1-RTT STREAM echo, Application PTO service, protected close delivery, and route cleanup through one socket/lifecycle loop owner with adapter-installed client keys plus matching peer transcript secrets, proves direct server-probe confirmation after Handshake CRYPTO consumption, proves server-connection backend 1-RTT pull, OpenSSL secret callbacks, applied peer stream-count limits, handshake confirmation, and Handshake-space/key discard, and drives paired loopback server confirmation through backend-consumed Handshake CRYPTO plus peer transport-parameter and Handshake/1-RTT secret pull; full endpoint-owned live TLS handshake/socket loop is missing. |
 | QUIC v1 packet protection | Required. Initial, Handshake, 0-RTT when enabled, and 1-RTT packets must be produced and consumed by the TLS-owned path. | Partial: v1/v2 Initial, Retry integrity, protected long/short helpers, and mock installed-key paths exist. |
 | Streams | Required. Bidirectional and unidirectional stream open, read, write, FIN, reset, STOP_SENDING, and stream limits must work over protected UDP. | Partial: in-memory stream state and protected loopback exercises exist; TLS-owned UDP stream API is missing. |
@@ -132,15 +132,107 @@ handshake/socket loop. The minimum proof for that milestone is:
   documented blocker explaining why interop cannot yet be run.
 
 After the echo path, keep the transport core embeddable instead of baking
-production socket policy into demos. The target socket-facing API shape is
-`feedDatagram`, `processPendingWork`, `pollDatagram`, and `nextDeadline`, with
-one lifecycle owner responsible for timers, route cleanup, close, and key
-discard. The first interop entry should handle only `handshake` and `transfer`
-and return explicit blockers until real TLS-owned binaries exist. Real TLS and
-interop paths must also emit enough evidence for debugging, including keylog
-support and trace events for handshake, transport parameters, traffic-secret
-installation, packet-number spaces, ACK/loss/PTO, key discard, close, and route
-cleanup.
+production socket policy into demos. The lifecycle core now exposes the first
+socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithInstalledKeys`,
+`feedDatagramWithInstalledKeysAcrossConnections`,
+`processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`,
+`processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`processPendingWork`,
+`processPendingWorkAcrossConnections`, `processPendingWorkAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
+`processPendingWorkAndDrainDatagrams`,
+`processDueDeadlineAndPollDatagram`,
+`processDueDeadlineAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndPollDatagram`,
+`processDueDeadlineAcrossConnectionsAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`pollDatagram`, `drainDatagramsAcrossConnections`,
+`pollDatagramAcrossConnections`, `driveCryptoBackendsInSpaceAndArmConnections`,
+`driveCryptoBackendsInSpaceAndPollDatagram`,
+`driveCryptoBackendsInSpaceAndDrainDatagrams`,
+`driveCryptoBackendsInSpaceOrCloseAndArmConnections`,
+`driveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
+`driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams`,
+`processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`drainProtectedLongCryptoDatagramsInSpace`,
+`processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
+`nextDeadline`, and
+`nextDeadlineAcrossConnections`, with one lifecycle owner responsible for
+timers, route cleanup, close, installed-key packet receive, cross-connection
+receive dispatch, cross-connection pending-work sweep, due-deadline service,
+cross-connection due-deadline dispatch, recovery-wakeup packet output,
+installed-key packet output, bounded caller-owned output draining,
+cross-connection output dispatch, receive-to-backend-to-output loop steps,
+receive-to-backend-to-bounded-drain loop steps, cross-connection TLS backend drive, backend-drive-to-datagram output steps,
+backend-drive-to-bounded-drain output steps,
+backend-drive-to-caller-keyed long-header drain steps,
+caller-keyed receive-to-backend-to-bounded-drain loop steps,
+installed-key Handshake receive-to-backend-to-bounded-drain loop steps,
+close-propagating installed-key Handshake backend-drain loop steps,
+single-connection installed-key receive-to-backend-to-output loop steps,
+single-connection installed-key receive-to-backend-to-bounded-drain loop steps,
+single-connection installed-key receive-to-backend-close-to-output loop steps,
+single-connection installed-key receive-to-backend-close-to-bounded-drain loop steps,
+single-connection compatible-version receive-to-backend-to-output loop steps,
+single-connection compatible-version receive-to-backend-close-to-output loop steps,
+single-connection pending-work-to-backend-to-bounded-drain loop steps,
+single-connection pending-work-to-backend-close-to-bounded-drain loop steps,
+single-connection due-deadline-to-backend-to-bounded-drain loop steps,
+single-connection due-deadline-to-backend-close-to-bounded-drain loop steps,
+close-propagating TLS backend drive,
+RFC 9368 compatible-version backend sweeps, pending-work-to-backend-to-output
+loop steps, pending-work-to-bounded-drain loop steps,
+pending-work-to-backend-to-bounded-drain loop steps,
+due-deadline-to-backend-to-output loop steps,
+due-deadline-to-bounded-drain loop steps,
+due-deadline-to-backend-to-bounded-drain loop steps, and event-loop wakeup
+selection across caller-owned connection maps.
+`EndpointConnectionDeadline.installedKeyPollOptions()`
+maps recovery wakeups returned by `nextDeadline()` into installed-key poll
+options for Handshake and 1-RTT paths. Production socket policy, full
+TLS-owned handshake driving, and live key lifecycle remain pending. The first
+interop entry should handle only `handshake` and `transfer` and return explicit
+blockers until real TLS-owned binaries exist. Real TLS and interop paths must
+also emit enough evidence for debugging, including keylog support and trace
+events for handshake, transport parameters, traffic-secret installation,
+packet-number spaces, ACK/loss/PTO, key discard, close, and route cleanup.
 
 Further mock-only loopbacks are useful only when they close a specific gap in
 the matrix below. They should not be treated as progress toward completing
@@ -223,6 +315,390 @@ QUIC unless the gap is named and the verification evidence is added here.
   over short packets and a loopback UDP STREAM echo with those 1-RTT secrets.
   Full endpoint-owned live TLS handshake/socket loop
   remains pending.
+- 2026-06-10: Added
+  `EndpointAcceptedInitialCryptoBackendDatagramResult` and
+  `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram()`
+  as a server Initial accept-to-TLS-backend response step. The helper
+  authenticates the accepted protected client Initial, installs endpoint
+  routes, drives the Initial-space `CryptoBackend`, and packetizes one
+  backend-produced server Initial datagram without taking ownership of
+  connection/backend/socket storage. Unit coverage proves the backend consumes
+  client Initial CRYPTO, queues server Initial CRYPTO, refreshes endpoint
+  recovery scheduling, and the client can decrypt the backend-produced response.
+- 2026-06-10: Added
+  `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram()`
+  for the close-propagating accepted-Initial backend path. Peer
+  transport-parameter errors returned by the Initial-space backend now queue a
+  transport `CONNECTION_CLOSE` after route installation, stop before backend
+  output polling, and leave the close to the existing protected long-packet
+  poll path. Unit coverage proves the backend consumes client Initial CRYPTO,
+  does not pull output after the peer-parameter error, exposes a close-timeout
+  deadline through the lifecycle, and the client can decrypt the protected
+  Initial close.
+- 2026-06-10: Added `EndpointAcceptedInitialCryptoBackendDatagramDrainResult`,
+  `EndpointConnectionLifecycle.drainProtectedLongCryptoDatagramsInSpace()`, and
+  `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams()`
+  so socket loops can bound protected Initial/Handshake CRYPTO output work with
+  caller-owned result slots. Unit coverage proves an accepted Initial can drive
+  a backend that queues multiple Initial CRYPTO outputs, drain only the first
+  protected server Initial datagram in a one-slot batch, continue draining the
+  remaining Initial datagram in a later batch, and let the client reassemble the
+  complete backend-produced CRYPTO bytes.
+- 2026-06-10: Added
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndArmConnection()` so
+  endpoint-owned loops can drive a connection `CryptoBackend` and refresh the
+  aggregate recovery timer snapshot in one core API. Unit coverage proves that
+  a backend-confirmed no-output Handshake drive confirms the connection,
+  discards Handshake packet-number-space state, and clears the endpoint timer;
+  the OpenSSL-backed adapter now uses this lifecycle helper on the client and
+  paired server backend paths. Added
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndArmConnection()`
+  for the close-propagating peer transport-parameter path; unit coverage proves
+  invalid backend peer-parameter bytes queue a protected Handshake
+  `TRANSPORT_PARAMETER_ERROR` close through the endpoint lifecycle without
+  pulling backend output. Added endpoint lifecycle wrappers for
+  `driveCryptoBackendInSpaceWithCompatibleVersion*()` as the RFC 9368
+  compatible Version Information backend path; tests cover selected-version
+  progress, Handshake discard/timer refresh, and protected
+  `VERSION_NEGOTIATION_ERROR` close emission before backend output is pulled.
+  Added
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams()`
+  for socket loops that already hold Initial or Handshake packet-protection
+  keys. Unit coverage proves a caller-keyed Handshake datagram can feed backend
+  input, a backend drive can queue two Handshake CRYPTO outputs, a one-slot
+  bounded drain emits only the first protected long-header datagram, and a
+  later drain completes delivery to the peer. Added
+  `EndpointConnectionLifecycle.processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams()`
+  as the single-connection receive-to-backend-to-bounded-drain step for
+  caller-keyed Initial/Handshake paths; tests prove an authenticated Handshake
+  datagram is processed before backend input delivery and bounded response
+  draining. Added
+  `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams()`
+  for the TLS-owned Handshake stage after traffic secrets are installed; tests
+  prove installed-key Handshake receive, backend input delivery, multi-output
+  backend CRYPTO, one-slot bounded drain, and later peer delivery through
+  installed-key Handshake packet protection. Added
+  `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams()`
+  for the close-propagating installed-key Handshake backend path; tests prove
+  backend peer transport-parameter errors stop before backend output pull or
+  output drain and leave a protected Handshake close for the peer. Added
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams()`
+  as a single-connection no-new-datagram tick; tests prove pending-work sweep
+  accounting, backend drive, one-slot installed-key Handshake drain, and later
+  peer delivery without requiring callers to build single-element view slices.
+  Added
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams()`
+  for the single-connection close-propagating no-new-datagram tick; tests prove
+  backend errors stop before output pull and drain.
+  The installed-key Handshake receive `OrClose` lifecycle wrapper now also
+  refreshes endpoint state when authenticated frame errors queue protected
+  `CONNECTION_CLOSE`; tests prove an armed Handshake recovery timer is cleared
+  before the protected close is polled. The other endpoint protected receive
+  `OrClose` wrappers now use the same error-path refresh rule for caller-keyed,
+  installed-key, key-update, and key-phase long/0-RTT/1-RTT paths; short-packet
+  and installed-key 1-RTT tests prove an armed Application recovery timer is
+  cleared before the protected close is polled. On an already failing
+  connection path, endpoint timer refresh is best-effort so callers keep the
+  original connection error instead of a secondary timer-mirroring failure.
+- 2026-06-10: Added the first core socket-loop entrypoints directly on
+  `EndpointConnectionLifecycle`: `feedDatagram()` wraps version-independent
+  routing, Version Negotiation, stateless reset, and Initial accept
+  classification; `nextDeadline()` returns the earliest active idle,
+  close/drain, or recovery deadline for a connection handle;
+  `processPendingWork()` runs the endpoint-owned pending-work order of idle
+  retirement, close/drain retirement, then loss/PTO service; and
+  `pollDatagram()` emits installed-key Handshake, 0-RTT, or 1-RTT datagrams
+  through the existing protected packet helpers. Unit coverage proves routed
+  feed classification, idle-before-recovery pending-work retirement, closed
+  connections no longer reporting stale idle deadlines, installed-key 1-RTT
+  packet output, recovery timer refresh, and peer ACK scheduling. This is the
+  embeddable API surface for socket loops; the production TLS-owned event loop
+  remains pending.
+- 2026-06-10: Added
+  `EndpointConnectionLifecycle.processPendingWorkAndPollDatagram()` as the
+  installed-key recovery wakeup bridge for socket loops. It preserves the
+  `processPendingWork()` ordering, returns idle/close retirement without
+  polling output, and only calls `pollDatagram()` after a due loss/PTO timer is
+  actually serviced for the requested packet-number space. Unit coverage proves
+  the before-deadline path is a no-op and the due Application PTO path emits an
+  installed-key 1-RTT PING probe while keeping the endpoint recovery timer
+  armed for the probe.
+- 2026-06-10: Added
+  `EndpointPendingWorkDatagramDrainResult` and
+  `EndpointConnectionLifecycle.processPendingWorkAndDrainDatagrams()` as the
+  bounded-output form of the installed-key recovery wakeup bridge. It preserves
+  the same `processPendingWork()` gating as
+  `processPendingWorkAndPollDatagram()`: before a loss/PTO timer is serviced it
+  returns an empty drain result, and after a matching recovery wakeup it drains
+  installed-key output into caller-owned result slots. Unit coverage proves the
+  before-deadline no-op and the due Application PTO 1-RTT PING probe path.
+- 2026-06-10: Added
+  `EndpointConnectionDeadline.installedKeyPollOptions()` and
+  `EndpointPollInstalledKeyDatagramOptions.fromRecoveryDeadline()` so socket
+  loops can derive installed-key Handshake or 1-RTT poll options directly from
+  `nextDeadline()` recovery wakeups. Initial recovery intentionally returns
+  null because Initial packetization does not use installed TLS traffic
+  secrets; 0-RTT remains an explicit poll choice for accepted early data. Unit
+  coverage checks idle/Initial no-op mapping, Handshake DCID/SCID preservation,
+  and Application-to-1-RTT mapping, and the PTO wakeup test now uses the
+  deadline-derived options.
+- 2026-06-10: Added
+  `EndpointConnectionLifecycle.processDueDeadlineAndPollDatagram()` as the
+  socket-loop wakeup entrypoint that combines `nextDeadline()` with pending-work
+  processing. Calls before the current deadline return null and do not mutate
+  connection or endpoint state. Due idle/close deadlines run retirement without
+  output; due installed-key recovery deadlines reuse
+  `processPendingWorkAndPollDatagram()` and may return a probe datagram. Unit
+  coverage proves idle retirement through the due-deadline entrypoint and
+  Application PTO wakeups that are no-ops before the deadline and emit an
+  installed-key 1-RTT PING probe at the deadline.
+- 2026-06-10: Added `EndpointDueWorkDatagramDrainResult`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDrainDatagrams()`, and
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams()`
+  as bounded-output forms of the due-deadline wakeup path. Calls before the
+  current deadline still return null; due idle/close deadlines return empty
+  drain results; due installed-key recovery deadlines reuse
+  `processPendingWorkAndDrainDatagrams()`. Unit coverage proves single-handle
+  and cross-connection Application PTO wakeups drain 1-RTT PING probes while
+  preserving earliest-deadline selection.
+- 2026-06-10: Added `EndpointConnectionView` and
+  `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()` for embeddable
+  socket loops where callers own the connection map. The lifecycle now combines
+  connection-owned idle/close deadlines with endpoint-owned recovery snapshots
+  across a caller-provided view slice without taking ownership of connection
+  storage. Unit coverage proves selection order across close timeout, idle
+  timeout, recovery PTO, and connections with no endpoint-visible deadline.
+- 2026-06-10: Added `EndpointConnectionPollView` and
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndPollDatagram()`
+  so embeddable socket loops can dispatch the earliest already-due deadline
+  across caller-owned connections without giving the lifecycle connection
+  storage ownership. Unit coverage proves calls before the earliest due
+  deadline are no-ops, and that only the selected due connection emits the
+  installed-key 1-RTT PTO probe while later-deadline connections remain
+  untouched.
+- 2026-06-10: Added `EndpointConnectionReceiveView` and
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnections()`
+  so socket loops can route and process installed-key datagrams across a
+  caller-owned connection set without duplicating endpoint route lookup and
+  close-propagating protected receive logic. Unit coverage proves a routed
+  1-RTT packet is delivered to the matching connection ID while another live
+  caller-owned connection remains untouched.
+- 2026-06-10: Added
+  `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` and
+  `EndpointPolledDatagramResult` for caller-owned connection maps. Socket loops
+  can now ask the lifecycle owner to poll installed-key output across a
+  caller-ordered connection slice without duplicating timer mirroring around
+  each connection. Unit coverage proves the first connection with queued output
+  is selected and produces a protected 1-RTT PING while an earlier idle
+  connection remains unsent.
+- 2026-06-10: Added `EndpointDatagramDrainResult` and
+  `EndpointConnectionLifecycle.drainDatagramsAcrossConnections()` so embeddable
+  socket loops can drain installed-key output into caller-owned result slots
+  with an explicit per-iteration bound. The result reports initialized entries
+  even when a later poll fails, preserving caller ownership and release
+  responsibility for partially drained datagrams. Unit coverage proves a
+  one-slot batch emits only the first queued connection and a later drain
+  continues with the remaining queued connection.
+- 2026-06-10: Added `EndpointPendingWorkSweepResult` and
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnections()` so socket
+  loops can sweep idle timeout, close/drain timeout, and recovery timer work
+  across caller-owned connections without taking over connection storage. Unit
+  coverage proves one pass can retire an idle connection and service another
+  connection's due recovery timer while preserving the latter connection.
+- 2026-06-10: Added `EndpointPendingWorkCryptoBackendDatagramResult` and
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram()`
+  for no-new-datagram loop ticks. The helper applies idle/close/recovery
+  pending work first, then drives caller-owned TLS backends, then polls
+  installed-key output across caller-owned connections. Unit coverage proves an
+  expired Application PTO can be serviced and emitted as a protected 1-RTT PING
+  probe in the same lifecycle-owned API step without backend storage ownership.
+- 2026-06-10: Added the close-propagating and RFC 9368-compatible pending-work
+  backend loop variants:
+  `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram()`,
+  `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram()`,
+  and
+  `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram()`.
+  Unit coverage proves timer/flush ticks can stop before output polling on peer
+  transport-parameter errors, apply authenticated compatible Version
+  Information, and queue compatible-version close state through the same
+  lifecycle-owned API boundary.
+- 2026-06-10: Added `EndpointDueWorkCryptoBackendDatagramResult` and the
+  due-deadline backend loop variants:
+  `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram()`,
+  `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram()`,
+  `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram()`,
+  and
+  `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram()`.
+  The helpers process the earliest due caller-owned connection first, return a
+  due recovery datagram before driving TLS backends, and only continue into
+  backend drive/output polling for non-output deadlines such as idle or close
+  wakeups. Unit coverage proves one-output ownership, close-propagating backend
+  errors, compatible Version Information application, and compatible-version
+  close propagation through the same lifecycle-owned wakeup API.
+- 2026-06-10: Added `EndpointCryptoBackendDriveView`,
+  `EndpointCryptoBackendDriveSweepResult`, and
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndArmConnections()`
+  so a TLS-backed socket loop can drive caller-owned connection/backend pairs
+  in one lifecycle-owned sweep. The helper reuses the single-connection backend
+  drive path and refreshes endpoint recovery scheduling for each connection.
+  Unit coverage proves two caller-owned backends are driven, their outbound
+  Handshake CRYPTO bytes are aggregated in progress counters, and each
+  connection receives its own queued CRYPTO output.
+- 2026-06-10: Added
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceOrCloseAndArmConnections()`
+  for TLS-backed socket loops that need close-propagating peer
+  transport-parameter handling across caller-owned connection/backend pairs.
+  The sweep stops at the first backend error so the originating connection
+  error is not hidden by later backend work. Unit coverage proves an earlier
+  backend can queue CRYPTO output, the failing backend enters closing state
+  without pulling output, and later backends are not driven.
+- 2026-06-10: Added
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections()`
+  and
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections()`
+  for RFC 9368-compatible TLS backend sweeps across caller-owned
+  connection/backend pairs. The success sweep aggregates peer
+  transport-parameter bytes, compatible-version selection, handshake
+  confirmation, and recovery-timer refresh across multiple connections. The
+  close-propagating sweep stops at the first peer Version Information error and
+  leaves later backends untouched. Unit coverage proves both the two-connection
+  compatible-version success path and the first-error close path.
+- 2026-06-10: Added `EndpointCryptoBackendDriveDatagramResult` and
+  backend-drive-to-datagram loop steps:
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndPollDatagram()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndPollDatagram()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceOrCloseAndPollDatagram()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndPollDatagram()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram()`,
+  and
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram()`.
+  These helpers combine one lifecycle-owned TLS backend sweep with installed-key
+  datagram polling across caller-owned connections, without taking ownership of
+  connection/backend storage. Unit coverage proves backend-produced Handshake
+  CRYPTO can be driven, packetized as a protected installed-key Handshake
+  datagram, and consumed by the peer as CRYPTO bytes in the same loop-facing
+  API step. The single-connection forms reuse the same sweep path with one
+  connection/backend pair and prove one-datagram polling, close-before-poll
+  suppression, and compatible-version peer information handling.
+- 2026-06-10: Added `EndpointCryptoBackendDriveDatagramDrainResult` and
+  backend-drive-to-bounded-drain loop steps:
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams()`,
+  and
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`.
+  These helpers keep backend progress and bounded caller-owned output draining
+  in one lifecycle-owned API step. Unit coverage proves multiple queued
+  installed-key datagrams can be drained after a backend sweep, while
+  close-propagating backend errors stop before any output slot is initialized
+  and compatible-version variants apply or reject peer Version Information
+  before draining. The single-connection forms reuse the same sweep path with
+  one connection/backend pair and prove one-slot bounded drain, close-before
+  drain suppression, and compatible-version peer information handling.
+- 2026-06-10: Added `EndpointFeedCryptoBackendDriveDatagramResult` and
+  receive-to-backend-to-output loop steps:
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram()`,
+  and
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram()`.
+  These helpers serve caller-owned connection and backend maps. Routed installed-key
+  datagrams are processed, then the selected backend sweep consumes received
+  CRYPTO, and installed-key output is polled in the same lifecycle-owned API
+  step. Non-routed Version Negotiation, stateless reset, supported Initial
+  acceptance, and drop results return without backend driving. Unit coverage
+  proves a protected Handshake CRYPTO datagram is routed to the server
+  connection, consumed by the backend, answered as a protected Handshake
+  datagram, and consumed by the peer as CRYPTO bytes; it also proves dropped
+  datagrams do not drive OrClose/compatible backends, and close-propagating
+  backend peer-parameter errors stop before output polling. The single-connection
+  forms reuse the same lifecycle path with one connection/backend pair and prove
+  routed receive-to-backend-to-poll response delivery, close-before-poll
+  suppression, compatible peer Version Information application, and
+  compatible-version close-before-poll suppression.
+- 2026-06-10: Added `EndpointFeedCryptoBackendDriveDatagramDrainResult` and
+  receive-to-backend-to-bounded-drain loop steps:
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams()`,
+  and
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`.
+  These helpers combine routed installed-key receive, selected TLS backend
+  sweep, and bounded caller-owned output draining without taking ownership of
+  connection/backend storage. Unit coverage proves a routed Handshake CRYPTO
+  datagram can drive backend output and drain multiple protected response
+  datagrams in the same loop step. The single-connection form reuses the same
+  lifecycle path with one connection/backend pair and proves one-slot bounded
+  drain plus later peer delivery; the single compatible-version form also
+  proves peer Version Information application before bounded drain, while its
+  OrClose form queues CONNECTION_CLOSE and stops before output draining when no
+  compatible version is selected. Dropped datagrams do not drive any backend,
+  and close-propagating peer-parameter errors stop before output draining.
+- 2026-06-10: Added `EndpointPendingWorkCryptoBackendDatagramDrainResult` and
+  pending-work-to-backend-to-bounded-drain loop steps:
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams()`,
+  and
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`.
+  These helpers run endpoint pending work before TLS backend progress and
+  bounded output draining. Unit coverage proves a no-new-datagram loop tick can
+  drive a backend and drain multiple queued installed-key datagrams, while
+  close-propagating backend errors stop before output draining. The
+  single-connection compatible-version form proves peer Version Information is
+  applied before bounded drain, while its OrClose form queues CONNECTION_CLOSE
+  and stops before output draining when no compatible version is selected.
+- 2026-06-10: Added `EndpointDueWorkCryptoBackendDatagramDrainResult` and
+  due-deadline-to-backend-to-bounded-drain loop steps:
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams()`,
+  and
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`.
+  These helpers preserve due recovery datagram ownership: when a deadline
+  already emits a protected probe, backend work is skipped; when the due
+  deadline has no datagram, backend progress and bounded output draining run in
+  the same lifecycle-owned step. The single-connection form stops before
+  backend progress after terminal idle/close cleanup; its OrClose form queues
+  CONNECTION_CLOSE on backend peer-parameter errors and returns before output
+  draining. The single compatible-version form proves peer Version Information
+  is applied before bounded drain after an Initial recovery wakeup with no
+  installed-key datagram, while its OrClose form queues CONNECTION_CLOSE and
+  stops before output draining when no compatible version is selected. Unit
+  coverage proves recovery-datagram ownership, non-output deadline backend
+  drive, close-propagating drain suppression, and an Initial recovery wakeup
+  that continues into Handshake backend output, emits only the first protected
+  datagram under a one-slot budget, and delivers the remaining backend CRYPTO
+  through a later drain.
+- 2026-06-10: Extended the socket-facing lifecycle surface with
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeys()`. The helper
+  combines version-independent feed classification with routed installed-key
+  Handshake, 0-RTT, or 1-RTT protected receive, and uses close-propagating
+  receive paths for authenticated plaintext frame errors. Unit coverage now
+  proves a client lifecycle can `pollDatagram()` an installed-key 1-RTT packet,
+  while a server lifecycle routes and processes that same packet through
+  `feedDatagramWithInstalledKeys()`, preserves route evidence, schedules the
+  peer ACK, and does not arm a recovery timer for ACK-only receive state.
 - 2026-06-05: Extended `examples/tls_openssl_backend_adapter.zig` so the server
   connection probe pulls real pair-transcript 1-RTT secrets through the
   OpenSSL-backed backend, reports handshake confirmation, and discards server
@@ -2905,7 +3381,7 @@ run from `build.zig`.
 | `tls_c_abi_adapter` | Runnable C-object-backed `TlsBackend` check: a C-compiled callback object drives the same transport-parameter, CRYPTO byte, Handshake-secret, and confirmation path through the Zig adapter before replacing the demo object with a mature C TLS library binding. | Present |
 | `tls_openssl_probe` | Runnable OpenSSL QUIC TLS API/link probe: uses `pkg-config` OpenSSL, creates OpenSSL's full QUIC client method object, sets QUIC TLS callbacks and local transport parameters on the callback-mode TLS object, and prints the dispatch IDs needed for crypto send, secret yield, and peer transport-parameter callbacks. | Present |
 | `tls_openssl_pair_transcript` | Runnable OpenSSL client/server callback-mode transcript check: a fixed example PSK avoids certificate fixture noise, CRYPTO bytes are routed by OpenSSL protection level, both endpoints complete TLS 1.3 without alerts, peer transport-parameter plus Handshake/1-RTT secret callbacks fire on both endpoints, role-specific quicz-encoded local transport-parameter bytes are configured into OpenSSL and then copied and parsed from peer transport-parameter callbacks, keylog callback count/byte evidence is recorded without printing key material, generated CRYPTO bytes are delivered into quicz Initial/Handshake/Application CRYPTO queues, the client Initial CRYPTO bytes are packetized with quicz protected Initial long-packet helpers and delivered to the server connection, both Initial flights are delivered over loopback UDP through the quicz endpoint lifecycle, a manual OpenSSL context routes live Initial and Handshake TLS CRYPTO bytes in both directions through the same socket/lifecycle boundary, OpenSSL-produced Handshake secrets drive installed-key protected Handshake CRYPTO delivery in both directions including loopback UDP delivery through the same lifecycle, the same manual OpenSSL context drives a 1-RTT STREAM request/echo/final-ACK exchange plus Handshake key discard and protected close/route cleanup through that socket/lifecycle path, and OpenSSL-produced 1-RTT secrets drive an installed-key protected STREAM request/response over short packets plus a loopback UDP STREAM echo through the same lifecycle. | Present |
-| `tls_openssl_backend_adapter` | Runnable OpenSSL-backed `TlsBackend` wrapper check: the existing drive path sets quicz local transport parameters on an OpenSSL TLS object, drives `SSL_do_handshake()` to emit the first TLS CRYPTO flight, routes that adapter-generated Initial CRYPTO flight through a protected Initial datagram over loopback UDP, consumes quicz-encoded pair-transcript server transport parameters through the wrapper, delivers real pair-transcript Handshake/1-RTT secrets through OpenSSL callback boundaries, routes real pair-transcript Handshake CRYPTO through a protected Handshake datagram over loopback UDP before feeding it back through the adapter, verifies OpenSSL recv/release callback consumption of inbound Handshake CRYPTO before backend confirmation, then drives loopback UDP 1-RTT STREAM echo with adapter-installed client keys plus matching peer transcript secrets, services Application PTO and routes the protected probe through the same lifecycle owner, reports `backend_confirmed=true` through the OpenSSL-backed `handshake_confirmed` callback, prints matching `peer_tp_bytes` and `transcript_tp`, transcript keylog evidence, and the current wrapper keylog boundary, discards the client Handshake packet-number space and keys through a backend-confirmed no-output Handshake drive, uses the server connection probe to pull real pair-transcript 1-RTT secrets through the backend, record OpenSSL secret callbacks, confirm the server connection, prove peer stream-count limit enforcement from the applied transport parameters, and discard server Handshake packet-number-space keys, uses the paired loopback server backend to consume client Handshake CRYPTO over loopback UDP, pull peer transport parameters plus Handshake/1-RTT secrets, confirm, and clear Handshake keys, and completes protected close delivery plus route cleanup through one socket/lifecycle loop owner. | Present |
+| `tls_openssl_backend_adapter` | Runnable OpenSSL-backed `TlsBackend` wrapper check: the endpoint lifecycle-owned backend drive sets quicz local transport parameters on an OpenSSL TLS object, drives `SSL_do_handshake()` to emit the first TLS CRYPTO flight, routes that adapter-generated Initial CRYPTO flight through a protected Initial datagram over loopback UDP, consumes quicz-encoded pair-transcript server transport parameters through the wrapper, delivers real pair-transcript Handshake/1-RTT secrets through OpenSSL callback boundaries, routes real pair-transcript Handshake CRYPTO through a protected Handshake datagram over loopback UDP before feeding it back through the adapter, verifies OpenSSL recv/release callback consumption of inbound Handshake CRYPTO before backend confirmation, then drives loopback UDP 1-RTT STREAM echo with adapter-installed client keys plus matching peer transcript secrets, services Application PTO and routes the protected probe through the same lifecycle owner, reports `backend_confirmed=true` through the OpenSSL-backed `handshake_confirmed` callback, prints matching `peer_tp_bytes` and `transcript_tp`, transcript keylog evidence, and the current wrapper keylog boundary, discards the client Handshake packet-number space and keys through a lifecycle-owned backend-confirmed no-output Handshake drive that refreshes aggregate recovery timers, uses the server connection probe to pull real pair-transcript 1-RTT secrets through the backend, record OpenSSL secret callbacks, confirm the server connection, prove peer stream-count limit enforcement from the applied transport parameters, and discard server Handshake packet-number-space keys, uses the paired loopback server backend to consume client Handshake CRYPTO over loopback UDP, pull peer transport parameters plus Handshake/1-RTT secrets, confirm, and clear Handshake keys, and completes protected close delivery plus route cleanup through one socket/lifecycle loop owner. | Present |
 | `initial_keys` | RFC 9001 QUIC v1 and RFC 9369 QUIC v2 Initial secret/key/IV/header-protection key derivation, RFC 9001 `quic ku` key-update derivation, protected Initial long-packet seal/open, configured v2 connection Initial packetization, and AES header-protection masking from a client Initial DCID. | Present |
 | `endpoint_routing` | Current in-memory endpoint DCID/IPv4 UDP tuple routing, long-header DCID peeking, unsupported-version RFC 8999 Version Negotiation response generation, client Initial Source CID route registration, supported-version unknown-DCID Initial accept classification, accepted Initial Original DCID/server Initial SCID route registration, short-header registered-CID matching, zero-length CID tuple routing, Retry Source CID route switching, caller-validated preferred-address migration commit, sequence/retire-prior-to/connection-handle route retirement, stateless reset token reuse rejection, caller-validated path update, active-migration-disabled rejection, route retirement, stateless reset token lookup for inactive CIDs, reset datagram construction with caller-supplied unpredictable bytes, and route/version-negotiation/reset/drop/accept receive action classification. | Present |
 | `endpoint_recovery_timers` | Endpoint-owned recovery timer scheduling across caller-owned connection handles: endpoint lifecycle route ownership, earliest aggregate timer selection, before-deadline no-op refresh, PTO service/re-arm, ACK-driven disarm, loss-time service, final timer disarm, connection-handle route retirement, routed protected long-header receive timer refresh with processed-count preservation, client Initial ACK anti-deadlock Handshake PTO preservation, caller-keyed and installed-key Handshake/0-RTT protected long-header recovery timer service plus PTO probe polling, protected long-header send timer refresh, routed caller-keyed Handshake CRYPTO-space and 0-RTT long-packet receive timer refresh, caller-keyed Initial/Handshake CRYPTO-space and 0-RTT long-packet send timer refresh, caller-keyed protected 1-RTT short-packet receive timer refresh, caller-keyed protected 1-RTT short-packet send timer refresh, installed-key protected 1-RTT recovery timer service plus PTO probe polling, routed explicit key-phase/key-update short-packet receive timer refresh, caller-owned key-phase-state short-packet send timer refresh, routed installed-key Handshake/0-RTT long-packet receive timer refresh, installed-key Handshake/0-RTT long-packet send timer refresh, and installed-key protected 1-RTT short-packet send/receive timer refresh. | Present |

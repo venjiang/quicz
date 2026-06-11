@@ -561,6 +561,12 @@ pub const EndpointLossDetectionTimers = struct {
         return earliest;
     }
 
+    /// Return one connection handle's recovery timer snapshot, if armed.
+    pub fn deadlineForConnection(self: *const EndpointLossDetectionTimers, connection_id: u64) ?EndpointLossDetectionTimerDeadline {
+        const index = self.findIndex(connection_id) orelse return null;
+        return self.entries.items[index];
+    }
+
     /// Service one connection's due loss detection timer and refresh scheduling.
     ///
     /// This is the endpoint event-loop bridge for a caller-owned connection
@@ -736,6 +742,314 @@ pub const EndpointProtectedLongRecoveryPollResult = struct {
     datagram: ?[]u8,
 };
 
+/// Endpoint timer kind a socket loop can wait on for one connection handle.
+pub const EndpointConnectionDeadlineKind = enum {
+    /// Connection idle timeout should be checked at the deadline.
+    idle_timeout,
+    /// Closing or draining timeout should be checked at the deadline.
+    close_timeout,
+    /// QUIC loss/PTO recovery timer should be serviced at the deadline.
+    recovery,
+};
+
+/// Earliest endpoint-visible deadline for one caller-owned connection.
+pub const EndpointConnectionDeadline = struct {
+    /// Caller-owned connection handle used by endpoint routing and timers.
+    connection_id: u64,
+    /// Absolute deadline in the connection's caller-controlled millisecond clock.
+    deadline_millis: i64,
+    /// Timer class that owns the deadline.
+    kind: EndpointConnectionDeadlineKind,
+    /// Recovery timer detail, present only when `kind` is `.recovery`.
+    recovery: ?LossDetectionTimerDeadline = null,
+
+    /// Derive installed-key poll options for a recovery deadline.
+    ///
+    /// Initial recovery cannot use installed-key packetization. Application
+    /// recovery maps to the 1-RTT short-packet path; callers that are still
+    /// servicing 0-RTT PTO should pass explicit `.zero_rtt` options instead.
+    pub fn installedKeyPollOptions(
+        self: EndpointConnectionDeadline,
+        destination_connection_id: []const u8,
+        source_connection_id: []const u8,
+    ) ?EndpointPollInstalledKeyDatagramOptions {
+        if (self.kind != .recovery) return null;
+        const timer = self.recovery orelse return null;
+        return EndpointPollInstalledKeyDatagramOptions.fromRecoveryDeadline(
+            timer,
+            destination_connection_id,
+            source_connection_id,
+        );
+    }
+};
+
+/// Caller-owned connection reference used by aggregate endpoint scheduling.
+pub const EndpointConnectionView = struct {
+    /// Caller-owned connection handle used by endpoint routing and timers.
+    connection_id: u64,
+    /// Caller-owned connection state. The lifecycle does not take ownership.
+    connection: *const Connection,
+};
+
+/// Mutable caller-owned connection reference used by socket-loop deadline work.
+pub const EndpointConnectionPollView = struct {
+    /// Caller-owned connection handle used by endpoint routing and timers.
+    connection_id: u64,
+    /// Caller-owned connection state. The lifecycle does not take ownership.
+    connection: *Connection,
+    /// Destination connection ID to use when a due recovery wakeup emits a packet.
+    destination_connection_id: []const u8,
+    /// Source connection ID for long-header Handshake recovery packets.
+    source_connection_id: []const u8 = &.{},
+};
+
+/// Mutable caller-owned connection reference used by socket-loop receive dispatch.
+pub const EndpointConnectionReceiveView = struct {
+    /// Caller-owned connection handle used by endpoint routing and packet receive.
+    connection_id: u64,
+    /// Caller-owned connection state. The lifecycle does not take ownership.
+    connection: *Connection,
+};
+
+/// Caller-owned connection/backend pair used by TLS drive sweeps.
+pub const EndpointCryptoBackendDriveView = struct {
+    /// Caller-owned connection handle used by endpoint timers.
+    connection_id: u64,
+    /// Caller-owned connection state. The lifecycle does not take ownership.
+    connection: *Connection,
+    /// TLS/crypto backend associated with `connection`.
+    backend: CryptoBackend,
+    /// Scratch buffer used for backend pull and transport-parameter bytes.
+    scratch: []u8,
+};
+
+/// Result from one socket-loop pending-work pass for a connection handle.
+pub const EndpointPendingWorkResult = struct {
+    /// Endpoint state retired because idle timeout closed the connection.
+    idle_retired: ?EndpointConnectionRetireResult = null,
+    /// Endpoint state retired because close/drain timeout closed the connection.
+    close_retired: ?EndpointConnectionRetireResult = null,
+    /// Loss/PTO timer serviced for the connection, if due.
+    recovery_serviced: ?EndpointLossDetectionTimerDeadline = null,
+};
+
+/// Result from processing pending endpoint work and polling a recovery datagram.
+pub const EndpointPendingWorkDatagramResult = struct {
+    /// Pending-work actions applied before polling output.
+    pending_work: EndpointPendingWorkResult,
+    /// Protected datagram emitted after a due recovery timer, if any.
+    datagram: ?[]u8 = null,
+};
+
+/// Result from processing pending endpoint work and draining recovery output.
+pub const EndpointPendingWorkDatagramDrainResult = struct {
+    /// Pending-work actions applied before draining output.
+    pending_work: EndpointPendingWorkResult,
+    /// Bounded output drain result after a due recovery timer.
+    drain: EndpointDatagramDrainResult,
+};
+
+/// Summary from sweeping pending work across caller-owned connections.
+pub const EndpointPendingWorkSweepResult = struct {
+    /// Number of connection handles retired by idle timeout.
+    idle_retired_count: usize = 0,
+    /// Number of connection handles retired by close/drain timeout.
+    close_retired_count: usize = 0,
+    /// Number of due loss/PTO timers serviced.
+    recovery_serviced_count: usize = 0,
+};
+
+/// Result from pending-work sweep followed by backend drive and output polling.
+pub const EndpointPendingWorkCryptoBackendDatagramResult = struct {
+    /// Pending-work actions applied before backend/output processing.
+    pending_work: EndpointPendingWorkSweepResult,
+    /// Backend drive and output polling result.
+    backend: EndpointCryptoBackendDriveDatagramResult,
+};
+
+/// Result from pending-work sweep followed by backend drive and output draining.
+pub const EndpointPendingWorkCryptoBackendDatagramDrainResult = struct {
+    /// Pending-work actions applied before backend/output processing.
+    pending_work: EndpointPendingWorkSweepResult,
+    /// Backend drive and bounded output drain result.
+    backend: EndpointCryptoBackendDriveDatagramDrainResult,
+};
+
+/// Summary from driving crypto backends across caller-owned connections.
+pub const EndpointCryptoBackendDriveSweepResult = struct {
+    /// Number of connection/backend pairs driven.
+    connections_driven: usize = 0,
+    /// Aggregated backend progress across all successfully driven connections.
+    progress: CryptoBackendProgress = .{},
+};
+
+/// Result from one TLS backend sweep followed by installed-key datagram polling.
+pub const EndpointCryptoBackendDriveDatagramResult = struct {
+    /// Backend drive progress collected before polling output.
+    backend: EndpointCryptoBackendDriveSweepResult,
+    /// Protected datagram emitted after backend progress, if any.
+    datagram: ?EndpointPolledDatagramResult = null,
+};
+
+/// Result from one TLS backend sweep followed by bounded output draining.
+pub const EndpointCryptoBackendDriveDatagramDrainResult = struct {
+    /// Backend drive progress collected before draining output.
+    backend: EndpointCryptoBackendDriveSweepResult,
+    /// Bounded output drain result after backend progress.
+    drain: EndpointDatagramDrainResult,
+};
+
+/// Result from one backend drive followed by caller-keyed long-packet draining.
+pub const EndpointCryptoBackendDriveProtectedLongDatagramDrainResult = struct {
+    /// Backend progress collected before draining output.
+    backend: CryptoBackendProgress,
+    /// Bounded caller-keyed Initial/Handshake CRYPTO output drain result.
+    drain: EndpointDatagramDrainResult,
+};
+
+/// Result from polling installed-key output across caller-owned connections.
+pub const EndpointPolledDatagramResult = struct {
+    /// Caller-owned connection handle that produced `datagram`.
+    connection_id: u64,
+    /// Protected datagram emitted by the selected connection.
+    datagram: []u8,
+};
+
+/// Result from draining installed-key datagrams into caller-owned result slots.
+pub const EndpointDatagramDrainResult = struct {
+    /// Number of initialized entries written to the caller-provided output slice.
+    datagrams_written: usize = 0,
+    /// First polling error observed after any earlier entries were written.
+    ///
+    /// Callers still own and must release `datagrams_written` entries even when
+    /// this field is set.
+    first_error: ?Error = null,
+};
+
+/// Result from servicing one due endpoint-visible deadline.
+pub const EndpointDueWorkDatagramResult = struct {
+    /// Deadline that was due when this pending-work pass started.
+    deadline: EndpointConnectionDeadline,
+    /// Pending-work actions applied for the due deadline.
+    pending_work: EndpointPendingWorkResult,
+    /// Protected datagram emitted after a due recovery timer, if any.
+    datagram: ?[]u8 = null,
+};
+
+/// Result from servicing one due endpoint-visible deadline and draining output.
+pub const EndpointDueWorkDatagramDrainResult = struct {
+    /// Deadline that was due when this pending-work pass started.
+    deadline: EndpointConnectionDeadline,
+    /// Pending-work actions applied for the due deadline.
+    pending_work: EndpointPendingWorkResult,
+    /// Bounded output drain after a due recovery timer, if any.
+    drain: EndpointDatagramDrainResult,
+};
+
+/// Result from due-deadline work followed by optional backend/output processing.
+pub const EndpointDueWorkCryptoBackendDatagramResult = struct {
+    /// Due deadline work applied before backend/output processing.
+    due_work: EndpointDueWorkDatagramResult,
+    /// Backend drive and output polling result when the due step did not
+    /// already emit a datagram.
+    backend: ?EndpointCryptoBackendDriveDatagramResult = null,
+};
+
+/// Result from due-deadline work followed by optional backend/output draining.
+pub const EndpointDueWorkCryptoBackendDatagramDrainResult = struct {
+    /// Due deadline work applied before backend/output processing.
+    due_work: EndpointDueWorkDatagramResult,
+    /// Backend drive and bounded output drain result when the due step did not
+    /// already emit a datagram.
+    backend: ?EndpointCryptoBackendDriveDatagramDrainResult = null,
+};
+
+/// Result from feeding one socket datagram through installed-key receive paths.
+pub const EndpointFeedInstalledKeyDatagramResult = union(enum) {
+    /// Datagram was routed to and processed by the caller-owned connection.
+    routed: endpoint.RouteResult,
+    /// Datagram is a supported-version Initial for a new server connection.
+    accept_initial: endpoint.InitialAcceptResult,
+    /// Caller should send this Version Negotiation datagram on the same UDP path.
+    version_negotiation: []const u8,
+    /// Caller should send this stateless reset datagram on the same UDP path.
+    stateless_reset: []const u8,
+    /// Datagram should be dropped without connection delivery.
+    dropped,
+};
+
+/// Result from feeding one installed-key datagram, then driving backend output.
+pub const EndpointFeedCryptoBackendDriveDatagramResult = struct {
+    /// Receive classification and processing result.
+    feed: EndpointFeedInstalledKeyDatagramResult,
+    /// Backend drive and output result when `feed` routed to a connection.
+    backend: ?EndpointCryptoBackendDriveDatagramResult = null,
+};
+
+/// Result from feeding one installed-key datagram, then draining backend output.
+pub const EndpointFeedCryptoBackendDriveDatagramDrainResult = struct {
+    /// Receive classification and processing result.
+    feed: EndpointFeedInstalledKeyDatagramResult,
+    /// Backend drive and bounded output drain when `feed` routed to a connection.
+    backend: ?EndpointCryptoBackendDriveDatagramDrainResult = null,
+};
+
+/// Packet-number-space choice for `pollDatagram()`.
+pub const EndpointInstalledKeyDatagramSpace = enum {
+    /// Poll a Handshake long-header datagram with connection-installed keys.
+    handshake,
+    /// Poll a 0-RTT long-header datagram with connection-installed keys.
+    zero_rtt,
+    /// Poll a 1-RTT short-header datagram with connection-installed keys.
+    application,
+};
+
+/// Options for polling a datagram after the connection owns packet-protection keys.
+pub const EndpointPollInstalledKeyDatagramOptions = struct {
+    /// Packet-number-space/header family to poll.
+    space: EndpointInstalledKeyDatagramSpace,
+    /// Destination connection ID to encode in the emitted packet.
+    destination_connection_id: []const u8,
+    /// Source connection ID for long-header Handshake/0-RTT packets.
+    source_connection_id: []const u8 = &[_]u8{},
+
+    /// Build installed-key poll options from a loss/PTO recovery deadline.
+    ///
+    /// Initial recovery returns null because Initial packetization does not use
+    /// installed TLS traffic secrets. Application recovery maps to 1-RTT; use
+    /// explicit `.zero_rtt` options when servicing accepted early data.
+    pub fn fromRecoveryDeadline(
+        timer: LossDetectionTimerDeadline,
+        destination_connection_id: []const u8,
+        source_connection_id: []const u8,
+    ) ?EndpointPollInstalledKeyDatagramOptions {
+        return switch (timer.space) {
+            .initial => null,
+            .handshake => .{
+                .space = .handshake,
+                .destination_connection_id = destination_connection_id,
+                .source_connection_id = source_connection_id,
+            },
+            .application => .{
+                .space = .application,
+                .destination_connection_id = destination_connection_id,
+            },
+        };
+    }
+};
+
+/// Options for feeding a datagram after the connection owns packet-protection keys.
+pub const EndpointFeedInstalledKeyDatagramOptions = struct {
+    /// Packet-number-space/header family expected for routed datagram processing.
+    space: EndpointInstalledKeyDatagramSpace,
+    /// Scratch output buffer for Version Negotiation or stateless reset actions.
+    out: []u8,
+    /// Endpoint entropy used when constructing stateless reset datagrams.
+    unpredictable_prefix: []const u8,
+    /// Versions supported by this endpoint for Initial accept/VN classification.
+    supported_versions: []const packet.Version,
+};
+
 /// Endpoint result after accepting a protected Initial and emitting a response.
 pub const EndpointAcceptedProtectedInitialResponseResult = struct {
     /// Authentication, packet processing, and route installation result.
@@ -745,6 +1059,29 @@ pub const EndpointAcceptedProtectedInitialResponseResult = struct {
     /// The caller owns these bytes and must free them with the same allocator
     /// used by `connection`.
     response_datagram: []u8,
+};
+
+/// Endpoint result after accepting a protected Initial and driving a TLS backend.
+pub const EndpointAcceptedInitialCryptoBackendDatagramResult = struct {
+    /// Authentication, packet processing, and route installation result.
+    accepted_initial: EndpointAcceptedProtectedInitialResult,
+    /// Initial-space backend progress after consuming received client CRYPTO.
+    backend: CryptoBackendProgress,
+    /// Protected server Initial datagram emitted from backend-produced CRYPTO.
+    ///
+    /// The caller owns these bytes and must free them with the same allocator
+    /// used by `connection`.
+    response_datagram: ?[]u8 = null,
+};
+
+/// Endpoint result after accepting a protected Initial and draining TLS output.
+pub const EndpointAcceptedInitialCryptoBackendDatagramDrainResult = struct {
+    /// Authentication, packet processing, and route installation result.
+    accepted_initial: EndpointAcceptedProtectedInitialResult,
+    /// Initial-space backend progress after consuming received client CRYPTO.
+    backend: CryptoBackendProgress,
+    /// Bounded protected server Initial output drain result.
+    drain: EndpointDatagramDrainResult,
 };
 
 /// Endpoint result after accepting a Retry follow-up protected Initial.
@@ -1078,6 +1415,175 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .accepted_initial = accepted_initial,
             .response_datagram = response_datagram,
+        };
+    }
+
+    /// Process one accepted client Initial, drive Initial TLS, and emit response.
+    ///
+    /// This is the TLS-backend form of
+    /// `processAcceptedProtectedInitialResponseDatagram()`. The lifecycle
+    /// authenticates the client Initial, installs server endpoint routes,
+    /// delivers received Initial CRYPTO into `backend`, queues backend-produced
+    /// Initial CRYPTO, and emits at most one protected server Initial datagram.
+    /// Connection/backend/socket storage remains caller-owned.
+    pub fn processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        initial_accept: endpoint.InitialAcceptResult,
+        server_source_connection_id: []const u8,
+        datagram: []const u8,
+        options: endpoint.AcceptedInitialRouteOptions,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) EndpointProtectedInitialError!EndpointAcceptedInitialCryptoBackendDatagramResult {
+        const accepted_initial = try self.processAcceptedProtectedInitialDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            initial_accept,
+            server_source_connection_id,
+            datagram,
+            options,
+        );
+        const backend_progress = try self.driveCryptoBackendInSpaceAndArmConnection(
+            connection_id,
+            connection,
+            .initial,
+            backend,
+            scratch,
+        );
+        const initial_secrets = protection.deriveInitialSecrets(
+            accepted_initial.initial_accept.version,
+            accepted_initial.initial_accept.original_destination_connection_id,
+        ) catch return error.InvalidPacket;
+        return .{
+            .accepted_initial = accepted_initial,
+            .backend = backend_progress,
+            .response_datagram = try self.pollProtectedLongCryptoDatagramInSpace(
+                connection_id,
+                connection,
+                .initial,
+                now_millis,
+                accepted_initial.initial_accept.source_connection_id,
+                server_source_connection_id,
+                &[_]u8{},
+                initial_secrets.server,
+            ),
+        };
+    }
+
+    /// Process one accepted client Initial, drive Initial TLS, and drain output.
+    ///
+    /// This bounded-output form lets socket loops cap the number of protected
+    /// server Initial datagrams emitted after backend progress. It preserves
+    /// caller ownership of connection/backend/socket storage and each returned
+    /// datagram.
+    pub fn processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        initial_accept: endpoint.InitialAcceptResult,
+        server_source_connection_id: []const u8,
+        datagram: []const u8,
+        options: endpoint.AcceptedInitialRouteOptions,
+        backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedInitialError!EndpointAcceptedInitialCryptoBackendDatagramDrainResult {
+        const accepted_initial = try self.processAcceptedProtectedInitialDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            initial_accept,
+            server_source_connection_id,
+            datagram,
+            options,
+        );
+        const backend_progress = try self.driveCryptoBackendInSpaceAndArmConnection(
+            connection_id,
+            connection,
+            .initial,
+            backend,
+            scratch,
+        );
+        const initial_secrets = protection.deriveInitialSecrets(
+            accepted_initial.initial_accept.version,
+            accepted_initial.initial_accept.original_destination_connection_id,
+        ) catch return error.InvalidPacket;
+        return .{
+            .accepted_initial = accepted_initial,
+            .backend = backend_progress,
+            .drain = self.drainProtectedLongCryptoDatagramsInSpace(
+                connection_id,
+                connection,
+                .initial,
+                now_millis,
+                accepted_initial.initial_accept.source_connection_id,
+                server_source_connection_id,
+                &[_]u8{},
+                initial_secrets.server,
+                out,
+            ),
+        };
+    }
+
+    /// Process one accepted Initial through a close-propagating TLS backend.
+    ///
+    /// This preserves the success behavior of
+    /// `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram()`, but
+    /// peer transport-parameter errors returned by `backend` queue
+    /// `CONNECTION_CLOSE` through
+    /// `driveCryptoBackendInSpaceOrCloseAndArmConnection()` and return before
+    /// polling a response datagram. The caller can then poll the pending close
+    /// through the existing protected long-packet path.
+    pub fn processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        initial_accept: endpoint.InitialAcceptResult,
+        server_source_connection_id: []const u8,
+        datagram: []const u8,
+        options: endpoint.AcceptedInitialRouteOptions,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) EndpointProtectedInitialError!EndpointAcceptedInitialCryptoBackendDatagramResult {
+        const accepted_initial = try self.processAcceptedProtectedInitialDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            initial_accept,
+            server_source_connection_id,
+            datagram,
+            options,
+        );
+        const backend_progress = try self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+            connection_id,
+            connection,
+            .initial,
+            backend,
+            scratch,
+        );
+        const initial_secrets = protection.deriveInitialSecrets(
+            accepted_initial.initial_accept.version,
+            accepted_initial.initial_accept.original_destination_connection_id,
+        ) catch return error.InvalidPacket;
+        return .{
+            .accepted_initial = accepted_initial,
+            .backend = backend_progress,
+            .response_datagram = try self.pollProtectedLongCryptoDatagramInSpace(
+                connection_id,
+                connection,
+                .initial,
+                now_millis,
+                accepted_initial.initial_accept.source_connection_id,
+                server_source_connection_id,
+                &[_]u8{},
+                initial_secrets.server,
+            ),
         };
     }
 
@@ -1436,6 +1942,857 @@ pub const EndpointConnectionLifecycle = struct {
         return self.router.handleDatagramWithVersionNegotiation(out, path, datagram, unpredictable_prefix, supported_versions);
     }
 
+    /// Socket-facing datagram intake entrypoint.
+    ///
+    /// This is the public endpoint-loop name for receive classification. It
+    /// performs version-independent routing, unsupported-version Version
+    /// Negotiation response generation, stateless reset lookup, and new Initial
+    /// accept classification without owning socket I/O or `Connection` storage.
+    pub fn feedDatagram(
+        self: *const EndpointConnectionLifecycle,
+        out: []u8,
+        path: endpoint.Udp4Tuple,
+        datagram: []const u8,
+        unpredictable_prefix: []const u8,
+        supported_versions: []const packet.Version,
+    ) endpoint.RouteError!endpoint.DatagramAction {
+        return self.handleDatagramWithVersionNegotiation(
+            out,
+            path,
+            datagram,
+            unpredictable_prefix,
+            supported_versions,
+        );
+    }
+
+    /// Socket-facing installed-key datagram receive entrypoint.
+    ///
+    /// This combines `feedDatagram()` classification with routed protected
+    /// packet processing after TLS has installed keys on `connection`. Routed
+    /// datagrams must resolve to `connection_id`; authenticated plaintext frame
+    /// errors use the close-propagating receive paths. Version Negotiation,
+    /// stateless reset, new Initial accept, and drop actions are surfaced
+    /// unchanged for the socket loop to handle.
+    pub fn feedDatagramWithInstalledKeys(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        const action = try self.feedDatagram(
+            options.out,
+            path,
+            datagram,
+            options.unpredictable_prefix,
+            options.supported_versions,
+        );
+        return switch (action) {
+            .routed => |route| routed: {
+                if (route.connection_id != connection_id) return error.InvalidPacket;
+                switch (options.space) {
+                    .handshake => try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+                        connection_id,
+                        connection,
+                        now_millis,
+                        datagram,
+                    ),
+                    .zero_rtt => try self.processProtectedZeroRttDatagramWithInstalledKeysOrClose(
+                        connection_id,
+                        connection,
+                        now_millis,
+                        datagram,
+                    ),
+                    .application => try self.processProtectedShortDatagramWithInstalledKeysOrClose(
+                        connection_id,
+                        connection,
+                        now_millis,
+                        route.destination_connection_id.asSlice().len,
+                        datagram,
+                    ),
+                }
+                break :routed .{ .routed = route };
+            },
+            .accept_initial => |initial| .{ .accept_initial = initial },
+            .version_negotiation => |response| .{ .version_negotiation = response },
+            .stateless_reset => |reset| .{ .stateless_reset = reset },
+            .dropped => .dropped,
+        };
+    }
+
+    /// Socket-facing installed-key receive dispatch across caller-owned connections.
+    ///
+    /// This helper keeps endpoint routing and protected packet receive under
+    /// the lifecycle owner while leaving connection storage with the caller.
+    /// Routed datagrams are matched by `connection_id` against `connections`;
+    /// missing matches return `InvalidPacket`. Non-routed actions are surfaced
+    /// unchanged so the socket loop can send Version Negotiation/stateless
+    /// reset responses or accept new Initials.
+    pub fn feedDatagramWithInstalledKeysAcrossConnections(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        const action = try self.feedDatagram(
+            options.out,
+            path,
+            datagram,
+            options.unpredictable_prefix,
+            options.supported_versions,
+        );
+        return switch (action) {
+            .routed => |route| routed: {
+                const view = for (connections) |candidate| {
+                    if (candidate.connection_id == route.connection_id) break candidate;
+                } else return error.InvalidPacket;
+                switch (options.space) {
+                    .handshake => try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+                        view.connection_id,
+                        view.connection,
+                        now_millis,
+                        datagram,
+                    ),
+                    .zero_rtt => try self.processProtectedZeroRttDatagramWithInstalledKeysOrClose(
+                        view.connection_id,
+                        view.connection,
+                        now_millis,
+                        datagram,
+                    ),
+                    .application => try self.processProtectedShortDatagramWithInstalledKeysOrClose(
+                        view.connection_id,
+                        view.connection,
+                        now_millis,
+                        route.destination_connection_id.asSlice().len,
+                        datagram,
+                    ),
+                }
+                break :routed .{ .routed = route };
+            },
+            .accept_initial => |initial| .{ .accept_initial = initial },
+            .version_negotiation => |response| .{ .version_negotiation = response },
+            .stateless_reset => |reset| .{ .stateless_reset = reset },
+            .dropped => .dropped,
+        };
+    }
+
+    /// Feed an installed-key datagram, drive TLS backends, then poll output.
+    ///
+    /// This is a socket-loop receive-to-backend-to-output step for callers that
+    /// own connection/backend storage. Non-routed feed results are returned
+    /// without driving backends, so Version Negotiation, stateless reset, new
+    /// Initial acceptance, and drop handling remain explicit at the socket
+    /// policy layer.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        switch (feed) {
+            .routed => {},
+            else => return .{ .feed = feed },
+        }
+        return .{
+            .feed = feed,
+            .backend = try self.driveCryptoBackendsInSpaceAndPollDatagram(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Feed one installed-key datagram, drive one backend, then poll output.
+    ///
+    /// This is the single-connection receive-to-backend-to-output loop step. It
+    /// reuses the cross-connection lifecycle path with one caller-owned
+    /// connection/backend pair.
+    pub fn feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            &poll_views,
+            poll_options.space,
+        );
+    }
+
+    /// Feed an installed-key datagram, drive TLS backends, then drain output.
+    ///
+    /// This is the bounded-output form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram()`.
+    /// The caller-owned output slice limits work after a routed receive and
+    /// backend sweep. Non-routed feed results return without backend work.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramDrainResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        switch (feed) {
+            .routed => {},
+            else => return .{ .feed = feed },
+        }
+        return .{
+            .feed = feed,
+            .backend = try self.driveCryptoBackendsInSpaceAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Feed one installed-key datagram, drive one backend, then drain output.
+    ///
+    /// This is the single-connection bounded-output receive-to-backend loop
+    /// step. It reuses the cross-connection lifecycle path with one
+    /// caller-owned connection/backend pair so simple client/server socket
+    /// loops do not need to manually build receive, drive, and poll view slices.
+    pub fn feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramDrainResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            &poll_views,
+            poll_options.space,
+            out,
+        );
+    }
+
+    /// Feed an installed-key datagram, drive close-propagating backends, then poll output.
+    ///
+    /// Backend peer transport-parameter errors stop before output polling,
+    /// preserving the originating connection close path.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        switch (feed) {
+            .routed => {},
+            else => return .{ .feed = feed },
+        }
+        return .{
+            .feed = feed,
+            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Feed one installed-key datagram, drive close-propagating backend, then poll output.
+    ///
+    /// Backend peer transport-parameter errors queue CONNECTION_CLOSE and
+    /// return before output polling.
+    pub fn feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            &poll_views,
+            poll_options.space,
+        );
+    }
+
+    /// Feed an installed-key datagram, drive close-propagating backends, then drain output.
+    ///
+    /// Backend peer transport-parameter errors return before any output slot is
+    /// initialized, preserving the close-propagating backend contract.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramDrainResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        switch (feed) {
+            .routed => {},
+            else => return .{ .feed = feed },
+        }
+        return .{
+            .feed = feed,
+            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Feed one installed-key datagram, drive close-propagating backend, then drain output.
+    ///
+    /// This is the single-connection OrClose form of
+    /// `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams()`.
+    /// Backend peer transport-parameter errors queue CONNECTION_CLOSE and
+    /// return before any installed-key output slot is initialized.
+    pub fn feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramDrainResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            &poll_views,
+            poll_options.space,
+            out,
+        );
+    }
+
+    /// Feed an installed-key datagram, drive compatible-version backends, then poll output.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        switch (feed) {
+            .routed => {},
+            else => return .{ .feed = feed },
+        }
+        return .{
+            .feed = feed,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+                backend_space,
+                drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Feed one installed-key datagram, drive one compatible-version backend, then poll output.
+    ///
+    /// This is the single-connection receive-to-backend-to-output loop step for
+    /// RFC 9368-compatible handshakes.
+    pub fn feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            compatibilities,
+            &poll_views,
+            poll_options.space,
+        );
+    }
+
+    /// Feed an installed-key datagram, drive compatible-version backends, then drain output.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramDrainResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        switch (feed) {
+            .routed => {},
+            else => return .{ .feed = feed },
+        }
+        return .{
+            .feed = feed,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Feed one installed-key datagram, drive one compatible-version backend, then drain output.
+    ///
+    /// This is the single-connection bounded-output receive-to-backend loop
+    /// step for RFC 9368-compatible handshakes. It reuses the cross-connection
+    /// lifecycle path with one caller-owned connection/backend pair.
+    pub fn feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramDrainResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            compatibilities,
+            &poll_views,
+            poll_options.space,
+            out,
+        );
+    }
+
+    /// Feed an installed-key datagram, drive compatible-version close path, then poll output.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        switch (feed) {
+            .routed => {},
+            else => return .{ .feed = feed },
+        }
+        return .{
+            .feed = feed,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+                backend_space,
+                drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Feed one installed-key datagram, drive compatible-version close path, then poll output.
+    ///
+    /// Peer Version Information errors queue CONNECTION_CLOSE and return before
+    /// output polling.
+    pub fn feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            compatibilities,
+            &poll_views,
+            poll_options.space,
+        );
+    }
+
+    /// Feed an installed-key datagram, drive compatible-version close path, then drain output.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramDrainResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        switch (feed) {
+            .routed => {},
+            else => return .{ .feed = feed },
+        }
+        return .{
+            .feed = feed,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Feed one installed-key datagram, drive compatible-version close path, then drain output.
+    ///
+    /// This is the single-connection OrClose form of
+    /// `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`.
+    /// Peer Version Information errors queue CONNECTION_CLOSE and return before
+    /// any installed-key output slot is initialized.
+    pub fn feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedCryptoBackendDriveDatagramDrainResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            compatibilities,
+            &poll_views,
+            poll_options.space,
+            out,
+        );
+    }
+
     /// Process a client-side Version Negotiation response and retire old routes.
     ///
     /// A valid RFC 8999 Version Negotiation packet supersedes the current
@@ -1649,9 +3006,886 @@ pub const EndpointConnectionLifecycle = struct {
         try self.recovery_timers.armFromConnection(connection_id, connection);
     }
 
+    fn refreshRecoveryTimerAfterConnectionError(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *const Connection,
+    ) void {
+        // Preserve the connection error; timer mirroring is secondary once the
+        // connection path is already failing.
+        self.armRecoveryTimerFromConnection(connection_id, connection) catch {};
+    }
+
     /// Return the earliest connection-level recovery timer known to the endpoint.
     pub fn earliestRecoveryDeadline(self: *const EndpointConnectionLifecycle) ?EndpointLossDetectionTimerDeadline {
         return self.recovery_timers.earliestDeadline();
+    }
+
+    /// Return the next endpoint-visible deadline for one connection handle.
+    ///
+    /// Socket loops can use this to wait on idle timeout, close/drain timeout,
+    /// or QUIC loss/PTO recovery without comparing independent connection and
+    /// endpoint timer sources themselves.
+    pub fn nextDeadline(
+        self: *const EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *const Connection,
+    ) ?EndpointConnectionDeadline {
+        const state = connection.connectionState();
+        var next: ?EndpointConnectionDeadline = null;
+
+        if (state == .active) {
+            if (connection.idleTimeoutDeadlineMillis()) |deadline| {
+                next = .{
+                    .connection_id = connection_id,
+                    .deadline_millis = deadline,
+                    .kind = .idle_timeout,
+                };
+            }
+        }
+        if (state == .closing or state == .draining) {
+            if (connection.closeDeadlineMillis()) |deadline| {
+                if (next == null or deadline < next.?.deadline_millis) {
+                    next = .{
+                        .connection_id = connection_id,
+                        .deadline_millis = deadline,
+                        .kind = .close_timeout,
+                    };
+                }
+            }
+        }
+        if (state == .active) {
+            if (self.recovery_timers.deadlineForConnection(connection_id)) |deadline| {
+                if (next == null or deadline.timer.deadline_millis < next.?.deadline_millis) {
+                    next = .{
+                        .connection_id = connection_id,
+                        .deadline_millis = deadline.timer.deadline_millis,
+                        .kind = .recovery,
+                        .recovery = deadline.timer,
+                    };
+                }
+            }
+        }
+
+        return next;
+    }
+
+    /// Return the earliest endpoint-visible deadline across caller-owned connections.
+    ///
+    /// The endpoint lifecycle still does not own connection storage. Callers
+    /// provide the currently live connection views from their connection map,
+    /// and the lifecycle combines connection-owned idle/close deadlines with
+    /// endpoint-owned recovery timer snapshots.
+    pub fn nextDeadlineAcrossConnections(
+        self: *const EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionView,
+    ) ?EndpointConnectionDeadline {
+        var next: ?EndpointConnectionDeadline = null;
+        for (connections) |view| {
+            const candidate = self.nextDeadline(view.connection_id, view.connection) orelse continue;
+            if (next == null or candidate.deadline_millis < next.?.deadline_millis) {
+                next = candidate;
+            }
+        }
+        return next;
+    }
+
+    /// Drive a connection TLS/crypto backend under endpoint lifecycle ownership.
+    ///
+    /// This wraps `Connection.driveCryptoBackendInSpace()` and then refreshes
+    /// the endpoint's aggregate recovery timer snapshot for the caller-owned
+    /// connection handle. Socket loops should use this helper when backend
+    /// progress can queue protected CRYPTO, install keys, confirm the
+    /// handshake, or discard packet-number-space state that affects recovery
+    /// scheduling.
+    pub fn driveCryptoBackendInSpaceAndArmConnection(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!CryptoBackendProgress {
+        const progress = try connection.driveCryptoBackendInSpace(space, backend, scratch);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return progress;
+    }
+
+    /// Drive one TLS backend, then drain caller-keyed long-header CRYPTO output.
+    ///
+    /// This single-connection form is for socket loops that already hold
+    /// Initial or Handshake packet-protection keys. It applies backend progress
+    /// first, refreshes endpoint recovery state, and then drains at most
+    /// `out.len` protected long-header CRYPTO datagrams from `drain_space`.
+    /// Connection/backend/socket storage and each returned datagram remain
+    /// caller-owned.
+    pub fn driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        drain_space: PacketNumberSpace,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveProtectedLongDatagramDrainResult {
+        const backend_progress = try self.driveCryptoBackendInSpaceAndArmConnection(
+            connection_id,
+            connection,
+            backend_space,
+            backend,
+            scratch,
+        );
+        return .{
+            .backend = backend_progress,
+            .drain = self.drainProtectedLongCryptoDatagramsInSpace(
+                connection_id,
+                connection,
+                drain_space,
+                now_millis,
+                dcid,
+                scid,
+                initial_token,
+                keys,
+                out,
+            ),
+        };
+    }
+
+    fn accumulateCryptoBackendProgress(
+        result: *EndpointCryptoBackendDriveSweepResult,
+        progress: CryptoBackendProgress,
+    ) void {
+        result.connections_driven += 1;
+        result.progress.local_transport_parameters_bytes += progress.local_transport_parameters_bytes;
+        result.progress.peer_transport_parameters_bytes += progress.peer_transport_parameters_bytes;
+        result.progress.peer_transport_parameters_applied = result.progress.peer_transport_parameters_applied or
+            progress.peer_transport_parameters_applied;
+        if (result.progress.peer_compatible_version_selected == null) {
+            result.progress.peer_compatible_version_selected = progress.peer_compatible_version_selected;
+        }
+        result.progress.handshake_keys_installed = result.progress.handshake_keys_installed or
+            progress.handshake_keys_installed;
+        result.progress.zero_rtt_keys_installed = result.progress.zero_rtt_keys_installed or
+            progress.zero_rtt_keys_installed;
+        result.progress.one_rtt_keys_installed = result.progress.one_rtt_keys_installed or
+            progress.one_rtt_keys_installed;
+        result.progress.inbound_chunks += progress.inbound_chunks;
+        result.progress.inbound_bytes += progress.inbound_bytes;
+        result.progress.outbound_chunks += progress.outbound_chunks;
+        result.progress.outbound_bytes += progress.outbound_bytes;
+        result.progress.handshake_confirmed = result.progress.handshake_confirmed or progress.handshake_confirmed;
+    }
+
+    /// Drive crypto backends across caller-owned connections.
+    ///
+    /// This is the socket-loop sweep form of
+    /// `driveCryptoBackendInSpaceAndArmConnection()`. The lifecycle still does
+    /// not own connection or backend storage; it only centralizes backend
+    /// driving and recovery-timer refresh for each caller-provided view.
+    pub fn driveCryptoBackendsInSpaceAndArmConnections(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        views: []const EndpointCryptoBackendDriveView,
+    ) Error!EndpointCryptoBackendDriveSweepResult {
+        var result = EndpointCryptoBackendDriveSweepResult{};
+        for (views) |view| {
+            const progress = try self.driveCryptoBackendInSpaceAndArmConnection(
+                view.connection_id,
+                view.connection,
+                space,
+                view.backend,
+                view.scratch,
+            );
+            accumulateCryptoBackendProgress(&result, progress);
+        }
+        return result;
+    }
+
+    /// Drive crypto backends, then poll installed-key output across connections.
+    ///
+    /// This is the socket-loop step for TLS backend progress that may queue
+    /// protected CRYPTO or install keys and make already queued data sendable.
+    /// Connection/backend storage and output ordering remain caller-owned via
+    /// the two view slices.
+    pub fn driveCryptoBackendsInSpaceAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        now_millis: i64,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
+            space,
+            drive_views,
+        );
+        return .{
+            .backend = backend,
+            .datagram = try self.pollDatagramAcrossConnections(
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Drive one backend, then poll one installed-key datagram.
+    ///
+    /// This is the single-connection backend-drive-to-datagram step for simple
+    /// socket loops that do not need to manually build drive and poll view
+    /// slices.
+    pub fn driveCryptoBackendInSpaceAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        now_millis: i64,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.driveCryptoBackendsInSpaceAndPollDatagram(
+            space,
+            &drive_views,
+            &poll_views,
+            now_millis,
+            poll_options.space,
+        );
+    }
+
+    /// Drive crypto backends, then drain installed-key output across connections.
+    ///
+    /// This is the bounded-output form for embeddable socket loops that own the
+    /// final datagram queue. Backend progress is applied before draining, and
+    /// the caller-provided output slice limits work for the current iteration.
+    pub fn driveCryptoBackendsInSpaceAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        now_millis: i64,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
+            space,
+            drive_views,
+        );
+        return .{
+            .backend = backend,
+            .drain = self.drainDatagramsAcrossConnections(
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Drive one backend, then drain installed-key output.
+    ///
+    /// This is the single-connection bounded-output backend-drive step for
+    /// simple socket loops that do not need to manually build drive and poll
+    /// view slices.
+    pub fn driveCryptoBackendInSpaceAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        now_millis: i64,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.driveCryptoBackendsInSpaceAndDrainDatagrams(
+            space,
+            &drive_views,
+            &poll_views,
+            now_millis,
+            poll_options.space,
+            out,
+        );
+    }
+
+    /// Drive crypto backends across caller-owned connections with close propagation.
+    ///
+    /// This is the sweep form of
+    /// `driveCryptoBackendInSpaceOrCloseAndArmConnection()`. It returns on the
+    /// first backend/transport-parameter error so the socket loop can surface
+    /// that connection error without hiding it behind later backend progress.
+    pub fn driveCryptoBackendsInSpaceOrCloseAndArmConnections(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        views: []const EndpointCryptoBackendDriveView,
+    ) Error!EndpointCryptoBackendDriveSweepResult {
+        var result = EndpointCryptoBackendDriveSweepResult{};
+        for (views) |view| {
+            const progress = try self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+                view.connection_id,
+                view.connection,
+                space,
+                view.backend,
+                view.scratch,
+            );
+            accumulateCryptoBackendProgress(&result, progress);
+        }
+        return result;
+    }
+
+    /// Drive close-propagating crypto backends, then poll installed-key output.
+    ///
+    /// If backend peer transport-parameter processing fails, this returns that
+    /// connection error before polling output so callers can surface the close
+    /// path for the originating connection.
+    pub fn driveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        now_millis: i64,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
+            space,
+            drive_views,
+        );
+        return .{
+            .backend = backend,
+            .datagram = try self.pollDatagramAcrossConnections(
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Drive one close-propagating backend, then poll one installed-key datagram.
+    ///
+    /// Peer transport-parameter errors queue CONNECTION_CLOSE and return before
+    /// output polling.
+    pub fn driveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        now_millis: i64,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.driveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+            space,
+            &drive_views,
+            &poll_views,
+            now_millis,
+            poll_options.space,
+        );
+    }
+
+    /// Drive close-propagating backends, then drain installed-key output.
+    ///
+    /// Peer transport-parameter errors return before output draining. Successful
+    /// backend progress uses the same bounded drain contract as
+    /// `drainDatagramsAcrossConnections()`.
+    pub fn driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        now_millis: i64,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
+            space,
+            drive_views,
+        );
+        return .{
+            .backend = backend,
+            .drain = self.drainDatagramsAcrossConnections(
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Drive one close-propagating backend, then drain installed-key output.
+    ///
+    /// Peer transport-parameter errors queue CONNECTION_CLOSE and return before
+    /// any output slot is initialized.
+    pub fn driveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        now_millis: i64,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+            space,
+            &drive_views,
+            &poll_views,
+            now_millis,
+            poll_options.space,
+            out,
+        );
+    }
+
+    /// Drive a crypto backend and queue transport close on peer-parameter errors.
+    ///
+    /// This is the endpoint lifecycle wrapper for
+    /// `Connection.driveCryptoBackendInSpaceOrClose()`. It refreshes endpoint
+    /// recovery scheduling after both success and close-propagating errors so
+    /// socket loops keep their connection-handle timer snapshot aligned with
+    /// the connection state.
+    pub fn driveCryptoBackendInSpaceOrCloseAndArmConnection(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!CryptoBackendProgress {
+        const progress = connection.driveCryptoBackendInSpaceOrClose(space, backend, scratch) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return progress;
+    }
+
+    /// Drive a compatible-version crypto backend under endpoint lifecycle ownership.
+    ///
+    /// This is the endpoint wrapper for
+    /// `Connection.driveCryptoBackendInSpaceWithCompatibleVersion()`. It is the
+    /// RFC 9368 server-side TLS backend path when the peer's Version
+    /// Information transport parameter can select an explicitly allowed
+    /// compatible version.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionAndArmConnection(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!CryptoBackendProgress {
+        const progress = try connection.driveCryptoBackendInSpaceWithCompatibleVersion(
+            space,
+            backend,
+            scratch,
+            compatibilities,
+        );
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return progress;
+    }
+
+    /// Drive compatible-version crypto backends across caller-owned connections.
+    ///
+    /// This is the sweep form of
+    /// `driveCryptoBackendInSpaceWithCompatibleVersionAndArmConnection()`. It is
+    /// the endpoint-owned loop path for RFC 9368-compatible server handshakes
+    /// when multiple caller-owned connections share one event-loop iteration.
+    pub fn driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+    ) Error!EndpointCryptoBackendDriveSweepResult {
+        var result = EndpointCryptoBackendDriveSweepResult{};
+        for (views) |view| {
+            const progress = try self.driveCryptoBackendInSpaceWithCompatibleVersionAndArmConnection(
+                view.connection_id,
+                view.connection,
+                space,
+                view.backend,
+                view.scratch,
+                compatibilities,
+            );
+            accumulateCryptoBackendProgress(&result, progress);
+        }
+        return result;
+    }
+
+    /// Drive compatible-version backends, then poll installed-key output.
+    ///
+    /// This combines the RFC 9368-compatible backend sweep with the normal
+    /// endpoint-owned datagram poll step used by socket loops after TLS
+    /// progress.
+    pub fn driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        now_millis: i64,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections(
+            space,
+            drive_views,
+            compatibilities,
+        );
+        return .{
+            .backend = backend,
+            .datagram = try self.pollDatagramAcrossConnections(
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Drive one compatible-version backend, then poll one installed-key datagram.
+    ///
+    /// This is the single-connection form of
+    /// `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram()`.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        now_millis: i64,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+            space,
+            &drive_views,
+            compatibilities,
+            &poll_views,
+            now_millis,
+            poll_options.space,
+        );
+    }
+
+    /// Drive compatible-version backends, then drain installed-key output.
+    pub fn driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        now_millis: i64,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections(
+            space,
+            drive_views,
+            compatibilities,
+        );
+        return .{
+            .backend = backend,
+            .drain = self.drainDatagramsAcrossConnections(
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Drive one compatible-version backend, then drain installed-key output.
+    ///
+    /// This is the single-connection form of
+    /// `driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams()`.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        now_millis: i64,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+            space,
+            &drive_views,
+            compatibilities,
+            &poll_views,
+            now_millis,
+            poll_options.space,
+            out,
+        );
+    }
+
+    /// Drive a compatible-version backend and queue transport close on errors.
+    ///
+    /// This wraps `Connection.driveCryptoBackendInSpaceWithCompatibleVersionOrClose()`
+    /// and refreshes endpoint recovery scheduling after both success and
+    /// close-propagating peer Version Information errors.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndArmConnection(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!CryptoBackendProgress {
+        const progress = connection.driveCryptoBackendInSpaceWithCompatibleVersionOrClose(
+            space,
+            backend,
+            scratch,
+            compatibilities,
+        ) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return progress;
+    }
+
+    /// Drive compatible-version crypto backends with close propagation.
+    ///
+    /// This is the sweep form of
+    /// `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndArmConnection()`.
+    /// It stops on the first peer Version Information error so the socket loop
+    /// can surface the connection close without hiding it behind later backend
+    /// work.
+    pub fn driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+    ) Error!EndpointCryptoBackendDriveSweepResult {
+        var result = EndpointCryptoBackendDriveSweepResult{};
+        for (views) |view| {
+            const progress = try self.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndArmConnection(
+                view.connection_id,
+                view.connection,
+                space,
+                view.backend,
+                view.scratch,
+                compatibilities,
+            );
+            accumulateCryptoBackendProgress(&result, progress);
+        }
+        return result;
+    }
+
+    /// Drive compatible-version close-propagating backends, then poll output.
+    ///
+    /// Backend errors stop the step before datagram polling, matching the
+    /// single-purpose close-propagating sweep behavior.
+    pub fn driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        now_millis: i64,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections(
+            space,
+            drive_views,
+            compatibilities,
+        );
+        return .{
+            .backend = backend,
+            .datagram = try self.pollDatagramAcrossConnections(
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Drive one compatible-version close path, then poll one installed-key datagram.
+    ///
+    /// Peer Version Information errors queue CONNECTION_CLOSE and return before
+    /// output polling.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        now_millis: i64,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+            space,
+            &drive_views,
+            compatibilities,
+            &poll_views,
+            now_millis,
+            poll_options.space,
+        );
+    }
+
+    /// Drive compatible-version close-propagating backends, then drain output.
+    ///
+    /// Backend errors stop the step before draining, preserving the
+    /// close-propagating behavior of the sweep form.
+    pub fn driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        now_millis: i64,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections(
+            space,
+            drive_views,
+            compatibilities,
+        );
+        return .{
+            .backend = backend,
+            .drain = self.drainDatagramsAcrossConnections(
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Drive one compatible-version close path, then drain installed-key output.
+    ///
+    /// Peer Version Information errors queue CONNECTION_CLOSE and return before
+    /// any output slot is initialized.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        now_millis: i64,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+            space,
+            &drive_views,
+            compatibilities,
+            &poll_views,
+            now_millis,
+            poll_options.space,
+            out,
+        );
     }
 
     /// Service one connection's due loss/PTO timer and refresh endpoint state.
@@ -1662,6 +3896,1234 @@ pub const EndpointConnectionLifecycle = struct {
         now_millis: i64,
     ) Error!?EndpointLossDetectionTimerDeadline {
         return self.recovery_timers.serviceConnection(connection_id, connection, now_millis);
+    }
+
+    /// Process one pending-work pass for a caller-owned connection.
+    ///
+    /// The endpoint lifecycle owns the ordering expected by socket loops:
+    /// terminal idle timeout first, close/drain timeout second, and loss/PTO
+    /// recovery service only while the connection remains live.
+    pub fn processPendingWork(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+    ) Error!EndpointPendingWorkResult {
+        var result = EndpointPendingWorkResult{};
+
+        result.idle_retired = try self.checkIdleTimeoutsAndRetireConnection(
+            connection_id,
+            connection,
+            now_millis,
+        );
+        if (result.idle_retired != null) return result;
+
+        result.close_retired = try self.checkCloseTimeoutsAndRetireConnection(
+            connection_id,
+            connection,
+            now_millis,
+        );
+        if (result.close_retired != null) return result;
+
+        result.recovery_serviced = try self.serviceRecoveryTimer(
+            connection_id,
+            connection,
+            now_millis,
+        );
+        return result;
+    }
+
+    /// Sweep pending work across caller-owned connections.
+    ///
+    /// This keeps idle/close retirement and recovery timer servicing under the
+    /// endpoint lifecycle owner while the caller keeps connection storage and
+    /// iteration order. It does not poll output; socket loops should use
+    /// `pollDatagramAcrossConnections()` or due-deadline helpers for datagrams.
+    pub fn processPendingWorkAcrossConnections(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+    ) Error!EndpointPendingWorkSweepResult {
+        var sweep = EndpointPendingWorkSweepResult{};
+        for (connections) |view| {
+            const pending = try self.processPendingWork(
+                view.connection_id,
+                view.connection,
+                now_millis,
+            );
+            if (pending.idle_retired != null) {
+                sweep.idle_retired_count += 1;
+            }
+            if (pending.close_retired != null) {
+                sweep.close_retired_count += 1;
+            }
+            if (pending.recovery_serviced != null) {
+                sweep.recovery_serviced_count += 1;
+            }
+        }
+        return sweep;
+    }
+
+    /// Process pending work, drive crypto backends, then poll installed-key output.
+    ///
+    /// This is the no-new-datagram socket-loop step: timers and close/idle
+    /// cleanup run first, then TLS backend progress is driven, and finally the
+    /// first installed-key datagram is polled across caller-owned connections.
+    /// The lifecycle owns ordering and timer mirroring; callers still own
+    /// connection/backend storage and output fairness through the view slices.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsInSpaceAndPollDatagram(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Process pending work, drive crypto backends, then drain installed-key output.
+    ///
+    /// This is the bounded-output form for no-new-datagram socket-loop ticks.
+    /// Pending work runs before backend progress; the caller-owned output slice
+    /// bounds the send work produced by backend or recovery state.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsInSpaceAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Process pending work, drive close-propagating backends, then poll output.
+    ///
+    /// This is the timer/flush tick form for socket loops that need peer
+    /// transport-parameter errors to queue CONNECTION_CLOSE and stop before
+    /// installed-key output polling.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Process pending work, drive close-propagating backends, then drain output.
+    ///
+    /// Backend peer transport-parameter errors return before output draining.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Process pending work, drive compatible-version backends, then poll output.
+    ///
+    /// This is the no-new-datagram socket-loop step for RFC 9368-compatible
+    /// server handshakes where backend progress may authenticate Version
+    /// Information and make queued output sendable.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+                backend_space,
+                drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Process pending work, drive compatible-version backends, then drain output.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Process pending work, drive compatible-version close path, then poll output.
+    ///
+    /// Peer Version Information errors queue CONNECTION_CLOSE and return before
+    /// output polling, while successful compatible-version backend progress uses
+    /// the normal installed-key datagram poll step.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+                backend_space,
+                drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Process pending work, drive compatible-version close path, then drain output.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    fn pendingWorkSweepFromSingle(pending_work: EndpointPendingWorkResult) EndpointPendingWorkSweepResult {
+        return .{
+            .idle_retired_count = if (pending_work.idle_retired != null) 1 else 0,
+            .close_retired_count = if (pending_work.close_retired != null) 1 else 0,
+            .recovery_serviced_count = if (pending_work.recovery_serviced != null) 1 else 0,
+        };
+    }
+
+    /// Process pending work, drive one backend, then drain installed-key output.
+    ///
+    /// This is the single-connection bounded-output form for no-new-datagram
+    /// socket-loop ticks. Terminal idle or close cleanup stops the step before
+    /// backend progress; live connections then drive the caller-owned backend
+    /// and drain installed-key output with the caller-provided work budget.
+    pub fn processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
+        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
+            return .{
+                .pending_work = pending_sweep,
+                .backend = .{
+                    .backend = .{},
+                    .drain = .{},
+                },
+            };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .pending_work = pending_sweep,
+            .backend = try self.driveCryptoBackendsInSpaceAndDrainDatagrams(
+                backend_space,
+                &drive_views,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+                out,
+            ),
+        };
+    }
+
+    /// Process pending work, drive close-propagating backend, then drain output.
+    ///
+    /// This is the single-connection OrClose form of
+    /// `processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams()`.
+    /// Terminal idle or close cleanup stops before backend progress; backend
+    /// peer transport-parameter errors queue CONNECTION_CLOSE and return
+    /// before any installed-key output drain is attempted.
+    pub fn processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
+        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
+            return .{
+                .pending_work = pending_sweep,
+                .backend = .{
+                    .backend = .{},
+                    .drain = .{},
+                },
+            };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .pending_work = pending_sweep,
+            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+                backend_space,
+                &drive_views,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+                out,
+            ),
+        };
+    }
+
+    /// Process pending work, drive one compatible-version backend, then drain output.
+    ///
+    /// This is the single-connection bounded-output form for no-new-datagram
+    /// RFC 9368-compatible handshake ticks. Terminal idle or close cleanup
+    /// stops before backend progress; live connections then drive the
+    /// caller-owned backend with explicit compatible-version rules.
+    pub fn processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
+        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
+            return .{
+                .pending_work = pending_sweep,
+                .backend = .{
+                    .backend = .{},
+                    .drain = .{},
+                },
+            };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .pending_work = pending_sweep,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+                backend_space,
+                &drive_views,
+                compatibilities,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+                out,
+            ),
+        };
+    }
+
+    /// Process pending work, drive compatible-version close path, then drain output.
+    ///
+    /// This is the single-connection OrClose form of
+    /// `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`.
+    /// Peer Version Information errors queue CONNECTION_CLOSE and return before
+    /// any installed-key output drain is attempted.
+    pub fn processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
+        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
+            return .{
+                .pending_work = pending_sweep,
+                .backend = .{
+                    .backend = .{},
+                    .drain = .{},
+                },
+            };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .pending_work = pending_sweep,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+                backend_space,
+                &drive_views,
+                compatibilities,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+                out,
+            ),
+        };
+    }
+
+    /// Process pending work and poll the installed-key datagram caused by recovery.
+    ///
+    /// Normal queued output should use `pollDatagram()` directly. This helper
+    /// only polls after a due loss/PTO timer was serviced, so timer wakeups in
+    /// socket loops can be handled without duplicating endpoint lifecycle
+    /// ordering.
+    pub fn processPendingWorkAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointPendingWorkDatagramResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const serviced = pending_work.recovery_serviced orelse return .{
+            .pending_work = pending_work,
+            .datagram = null,
+        };
+        const expected_space: PacketNumberSpace = switch (options.space) {
+            .handshake => .handshake,
+            .zero_rtt => .application,
+            .application => .application,
+        };
+        if (serviced.timer.space != expected_space) return error.InvalidPacket;
+
+        return .{
+            .pending_work = pending_work,
+            .datagram = try self.pollDatagram(connection_id, connection, now_millis, options),
+        };
+    }
+
+    /// Process pending work and drain installed-key datagrams caused by recovery.
+    ///
+    /// This is the bounded-output form of `processPendingWorkAndPollDatagram()`.
+    /// It only drains after a due loss/PTO timer was serviced and keeps the
+    /// caller-owned output slice as the per-iteration work budget.
+    pub fn processPendingWorkAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkDatagramDrainResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const serviced = pending_work.recovery_serviced orelse return .{
+            .pending_work = pending_work,
+            .drain = .{},
+        };
+        const expected_space: PacketNumberSpace = switch (options.space) {
+            .handshake => .handshake,
+            .zero_rtt => .application,
+            .application => .application,
+        };
+        if (serviced.timer.space != expected_space) return error.InvalidPacket;
+
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = options.destination_connection_id,
+            .source_connection_id = options.source_connection_id,
+        }};
+        return .{
+            .pending_work = pending_work,
+            .drain = self.drainDatagramsAcrossConnections(
+                &poll_views,
+                now_millis,
+                options.space,
+                out,
+            ),
+        };
+    }
+
+    /// Process the due endpoint-visible deadline for one connection handle.
+    ///
+    /// Socket loops can call this after waking from `nextDeadline()`. Calls
+    /// before the current deadline return null and do not touch connection or
+    /// endpoint state. Due recovery deadlines that map to installed-key packet
+    /// spaces also poll the probe datagram; idle, close, and Initial recovery
+    /// deadlines only run pending work.
+    pub fn processDueDeadlineAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        destination_connection_id: []const u8,
+        source_connection_id: []const u8,
+    ) Error!?EndpointDueWorkDatagramResult {
+        const deadline = self.nextDeadline(connection_id, connection) orelse return null;
+        if (deadline.deadline_millis > now_millis) return null;
+
+        const pending_datagram = if (deadline.installedKeyPollOptions(
+            destination_connection_id,
+            source_connection_id,
+        )) |options|
+            try self.processPendingWorkAndPollDatagram(connection_id, connection, now_millis, options)
+        else
+            EndpointPendingWorkDatagramResult{
+                .pending_work = try self.processPendingWork(connection_id, connection, now_millis),
+                .datagram = null,
+            };
+
+        return .{
+            .deadline = deadline,
+            .pending_work = pending_datagram.pending_work,
+            .datagram = pending_datagram.datagram,
+        };
+    }
+
+    /// Process the due endpoint-visible deadline and drain installed-key output.
+    ///
+    /// This is the bounded-output form of `processDueDeadlineAndPollDatagram()`.
+    /// Calls before the current deadline return null. Due idle/close deadlines
+    /// run pending work and return an empty drain result; due installed-key
+    /// recovery deadlines reuse `processPendingWorkAndDrainDatagrams()`.
+    pub fn processDueDeadlineAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        destination_connection_id: []const u8,
+        source_connection_id: []const u8,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkDatagramDrainResult {
+        const deadline = self.nextDeadline(connection_id, connection) orelse return null;
+        if (deadline.deadline_millis > now_millis) return null;
+
+        const pending_drain = if (deadline.installedKeyPollOptions(
+            destination_connection_id,
+            source_connection_id,
+        )) |options|
+            try self.processPendingWorkAndDrainDatagrams(connection_id, connection, now_millis, options, out)
+        else
+            EndpointPendingWorkDatagramDrainResult{
+                .pending_work = try self.processPendingWork(connection_id, connection, now_millis),
+                .drain = .{},
+            };
+
+        return .{
+            .deadline = deadline,
+            .pending_work = pending_drain.pending_work,
+            .drain = pending_drain.drain,
+        };
+    }
+
+    /// Process a due deadline, drive one backend, then drain installed-key output.
+    ///
+    /// This is the single-connection bounded-output form for timer wakeups.
+    /// Due recovery datagrams keep explicit ownership and stop before backend
+    /// progress. Terminal idle or close cleanup also stops before backend
+    /// progress because the caller-owned connection is no longer live.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            poll_options.destination_connection_id,
+            poll_options.source_connection_id,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceAndDrainDatagrams(
+                backend_space,
+                &drive_views,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+                out,
+            ),
+        };
+    }
+
+    /// Process a due deadline, drive a close-propagating backend, then drain output.
+    ///
+    /// This is the single-connection OrClose form of
+    /// `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams()`.
+    /// Due recovery datagrams and terminal idle/close cleanup stop before
+    /// backend progress. Backend peer transport-parameter errors queue
+    /// CONNECTION_CLOSE and return before installed-key output draining.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            poll_options.destination_connection_id,
+            poll_options.source_connection_id,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+                backend_space,
+                &drive_views,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+                out,
+            ),
+        };
+    }
+
+    /// Process a due deadline, drive one compatible-version backend, then drain output.
+    ///
+    /// This is the single-connection bounded-output form for RFC
+    /// 9368-compatible timer wakeups. Due recovery datagrams keep explicit
+    /// ownership and stop before backend progress; live no-output deadlines
+    /// then drive the caller-owned backend with compatible-version rules.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            poll_options.destination_connection_id,
+            poll_options.source_connection_id,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+                backend_space,
+                &drive_views,
+                compatibilities,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+                out,
+            ),
+        };
+    }
+
+    /// Process a due deadline, drive compatible-version close path, then drain output.
+    ///
+    /// This is the single-connection OrClose form of
+    /// `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`.
+    /// Peer Version Information errors queue CONNECTION_CLOSE and return before
+    /// any installed-key output draining.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            poll_options.destination_connection_id,
+            poll_options.source_connection_id,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+                backend_space,
+                &drive_views,
+                compatibilities,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+                out,
+            ),
+        };
+    }
+
+    /// Process the earliest due deadline across caller-owned connections.
+    ///
+    /// The lifecycle still does not own connection storage. Callers pass the
+    /// currently live connection views from their map, including the connection
+    /// IDs needed for installed-key packet output. If no endpoint-visible
+    /// deadline is due at `now_millis`, this returns null without side effects.
+    pub fn processDueDeadlineAcrossConnectionsAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+    ) Error!?EndpointDueWorkDatagramResult {
+        var selected_index: ?usize = null;
+        var selected_deadline: ?EndpointConnectionDeadline = null;
+        for (connections, 0..) |view, index| {
+            const candidate = self.nextDeadline(view.connection_id, view.connection) orelse continue;
+            if (candidate.deadline_millis > now_millis) continue;
+            if (selected_deadline == null or candidate.deadline_millis < selected_deadline.?.deadline_millis) {
+                selected_index = index;
+                selected_deadline = candidate;
+            }
+        }
+
+        const index = selected_index orelse return null;
+        const view = connections[index];
+        return self.processDueDeadlineAndPollDatagram(
+            view.connection_id,
+            view.connection,
+            now_millis,
+            view.destination_connection_id,
+            view.source_connection_id,
+        );
+    }
+
+    /// Process the earliest due deadline across connections and drain output.
+    pub fn processDueDeadlineAcrossConnectionsAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkDatagramDrainResult {
+        var selected_index: ?usize = null;
+        var selected_deadline: ?EndpointConnectionDeadline = null;
+        for (connections, 0..) |view, index| {
+            const candidate = self.nextDeadline(view.connection_id, view.connection) orelse continue;
+            if (candidate.deadline_millis > now_millis) continue;
+            if (selected_deadline == null or candidate.deadline_millis < selected_deadline.?.deadline_millis) {
+                selected_index = index;
+                selected_deadline = candidate;
+            }
+        }
+
+        const index = selected_index orelse return null;
+        const view = connections[index];
+        return self.processDueDeadlineAndDrainDatagrams(
+            view.connection_id,
+            view.connection,
+            now_millis,
+            view.destination_connection_id,
+            view.source_connection_id,
+            out,
+        );
+    }
+
+    /// Process the earliest due deadline, then drive TLS backends if no datagram was emitted.
+    ///
+    /// A due recovery wakeup can already allocate a protected datagram. In that
+    /// case this step returns immediately with the due datagram and leaves
+    /// backend progress for a later loop iteration, preserving one-output
+    /// ownership for callers. Idle, close, and Initial recovery wakeups have no
+    /// installed-key datagram, so they can continue into backend drive and
+    /// installed-key output polling.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        deadline_connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.datagram != null) return .{ .due_work = due_work };
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceAndPollDatagram(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Process the earliest due deadline, then drive TLS backends and drain output.
+    ///
+    /// If the due deadline already emits a recovery datagram, backend work is
+    /// skipped so ownership of that allocated datagram remains explicit. When
+    /// the due step has no datagram, backend progress and bounded output
+    /// draining run in one lifecycle-owned step.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        deadline_connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.datagram != null) return .{ .due_work = due_work };
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Process the earliest due deadline, then drive close-propagating TLS backends.
+    ///
+    /// Backend errors are returned only after a due deadline that did not emit a
+    /// datagram. This avoids losing ownership of an allocated recovery datagram
+    /// on later backend failure.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        deadline_connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.datagram != null) return .{ .due_work = due_work };
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Process the earliest due deadline, then drive close-propagating backends and drain output.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        deadline_connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.datagram != null) return .{ .due_work = due_work };
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Process the earliest due deadline, then drive compatible-version backends.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        deadline_connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.datagram != null) return .{ .due_work = due_work };
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+                backend_space,
+                drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Process the earliest due deadline, then drive compatible-version backends and drain output.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        deadline_connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.datagram != null) return .{ .due_work = due_work };
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Process the earliest due deadline, then drive compatible-version close path.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        deadline_connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.datagram != null) return .{ .due_work = due_work };
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+                backend_space,
+                drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Process the earliest due deadline, then drive compatible-version close path and drain output.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        deadline_connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.datagram != null) return .{ .due_work = due_work };
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
     }
 
     /// Service a due Initial/Handshake recovery timer and poll a protected long probe.
@@ -1927,7 +5389,10 @@ pub const EndpointConnectionLifecycle = struct {
         keys: ProtectedLongDatagramKeys,
         datagram: []const u8,
     ) Error!usize {
-        const count = try connection.processProtectedLongDatagramOrClose(now_millis, keys, datagram);
+        const count = connection.processProtectedLongDatagramOrClose(now_millis, keys, datagram) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         try self.armRecoveryTimerFromConnection(connection_id, connection);
         return count;
     }
@@ -2019,6 +5484,49 @@ pub const EndpointConnectionLifecycle = struct {
         return datagram;
     }
 
+    /// Drain caller-keyed Initial/Handshake CRYPTO datagrams into result slots.
+    ///
+    /// This is the bounded-output form of
+    /// `pollProtectedLongCryptoDatagramInSpace()`. The caller owns each
+    /// initialized datagram entry. If polling fails after earlier entries were
+    /// written, `first_error` preserves that failure while keeping the written
+    /// count available for cleanup.
+    pub fn drainProtectedLongCryptoDatagramsInSpace(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointDatagramDrainResult {
+        var result = EndpointDatagramDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const datagram = self.pollProtectedLongCryptoDatagramInSpace(
+                connection_id,
+                connection,
+                space,
+                now_millis,
+                dcid,
+                scid,
+                initial_token,
+                keys,
+            ) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = .{
+                .connection_id = connection_id,
+                .datagram = datagram orelse return result,
+            };
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
     /// Process one caller-keyed Initial/Handshake datagram and refresh timers.
     ///
     /// Packet-number-space selection, packet authentication, ACK generation,
@@ -2038,6 +5546,55 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Process caller-keyed long-header input, drive backend, and drain output.
+    ///
+    /// This is the single-connection socket-loop step for Initial or Handshake
+    /// CRYPTO processing when packet-protection keys are still caller-owned. It
+    /// authenticates and processes the incoming long-header datagram before
+    /// delivering reassembled CRYPTO to `backend`, then drains at most `out.len`
+    /// protected long-header CRYPTO datagrams from the same packet-number
+    /// space. The caller owns the backend, connection storage, socket send
+    /// queue, and each initialized output datagram.
+    pub fn processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveProtectedLongDatagramDrainResult {
+        try self.processProtectedLongDatagramInSpace(
+            connection_id,
+            connection,
+            space,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        return try self.driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams(
+            connection_id,
+            connection,
+            space,
+            backend,
+            scratch,
+            space,
+            now_millis,
+            dcid,
+            scid,
+            initial_token,
+            send_keys,
+            out,
+        );
+    }
+
     /// Process one caller-keyed Initial/Handshake datagram with close propagation.
     ///
     /// This keeps the single-space protected long success behavior while
@@ -2051,7 +5608,10 @@ pub const EndpointConnectionLifecycle = struct {
         keys: protection.Aes128PacketProtectionKeys,
         datagram: []const u8,
     ) Error!void {
-        try connection.processProtectedLongDatagramInSpaceOrClose(space, now_millis, keys, datagram);
+        connection.processProtectedLongDatagramInSpaceOrClose(space, now_millis, keys, datagram) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
@@ -2165,7 +5725,10 @@ pub const EndpointConnectionLifecycle = struct {
         keys: protection.Aes128PacketProtectionKeys,
         datagram: []const u8,
     ) Error!void {
-        try connection.processProtectedZeroRttDatagramOrClose(now_millis, keys, datagram);
+        connection.processProtectedZeroRttDatagramOrClose(now_millis, keys, datagram) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
@@ -2278,7 +5841,10 @@ pub const EndpointConnectionLifecycle = struct {
         dcid_len: usize,
         datagram: []const u8,
     ) Error!void {
-        try connection.processProtectedShortDatagramOrClose(now_millis, keys, dcid_len, datagram);
+        connection.processProtectedShortDatagramOrClose(now_millis, keys, dcid_len, datagram) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
@@ -2484,7 +6050,10 @@ pub const EndpointConnectionLifecycle = struct {
         dcid_len: usize,
         datagram: []const u8,
     ) Error!void {
-        try connection.processProtectedShortDatagramWithKeyUpdateOrClose(now_millis, keys, dcid_len, datagram);
+        connection.processProtectedShortDatagramWithKeyUpdateOrClose(now_millis, keys, dcid_len, datagram) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
@@ -2598,7 +6167,10 @@ pub const EndpointConnectionLifecycle = struct {
         dcid_len: usize,
         datagram: []const u8,
     ) Error!void {
-        try connection.processProtectedShortDatagramWithKeyPhaseStateOrClose(now_millis, key_phase_state, dcid_len, datagram);
+        connection.processProtectedShortDatagramWithKeyPhaseStateOrClose(now_millis, key_phase_state, dcid_len, datagram) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
@@ -2694,6 +6266,105 @@ pub const EndpointConnectionLifecycle = struct {
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
+    /// Process installed-key Handshake input, drive backend, and drain output.
+    ///
+    /// This is the single-connection TLS-owned Handshake loop step after a
+    /// crypto backend has installed packet-protection keys on `connection`.
+    /// It opens one protected Handshake datagram with installed peer keys,
+    /// delivers reassembled CRYPTO to `backend`, then drains at most `out.len`
+    /// installed-key Handshake datagrams with the installed local keys.
+    /// Connection/backend/socket storage and each initialized output datagram
+    /// remain caller-owned.
+    pub fn processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+        dcid: []const u8,
+        scid: []const u8,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        try self.processProtectedHandshakeDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = dcid,
+            .source_connection_id = scid,
+        }};
+        return try self.driveCryptoBackendsInSpaceAndDrainDatagrams(
+            .handshake,
+            &drive_views,
+            &poll_views,
+            now_millis,
+            .handshake,
+            out,
+        );
+    }
+
+    /// Process installed-key Handshake input through close-propagating backend.
+    ///
+    /// This preserves the success behavior of
+    /// `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams()`,
+    /// while using the close-propagating receive and backend-drive paths.
+    /// Authenticated frame errors or backend peer transport-parameter errors
+    /// return before output draining, leaving the protected close to the
+    /// existing installed-key Handshake output path.
+    pub fn processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+        dcid: []const u8,
+        scid: []const u8,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = dcid,
+            .source_connection_id = scid,
+        }};
+        return try self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+            .handshake,
+            &drive_views,
+            &poll_views,
+            now_millis,
+            .handshake,
+            out,
+        );
+    }
+
     /// Process one installed-key protected Handshake datagram with close propagation.
     ///
     /// Installed-key lookup and success behavior remain in `Connection`.
@@ -2706,7 +6377,10 @@ pub const EndpointConnectionLifecycle = struct {
         now_millis: i64,
         datagram: []const u8,
     ) Error!void {
-        try connection.processProtectedHandshakeDatagramWithInstalledKeysOrClose(now_millis, datagram);
+        connection.processProtectedHandshakeDatagramWithInstalledKeysOrClose(now_millis, datagram) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
@@ -2808,7 +6482,10 @@ pub const EndpointConnectionLifecycle = struct {
         now_millis: i64,
         datagram: []const u8,
     ) Error!void {
-        try connection.processProtectedZeroRttDatagramWithInstalledKeysOrClose(now_millis, datagram);
+        connection.processProtectedZeroRttDatagramWithInstalledKeysOrClose(now_millis, datagram) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
@@ -2880,6 +6557,115 @@ pub const EndpointConnectionLifecycle = struct {
         return datagram;
     }
 
+    /// Socket-facing installed-key datagram output entrypoint.
+    ///
+    /// This is the public endpoint-loop name for polling the next packet after
+    /// a TLS backend has installed packet-protection keys on `connection`.
+    pub fn pollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!?[]u8 {
+        return switch (options.space) {
+            .handshake => self.pollProtectedHandshakeDatagramWithInstalledKeys(
+                connection_id,
+                connection,
+                now_millis,
+                options.destination_connection_id,
+                options.source_connection_id,
+            ),
+            .zero_rtt => self.pollProtectedZeroRttDatagramWithInstalledKeys(
+                connection_id,
+                connection,
+                now_millis,
+                options.destination_connection_id,
+                options.source_connection_id,
+            ),
+            .application => self.pollProtectedShortDatagramWithInstalledKeys(
+                connection_id,
+                connection,
+                now_millis,
+                options.destination_connection_id,
+            ),
+        };
+    }
+
+    /// Poll the first installed-key datagram across caller-owned connections.
+    ///
+    /// This helper keeps output polling and endpoint recovery-timer mirroring
+    /// under the lifecycle owner while preserving caller-owned connection
+    /// storage and caller-defined fairness/order. It returns the first
+    /// connection in `connections` that emits a protected datagram.
+    pub fn pollDatagramAcrossConnections(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        space: EndpointInstalledKeyDatagramSpace,
+    ) Error!?EndpointPolledDatagramResult {
+        for (connections) |view| {
+            const datagram = try self.pollDatagram(
+                view.connection_id,
+                view.connection,
+                now_millis,
+                .{
+                    .space = space,
+                    .destination_connection_id = view.destination_connection_id,
+                    .source_connection_id = view.source_connection_id,
+                },
+            );
+            if (datagram) |bytes| {
+                return .{
+                    .connection_id = view.connection_id,
+                    .datagram = bytes,
+                };
+            }
+        }
+        return null;
+    }
+
+    /// Drain installed-key datagrams into caller-owned result slots.
+    ///
+    /// The output slice bounds work per socket-loop iteration and gives the
+    /// caller explicit ownership of each returned datagram. If polling fails
+    /// after earlier datagrams were written, this returns the count together
+    /// with `first_error` so callers can release the initialized entries before
+    /// surfacing the error.
+    pub fn drainDatagramsAcrossConnections(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointDatagramDrainResult {
+        var result = EndpointDatagramDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const polled = self.pollDatagramAcrossConnections(
+                connections,
+                now_millis,
+                space,
+            ) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = polled orelse return result;
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
+    /// Explicit installed-key alias for `pollDatagram()`.
+    pub fn pollDatagramWithInstalledKeys(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!?[]u8 {
+        return self.pollDatagram(connection_id, connection, now_millis, options);
+    }
+
     /// Process one installed-key protected 1-RTT datagram and refresh timers.
     ///
     /// ACK processing, loss recovery cleanup, and ACK generation state stay in
@@ -2911,7 +6697,10 @@ pub const EndpointConnectionLifecycle = struct {
         dcid_len: usize,
         datagram: []const u8,
     ) Error!void {
-        try connection.processProtectedShortDatagramWithInstalledKeysOrClose(now_millis, dcid_len, datagram);
+        connection.processProtectedShortDatagramWithInstalledKeysOrClose(now_millis, dcid_len, datagram) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
@@ -18563,6 +22352,6028 @@ test "EndpointConnectionLifecycle retires routes with recovery timer" {
     try std.testing.expect(!retired_again.recovery_timer_disarmed);
 }
 
+test "EndpointConnectionLifecycle exposes socket-facing feed deadline and pending work APIs" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const short_datagram = [_]u8{
+        0x40, 0x31, 0x32, 0x33, 0x34, 0x00, 0x01, 0x02,
+        0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+        0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x11, 0x12, 0x13,
+        0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+    };
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const supported_versions = [_]packet.Version{.v1};
+
+    try lifecycle.registerConnectionId(60, &cid, path, .{ .sequence_number = 0 });
+    var feed_out: [64]u8 = undefined;
+    const action = try lifecycle.feedDatagram(
+        &feed_out,
+        path,
+        &short_datagram,
+        &reset_prefix,
+        &supported_versions,
+    );
+    switch (action) {
+        .routed => |route| {
+            try std.testing.expectEqual(@as(u64, 60), route.connection_id);
+            try std.testing.expectEqualSlices(u8, &cid, route.destination_connection_id.asSlice());
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try conn.sendPing();
+    var tx_buf: [16]u8 = undefined;
+    const payload = (try conn.pollTx(10, &tx_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), payload.len);
+    try lifecycle.armRecoveryTimerFromConnection(60, &conn);
+
+    const next = lifecycle.nextDeadline(60, &conn) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 60), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
+    try std.testing.expectEqual(@as(i64, 40), next.deadline_millis);
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), next.recovery);
+
+    const early = try lifecycle.processPendingWork(60, &conn, 39);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), early.idle_retired);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), early.close_retired);
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), early.recovery_serviced);
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const due_work = (try lifecycle.processDueDeadlineAndPollDatagram(
+        60,
+        &conn,
+        40,
+        &cid,
+        &[_]u8{},
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, due_work.deadline.kind);
+    try std.testing.expectEqual(@as(i64, 40), due_work.deadline.deadline_millis);
+    try std.testing.expectEqual(@as(?[]u8, null), due_work.datagram);
+    const retired = due_work.pending_work.idle_retired orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), retired.routes_retired);
+    try std.testing.expect(retired.recovery_timer_disarmed);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), due_work.pending_work.close_retired);
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), due_work.pending_work.recovery_serviced);
+    try std.testing.expectEqual(ConnectionState.closed, conn.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), lifecycle.nextDeadline(60, &conn));
+}
+
+test "EndpointConnectionLifecycle sweeps pending work across caller-owned connections" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var idle_conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer idle_conn.deinit();
+    try idle_conn.confirmHandshake();
+
+    const idle_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const idle_cid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
+    try lifecycle.registerConnectionId(66, &idle_cid, idle_path, .{ .sequence_number = 0 });
+
+    try idle_conn.sendPing();
+    var idle_payload_buf: [16]u8 = undefined;
+    _ = (try idle_conn.pollTx(10, &idle_payload_buf)) orelse return error.TestUnexpectedResult;
+    try lifecycle.armRecoveryTimerFromConnection(66, &idle_conn);
+
+    var recovery_conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer recovery_conn.deinit();
+    try recovery_conn.confirmHandshake();
+    _ = try recovery_conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(67, &recovery_conn);
+
+    const idle_deadline = idle_conn.idleTimeoutDeadlineMillis() orelse return error.TestUnexpectedResult;
+    const recovery_deadline = lifecycle.nextDeadline(67, &recovery_conn) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, recovery_deadline.kind);
+    const now_millis = @max(idle_deadline, recovery_deadline.deadline_millis);
+
+    const connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 66, .connection = &idle_conn },
+        .{ .connection_id = 67, .connection = &recovery_conn },
+    };
+    const sweep = try lifecycle.processPendingWorkAcrossConnections(&connections, now_millis);
+
+    try std.testing.expectEqual(@as(usize, 1), sweep.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), sweep.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), sweep.recovery_serviced_count);
+    try std.testing.expectEqual(ConnectionState.closed, idle_conn.connectionState());
+    try std.testing.expectEqual(ConnectionState.active, recovery_conn.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(u8, 1), recovery_conn.recovery_state.pto_count);
+}
+
+test "EndpointConnectionLifecycle pending-work backend loop step polls PTO output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try client.sendPing();
+    const first = (try lifecycle.pollDatagram(181, &client, 10, .{
+        .space = .application,
+        .destination_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    const deadline = lifecycle.nextDeadline(181, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, deadline.kind);
+
+    const pending_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 181,
+        .connection = &client,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 181,
+        .connection = &client,
+        .destination_connection_id = &server_dcid,
+    }};
+    const result = try lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram(
+        &pending_connections,
+        deadline.deadline_millis,
+        .application,
+        &[_]EndpointCryptoBackendDriveView{},
+        &poll_views,
+        .application,
+    );
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), result.backend.backend.connections_driven);
+    const probe = result.backend.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe.datagram);
+    try std.testing.expectEqual(@as(u64, 181), probe.connection_id);
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        secrets.client,
+        probe.datagram,
+        server_dcid.len,
+        1,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "EndpointConnectionLifecycle pending-work backend loop step drains queued output" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const first_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x11 };
+    const second_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x22 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+
+    var first = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer first.deinit();
+    try first.confirmHandshake();
+    try first.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try first.sendPing();
+
+    var second = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer second.deinit();
+    try second.confirmHandshake();
+    try second.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try second.sendPing();
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const pending_connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 184, .connection = &backend_connection },
+        .{ .connection_id = 185, .connection = &first },
+        .{ .connection_id = 186, .connection = &second },
+    };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 184,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{
+        .{
+            .connection_id = 185,
+            .connection = &first,
+            .destination_connection_id = &first_dcid,
+        },
+        .{
+            .connection_id = 186,
+            .connection = &second,
+            .destination_connection_id = &second_dcid,
+        },
+    };
+    var out: [2]EndpointPolledDatagramResult = undefined;
+
+    const result = try lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams(
+        &pending_connections,
+        10,
+        .handshake,
+        &drive_views,
+        &poll_views,
+        .application,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+    try std.testing.expectEqual(@as(usize, 2), result.backend.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.backend.drain.first_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    defer std.testing.allocator.free(out[1].datagram);
+    try std.testing.expectEqual(@as(u64, 185), out[0].connection_id);
+    try std.testing.expectEqual(@as(u64, 186), out[1].connection_id);
+}
+
+test "EndpointConnectionLifecycle single pending-work backend loop step drains installed-key output" {
+    const OutputBackend = struct {
+        outbound: []const []const u8,
+        outbound_index: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_index >= self.outbound.len) return null;
+            const outbound = self.outbound[self.outbound_index];
+            if (out_buf.len < outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..outbound.len], outbound);
+            self.outbound_index += 1;
+            return out_buf[0..outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x24, 0x34, 0x44, 0x54 };
+    const server_dcid = [_]u8{ 0xb4, 0xc4, 0xd4, 0xe4 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const outbound = [_][]const u8{
+        "single pending drain one",
+        "single pending drain two",
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var backend = OutputBackend{ .outbound = &outbound };
+    var scratch: [128]u8 = undefined;
+    var first_out: [1]EndpointPolledDatagramResult = undefined;
+    const result = try lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams(
+        188,
+        &server,
+        10,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+        &first_out,
+    );
+    defer for (first_out[0..result.backend.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 2), result.backend.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, outbound[0].len + outbound[1].len), result.backend.backend.progress.outbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.backend.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 188), first_out[0].connection_id);
+
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 188,
+        .connection = &server,
+        .destination_connection_id = &client_dcid,
+        .source_connection_id = &server_dcid,
+    }};
+    var rest_out: [2]EndpointPolledDatagramResult = undefined;
+    const rest = lifecycle.drainDatagramsAcrossConnections(
+        &poll_views,
+        11,
+        .handshake,
+        &rest_out,
+    );
+    defer for (rest_out[0..rest.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expect(rest.datagrams_written >= 1);
+    try std.testing.expectEqual(@as(?Error, null), rest.first_error);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, first_out[0].datagram);
+    for (rest_out[0..rest.datagrams_written], 0..) |entry, index| {
+        try client.processProtectedHandshakeDatagramWithInstalledKeys(13 + @as(i64, @intCast(index)), entry.datagram);
+    }
+    var response_crypto: [80]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "single pending drain onesingle pending drain two",
+        response_crypto[0..response_len],
+    );
+}
+
+test "EndpointConnectionLifecycle single pending-work backend OrClose stops before output drain" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x55 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try server.sendCryptoInSpace(.handshake, "queued before bad backend");
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
+            189,
+            &server,
+            10,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            .{
+                .space = .handshake,
+                .destination_connection_id = &server_dcid,
+                .source_connection_id = &server_dcid,
+            },
+            &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle single pending-work compatible backend drain applies peer information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        outbound: []const u8,
+        peer_sent: bool = false,
+        outbound_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x25, 0x35, 0x45, 0x55 };
+    const server_dcid = [_]u8{ 0xb5, 0xc5, 0xd5, 0xe5 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 6789,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var backend = Backend{
+        .peer_transport_parameters = peer_params_out.getWritten(),
+        .outbound = "single pending compatible output",
+    };
+    var scratch: [256]u8 = undefined;
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    const result = try lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams(
+        190,
+        &server,
+        10,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+        &out,
+    );
+    defer for (out[0..result.backend.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(peer_params_out.getWritten().len, result.backend.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expect(result.backend.backend.progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), result.backend.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "single pending compatible output".len), result.backend.backend.progress.outbound_bytes);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(backend.outbound_sent);
+    try std.testing.expectEqual(@as(u64, 6789), server.peer_max_data);
+    const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.backend.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 190), out[0].connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(11, out[0].datagram);
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("single pending compatible output", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle single pending-work compatible OrClose stops before output drain" {
+    const BadBackend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xab, 0xbc, 0xcd, 0x56 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 6789,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try server.sendCryptoInSpace(.handshake, "queued before compatible pending close");
+
+    var backend = BadBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+            191,
+            &server,
+            10,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            &[_]VersionCompatibility{},
+            .{
+                .space = .handshake,
+                .destination_connection_id = &server_dcid,
+                .source_connection_id = &server_dcid,
+            },
+            &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle pending-work close-propagating backend stops before output poll" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    const pending_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 182,
+        .connection = &server,
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 182,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+            &pending_connections,
+            10,
+            .handshake,
+            &drive_views,
+            &[_]EndpointConnectionPollView{},
+            .handshake,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle pending-work close-propagating backend stops before output drain" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var ready = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer ready.deinit();
+    try ready.confirmHandshake();
+    const secrets = try protection.deriveInitialSecrets(.v1, &[_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 });
+    try ready.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try ready.sendPing();
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    const ready_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x33 };
+    const pending_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 187,
+        .connection = &server,
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 187,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 188,
+        .connection = &ready,
+        .destination_connection_id = &ready_dcid,
+    }};
+    var out: [1]EndpointPolledDatagramResult = undefined;
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+            &pending_connections,
+            10,
+            .handshake,
+            &drive_views,
+            &poll_views,
+            .application,
+            &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), ready.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle pending-work compatible-version backend applies peer information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 9876,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    const pending_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 183,
+        .connection = &server,
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 183,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+
+    const result = try lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+        &pending_connections,
+        10,
+        .handshake,
+        &drive_views,
+        &compatibilities,
+        &[_]EndpointConnectionPollView{},
+        .handshake,
+    );
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(peer_params_out.getWritten().len, result.backend.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expect(result.backend.backend.progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), result.backend.backend.progress.peer_compatible_version_selected);
+    try std.testing.expect(result.backend.datagram == null);
+    try std.testing.expectEqual(@as(u64, 9876), server.peer_max_data);
+    try std.testing.expect(backend.peer_sent);
+
+    const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
+}
+
+test "EndpointConnectionLifecycle pending-work compatible-version close path stops before output poll" {
+    const Backend = struct {
+        output_pulled: bool = false,
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 9876,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    const pending_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 184,
+        .connection = &server,
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 184,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+            &pending_connections,
+            10,
+            .handshake,
+            &drive_views,
+            &[_]VersionCompatibility{},
+            &[_]EndpointConnectionPollView{},
+            .handshake,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle selects deadline across caller-owned connections" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var idle_conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 5000,
+    });
+    defer idle_conn.deinit();
+    try idle_conn.confirmHandshake();
+    try idle_conn.sendPing();
+    var idle_payload_buf: [16]u8 = undefined;
+    _ = try idle_conn.pollTx(10, &idle_payload_buf);
+    const idle_deadline = idle_conn.idleTimeoutDeadlineMillis() orelse return error.TestUnexpectedResult;
+
+    var recovery_conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 10_000,
+    });
+    defer recovery_conn.deinit();
+    try recovery_conn.confirmHandshake();
+    _ = try recovery_conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(72, &recovery_conn);
+
+    var closing_conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer closing_conn.deinit();
+    try closing_conn.closeConnection(0, @intFromEnum(frame.FrameType.ping), "done");
+    var close_payload_buf: [64]u8 = undefined;
+    _ = (try closing_conn.pollTx(20, &close_payload_buf)) orelse return error.TestUnexpectedResult;
+    const close_deadline = closing_conn.closeDeadlineMillis() orelse return error.TestUnexpectedResult;
+
+    var no_deadline_conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer no_deadline_conn.deinit();
+
+    const connections = [_]EndpointConnectionView{
+        .{ .connection_id = 71, .connection = &idle_conn },
+        .{ .connection_id = 72, .connection = &recovery_conn },
+        .{ .connection_id = 73, .connection = &closing_conn },
+        .{ .connection_id = 74, .connection = &no_deadline_conn },
+    };
+
+    const first = lifecycle.nextDeadlineAcrossConnections(&connections) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 73), first.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.close_timeout, first.kind);
+    try std.testing.expectEqual(close_deadline, first.deadline_millis);
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), first.recovery);
+
+    const after_close_connections = [_]EndpointConnectionView{
+        .{ .connection_id = 71, .connection = &idle_conn },
+        .{ .connection_id = 72, .connection = &recovery_conn },
+        .{ .connection_id = 74, .connection = &no_deadline_conn },
+    };
+    const second = lifecycle.nextDeadlineAcrossConnections(&after_close_connections) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 71), second.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, second.kind);
+    try std.testing.expectEqual(idle_deadline, second.deadline_millis);
+
+    idle_conn.checkIdleTimeouts(idle_deadline) catch |err| switch (err) {
+        error.ConnectionClosed => {},
+        else => return err,
+    };
+    const after_idle_connections = [_]EndpointConnectionView{
+        .{ .connection_id = 72, .connection = &recovery_conn },
+        .{ .connection_id = 74, .connection = &no_deadline_conn },
+    };
+    const third = lifecycle.nextDeadlineAcrossConnections(&after_idle_connections) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 72), third.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, third.kind);
+    const recovery_timer = third.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
+}
+
+test "EndpointConnectionDeadline derives installed-key poll options" {
+    const dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const scid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+
+    const idle = EndpointConnectionDeadline{
+        .connection_id = 7,
+        .deadline_millis = 10,
+        .kind = .idle_timeout,
+    };
+    try std.testing.expect(idle.installedKeyPollOptions(&dcid, &scid) == null);
+
+    const initial = EndpointConnectionDeadline{
+        .connection_id = 7,
+        .deadline_millis = 10,
+        .kind = .recovery,
+        .recovery = .{
+            .space = .initial,
+            .kind = .pto,
+            .deadline_millis = 10,
+        },
+    };
+    try std.testing.expect(initial.installedKeyPollOptions(&dcid, &scid) == null);
+
+    const handshake = EndpointConnectionDeadline{
+        .connection_id = 7,
+        .deadline_millis = 10,
+        .kind = .recovery,
+        .recovery = .{
+            .space = .handshake,
+            .kind = .pto,
+            .deadline_millis = 10,
+        },
+    };
+    const handshake_options = handshake.installedKeyPollOptions(&dcid, &scid) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointInstalledKeyDatagramSpace.handshake, handshake_options.space);
+    try std.testing.expectEqualSlices(u8, &dcid, handshake_options.destination_connection_id);
+    try std.testing.expectEqualSlices(u8, &scid, handshake_options.source_connection_id);
+
+    const application = EndpointConnectionDeadline{
+        .connection_id = 7,
+        .deadline_millis = 10,
+        .kind = .recovery,
+        .recovery = .{
+            .space = .application,
+            .kind = .pto,
+            .deadline_millis = 10,
+        },
+    };
+    const application_options = application.installedKeyPollOptions(&dcid, &scid) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointInstalledKeyDatagramSpace.application, application_options.space);
+    try std.testing.expectEqualSlices(u8, &dcid, application_options.destination_connection_id);
+    try std.testing.expectEqual(@as(usize, 0), application_options.source_connection_id.len);
+}
+
+test "EndpointConnectionLifecycle pollDatagram emits 1-RTT packet" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(62, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendPing();
+    const datagram = (try client_lifecycle.pollDatagram(61, &client, 10, .{
+        .space = .application,
+        .destination_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), client_lifecycle.recoveryTimerCount());
+    const next = client_lifecycle.nextDeadline(61, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    try std.testing.expect(next.recovery != null);
+
+    var out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const feed = try server_lifecycle.feedDatagramWithInstalledKeys(
+        62,
+        &server,
+        server_path,
+        11,
+        datagram,
+        .{
+            .space = .application,
+            .out = &out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+    );
+    switch (feed) {
+        .routed => |route| {
+            try std.testing.expectEqual(@as(u64, 62), route.connection_id);
+            try std.testing.expectEqualSlices(u8, &server_dcid, route.destination_connection_id.asSlice());
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle dispatches installed-key receive across caller-owned connections" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x33 };
+    const decoy_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var decoy = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer decoy.deinit();
+    try decoy.validatePeerAddress();
+    try decoy.confirmHandshake();
+    try decoy.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(92, &server_dcid, server_path, .{ .sequence_number = 0 });
+    try server_lifecycle.registerConnectionId(93, &decoy_dcid, server_path, .{ .sequence_number = 1 });
+
+    try client.sendPing();
+    const datagram = (try client_lifecycle.pollDatagram(91, &client, 10, .{
+        .space = .application,
+        .destination_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+
+    var out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 93, .connection = &decoy },
+        .{ .connection_id = 92, .connection = &server },
+    };
+    const feed = try server_lifecycle.feedDatagramWithInstalledKeysAcrossConnections(
+        &connections,
+        server_path,
+        11,
+        datagram,
+        .{
+            .space = .application,
+            .out = &out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+    );
+    switch (feed) {
+        .routed => |route| {
+            try std.testing.expectEqual(@as(u64, 92), route.connection_id);
+            try std.testing.expectEqualSlices(u8, &server_dcid, route.destination_connection_id.asSlice());
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(?u64, null), decoy.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle feeds installed-key datagram then drives backend and polls response" {
+    const Backend = struct {
+        outbound: []const u8,
+        outbound_sent: bool = false,
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(152, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendCryptoInSpace(.handshake, "client backend input");
+    const client_datagram = (try client_lifecycle.pollDatagram(151, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = Backend{ .outbound = "server backend response" };
+    var scratch: [128]u8 = undefined;
+    const receive_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 152,
+        .connection = &server,
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 152,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 152,
+        .connection = &server,
+        .destination_connection_id = &client_dcid,
+        .source_connection_id = &server_dcid,
+    }};
+    var out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram(
+        &receive_connections,
+        server_path,
+        11,
+        client_datagram,
+        .{
+            .space = .handshake,
+            .out = &out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        .handshake,
+        &drive_views,
+        &poll_views,
+        .handshake,
+    );
+    switch (result.feed) {
+        .routed => |route| {
+            try std.testing.expectEqual(@as(u64, 152), route.connection_id);
+            try std.testing.expectEqualSlices(u8, &server_dcid, route.destination_connection_id.asSlice());
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "client backend input".len), backend_result.backend.progress.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "server backend response".len), backend_result.backend.progress.outbound_bytes);
+    try std.testing.expectEqualStrings("client backend input", backend.received[0..backend.received_len]);
+    try std.testing.expect(backend.outbound_sent);
+
+    const response = backend_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response.datagram);
+    try std.testing.expectEqual(@as(u64, 152), response.connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, response.datagram);
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server backend response", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle single feed backend poll step returns response datagram" {
+    const Backend = struct {
+        outbound: []const u8,
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+        outbound_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x2b, 0x3b, 0x4b, 0x5b };
+    const server_dcid = [_]u8{ 0xbb, 0xcb, 0xdb, 0xeb };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(167, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendCryptoInSpace(.handshake, "client single poll input");
+    const client_datagram = (try client_lifecycle.pollDatagram(161, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = Backend{ .outbound = "server single poll output" };
+    var scratch: [128]u8 = undefined;
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram(
+        167,
+        &server,
+        server_path,
+        11,
+        client_datagram,
+        .{
+            .space = .handshake,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+    );
+    switch (result.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 167), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "client single poll input".len), backend_result.backend.progress.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "server single poll output".len), backend_result.backend.progress.outbound_bytes);
+    try std.testing.expectEqualStrings("client single poll input", backend.received[0..backend.received_len]);
+    try std.testing.expect(backend.outbound_sent);
+
+    const response = backend_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response.datagram);
+    try std.testing.expectEqual(@as(u64, 167), response.connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, response.datagram);
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server single poll output", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle feeds installed-key datagram then drives backend and drains responses" {
+    const Backend = struct {
+        outbound: []const []const u8,
+        outbound_index: usize = 0,
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_index >= self.outbound.len) return null;
+            const outbound = self.outbound[self.outbound_index];
+            if (out_buf.len < outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..outbound.len], outbound);
+            self.outbound_index += 1;
+            return out_buf[0..outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x20, 0x30, 0x40, 0x50 };
+    const server_dcid = [_]u8{ 0xba, 0xcb, 0xdc, 0xed };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(162, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendCryptoInSpace(.handshake, "client drain input");
+    const client_datagram = (try client_lifecycle.pollDatagram(161, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    const outbound = [_][]const u8{
+        "server drain response one",
+        "server drain response two",
+    };
+    var backend = Backend{ .outbound = &outbound };
+    var scratch: [128]u8 = undefined;
+    const receive_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 162,
+        .connection = &server,
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 162,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 162,
+        .connection = &server,
+        .destination_connection_id = &client_dcid,
+        .source_connection_id = &server_dcid,
+    }};
+    var feed_out: [64]u8 = undefined;
+    var drained: [2]EndpointPolledDatagramResult = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams(
+        &receive_connections,
+        server_path,
+        11,
+        client_datagram,
+        .{
+            .space = .handshake,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        .handshake,
+        &drive_views,
+        &poll_views,
+        .handshake,
+        &drained,
+    );
+    switch (result.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 162), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "client drain input".len), backend_result.backend.progress.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 2), backend_result.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, outbound[0].len + outbound[1].len), backend_result.backend.progress.outbound_bytes);
+    try std.testing.expectEqualStrings("client drain input", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(usize, 2), backend.outbound_index);
+    try std.testing.expectEqual(@as(usize, 2), backend_result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), backend_result.drain.first_error);
+    defer std.testing.allocator.free(drained[0].datagram);
+    defer std.testing.allocator.free(drained[1].datagram);
+    try std.testing.expectEqual(@as(u64, 162), drained[0].connection_id);
+    try std.testing.expectEqual(@as(u64, 162), drained[1].connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, drained[0].datagram);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, drained[1].datagram);
+    var response_crypto: [96]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "server drain response oneserver drain response two",
+        response_crypto[0..response_len],
+    );
+}
+
+test "EndpointConnectionLifecycle single feed backend drain step uses bounded output" {
+    const Backend = struct {
+        outbound: []const []const u8,
+        outbound_index: usize = 0,
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_index >= self.outbound.len) return null;
+            const outbound = self.outbound[self.outbound_index];
+            if (out_buf.len < outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..outbound.len], outbound);
+            self.outbound_index += 1;
+            return out_buf[0..outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x27, 0x37, 0x47, 0x57 };
+    const server_dcid = [_]u8{ 0xb7, 0xc7, 0xd7, 0xe7 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(163, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendCryptoInSpace(.handshake, "client single feed input");
+    const client_datagram = (try client_lifecycle.pollDatagram(161, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    const outbound = [_][]const u8{
+        "server single feed one",
+        "server single feed two",
+    };
+    var backend = Backend{ .outbound = &outbound };
+    var scratch: [128]u8 = undefined;
+    var feed_out: [64]u8 = undefined;
+    var first_out: [1]EndpointPolledDatagramResult = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams(
+        163,
+        &server,
+        server_path,
+        11,
+        client_datagram,
+        .{
+            .space = .handshake,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+        &first_out,
+    );
+    switch (result.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 163), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "client single feed input".len), backend_result.backend.progress.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 2), backend_result.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, outbound[0].len + outbound[1].len), backend_result.backend.progress.outbound_bytes);
+    try std.testing.expectEqualStrings("client single feed input", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(usize, 2), backend.outbound_index);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), backend_result.drain.first_error);
+    defer std.testing.allocator.free(first_out[0].datagram);
+    try std.testing.expectEqual(@as(u64, 163), first_out[0].connection_id);
+
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 163,
+        .connection = &server,
+        .destination_connection_id = &client_dcid,
+        .source_connection_id = &server_dcid,
+    }};
+    var rest_out: [2]EndpointPolledDatagramResult = undefined;
+    const rest = server_lifecycle.drainDatagramsAcrossConnections(
+        &poll_views,
+        12,
+        .handshake,
+        &rest_out,
+    );
+    defer for (rest_out[0..rest.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expect(rest.datagrams_written >= 1);
+    try std.testing.expectEqual(@as(?Error, null), rest.first_error);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, first_out[0].datagram);
+    for (rest_out[0..rest.datagrams_written], 0..) |entry, index| {
+        try client.processProtectedHandshakeDatagramWithInstalledKeys(14 + @as(i64, @intCast(index)), entry.datagram);
+    }
+    var response_crypto: [96]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "server single feed oneserver single feed two",
+        response_crypto[0..response_len],
+    );
+}
+
+test "EndpointConnectionLifecycle single feed backend OrClose stops before drain" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x28, 0x38, 0x48, 0x58 };
+    const server_dcid = [_]u8{ 0xb8, 0xc8, 0xd8, 0xe8 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try server.sendCryptoInSpace(.handshake, "queued before bad single feed");
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(164, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendCryptoInSpace(.handshake, "client bad single feed input");
+    const client_datagram = (try client_lifecycle.pollDatagram(161, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    var feed_out: [64]u8 = undefined;
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
+            164,
+            &server,
+            server_path,
+            11,
+            client_datagram,
+            .{
+                .space = .handshake,
+                .out = &feed_out,
+                .unpredictable_prefix = &reset_prefix,
+                .supported_versions = &versions,
+            },
+            .handshake,
+            backend.backend(),
+            &scratch,
+            .{
+                .space = .handshake,
+                .destination_connection_id = &client_dcid,
+                .source_connection_id = &server_dcid,
+            },
+            &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle single feed backend OrClose stops before poll" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x2c, 0x3c, 0x4c, 0x5c };
+    const server_dcid = [_]u8{ 0xbc, 0xcc, 0xdc, 0xec };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try server.sendCryptoInSpace(.handshake, "queued before bad single feed poll");
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(168, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendCryptoInSpace(.handshake, "client bad single feed poll input");
+    const client_datagram = (try client_lifecycle.pollDatagram(161, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+            168,
+            &server,
+            server_path,
+            11,
+            client_datagram,
+            .{
+                .space = .handshake,
+                .out = &feed_out,
+                .unpredictable_prefix = &reset_prefix,
+                .supported_versions = &versions,
+            },
+            .handshake,
+            backend.backend(),
+            &scratch,
+            .{
+                .space = .handshake,
+                .destination_connection_id = &client_dcid,
+                .source_connection_id = &server_dcid,
+            },
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle single compatible feed backend drain applies peer information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        outbound: []const u8,
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+        peer_sent: bool = false,
+        outbound_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x29, 0x39, 0x49, 0x59 };
+    const server_dcid = [_]u8{ 0xb9, 0xc9, 0xd9, 0xe9 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(165, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendCryptoInSpace(.handshake, "client compatible feed input");
+    const client_datagram = (try client_lifecycle.pollDatagram(161, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = Backend{
+        .peer_transport_parameters = peer_params_out.getWritten(),
+        .outbound = "server compatible feed output",
+    };
+    var scratch: [256]u8 = undefined;
+    var feed_out: [64]u8 = undefined;
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams(
+        165,
+        &server,
+        server_path,
+        11,
+        client_datagram,
+        .{
+            .space = .handshake,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &server_versions,
+        },
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+        &drained,
+    );
+    switch (result.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 165), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "client compatible feed input".len), backend_result.backend.progress.inbound_bytes);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), backend_result.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.outbound_chunks);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(backend.outbound_sent);
+    try std.testing.expectEqualStrings("client compatible feed input", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(u64, 4321), server.peer_max_data);
+    const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), backend_result.drain.first_error);
+    defer std.testing.allocator.free(drained[0].datagram);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, drained[0].datagram);
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server compatible feed output", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle single compatible feed backend poll applies peer information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        outbound: []const u8,
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+        peer_sent: bool = false,
+        outbound_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x2d, 0x3d, 0x4d, 0x5d };
+    const server_dcid = [_]u8{ 0xbd, 0xcd, 0xdd, 0xed };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 8765,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(169, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendCryptoInSpace(.handshake, "client compatible poll input");
+    const client_datagram = (try client_lifecycle.pollDatagram(161, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = Backend{
+        .peer_transport_parameters = peer_params_out.getWritten(),
+        .outbound = "server compatible poll output",
+    };
+    var scratch: [256]u8 = undefined;
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram(
+        169,
+        &server,
+        server_path,
+        11,
+        client_datagram,
+        .{
+            .space = .handshake,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &server_versions,
+        },
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+    );
+    switch (result.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 169), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "client compatible poll input".len), backend_result.backend.progress.inbound_bytes);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), backend_result.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.outbound_chunks);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(backend.outbound_sent);
+    try std.testing.expectEqualStrings("client compatible poll input", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(u64, 8765), server.peer_max_data);
+    const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
+
+    const response = backend_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response.datagram);
+    try std.testing.expectEqual(@as(u64, 169), response.connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, response.datagram);
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server compatible poll output", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle single compatible feed OrClose stops before drain" {
+    const BadBackend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x2a, 0x3a, 0x4a, 0x5a };
+    const server_dcid = [_]u8{ 0xba, 0xca, 0xda, 0xea };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try server.sendCryptoInSpace(.handshake, "queued before compatible close");
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(166, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendCryptoInSpace(.handshake, "client bad compatible feed input");
+    const client_datagram = (try client_lifecycle.pollDatagram(161, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = BadBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    var feed_out: [64]u8 = undefined;
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+            166,
+            &server,
+            server_path,
+            11,
+            client_datagram,
+            .{
+                .space = .handshake,
+                .out = &feed_out,
+                .unpredictable_prefix = &reset_prefix,
+                .supported_versions = &server_versions,
+            },
+            .handshake,
+            backend.backend(),
+            &scratch,
+            &[_]VersionCompatibility{},
+            .{
+                .space = .handshake,
+                .destination_connection_id = &client_dcid,
+                .source_connection_id = &server_dcid,
+            },
+            &drained,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle single compatible feed OrClose stops before poll" {
+    const BadBackend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x2e, 0x3e, 0x4e, 0x5e };
+    const server_dcid = [_]u8{ 0xbe, 0xce, 0xde, 0xee };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 8765,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try server.sendCryptoInSpace(.handshake, "queued before compatible close poll");
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(170, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendCryptoInSpace(.handshake, "client bad compatible feed poll input");
+    const client_datagram = (try client_lifecycle.pollDatagram(161, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = BadBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+            170,
+            &server,
+            server_path,
+            11,
+            client_datagram,
+            .{
+                .space = .handshake,
+                .out = &feed_out,
+                .unpredictable_prefix = &reset_prefix,
+                .supported_versions = &server_versions,
+            },
+            .handshake,
+            backend.backend(),
+            &scratch,
+            &[_]VersionCompatibility{},
+            .{
+                .space = .handshake,
+                .destination_connection_id = &client_dcid,
+                .source_connection_id = &server_dcid,
+            },
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle feed backend variants do not drive on dropped datagram" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 100;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 171,
+        .connection = undefined,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{};
+    var out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const feed_options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .handshake,
+        .out = &out,
+        .unpredictable_prefix = &reset_prefix,
+        .supported_versions = &versions,
+    };
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const ignored_datagram = [_]u8{0};
+
+    const close_result = try lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+        &[_]EndpointConnectionReceiveView{},
+        path,
+        10,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        &drive_views,
+        &poll_views,
+        .handshake,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, close_result.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramResult, null), close_result.backend);
+
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+    const compatible_result = try lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+        &[_]EndpointConnectionReceiveView{},
+        path,
+        11,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        &drive_views,
+        &compatibilities,
+        &poll_views,
+        .handshake,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, compatible_result.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramResult, null), compatible_result.backend);
+
+    const compatible_close_result = try lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+        &[_]EndpointConnectionReceiveView{},
+        path,
+        12,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        &drive_views,
+        &compatibilities,
+        &poll_views,
+        .handshake,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, compatible_close_result.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramResult, null), compatible_close_result.backend);
+
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    const drain_result = try lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams(
+        &[_]EndpointConnectionReceiveView{},
+        path,
+        13,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        &drive_views,
+        &poll_views,
+        .handshake,
+        &drained,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, drain_result.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramDrainResult, null), drain_result.backend);
+
+    const close_drain_result = try lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+        &[_]EndpointConnectionReceiveView{},
+        path,
+        14,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        &drive_views,
+        &poll_views,
+        .handshake,
+        &drained,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, close_drain_result.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramDrainResult, null), close_drain_result.backend);
+
+    const compatible_drain_result = try lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+        &[_]EndpointConnectionReceiveView{},
+        path,
+        15,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        &drive_views,
+        &compatibilities,
+        &poll_views,
+        .handshake,
+        &drained,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, compatible_drain_result.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramDrainResult, null), compatible_drain_result.backend);
+
+    const compatible_close_drain_result = try lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+        &[_]EndpointConnectionReceiveView{},
+        path,
+        16,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        &drive_views,
+        &compatibilities,
+        &poll_views,
+        .handshake,
+        &drained,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, compatible_close_drain_result.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramDrainResult, null), compatible_close_drain_result.backend);
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+}
+
+test "EndpointConnectionLifecycle feed then close-propagating backend stops before output poll" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(172, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendCryptoInSpace(.handshake, "client hello");
+    const client_datagram = (try client_lifecycle.pollDatagram(171, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    const receive_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 172,
+        .connection = &server,
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 172,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 172,
+        .connection = &server,
+        .destination_connection_id = &client_dcid,
+        .source_connection_id = &server_dcid,
+    }};
+    var out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server_lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+            &receive_connections,
+            server_path,
+            11,
+            client_datagram,
+            .{
+                .space = .handshake,
+                .out = &out,
+                .unpredictable_prefix = &reset_prefix,
+                .supported_versions = &versions,
+            },
+            .handshake,
+            &drive_views,
+            &poll_views,
+            .handshake,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle feed then close-propagating backend stops before output drain" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x11, 0x21, 0x31, 0x41 };
+    const server_dcid = [_]u8{ 0xab, 0xbc, 0xcd, 0xde };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(174, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    try client.sendCryptoInSpace(.handshake, "client drain hello");
+    const client_datagram = (try client_lifecycle.pollDatagram(173, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    const receive_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 174,
+        .connection = &server,
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 174,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 174,
+        .connection = &server,
+        .destination_connection_id = &client_dcid,
+        .source_connection_id = &server_dcid,
+    }};
+    var feed_out: [64]u8 = undefined;
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server_lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+            &receive_connections,
+            server_path,
+            11,
+            client_datagram,
+            .{
+                .space = .handshake,
+                .out = &feed_out,
+                .unpredictable_prefix = &reset_prefix,
+                .supported_versions = &versions,
+            },
+            .handshake,
+            &drive_views,
+            &poll_views,
+            .handshake,
+            &drained,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle processPendingWorkAndPollDatagram emits installed-key PTO probe" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try client.sendPing();
+    const first = (try lifecycle.pollDatagram(63, &client, 10, .{
+        .space = .application,
+        .destination_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const next = lifecycle.nextDeadline(63, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 63), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
+    const options = next.installedKeyPollOptions(&server_dcid, &[_]u8{}) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointInstalledKeyDatagramSpace.application, options.space);
+
+    const early = try lifecycle.processPendingWorkAndPollDatagram(63, &client, recovery_timer.deadline_millis - 1, options);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), early.pending_work.idle_retired);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), early.pending_work.close_retired);
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), early.pending_work.recovery_serviced);
+    try std.testing.expectEqual(@as(?[]u8, null), early.datagram);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const due = try lifecycle.processPendingWorkAndPollDatagram(63, &client, recovery_timer.deadline_millis, options);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), due.pending_work.idle_retired);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), due.pending_work.close_retired);
+    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 63), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    const probe = due.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        secrets.client,
+        probe,
+        server_dcid.len,
+        1,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "EndpointConnectionLifecycle processPendingWorkAndDrainDatagrams drains installed-key PTO probe" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xee };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try client.sendPing();
+    const first = (try lifecycle.pollDatagram(65, &client, 10, .{
+        .space = .application,
+        .destination_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    const next = lifecycle.nextDeadline(65, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+    const options = next.installedKeyPollOptions(&server_dcid, &[_]u8{}) orelse return error.TestUnexpectedResult;
+
+    var early_out: [1]EndpointPolledDatagramResult = undefined;
+    const early = try lifecycle.processPendingWorkAndDrainDatagrams(
+        65,
+        &client,
+        recovery_timer.deadline_millis - 1,
+        options,
+        &early_out,
+    );
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), early.pending_work.idle_retired);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), early.pending_work.close_retired);
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), early.pending_work.recovery_serviced);
+    try std.testing.expectEqual(@as(usize, 0), early.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), early.drain.first_error);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    var due_out: [1]EndpointPolledDatagramResult = undefined;
+    const due = try lifecycle.processPendingWorkAndDrainDatagrams(
+        65,
+        &client,
+        recovery_timer.deadline_millis,
+        options,
+        &due_out,
+    );
+    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 65), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    try std.testing.expectEqual(@as(usize, 1), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), due.drain.first_error);
+    defer std.testing.allocator.free(due_out[0].datagram);
+    try std.testing.expectEqual(@as(u64, 65), due_out[0].connection_id);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        secrets.client,
+        due_out[0].datagram,
+        server_dcid.len,
+        1,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "EndpointConnectionLifecycle processDueDeadlineAndPollDatagram gates recovery wakeups" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try client.sendPing();
+    const first = (try lifecycle.pollDatagram(64, &client, 10, .{
+        .space = .application,
+        .destination_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+
+    const next = lifecycle.nextDeadline(64, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+
+    const before_deadline = try lifecycle.processDueDeadlineAndPollDatagram(
+        64,
+        &client,
+        recovery_timer.deadline_millis - 1,
+        &server_dcid,
+        &[_]u8{},
+    );
+    try std.testing.expect(before_deadline == null);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const due = (try lifecycle.processDueDeadlineAndPollDatagram(
+        64,
+        &client,
+        recovery_timer.deadline_millis,
+        &server_dcid,
+        &[_]u8{},
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due.deadline.kind);
+    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 64), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    const probe = due.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        secrets.client,
+        probe,
+        server_dcid.len,
+        1,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "EndpointConnectionLifecycle processDueDeadlineAndDrainDatagrams drains recovery wakeups" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xef };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try client.sendPing();
+    const first = (try lifecycle.pollDatagram(66, &client, 10, .{
+        .space = .application,
+        .destination_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+
+    const next = lifecycle.nextDeadline(66, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+
+    var early_out: [1]EndpointPolledDatagramResult = undefined;
+    const before_deadline = try lifecycle.processDueDeadlineAndDrainDatagrams(
+        66,
+        &client,
+        recovery_timer.deadline_millis - 1,
+        &server_dcid,
+        &[_]u8{},
+        &early_out,
+    );
+    try std.testing.expect(before_deadline == null);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    var due_out: [1]EndpointPolledDatagramResult = undefined;
+    const due = (try lifecycle.processDueDeadlineAndDrainDatagrams(
+        66,
+        &client,
+        recovery_timer.deadline_millis,
+        &server_dcid,
+        &[_]u8{},
+        &due_out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 66), due.deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due.deadline.kind);
+    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 66), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    try std.testing.expectEqual(@as(usize, 1), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), due.drain.first_error);
+    defer std.testing.allocator.free(due_out[0].datagram);
+    try std.testing.expectEqual(@as(u64, 66), due_out[0].connection_id);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        secrets.client,
+        due_out[0].datagram,
+        server_dcid.len,
+        1,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "EndpointConnectionLifecycle single due-deadline backend drain continues after Initial recovery" {
+    const OutputBackend = struct {
+        outbound: []const []const u8,
+        outbound_index: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_index >= self.outbound.len) return null;
+            const outbound = self.outbound[self.outbound_index];
+            if (out_buf.len < outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..outbound.len], outbound);
+            self.outbound_index += 1;
+            return out_buf[0..outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x25, 0x35, 0x45, 0x55 };
+    const server_dcid = [_]u8{ 0xb5, 0xc5, 0xd5, 0xe5 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const outbound = [_][]const u8{
+        "single due drain one",
+        "single due drain two",
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    _ = try client.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(190, &client);
+    const deadline = lifecycle.nextDeadline(190, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, deadline.kind);
+    const recovery_timer = deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, recovery_timer.space);
+
+    var backend = OutputBackend{ .outbound = &outbound };
+    var scratch: [128]u8 = undefined;
+    var early_out: [1]EndpointPolledDatagramResult = undefined;
+    const before_deadline = try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams(
+        190,
+        &client,
+        recovery_timer.deadline_millis - 1,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &server_dcid,
+            .source_connection_id = &client_dcid,
+        },
+        &early_out,
+    );
+    try std.testing.expect(before_deadline == null);
+    try std.testing.expectEqual(@as(usize, 0), backend.outbound_index);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    var first_out: [1]EndpointPolledDatagramResult = undefined;
+    const result = (try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams(
+        190,
+        &client,
+        recovery_timer.deadline_millis,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &server_dcid,
+            .source_connection_id = &client_dcid,
+        },
+        &first_out,
+    )) orelse return error.TestUnexpectedResult;
+    defer for (first_out[0..(if (result.backend) |driven| driven.drain.datagrams_written else 0)]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, result.due_work.deadline.kind);
+    try std.testing.expectEqual(@as(?[]u8, null), result.due_work.datagram);
+    const serviced = result.due_work.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 190), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.initial, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+
+    const driven = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), driven.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 2), driven.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, outbound[0].len + outbound[1].len), driven.backend.progress.outbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), driven.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), driven.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 190), first_out[0].connection_id);
+
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 190,
+        .connection = &client,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    }};
+    var rest_out: [2]EndpointPolledDatagramResult = undefined;
+    const rest = lifecycle.drainDatagramsAcrossConnections(
+        &poll_views,
+        recovery_timer.deadline_millis + 1,
+        .handshake,
+        &rest_out,
+    );
+    defer for (rest_out[0..rest.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expect(rest.datagrams_written >= 1);
+    try std.testing.expectEqual(@as(?Error, null), rest.first_error);
+
+    try server.processProtectedHandshakeDatagramWithInstalledKeys(
+        recovery_timer.deadline_millis + 2,
+        first_out[0].datagram,
+    );
+    for (rest_out[0..rest.datagrams_written], 0..) |entry, index| {
+        try server.processProtectedHandshakeDatagramWithInstalledKeys(
+            recovery_timer.deadline_millis + 3 + @as(i64, @intCast(index)),
+            entry.datagram,
+        );
+    }
+    var response_crypto: [80]u8 = undefined;
+    const response_len = (try server.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "single due drain onesingle due drain two",
+        response_crypto[0..response_len],
+    );
+}
+
+test "EndpointConnectionLifecycle single due-deadline backend OrClose stops before output drain" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x26, 0x36, 0x46, 0x56 };
+    const server_dcid = [_]u8{ 0xb6, 0xc6, 0xd6, 0xe6 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try client.sendCryptoInSpace(.handshake, "queued before due bad backend");
+
+    _ = try client.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(191, &client);
+    const deadline = lifecycle.nextDeadline(191, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, deadline.kind);
+    const recovery_timer = deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, recovery_timer.space);
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
+            191,
+            &client,
+            recovery_timer.deadline_millis,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            .{
+                .space = .handshake,
+                .destination_connection_id = &server_dcid,
+                .source_connection_id = &client_dcid,
+            },
+            &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, client.connectionState());
+    try std.testing.expect(client.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle single due-deadline compatible backend drain applies peer information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        outbound: []const u8,
+        peer_sent: bool = false,
+        outbound_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x27, 0x37, 0x47, 0x57 };
+    const server_dcid = [_]u8{ 0xb7, 0xc7, 0xd7, 0xe7 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 8765,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    _ = try server.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(192, &server);
+    const deadline = lifecycle.nextDeadline(192, &server) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, deadline.kind);
+    const recovery_timer = deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, recovery_timer.space);
+
+    var backend = Backend{
+        .peer_transport_parameters = peer_params_out.getWritten(),
+        .outbound = "single due compatible output",
+    };
+    var scratch: [256]u8 = undefined;
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    const result = (try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams(
+        192,
+        &server,
+        recovery_timer.deadline_millis,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    defer for (out[0..(if (result.backend) |driven| driven.drain.datagrams_written else 0)]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, result.due_work.deadline.kind);
+    try std.testing.expectEqual(@as(?[]u8, null), result.due_work.datagram);
+    const serviced = result.due_work.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 192), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.initial, serviced.timer.space);
+
+    const driven = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), driven.backend.connections_driven);
+    try std.testing.expectEqual(peer_params_out.getWritten().len, driven.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expect(driven.backend.progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), driven.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(usize, 1), driven.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "single due compatible output".len), driven.backend.progress.outbound_bytes);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(backend.outbound_sent);
+    try std.testing.expectEqual(@as(u64, 8765), server.peer_max_data);
+    const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
+    try std.testing.expectEqual(@as(usize, 1), driven.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), driven.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 192), out[0].connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(
+        recovery_timer.deadline_millis + 1,
+        out[0].datagram,
+    );
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("single due compatible output", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle single due-deadline compatible OrClose stops before output drain" {
+    const BadBackend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x28, 0x38, 0x48, 0x58 };
+    const server_dcid = [_]u8{ 0xb8, 0xc8, 0xd8, 0xe8 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 8765,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try server.sendCryptoInSpace(.handshake, "queued before due compatible close");
+
+    _ = try server.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(193, &server);
+    const deadline = lifecycle.nextDeadline(193, &server) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, deadline.kind);
+    const recovery_timer = deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, recovery_timer.space);
+
+    var backend = BadBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+            193,
+            &server,
+            recovery_timer.deadline_millis,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            &[_]VersionCompatibility{},
+            .{
+                .space = .handshake,
+                .destination_connection_id = &server_dcid,
+                .source_connection_id = &client_dcid,
+            },
+            &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle processDueDeadlineAcrossConnectionsAndPollDatagram selects due connection" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const fast_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x01 };
+    const slow_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x02 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var fast = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer fast.deinit();
+    try fast.confirmHandshake();
+    try fast.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var slow = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 10_000,
+    });
+    defer slow.deinit();
+    try slow.confirmHandshake();
+    try slow.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try fast.sendPing();
+    const fast_first = (try lifecycle.pollDatagram(81, &fast, 10, .{
+        .space = .application,
+        .destination_connection_id = &fast_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(fast_first);
+
+    try slow.sendPing();
+    const slow_first = (try lifecycle.pollDatagram(82, &slow, 10, .{
+        .space = .application,
+        .destination_connection_id = &slow_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(slow_first);
+
+    const fast_deadline = lifecycle.nextDeadline(81, &fast) orelse return error.TestUnexpectedResult;
+    const slow_deadline = lifecycle.nextDeadline(82, &slow) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, fast_deadline.kind);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, slow_deadline.kind);
+    try std.testing.expect(fast_deadline.deadline_millis < slow_deadline.deadline_millis);
+
+    const connections = [_]EndpointConnectionPollView{
+        .{
+            .connection_id = 81,
+            .connection = &fast,
+            .destination_connection_id = &fast_dcid,
+        },
+        .{
+            .connection_id = 82,
+            .connection = &slow,
+            .destination_connection_id = &slow_dcid,
+        },
+    };
+
+    const before_deadline = try lifecycle.processDueDeadlineAcrossConnectionsAndPollDatagram(
+        &connections,
+        fast_deadline.deadline_millis - 1,
+    );
+    try std.testing.expect(before_deadline == null);
+    try std.testing.expectEqual(@as(usize, 1), fast.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), fast.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 0), slow.pending_ping_count);
+
+    const due = (try lifecycle.processDueDeadlineAcrossConnectionsAndPollDatagram(
+        &connections,
+        fast_deadline.deadline_millis,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 81), due.deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due.deadline.kind);
+    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 81), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    const probe = due.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe);
+    try std.testing.expectEqual(@as(usize, 2), fast.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
+
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        secrets.client,
+        probe,
+        fast_dcid.len,
+        1,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "EndpointConnectionLifecycle processDueDeadlineAcrossConnectionsAndDrainDatagrams selects due connection" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const fast_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x06 };
+    const slow_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x07 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var fast = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer fast.deinit();
+    try fast.confirmHandshake();
+    try fast.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var slow = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 10_000,
+    });
+    defer slow.deinit();
+    try slow.confirmHandshake();
+    try slow.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try fast.sendPing();
+    const fast_first = (try lifecycle.pollDatagram(83, &fast, 10, .{
+        .space = .application,
+        .destination_connection_id = &fast_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(fast_first);
+
+    try slow.sendPing();
+    const slow_first = (try lifecycle.pollDatagram(84, &slow, 10, .{
+        .space = .application,
+        .destination_connection_id = &slow_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(slow_first);
+
+    const fast_deadline = lifecycle.nextDeadline(83, &fast) orelse return error.TestUnexpectedResult;
+    const slow_deadline = lifecycle.nextDeadline(84, &slow) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, fast_deadline.kind);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, slow_deadline.kind);
+    try std.testing.expect(fast_deadline.deadline_millis < slow_deadline.deadline_millis);
+
+    const connections = [_]EndpointConnectionPollView{
+        .{
+            .connection_id = 83,
+            .connection = &fast,
+            .destination_connection_id = &fast_dcid,
+        },
+        .{
+            .connection_id = 84,
+            .connection = &slow,
+            .destination_connection_id = &slow_dcid,
+        },
+    };
+
+    var early_out: [1]EndpointPolledDatagramResult = undefined;
+    const before_deadline = try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
+        &connections,
+        fast_deadline.deadline_millis - 1,
+        &early_out,
+    );
+    try std.testing.expect(before_deadline == null);
+    try std.testing.expectEqual(@as(usize, 1), fast.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
+
+    var due_out: [1]EndpointPolledDatagramResult = undefined;
+    const due = (try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
+        &connections,
+        fast_deadline.deadline_millis,
+        &due_out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 83), due.deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due.deadline.kind);
+    try std.testing.expectEqual(@as(usize, 1), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), due.drain.first_error);
+    defer std.testing.allocator.free(due_out[0].datagram);
+    try std.testing.expectEqual(@as(u64, 83), due_out[0].connection_id);
+    try std.testing.expectEqual(@as(usize, 2), fast.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
+}
+
+test "EndpointConnectionLifecycle due-deadline backend loop returns recovery datagram before backend drive" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x03 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try client.sendPing();
+    const first = (try lifecycle.pollDatagram(85, &client, 10, .{
+        .space = .application,
+        .destination_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    const deadline = lifecycle.nextDeadline(85, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, deadline.kind);
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const deadline_connections = [_]EndpointConnectionPollView{.{
+        .connection_id = 85,
+        .connection = &client,
+        .destination_connection_id = &client_dcid,
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 86,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+
+    const result = (try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram(
+        &deadline_connections,
+        deadline.deadline_millis,
+        .handshake,
+        &drive_views,
+        &[_]EndpointConnectionPollView{},
+        .handshake,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 85), result.due_work.deadline.connection_id);
+    try std.testing.expect(result.due_work.datagram != null);
+    defer std.testing.allocator.free(result.due_work.datagram.?);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramResult, null), result.backend);
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+}
+
+test "EndpointConnectionLifecycle due-deadline backend drain returns recovery datagram before backend drive" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x04 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try client.sendPing();
+    const first = (try lifecycle.pollDatagram(91, &client, 10, .{
+        .space = .application,
+        .destination_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    const deadline = lifecycle.nextDeadline(91, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, deadline.kind);
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const deadline_connections = [_]EndpointConnectionPollView{.{
+        .connection_id = 91,
+        .connection = &client,
+        .destination_connection_id = &client_dcid,
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 92,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    var out: [1]EndpointPolledDatagramResult = undefined;
+
+    const result = (try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams(
+        &deadline_connections,
+        deadline.deadline_millis,
+        .handshake,
+        &drive_views,
+        &[_]EndpointConnectionPollView{},
+        .handshake,
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 91), result.due_work.deadline.connection_id);
+    try std.testing.expect(result.due_work.datagram != null);
+    defer std.testing.allocator.free(result.due_work.datagram.?);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramDrainResult, null), result.backend);
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+}
+
+test "EndpointConnectionLifecycle due-deadline backend loop drives backend after non-output deadline" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var idle = try Connection.init(std.testing.allocator, .client, .{
+        .max_idle_timeout_ms = 30,
+    });
+    defer idle.deinit();
+    try idle.confirmHandshake();
+    try idle.sendPing();
+    var idle_payload_buf: [16]u8 = undefined;
+    _ = (try idle.pollTx(10, &idle_payload_buf)) orelse return error.TestUnexpectedResult;
+    const idle_deadline = idle.idleTimeoutDeadlineMillis() orelse return error.TestUnexpectedResult;
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const deadline_connections = [_]EndpointConnectionPollView{.{
+        .connection_id = 87,
+        .connection = &idle,
+        .destination_connection_id = &[_]u8{},
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 88,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+
+    const result = (try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram(
+        &deadline_connections,
+        idle_deadline,
+        .handshake,
+        &drive_views,
+        &[_]EndpointConnectionPollView{},
+        .handshake,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, result.due_work.deadline.kind);
+    try std.testing.expectEqual(@as(?[]u8, null), result.due_work.datagram);
+    try std.testing.expectEqual(ConnectionState.closed, idle.connectionState());
+    const driven = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), driven.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+    try std.testing.expectEqual(@as(?EndpointPolledDatagramResult, null), driven.datagram);
+}
+
+test "EndpointConnectionLifecycle due-deadline backend loop drains after non-output deadline" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const first_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x44 };
+    const second_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x55 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var idle = try Connection.init(std.testing.allocator, .client, .{
+        .max_idle_timeout_ms = 30,
+    });
+    defer idle.deinit();
+    try idle.confirmHandshake();
+    try idle.sendPing();
+    var idle_payload_buf: [16]u8 = undefined;
+    _ = (try idle.pollTx(10, &idle_payload_buf)) orelse return error.TestUnexpectedResult;
+    const idle_deadline = idle.idleTimeoutDeadlineMillis() orelse return error.TestUnexpectedResult;
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+
+    var first = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer first.deinit();
+    try first.confirmHandshake();
+    try first.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try first.sendPing();
+
+    var second = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer second.deinit();
+    try second.confirmHandshake();
+    try second.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try second.sendPing();
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const deadline_connections = [_]EndpointConnectionPollView{.{
+        .connection_id = 93,
+        .connection = &idle,
+        .destination_connection_id = &[_]u8{},
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 94,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{
+        .{
+            .connection_id = 95,
+            .connection = &first,
+            .destination_connection_id = &first_dcid,
+        },
+        .{
+            .connection_id = 96,
+            .connection = &second,
+            .destination_connection_id = &second_dcid,
+        },
+    };
+    var out: [2]EndpointPolledDatagramResult = undefined;
+
+    const result = (try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams(
+        &deadline_connections,
+        idle_deadline,
+        .handshake,
+        &drive_views,
+        &poll_views,
+        .application,
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, result.due_work.deadline.kind);
+    try std.testing.expectEqual(@as(?[]u8, null), result.due_work.datagram);
+    try std.testing.expectEqual(ConnectionState.closed, idle.connectionState());
+    const driven = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), driven.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+    try std.testing.expectEqual(@as(usize, 2), driven.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), driven.drain.first_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    defer std.testing.allocator.free(out[1].datagram);
+    try std.testing.expectEqual(@as(u64, 95), out[0].connection_id);
+    try std.testing.expectEqual(@as(u64, 96), out[1].connection_id);
+}
+
+test "EndpointConnectionLifecycle due-deadline close-propagating backend loop stops before output poll" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var idle = try Connection.init(std.testing.allocator, .client, .{
+        .max_idle_timeout_ms = 30,
+    });
+    defer idle.deinit();
+    try idle.confirmHandshake();
+    try idle.sendPing();
+    var idle_payload_buf: [16]u8 = undefined;
+    _ = (try idle.pollTx(10, &idle_payload_buf)) orelse return error.TestUnexpectedResult;
+    const idle_deadline = idle.idleTimeoutDeadlineMillis() orelse return error.TestUnexpectedResult;
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    const deadline_connections = [_]EndpointConnectionPollView{.{
+        .connection_id = 89,
+        .connection = &idle,
+        .destination_connection_id = &[_]u8{},
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 90,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+            &deadline_connections,
+            idle_deadline,
+            .handshake,
+            &drive_views,
+            &[_]EndpointConnectionPollView{},
+            .handshake,
+        ),
+    );
+    try std.testing.expectEqual(ConnectionState.closed, idle.connectionState());
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+}
+
+test "EndpointConnectionLifecycle due-deadline compatible-version backend loop applies peer information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 7777,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var idle = try Connection.init(std.testing.allocator, .client, .{
+        .max_idle_timeout_ms = 30,
+    });
+    defer idle.deinit();
+    try idle.confirmHandshake();
+    try idle.sendPing();
+    var idle_payload_buf: [16]u8 = undefined;
+    _ = (try idle.pollTx(10, &idle_payload_buf)) orelse return error.TestUnexpectedResult;
+    const idle_deadline = idle.idleTimeoutDeadlineMillis() orelse return error.TestUnexpectedResult;
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    const deadline_connections = [_]EndpointConnectionPollView{.{
+        .connection_id = 91,
+        .connection = &idle,
+        .destination_connection_id = &[_]u8{},
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 92,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+
+    const result = (try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+        &deadline_connections,
+        idle_deadline,
+        .handshake,
+        &drive_views,
+        &compatibilities,
+        &[_]EndpointConnectionPollView{},
+        .handshake,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, result.due_work.deadline.kind);
+    try std.testing.expectEqual(@as(?[]u8, null), result.due_work.datagram);
+    const driven = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), driven.backend.connections_driven);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), driven.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(u64, 7777), server.peer_max_data);
+    try std.testing.expect(backend.peer_sent);
+}
+
+test "EndpointConnectionLifecycle due-deadline compatible-version close path stops before output poll" {
+    const Backend = struct {
+        output_pulled: bool = false,
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 7777,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var idle = try Connection.init(std.testing.allocator, .client, .{
+        .max_idle_timeout_ms = 30,
+    });
+    defer idle.deinit();
+    try idle.confirmHandshake();
+    try idle.sendPing();
+    var idle_payload_buf: [16]u8 = undefined;
+    _ = (try idle.pollTx(10, &idle_payload_buf)) orelse return error.TestUnexpectedResult;
+    const idle_deadline = idle.idleTimeoutDeadlineMillis() orelse return error.TestUnexpectedResult;
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    const deadline_connections = [_]EndpointConnectionPollView{.{
+        .connection_id = 93,
+        .connection = &idle,
+        .destination_connection_id = &[_]u8{},
+    }};
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 94,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+            &deadline_connections,
+            idle_deadline,
+            .handshake,
+            &drive_views,
+            &[_]VersionCompatibility{},
+            &[_]EndpointConnectionPollView{},
+            .handshake,
+        ),
+    );
+    try std.testing.expectEqual(ConnectionState.closed, idle.connectionState());
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+}
+
+test "EndpointConnectionLifecycle pollDatagramAcrossConnections selects first output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const idle_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x11 };
+    const ready_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x22 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var idle = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer idle.deinit();
+    try idle.confirmHandshake();
+    try idle.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var ready = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer ready.deinit();
+    try ready.confirmHandshake();
+    try ready.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try ready.sendPing();
+
+    const connections = [_]EndpointConnectionPollView{
+        .{
+            .connection_id = 101,
+            .connection = &idle,
+            .destination_connection_id = &idle_dcid,
+        },
+        .{
+            .connection_id = 102,
+            .connection = &ready,
+            .destination_connection_id = &ready_dcid,
+        },
+    };
+
+    const polled = (try lifecycle.pollDatagramAcrossConnections(
+        &connections,
+        10,
+        .application,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 102), polled.connection_id);
+    try std.testing.expectEqual(@as(usize, 0), idle.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), ready.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        secrets.client,
+        polled.datagram,
+        ready_dcid.len,
+        0,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    const none = try lifecycle.pollDatagramAcrossConnections(
+        &connections,
+        11,
+        .application,
+    );
+    try std.testing.expect(none == null);
+}
+
+test "EndpointConnectionLifecycle drains datagrams across caller-owned output slots" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const first_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x31 };
+    const second_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x32 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var first = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer first.deinit();
+    try first.confirmHandshake();
+    try first.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try first.sendPing();
+
+    var second = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer second.deinit();
+    try second.confirmHandshake();
+    try second.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try second.sendPing();
+
+    const connections = [_]EndpointConnectionPollView{
+        .{
+            .connection_id = 103,
+            .connection = &first,
+            .destination_connection_id = &first_dcid,
+        },
+        .{
+            .connection_id = 104,
+            .connection = &second,
+            .destination_connection_id = &second_dcid,
+        },
+    };
+
+    var first_batch: [1]EndpointPolledDatagramResult = undefined;
+    const first_result = lifecycle.drainDatagramsAcrossConnections(
+        &connections,
+        10,
+        .application,
+        &first_batch,
+    );
+    try std.testing.expectEqual(@as(usize, 1), first_result.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), first_result.first_error);
+    defer std.testing.allocator.free(first_batch[0].datagram);
+    try std.testing.expectEqual(@as(u64, 103), first_batch[0].connection_id);
+    try std.testing.expectEqual(@as(usize, 1), first.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), second.sentPacketCount(.application));
+
+    var second_batch: [2]EndpointPolledDatagramResult = undefined;
+    const second_result = lifecycle.drainDatagramsAcrossConnections(
+        &connections,
+        11,
+        .application,
+        &second_batch,
+    );
+    try std.testing.expectEqual(@as(usize, 1), second_result.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), second_result.first_error);
+    defer std.testing.allocator.free(second_batch[0].datagram);
+    try std.testing.expectEqual(@as(u64, 104), second_batch[0].connection_id);
+    try std.testing.expectEqual(@as(usize, 1), second.sentPacketCount(.application));
+
+    var empty_batch: [1]EndpointPolledDatagramResult = undefined;
+    const empty_result = lifecycle.drainDatagramsAcrossConnections(
+        &connections,
+        12,
+        .application,
+        &empty_batch,
+    );
+    try std.testing.expectEqual(@as(usize, 0), empty_result.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), empty_result.first_error);
+}
+
+test "EndpointConnectionLifecycle backend drive drains caller-owned output slots" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const first_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x41 };
+    const second_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x42 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+
+    var first = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer first.deinit();
+    try first.confirmHandshake();
+    try first.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try first.sendPing();
+
+    var second = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer second.deinit();
+    try second.confirmHandshake();
+    try second.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try second.sendPing();
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 105,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{
+        .{
+            .connection_id = 106,
+            .connection = &first,
+            .destination_connection_id = &first_dcid,
+        },
+        .{
+            .connection_id = 107,
+            .connection = &second,
+            .destination_connection_id = &second_dcid,
+        },
+    };
+    var out: [2]EndpointPolledDatagramResult = undefined;
+
+    const result = try lifecycle.driveCryptoBackendsInSpaceAndDrainDatagrams(
+        .handshake,
+        &drive_views,
+        &poll_views,
+        10,
+        .application,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+    try std.testing.expectEqual(@as(usize, 2), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    defer std.testing.allocator.free(out[1].datagram);
+    try std.testing.expectEqual(@as(u64, 106), out[0].connection_id);
+    try std.testing.expectEqual(@as(u64, 107), out[1].connection_id);
+}
+
+test "EndpointConnectionLifecycle single backend drive drains bounded output" {
+    const OutputBackend = struct {
+        outbound: []const []const u8,
+        outbound_index: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_index >= self.outbound.len) return null;
+            const outbound = self.outbound[self.outbound_index];
+            if (out_buf.len < outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..outbound.len], outbound);
+            self.outbound_index += 1;
+            return out_buf[0..outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x31, 0x41, 0x51, 0x61 };
+    const server_dcid = [_]u8{ 0xc1, 0xd1, 0xe1, 0xf1 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const outbound = [_][]const u8{
+        "single backend drain one",
+        "single backend drain two",
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var backend = OutputBackend{ .outbound = &outbound };
+    var scratch: [128]u8 = undefined;
+    var first_out: [1]EndpointPolledDatagramResult = undefined;
+    const result = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
+        110,
+        &server,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        10,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+        &first_out,
+    );
+    defer for (first_out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 2), result.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, outbound[0].len + outbound[1].len), result.backend.progress.outbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 110), first_out[0].connection_id);
+
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 110,
+        .connection = &server,
+        .destination_connection_id = &client_dcid,
+        .source_connection_id = &server_dcid,
+    }};
+    var rest_out: [2]EndpointPolledDatagramResult = undefined;
+    const rest = lifecycle.drainDatagramsAcrossConnections(&poll_views, 11, .handshake, &rest_out);
+    defer for (rest_out[0..rest.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expect(rest.datagrams_written >= 1);
+    try std.testing.expectEqual(@as(?Error, null), rest.first_error);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, first_out[0].datagram);
+    for (rest_out[0..rest.datagrams_written], 0..) |entry, index| {
+        try client.processProtectedHandshakeDatagramWithInstalledKeys(13 + @as(i64, @intCast(index)), entry.datagram);
+    }
+    var response_crypto: [80]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "single backend drain onesingle backend drain two",
+        response_crypto[0..response_len],
+    );
+}
+
+test "EndpointConnectionLifecycle single backend drive polls datagram" {
+    const OutputBackend = struct {
+        outbound: []const u8,
+        sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x31, 0x41, 0x51, 0x65 };
+    const server_dcid = [_]u8{ 0xc1, 0xd1, 0xe1, 0xf5 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var backend = OutputBackend{ .outbound = "single backend poll output" };
+    var scratch: [128]u8 = undefined;
+    const result = try lifecycle.driveCryptoBackendInSpaceAndPollDatagram(
+        114,
+        &server,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        10,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "single backend poll output".len), result.backend.progress.outbound_bytes);
+    try std.testing.expect(backend.sent);
+
+    const polled = result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 114), polled.connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(11, polled.datagram);
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("single backend poll output", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle single close backend drive stops before drain" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.sendCryptoInSpace(.handshake, "queued before bad single backend");
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
+            111,
+            &server,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            10,
+            .{
+                .space = .handshake,
+                .destination_connection_id = &[_]u8{ 0x31, 0x41, 0x51, 0x62 },
+                .source_connection_id = &[_]u8{ 0xc1, 0xd1, 0xe1, 0xf2 },
+            },
+            &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+}
+
+test "EndpointConnectionLifecycle single close backend drive stops before poll" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.sendCryptoInSpace(.handshake, "queued before bad single backend poll");
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendInSpaceOrCloseAndPollDatagram(
+            115,
+            &server,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            10,
+            .{
+                .space = .handshake,
+                .destination_connection_id = &[_]u8{ 0x31, 0x41, 0x51, 0x66 },
+                .source_connection_id = &[_]u8{ 0xc1, 0xd1, 0xe1, 0xf6 },
+            },
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+}
+
+test "EndpointConnectionLifecycle single compatible backend drive drains after peer information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        outbound: []const u8,
+        peer_sent: bool = false,
+        outbound_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x31, 0x41, 0x51, 0x63 };
+    const server_dcid = [_]u8{ 0xc1, 0xd1, 0xe1, 0xf3 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 7777,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var backend = Backend{
+        .peer_transport_parameters = peer_params_out.getWritten(),
+        .outbound = "single compatible backend output",
+    };
+    var scratch: [256]u8 = undefined;
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    const result = try lifecycle.driveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams(
+        112,
+        &server,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+        10,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+        &out,
+    );
+    defer for (out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(peer_params_out.getWritten().len, result.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expect(result.backend.progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), result.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.progress.outbound_chunks);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(backend.outbound_sent);
+    try std.testing.expectEqual(@as(u64, 7777), server.peer_max_data);
+    const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 112), out[0].connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(11, out[0].datagram);
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("single compatible backend output", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle single compatible backend drive polls after peer information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        outbound: []const u8,
+        peer_sent: bool = false,
+        outbound_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x31, 0x41, 0x51, 0x67 };
+    const server_dcid = [_]u8{ 0xc1, 0xd1, 0xe1, 0xf7 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 8888,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var backend = Backend{
+        .peer_transport_parameters = peer_params_out.getWritten(),
+        .outbound = "single compatible backend poll output",
+    };
+    var scratch: [256]u8 = undefined;
+    const result = try lifecycle.driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram(
+        116,
+        &server,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+        10,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(peer_params_out.getWritten().len, result.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expect(result.backend.progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), result.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.progress.outbound_chunks);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(backend.outbound_sent);
+    try std.testing.expectEqual(@as(u64, 8888), server.peer_max_data);
+    const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
+
+    const polled = result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 116), polled.connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(11, polled.datagram);
+    var response_crypto: [80]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("single compatible backend poll output", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle single compatible close backend drive stops before drain" {
+    const BadBackend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 7777,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.sendCryptoInSpace(.handshake, "queued before bad compatible backend");
+
+    var backend = BadBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+            113,
+            &server,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            &[_]VersionCompatibility{},
+            10,
+            .{
+                .space = .handshake,
+                .destination_connection_id = &[_]u8{ 0x31, 0x41, 0x51, 0x64 },
+                .source_connection_id = &[_]u8{ 0xc1, 0xd1, 0xe1, 0xf4 },
+            },
+            &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+}
+
+test "EndpointConnectionLifecycle single compatible close backend drive stops before poll" {
+    const BadBackend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 8888,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.sendCryptoInSpace(.handshake, "queued before bad compatible backend poll");
+
+    var backend = BadBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+            117,
+            &server,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            &[_]VersionCompatibility{},
+            10,
+            .{
+                .space = .handshake,
+                .destination_connection_id = &[_]u8{ 0x31, 0x41, 0x51, 0x68 },
+                .source_connection_id = &[_]u8{ 0xc1, 0xd1, 0xe1, 0xf8 },
+            },
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+}
+
+test "EndpointConnectionLifecycle close-propagating backend drive stops before drain" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const ready_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x51 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var ready = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer ready.deinit();
+    try ready.confirmHandshake();
+    try ready.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try ready.sendPing();
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 108,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 109,
+        .connection = &ready,
+        .destination_connection_id = &ready_dcid,
+    }};
+    var out: [1]EndpointPolledDatagramResult = undefined;
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+            .handshake,
+            &drive_views,
+            &poll_views,
+            10,
+            .application,
+            &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), ready.sentPacketCount(.application));
+}
+
+test "EndpointConnectionLifecycle compatible-version backend drive drains after peer information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 2468,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 110,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    var out: [1]EndpointPolledDatagramResult = undefined;
+
+    const result = try lifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
+        .handshake,
+        &drive_views,
+        &compatibilities,
+        &[_]EndpointConnectionPollView{},
+        10,
+        .handshake,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), result.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(u64, 2468), server.peer_max_data);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expectEqual(@as(usize, 0), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+}
+
+test "EndpointConnectionLifecycle compatible-version close backend drive stops before drain" {
+    const Backend = struct {
+        output_pulled: bool = false,
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 2468,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 111,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    var out: [1]EndpointPolledDatagramResult = undefined;
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+            .handshake,
+            &drive_views,
+            &[_]VersionCompatibility{},
+            &[_]EndpointConnectionPollView{},
+            10,
+            .handshake,
+            &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+}
+
 test "EndpointConnectionLifecycle retires route and timer after idle timeout closes connection" {
     var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer lifecycle.deinit();
@@ -19278,6 +29089,450 @@ test "EndpointConnectionLifecycle emits accepted protected Initial response" {
     var client_crypto_buf: [64]u8 = undefined;
     const client_recv_len = (try client.recvCryptoInSpace(.initial, &client_crypto_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("server hello response", client_crypto_buf[0..client_recv_len]);
+}
+
+test "EndpointConnectionLifecycle accepts Initial and drives backend response" {
+    const InitialBackend = struct {
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+        output_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, bytes: []const u8) Error!void {
+            if (space != .initial) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (bytes.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[0..bytes.len], bytes);
+            self.received_len = bytes.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            if (space != .initial) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.output_sent) return null;
+            self.output_sent = true;
+            return "server hello from backend";
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const client_path = endpoint.Udp4Tuple{
+        .local = path.remote,
+        .remote = path.local,
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const reset_token = [_]u8{ 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f };
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const supported_versions = [_]packet.Version{ .v1, .v2 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    _ = try client_lifecycle.registerClientInitialSourceConnectionId(121, &client_scid, client_path, .{});
+    try client.sendCryptoInSpace(.initial, "client hello for backend");
+    const initial = (try client.pollInitialProtectedDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(initial);
+
+    var action_buf: [256]u8 = undefined;
+    const action = try lifecycle.handleDatagramWithVersionNegotiation(
+        &action_buf,
+        path,
+        initial,
+        &reset_prefix,
+        &supported_versions,
+    );
+    const accept = switch (action) {
+        .accept_initial => |initial_accept| initial_accept,
+        else => return error.TestUnexpectedResult,
+    };
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var backend = InitialBackend{};
+    var scratch: [256]u8 = undefined;
+    const result = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram(
+        205,
+        &server,
+        11,
+        accept,
+        &server_scid,
+        initial,
+        .{
+            .active_migration_disabled = true,
+            .stateless_reset_token = reset_token,
+        },
+        backend.backend(),
+        &scratch,
+    );
+    const response = result.response_datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response);
+
+    try std.testing.expectEqual(@as(usize, 1), result.accepted_initial.processed_packets);
+    try std.testing.expectEqual(@as(u64, 205), result.accepted_initial.accepted_routes.server_source_route.connection_id);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.inbound_chunks);
+    try std.testing.expectEqualStrings("client hello for backend", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "server hello from backend".len), result.backend.outbound_bytes);
+    try std.testing.expectEqual(@as(usize, 2), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const response_route = try client_lifecycle.processRoutedProtectedInitialDatagram(
+        121,
+        &client,
+        client_path,
+        12,
+        &original_dcid,
+        response,
+    );
+    try std.testing.expectEqual(@as(u64, 121), response_route.connection_id);
+
+    var client_crypto_buf: [64]u8 = undefined;
+    const client_recv_len = (try client.recvCryptoInSpace(.initial, &client_crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server hello from backend", client_crypto_buf[0..client_recv_len]);
+}
+
+test "EndpointConnectionLifecycle accepts Initial and drains backend response datagrams" {
+    const InitialBackend = struct {
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+        output_pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, bytes: []const u8) Error!void {
+            if (space != .initial) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (bytes.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[0..bytes.len], bytes);
+            self.received_len = bytes.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            if (space != .initial) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            defer self.output_pulls += 1;
+            return switch (self.output_pulls) {
+                0 => "server backend drain first",
+                1 => "server backend drain second",
+                else => null,
+            };
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const client_path = endpoint.Udp4Tuple{
+        .local = path.remote,
+        .remote = path.local,
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const reset_token = [_]u8{ 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f };
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const supported_versions = [_]packet.Version{ .v1, .v2 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const server_flight = "server backend drain firstserver backend drain second";
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    _ = try client_lifecycle.registerClientInitialSourceConnectionId(123, &client_scid, client_path, .{});
+    try client.sendCryptoInSpace(.initial, "client hello for backend drain");
+    const initial = (try client.pollInitialProtectedDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(initial);
+
+    var action_buf: [256]u8 = undefined;
+    const action = try lifecycle.handleDatagramWithVersionNegotiation(
+        &action_buf,
+        path,
+        initial,
+        &reset_prefix,
+        &supported_versions,
+    );
+    const accept = switch (action) {
+        .accept_initial => |initial_accept| initial_accept,
+        else => return error.TestUnexpectedResult,
+    };
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var backend = InitialBackend{};
+    var scratch: [256]u8 = undefined;
+    var first_out: [1]EndpointPolledDatagramResult = undefined;
+    const result = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams(
+        207,
+        &server,
+        11,
+        accept,
+        &server_scid,
+        initial,
+        .{
+            .active_migration_disabled = true,
+            .stateless_reset_token = reset_token,
+        },
+        backend.backend(),
+        &scratch,
+        &first_out,
+    );
+    defer for (first_out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(@as(usize, 1), result.accepted_initial.processed_packets);
+    try std.testing.expectEqualStrings("client hello for backend drain", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(usize, 2), result.backend.outbound_chunks);
+    try std.testing.expectEqual(server_flight.len, result.backend.outbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 207), first_out[0].connection_id);
+
+    var rest_out: [4]EndpointPolledDatagramResult = undefined;
+    const rest = lifecycle.drainProtectedLongCryptoDatagramsInSpace(
+        207,
+        &server,
+        .initial,
+        12,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+        &rest_out,
+    );
+    defer for (rest_out[0..rest.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expect(rest.datagrams_written >= 1);
+    try std.testing.expectEqual(@as(?Error, null), rest.first_error);
+
+    for (first_out[0..result.drain.datagrams_written]) |entry| {
+        const route = try client_lifecycle.processRoutedProtectedInitialDatagram(
+            123,
+            &client,
+            client_path,
+            13,
+            &original_dcid,
+            entry.datagram,
+        );
+        try std.testing.expectEqual(@as(u64, 123), route.connection_id);
+    }
+    for (rest_out[0..rest.datagrams_written]) |entry| {
+        const route = try client_lifecycle.processRoutedProtectedInitialDatagram(
+            123,
+            &client,
+            client_path,
+            14,
+            &original_dcid,
+            entry.datagram,
+        );
+        try std.testing.expectEqual(@as(u64, 123), route.connection_id);
+    }
+
+    var client_crypto_buf: [server_flight.len]u8 = undefined;
+    const client_recv_len = (try client.recvCryptoInSpace(.initial, &client_crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_flight.len, client_recv_len);
+    try std.testing.expectEqualStrings(server_flight, client_crypto_buf[0..client_recv_len]);
+}
+
+test "EndpointConnectionLifecycle accepted Initial backend OrClose queues Initial close" {
+    const BadBackend = struct {
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, bytes: []const u8) Error!void {
+            if (space != .initial) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (bytes.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[0..bytes.len], bytes);
+            self.received_len = bytes.len;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0xff;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const client_path = endpoint.Udp4Tuple{
+        .local = path.remote,
+        .remote = path.local,
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const reset_token = [_]u8{ 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f };
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const supported_versions = [_]packet.Version{ .v1, .v2 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    _ = try client_lifecycle.registerClientInitialSourceConnectionId(122, &client_scid, client_path, .{});
+    try client.sendCryptoInSpace(.initial, "client hello with bad params");
+    const initial = (try client.pollInitialProtectedDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(initial);
+
+    var action_buf: [256]u8 = undefined;
+    const action = try lifecycle.handleDatagramWithVersionNegotiation(
+        &action_buf,
+        path,
+        initial,
+        &reset_prefix,
+        &supported_versions,
+    );
+    const accept = switch (action) {
+        .accept_initial => |initial_accept| initial_accept,
+        else => return error.TestUnexpectedResult,
+    };
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var backend = BadBackend{};
+    var scratch: [256]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram(
+            206,
+            &server,
+            11,
+            accept,
+            &server_scid,
+            initial,
+            .{
+                .active_migration_disabled = true,
+                .stateless_reset_token = reset_token,
+            },
+            backend.backend(),
+            &scratch,
+        ),
+    );
+
+    try std.testing.expectEqualStrings("client hello with bad params", backend.received[0..backend.received_len]);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 2), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    switch (server.pending_close orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const close_packet = (try lifecycle.pollProtectedLongDatagram(
+        206,
+        &server,
+        12,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    const close_deadline = lifecycle.nextDeadline(206, &server) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.close_timeout, close_deadline.kind);
+
+    const response_route = try client_lifecycle.processRoutedProtectedInitialDatagram(
+        122,
+        &client,
+        client_path,
+        13,
+        &original_dcid,
+        close_packet,
+    );
+    try std.testing.expectEqual(@as(u64, 122), response_route.connection_id);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "EndpointConnectionLifecycle rejects accepted Initial without installing routes" {
@@ -21138,6 +31393,1772 @@ test "EndpointLossDetectionTimers drives protected short PTO and ACK disarm" {
     try timers.armFromConnection(41, &client);
     try std.testing.expectEqual(@as(usize, 0), timers.count());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), timers.earliestDeadline());
+}
+
+test "EndpointConnectionLifecycle drives crypto backend and refreshes recovery timer" {
+    const ConfirmingBackend = struct {
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn handshakeConfirmed(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try server.sendCryptoInSpace(.handshake, "server handshake");
+    const handshake_datagram = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        51,
+        &server,
+        10,
+        &client_dcid,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(handshake_datagram);
+    try std.testing.expectEqual(@as(usize, 1), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expect(lifecycle.earliestRecoveryDeadline() != null);
+
+    var backend = ConfirmingBackend{};
+    var scratch: [16]u8 = undefined;
+    const progress = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+        51,
+        &server,
+        .handshake,
+        backend.backend(),
+        &scratch,
+    );
+    try std.testing.expect(progress.handshake_confirmed);
+    try std.testing.expectEqual(HandshakeState.confirmed, server.handshakeState());
+    try std.testing.expect(server.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle drives backend and drains caller-keyed long crypto datagrams" {
+    const Backend = struct {
+        outbound: []const []const u8,
+        outbound_index: usize = 0,
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_index >= self.outbound.len) return null;
+            const outbound = self.outbound[self.outbound_index];
+            if (out_buf.len < outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..outbound.len], outbound);
+            self.outbound_index += 1;
+            return out_buf[0..outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const outbound = [_][]const u8{
+        "server keyed drain one",
+        "server keyed drain two",
+    };
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    try client.sendCryptoInSpace(.handshake, "client keyed drain input");
+    const client_datagram = (try lifecycle.pollProtectedLongCryptoDatagramInSpace(
+        61,
+        &client,
+        .handshake,
+        10,
+        &server_dcid,
+        &client_dcid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    try lifecycle.processProtectedLongDatagramInSpace(
+        62,
+        &server,
+        .handshake,
+        11,
+        secrets.client,
+        client_datagram,
+    );
+
+    var backend = Backend{ .outbound = &outbound };
+    var scratch: [128]u8 = undefined;
+    var first_out: [1]EndpointPolledDatagramResult = undefined;
+    const result = try lifecycle.driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams(
+        62,
+        &server,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .handshake,
+        12,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        secrets.server,
+        &first_out,
+    );
+    defer for (first_out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqualStrings("client keyed drain input", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "client keyed drain input".len), result.backend.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 2), result.backend.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, outbound[0].len + outbound[1].len), result.backend.outbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 62), first_out[0].connection_id);
+
+    var rest_out: [4]EndpointPolledDatagramResult = undefined;
+    const rest = lifecycle.drainProtectedLongCryptoDatagramsInSpace(
+        62,
+        &server,
+        .handshake,
+        13,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        secrets.server,
+        &rest_out,
+    );
+    defer for (rest_out[0..rest.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expectEqual(@as(usize, 1), rest.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), rest.first_error);
+
+    try client.processProtectedLongDatagramInSpace(.handshake, 14, secrets.server, first_out[0].datagram);
+    try client.processProtectedLongDatagramInSpace(.handshake, 15, secrets.server, rest_out[0].datagram);
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "server keyed drain oneserver keyed drain two",
+        response_crypto[0..response_len],
+    );
+}
+
+test "EndpointConnectionLifecycle processes long datagram then drives backend and drains output" {
+    const Backend = struct {
+        outbound: []const []const u8,
+        outbound_index: usize = 0,
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_index >= self.outbound.len) return null;
+            const outbound = self.outbound[self.outbound_index];
+            if (out_buf.len < outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..outbound.len], outbound);
+            self.outbound_index += 1;
+            return out_buf[0..outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x21, 0x31, 0x41, 0x51 };
+    const server_dcid = [_]u8{ 0xb1, 0xc1, 0xd1, 0xe1 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const outbound = [_][]const u8{
+        "server combined drain one",
+        "server combined drain two",
+    };
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    try client.sendCryptoInSpace(.handshake, "client combined input");
+    const client_datagram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        10,
+        &server_dcid,
+        &client_dcid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = Backend{ .outbound = &outbound };
+    var scratch: [128]u8 = undefined;
+    var first_out: [1]EndpointPolledDatagramResult = undefined;
+    const result = try lifecycle.processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
+        72,
+        &server,
+        .handshake,
+        11,
+        secrets.client,
+        client_datagram,
+        backend.backend(),
+        &scratch,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        secrets.server,
+        &first_out,
+    );
+    defer for (first_out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqualStrings("client combined input", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "client combined input".len), result.backend.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 2), result.backend.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, outbound[0].len + outbound[1].len), result.backend.outbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 72), first_out[0].connection_id);
+
+    var rest_out: [2]EndpointPolledDatagramResult = undefined;
+    const rest = lifecycle.drainProtectedLongCryptoDatagramsInSpace(
+        72,
+        &server,
+        .handshake,
+        12,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        secrets.server,
+        &rest_out,
+    );
+    defer for (rest_out[0..rest.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expectEqual(@as(usize, 1), rest.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), rest.first_error);
+
+    try client.processProtectedLongDatagramInSpace(.handshake, 13, secrets.server, first_out[0].datagram);
+    try client.processProtectedLongDatagramInSpace(.handshake, 14, secrets.server, rest_out[0].datagram);
+    var response_crypto: [80]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "server combined drain oneserver combined drain two",
+        response_crypto[0..response_len],
+    );
+}
+
+test "EndpointConnectionLifecycle drives crypto backends across caller-owned connections" {
+    const OutputBackend = struct {
+        outbound: []const u8,
+        sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var first = try Connection.init(std.testing.allocator, .server, .{});
+    defer first.deinit();
+    try first.validatePeerAddress();
+
+    var second = try Connection.init(std.testing.allocator, .server, .{});
+    defer second.deinit();
+    try second.validatePeerAddress();
+
+    var first_backend = OutputBackend{ .outbound = "a" };
+    var second_backend = OutputBackend{ .outbound = "bc" };
+    var first_scratch: [8]u8 = undefined;
+    var second_scratch: [8]u8 = undefined;
+    const views = [_]EndpointCryptoBackendDriveView{
+        .{
+            .connection_id = 111,
+            .connection = &first,
+            .backend = first_backend.backend(),
+            .scratch = &first_scratch,
+        },
+        .{
+            .connection_id = 112,
+            .connection = &second,
+            .backend = second_backend.backend(),
+            .scratch = &second_scratch,
+        },
+    };
+
+    const sweep = try lifecycle.driveCryptoBackendsInSpaceAndArmConnections(.handshake, &views);
+    try std.testing.expectEqual(@as(usize, 2), sweep.connections_driven);
+    try std.testing.expectEqual(@as(usize, 2), sweep.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, 3), sweep.progress.outbound_bytes);
+    try std.testing.expect(first_backend.sent);
+    try std.testing.expect(second_backend.sent);
+
+    var payload_buf: [32]u8 = undefined;
+    const first_payload = (try first.pollTxInSpace(.handshake, 10, &payload_buf)) orelse return error.TestUnexpectedResult;
+    var first_decoded = try frame.decodeFrameSlice(first_payload, std.testing.allocator);
+    defer frame.deinitFrame(&first_decoded.frame, std.testing.allocator);
+    switch (first_decoded.frame) {
+        .crypto => |crypto| try std.testing.expectEqualStrings("a", crypto.data),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const second_payload = (try second.pollTxInSpace(.handshake, 10, &payload_buf)) orelse return error.TestUnexpectedResult;
+    var second_decoded = try frame.decodeFrameSlice(second_payload, std.testing.allocator);
+    defer frame.deinitFrame(&second_decoded.frame, std.testing.allocator);
+    switch (second_decoded.frame) {
+        .crypto => |crypto| try std.testing.expectEqualStrings("bc", crypto.data),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "EndpointConnectionLifecycle drives crypto backend sweep and polls installed-key datagram" {
+    const OutputBackend = struct {
+        outbound: []const u8,
+        sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var backend = OutputBackend{ .outbound = "backend handshake" };
+    var scratch: [64]u8 = undefined;
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 151,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 151,
+        .connection = &server,
+        .destination_connection_id = &client_dcid,
+        .source_connection_id = &server_dcid,
+    }};
+
+    const result = try lifecycle.driveCryptoBackendsInSpaceAndPollDatagram(
+        .handshake,
+        &drive_views,
+        &poll_views,
+        10,
+        .handshake,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "backend handshake".len), result.backend.progress.outbound_bytes);
+    try std.testing.expect(backend.sent);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const polled = result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 151), polled.connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(11, polled.datagram);
+    var crypto_buf: [64]u8 = undefined;
+    const crypto_len = (try client.recvCryptoInSpace(.handshake, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("backend handshake", crypto_buf[0..crypto_len]);
+}
+
+test "EndpointConnectionLifecycle processes installed-key Handshake then drives backend and drains responses" {
+    const Backend = struct {
+        outbound: []const []const u8,
+        outbound_index: usize = 0,
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_index >= self.outbound.len) return null;
+            const outbound = self.outbound[self.outbound_index];
+            if (out_buf.len < outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..outbound.len], outbound);
+            self.outbound_index += 1;
+            return out_buf[0..outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x12, 0x22, 0x32, 0x42 };
+    const server_dcid = [_]u8{ 0xa2, 0xb2, 0xc2, 0xd2 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const outbound = [_][]const u8{
+        "installed-key drain one",
+        "installed-key drain two",
+    };
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try client.sendCryptoInSpace(.handshake, "installed-key client input");
+    const client_datagram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var backend = Backend{ .outbound = &outbound };
+    var scratch: [128]u8 = undefined;
+    var first_out: [1]EndpointPolledDatagramResult = undefined;
+    const result = try lifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams(
+        82,
+        &server,
+        11,
+        client_datagram,
+        backend.backend(),
+        &scratch,
+        &client_dcid,
+        &server_dcid,
+        &first_out,
+    );
+    defer for (first_out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqualStrings("installed-key client input", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "installed-key client input".len), result.backend.progress.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 2), result.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, outbound[0].len + outbound[1].len), result.backend.progress.outbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 82), first_out[0].connection_id);
+
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 82,
+        .connection = &server,
+        .destination_connection_id = &client_dcid,
+        .source_connection_id = &server_dcid,
+    }};
+    var rest_out: [2]EndpointPolledDatagramResult = undefined;
+    const rest = lifecycle.drainDatagramsAcrossConnections(
+        &poll_views,
+        12,
+        .handshake,
+        &rest_out,
+    );
+    defer for (rest_out[0..rest.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expect(rest.datagrams_written >= 1);
+    try std.testing.expectEqual(@as(?Error, null), rest.first_error);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, first_out[0].datagram);
+    for (rest_out[0..rest.datagrams_written], 0..) |entry, index| {
+        try client.processProtectedHandshakeDatagramWithInstalledKeys(14 + @as(i64, @intCast(index)), entry.datagram);
+    }
+    var response_crypto: [80]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "installed-key drain oneinstalled-key drain two",
+        response_crypto[0..response_len],
+    );
+}
+
+test "EndpointConnectionLifecycle installed-key Handshake backend OrClose stops before output drain" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x13, 0x23, 0x33, 0x43 };
+    const server_dcid = [_]u8{ 0xa3, 0xb3, 0xc3, 0xd3 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try client.sendCryptoInSpace(.handshake, "installed-key bad backend input");
+    const client_datagram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var backend = BadBackend{};
+    var scratch: [128]u8 = undefined;
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams(
+            92,
+            &server,
+            11,
+            client_datagram,
+            backend.backend(),
+            &scratch,
+            &client_dcid,
+            &server_dcid,
+            &drained,
+        ),
+    );
+    try std.testing.expectEqualStrings("installed-key bad backend input", backend.received[0..backend.received_len]);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+
+    const close_packet = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        92,
+        &server,
+        12,
+        &client_dcid,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, close_packet);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "EndpointConnectionLifecycle drives close-propagating crypto backend and refreshes state" {
+    const BadBackend = struct {
+        output_pulled: bool = false,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+            52,
+            &server,
+            .handshake,
+            backend.backend(),
+            &scratch,
+        ),
+    );
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+
+    const close_packet = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        52,
+        &server,
+        10,
+        &client_dcid,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(11, close_packet);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "EndpointConnectionLifecycle drives close-propagating crypto backend sweep until first error" {
+    const OutputBackend = struct {
+        sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 'x';
+            self.sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const BadBackend = struct {
+        output_pulled: bool = false,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var first = try Connection.init(std.testing.allocator, .server, .{});
+    defer first.deinit();
+    try first.validatePeerAddress();
+
+    var second = try Connection.init(std.testing.allocator, .server, .{});
+    defer second.deinit();
+    try second.validatePeerAddress();
+
+    var third = try Connection.init(std.testing.allocator, .server, .{});
+    defer third.deinit();
+    try third.validatePeerAddress();
+
+    var first_backend = OutputBackend{};
+    var second_backend = BadBackend{};
+    var third_backend = OutputBackend{};
+    var first_scratch: [8]u8 = undefined;
+    var second_scratch: [64]u8 = undefined;
+    var third_scratch: [8]u8 = undefined;
+    const views = [_]EndpointCryptoBackendDriveView{
+        .{
+            .connection_id = 121,
+            .connection = &first,
+            .backend = first_backend.backend(),
+            .scratch = &first_scratch,
+        },
+        .{
+            .connection_id = 122,
+            .connection = &second,
+            .backend = second_backend.backend(),
+            .scratch = &second_scratch,
+        },
+        .{
+            .connection_id = 123,
+            .connection = &third,
+            .backend = third_backend.backend(),
+            .scratch = &third_scratch,
+        },
+    };
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendsInSpaceOrCloseAndArmConnections(.handshake, &views),
+    );
+    try std.testing.expect(first_backend.sent);
+    try std.testing.expect(!second_backend.output_pulled);
+    try std.testing.expect(!third_backend.sent);
+    try std.testing.expectEqual(ConnectionState.active, first.connectionState());
+    try std.testing.expectEqual(ConnectionState.closing, second.connectionState());
+    try std.testing.expectEqual(ConnectionState.active, third.connectionState());
+    try std.testing.expect(second.pending_close != null);
+
+    var payload_buf: [16]u8 = undefined;
+    const payload = (try first.pollTxInSpace(.handshake, 10, &payload_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .crypto => |crypto| try std.testing.expectEqualStrings("x", crypto.data),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(?[]const u8, null), try third.pollTxInSpace(.handshake, 10, &payload_buf));
+}
+
+test "EndpointConnectionLifecycle drives compatible-version crypto backend and refreshes timer" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+
+        fn handshakeConfirmed(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try server.sendCryptoInSpace(.handshake, "server handshake");
+    const handshake_datagram = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        53,
+        &server,
+        10,
+        &client_dcid,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(handshake_datagram);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    const progress = try lifecycle.driveCryptoBackendInSpaceWithCompatibleVersionAndArmConnection(
+        53,
+        &server,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+    );
+
+    try std.testing.expectEqual(peer_params_out.getWritten().len, progress.peer_transport_parameters_bytes);
+    try std.testing.expect(progress.peer_transport_parameters_applied);
+    try std.testing.expect(progress.handshake_confirmed);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(u64, 4321), server.peer_max_data);
+    try std.testing.expect(server.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+
+    const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
+    try std.testing.expectEqual(
+        @as(?packet.Version, packet.Version.v2),
+        try server.selectPeerCompatibleVersion(&compatibilities),
+    );
+}
+
+test "EndpointConnectionLifecycle drives compatible-version crypto backends across caller-owned connections" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+
+        fn handshakeConfirmed(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const first_client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const second_client_dcid = [_]u8{ 0x50, 0x60, 0x70, 0x80 };
+    const first_server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const second_server_dcid = [_]u8{ 0xee, 0xff, 0x01, 0x02 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+    const peer_params = peer_params_out.getWritten();
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var first = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+        .initial_rtt_ms = 100,
+    });
+    defer first.deinit();
+    try first.validatePeerAddress();
+    try first.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var second = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+        .initial_rtt_ms = 100,
+    });
+    defer second.deinit();
+    try second.validatePeerAddress();
+    try second.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try first.sendCryptoInSpace(.handshake, "first server handshake");
+    const first_datagram = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        153,
+        &first,
+        10,
+        &first_client_dcid,
+        &first_server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first_datagram);
+
+    try second.sendCryptoInSpace(.handshake, "second server handshake");
+    const second_datagram = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        154,
+        &second,
+        10,
+        &second_client_dcid,
+        &second_server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_datagram);
+    try std.testing.expectEqual(@as(usize, 2), lifecycle.recoveryTimerCount());
+
+    var first_backend = Backend{ .peer_transport_parameters = peer_params };
+    var second_backend = Backend{ .peer_transport_parameters = peer_params };
+    var first_scratch: [256]u8 = undefined;
+    var second_scratch: [256]u8 = undefined;
+    const views = [_]EndpointCryptoBackendDriveView{
+        .{
+            .connection_id = 153,
+            .connection = &first,
+            .backend = first_backend.backend(),
+            .scratch = &first_scratch,
+        },
+        .{
+            .connection_id = 154,
+            .connection = &second,
+            .backend = second_backend.backend(),
+            .scratch = &second_scratch,
+        },
+    };
+
+    const sweep = try lifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections(
+        .handshake,
+        &views,
+        &compatibilities,
+    );
+    try std.testing.expectEqual(@as(usize, 2), sweep.connections_driven);
+    try std.testing.expectEqual(peer_params.len * 2, sweep.progress.peer_transport_parameters_bytes);
+    try std.testing.expect(sweep.progress.peer_transport_parameters_applied);
+    try std.testing.expect(sweep.progress.handshake_confirmed);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), sweep.progress.peer_compatible_version_selected);
+    try std.testing.expect(first_backend.peer_sent);
+    try std.testing.expect(second_backend.peer_sent);
+    try std.testing.expectEqual(@as(u64, 4321), first.peer_max_data);
+    try std.testing.expectEqual(@as(u64, 4321), second.peer_max_data);
+    try std.testing.expect(first.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(second.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle drives compatible-version close path and refreshes state" {
+    const Backend = struct {
+        output_pulled: bool = false,
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndArmConnection(
+            54,
+            &server,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            &[_]VersionCompatibility{},
+        ),
+    );
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+
+    const close_packet = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        54,
+        &server,
+        10,
+        &client_dcid,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(11, close_packet);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.version_negotiation_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("version negotiation", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "EndpointConnectionLifecycle drives compatible-version close-propagating crypto backend sweep until first error" {
+    const OutputBackend = struct {
+        sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 'v';
+            self.sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const VersionBackend = struct {
+        output_pulled: bool = false,
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{.v1};
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var first = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer first.deinit();
+    try first.validatePeerAddress();
+
+    var second = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer second.deinit();
+    try second.validatePeerAddress();
+
+    var third = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer third.deinit();
+    try third.validatePeerAddress();
+
+    var first_backend = OutputBackend{};
+    var second_backend = VersionBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var third_backend = OutputBackend{};
+    var first_scratch: [8]u8 = undefined;
+    var second_scratch: [256]u8 = undefined;
+    var third_scratch: [8]u8 = undefined;
+    const views = [_]EndpointCryptoBackendDriveView{
+        .{
+            .connection_id = 161,
+            .connection = &first,
+            .backend = first_backend.backend(),
+            .scratch = &first_scratch,
+        },
+        .{
+            .connection_id = 162,
+            .connection = &second,
+            .backend = second_backend.backend(),
+            .scratch = &second_scratch,
+        },
+        .{
+            .connection_id = 163,
+            .connection = &third,
+            .backend = third_backend.backend(),
+            .scratch = &third_scratch,
+        },
+    };
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections(
+            .handshake,
+            &views,
+            &compatibilities,
+        ),
+    );
+    try std.testing.expect(first_backend.sent);
+    try std.testing.expect(second_backend.peer_sent);
+    try std.testing.expect(!second_backend.output_pulled);
+    try std.testing.expect(!third_backend.sent);
+    try std.testing.expectEqual(ConnectionState.active, first.connectionState());
+    try std.testing.expectEqual(ConnectionState.closing, second.connectionState());
+    try std.testing.expectEqual(ConnectionState.active, third.connectionState());
+    try std.testing.expect(second.pending_close != null);
+    switch (second.pending_close orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.version_negotiation_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("version negotiation", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var payload_buf: [16]u8 = undefined;
+    const payload = (try first.pollTxInSpace(.handshake, 10, &payload_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .crypto => |crypto| try std.testing.expectEqualStrings("v", crypto.data),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(?[]const u8, null), try third.pollTxInSpace(.handshake, 10, &payload_buf));
+}
+
+test "EndpointConnectionLifecycle refreshes installed-key Handshake OrClose error state" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try server.sendCryptoInSpace(.handshake, "server handshake");
+    const handshake_datagram = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        55,
+        &server,
+        10,
+        &client_scid,
+        &server_scid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(handshake_datagram);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expect(lifecycle.earliestRecoveryDeadline() != null);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(10, handshake_datagram);
+
+    var invalid_payload: [1200]u8 = undefined;
+    @memset(&invalid_payload, 0);
+    invalid_payload[0] = @intFromEnum(frame.FrameType.handshake_done);
+    const invalid_handshake = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &server_scid,
+        .scid = &client_scid,
+        .packet_type = .handshake,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &invalid_payload);
+    defer std.testing.allocator.free(invalid_handshake);
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+            55,
+            &server,
+            11,
+            invalid_handshake,
+        ),
+    );
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+
+    const close_packet = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        55,
+        &server,
+        12,
+        &client_scid,
+        &server_scid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, close_packet);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.handshake_done)), close.frame_type);
+            try std.testing.expectEqualStrings("packet type", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "EndpointConnectionLifecycle refreshes protected short OrClose error state" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+
+    try server.sendPing();
+    const server_ping = (try lifecycle.pollProtectedShortDatagram(
+        56,
+        &server,
+        10,
+        &client_dcid,
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_ping);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expect(lifecycle.earliestRecoveryDeadline() != null);
+    try client.processProtectedShortDatagram(11, secrets.server, client_dcid.len, server_ping);
+
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_short = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
+    defer std.testing.allocator.free(invalid_short);
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processProtectedShortDatagramOrClose(
+            56,
+            &server,
+            12,
+            secrets.client,
+            server_dcid.len,
+            invalid_short,
+        ),
+    );
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+
+    const close_packet = (try lifecycle.pollProtectedShortDatagram(
+        56,
+        &server,
+        13,
+        &client_dcid,
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+
+    try client.processProtectedShortDatagram(14, secrets.server, client_dcid.len, close_packet);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, 0x1f), close.frame_type);
+            try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "EndpointConnectionLifecycle refreshes installed-key protected short OrClose error state" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try server.sendPing();
+    const server_ping = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        57,
+        &server,
+        10,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_ping);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expect(lifecycle.earliestRecoveryDeadline() != null);
+    try client.processProtectedShortDatagramWithInstalledKeys(11, client_dcid.len, server_ping);
+
+    const client_keys = protection.deriveAes128PacketProtectionKeys(secrets.client.secret);
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_short = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), client_keys, &unknown_frame);
+    defer std.testing.allocator.free(invalid_short);
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processProtectedShortDatagramWithInstalledKeysOrClose(
+            57,
+            &server,
+            12,
+            server_dcid.len,
+            invalid_short,
+        ),
+    );
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+
+    const close_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        57,
+        &server,
+        13,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+
+    try client.processProtectedShortDatagramWithInstalledKeys(14, client_dcid.len, close_packet);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, 0x1f), close.frame_type);
+            try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "EndpointConnectionLifecycle services and polls protected long Handshake PTO probe" {
