@@ -499,6 +499,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   path is still a no-op, mismatched packet-space options are rejected before
   recovery state mutation, and due Application PTO wakeups can emit or drain a
   protected 0-RTT `RESET_STREAM` probe.
+- 2026-06-11: Added `EndpointConnectionInstalledKeyPollView`,
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndPollDatagramWithInstalledKeyOptions()`,
+  and
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions()`.
+  These are the caller-owned-connection-map forms of the explicit installed-key
+  due-deadline wakeup path. Unit coverage proves earliest-deadline selection
+  across two accepted 0-RTT connections, before-deadline no-op behavior, and
+  protected 0-RTT `RESET_STREAM` poll/drain output without mutating the later
+  connection.
 - 2026-06-10: Added `EndpointConnectionView` and
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()` for embeddable
   socket loops where callers own the connection map. The lifecycle now combines

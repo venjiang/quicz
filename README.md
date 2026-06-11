@@ -226,6 +226,8 @@ loop entrypoints `feedDatagram`, `feedDatagramWithInstalledKeys`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processDueDeadlineAcrossConnectionsAndPollDatagram`,
 `processDueDeadlineAcrossConnectionsAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndPollDatagramWithInstalledKeyOptions`,
+`processDueDeadlineAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
@@ -318,7 +320,10 @@ from `nextDeadline()` into installed-key poll options for Handshake and 1-RTT
 paths. `processDueDeadlineAndPollDatagramWithInstalledKeyOptions()` and
 `processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions()` let callers
 service due recovery wakeups with explicit installed-key output choices, such
-as accepted 0-RTT. A production TLS-owned socket event loop is still pending.
+as accepted 0-RTT; the cross-connection `WithInstalledKeyOptions` variants
+preserve the same explicit choice while selecting the earliest due connection
+from a caller-owned map. A production TLS-owned socket event loop is still
+pending.
 
 `Connection` is the canonical public connection handle. `QuicConnection` remains
 available as a compatibility alias for older callers while the API is

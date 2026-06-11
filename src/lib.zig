@@ -803,6 +803,16 @@ pub const EndpointConnectionPollView = struct {
     source_connection_id: []const u8 = &.{},
 };
 
+/// Mutable caller-owned connection plus explicit installed-key output options.
+pub const EndpointConnectionInstalledKeyPollView = struct {
+    /// Caller-owned connection handle used by endpoint routing and timers.
+    connection_id: u64,
+    /// Caller-owned connection state. The lifecycle does not take ownership.
+    connection: *Connection,
+    /// Installed-key output options to use when this connection's recovery deadline is selected.
+    poll_options: EndpointPollInstalledKeyDatagramOptions,
+};
+
 /// Mutable caller-owned connection reference used by socket-loop receive dispatch.
 pub const EndpointConnectionReceiveView = struct {
     /// Caller-owned connection handle used by endpoint routing and packet receive.
@@ -5439,6 +5449,39 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Process the earliest due deadline with explicit installed-key output options.
+    ///
+    /// This is the cross-connection form of
+    /// `processDueDeadlineAndPollDatagramWithInstalledKeyOptions()`. Each view
+    /// owns the installed-key output choice for its connection, so accepted
+    /// 0-RTT recovery wakeups can be selected across a caller-owned map without
+    /// falling back to the default Application-to-1-RTT mapping.
+    pub fn processDueDeadlineAcrossConnectionsAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+    ) Error!?EndpointDueWorkDatagramResult {
+        var selected_index: ?usize = null;
+        var selected_deadline: ?EndpointConnectionDeadline = null;
+        for (connections, 0..) |view, index| {
+            const candidate = self.nextDeadline(view.connection_id, view.connection) orelse continue;
+            if (candidate.deadline_millis > now_millis) continue;
+            if (selected_deadline == null or candidate.deadline_millis < selected_deadline.?.deadline_millis) {
+                selected_index = index;
+                selected_deadline = candidate;
+            }
+        }
+
+        const index = selected_index orelse return null;
+        const view = connections[index];
+        return self.processDueDeadlineAndPollDatagramWithInstalledKeyOptions(
+            view.connection_id,
+            view.connection,
+            now_millis,
+            view.poll_options,
+        );
+    }
+
     /// Process the earliest due deadline across connections and drain output.
     pub fn processDueDeadlineAcrossConnectionsAndDrainDatagrams(
         self: *EndpointConnectionLifecycle,
@@ -5465,6 +5508,38 @@ pub const EndpointConnectionLifecycle = struct {
             now_millis,
             view.destination_connection_id,
             view.source_connection_id,
+            out,
+        );
+    }
+
+    /// Process the earliest due deadline with explicit installed-key draining.
+    ///
+    /// This is the bounded-output form of
+    /// `processDueDeadlineAcrossConnectionsAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processDueDeadlineAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkDatagramDrainResult {
+        var selected_index: ?usize = null;
+        var selected_deadline: ?EndpointConnectionDeadline = null;
+        for (connections, 0..) |view, index| {
+            const candidate = self.nextDeadline(view.connection_id, view.connection) orelse continue;
+            if (candidate.deadline_millis > now_millis) continue;
+            if (selected_deadline == null or candidate.deadline_millis < selected_deadline.?.deadline_millis) {
+                selected_index = index;
+                selected_deadline = candidate;
+            }
+        }
+
+        const index = selected_index orelse return null;
+        const view = connections[index];
+        return self.processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions(
+            view.connection_id,
+            view.connection,
+            now_millis,
+            view.poll_options,
             out,
         );
     }
@@ -27017,6 +27092,246 @@ test "EndpointConnectionLifecycle processDueDeadlineAndDrainDatagramsWithInstall
         secrets.client,
         1,
         .{ .reset_stream = reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle processDueDeadlineAcrossConnectionsAndPollDatagramWithInstalledKeyOptions selects zero RTT PTO" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const fast_client_dcid = [_]u8{ 0x12, 0x22, 0x32, 0x42 };
+    const fast_server_dcid = [_]u8{ 0xa1, 0xb1, 0xc1, 0xd1 };
+    const slow_client_dcid = [_]u8{ 0x13, 0x23, 0x33, 0x43 };
+    const slow_server_dcid = [_]u8{ 0xa2, 0xb2, 0xc2, 0xd2 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var fast = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer fast.deinit();
+    try fast.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try fast.confirmHandshake();
+
+    var slow = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 200,
+    });
+    defer slow.deinit();
+    try slow.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try slow.confirmHandshake();
+
+    const fast_stream_id = try fast.openStream();
+    try fast.sendOnStream(fast_stream_id, "bye", false);
+    try fast.resetStream(fast_stream_id, 31);
+    const fast_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = fast_stream_id,
+        .application_error_code = 31,
+        .final_size = 3,
+    };
+    const slow_stream_id = try slow.openStream();
+    try slow.sendOnStream(slow_stream_id, "bye", false);
+    try slow.resetStream(slow_stream_id, 32);
+    const slow_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = slow_stream_id,
+        .application_error_code = 32,
+        .final_size = 3,
+    };
+
+    const fast_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &fast_server_dcid,
+        .source_connection_id = &fast_client_dcid,
+    };
+    const slow_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &slow_server_dcid,
+        .source_connection_id = &slow_client_dcid,
+    };
+    const fast_first = (try lifecycle.pollDatagram(68, &fast, 10, fast_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(fast_first);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        fast_first,
+        secrets.client,
+        0,
+        .{ .reset_stream = fast_reset_frame },
+    ));
+    const slow_first = (try lifecycle.pollDatagram(69, &slow, 10, slow_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(slow_first);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        slow_first,
+        secrets.client,
+        0,
+        .{ .reset_stream = slow_reset_frame },
+    ));
+
+    const fast_deadline = lifecycle.nextDeadline(68, &fast) orelse return error.TestUnexpectedResult;
+    const fast_timer = fast_deadline.recovery orelse return error.TestUnexpectedResult;
+    const slow_deadline = lifecycle.nextDeadline(69, &slow) orelse return error.TestUnexpectedResult;
+    const slow_timer = slow_deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expect(fast_timer.deadline_millis < slow_timer.deadline_millis);
+
+    const connections = [_]EndpointConnectionInstalledKeyPollView{
+        .{
+            .connection_id = 68,
+            .connection = &fast,
+            .poll_options = fast_options,
+        },
+        .{
+            .connection_id = 69,
+            .connection = &slow,
+            .poll_options = slow_options,
+        },
+    };
+    const before_deadline = try lifecycle.processDueDeadlineAcrossConnectionsAndPollDatagramWithInstalledKeyOptions(
+        &connections,
+        fast_timer.deadline_millis - 1,
+    );
+    try std.testing.expect(before_deadline == null);
+    try std.testing.expectEqual(@as(usize, 1), fast.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
+
+    const due = (try lifecycle.processDueDeadlineAcrossConnectionsAndPollDatagramWithInstalledKeyOptions(
+        &connections,
+        fast_timer.deadline_millis,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due.deadline.kind);
+    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 68), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    const probe = due.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe);
+    try std.testing.expectEqual(@as(usize, 2), fast.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(u8, 1), fast.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 0), slow.recovery_state.pto_count);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        probe,
+        secrets.client,
+        1,
+        .{ .reset_stream = fast_reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle processDueDeadlineAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions selects zero RTT PTO" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const fast_client_dcid = [_]u8{ 0x14, 0x24, 0x34, 0x44 };
+    const fast_server_dcid = [_]u8{ 0xa3, 0xb3, 0xc3, 0xd3 };
+    const slow_client_dcid = [_]u8{ 0x15, 0x25, 0x35, 0x45 };
+    const slow_server_dcid = [_]u8{ 0xa4, 0xb4, 0xc4, 0xd4 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var fast = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer fast.deinit();
+    try fast.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try fast.confirmHandshake();
+
+    var slow = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 200,
+    });
+    defer slow.deinit();
+    try slow.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try slow.confirmHandshake();
+
+    const fast_stream_id = try fast.openStream();
+    try fast.sendOnStream(fast_stream_id, "bye", false);
+    try fast.resetStream(fast_stream_id, 41);
+    const fast_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = fast_stream_id,
+        .application_error_code = 41,
+        .final_size = 3,
+    };
+    const slow_stream_id = try slow.openStream();
+    try slow.sendOnStream(slow_stream_id, "bye", false);
+    try slow.resetStream(slow_stream_id, 42);
+    const slow_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = slow_stream_id,
+        .application_error_code = 42,
+        .final_size = 3,
+    };
+
+    const fast_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &fast_server_dcid,
+        .source_connection_id = &fast_client_dcid,
+    };
+    const slow_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &slow_server_dcid,
+        .source_connection_id = &slow_client_dcid,
+    };
+    const fast_first = (try lifecycle.pollDatagram(70, &fast, 10, fast_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(fast_first);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        fast_first,
+        secrets.client,
+        0,
+        .{ .reset_stream = fast_reset_frame },
+    ));
+    const slow_first = (try lifecycle.pollDatagram(71, &slow, 10, slow_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(slow_first);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        slow_first,
+        secrets.client,
+        0,
+        .{ .reset_stream = slow_reset_frame },
+    ));
+
+    const fast_deadline = lifecycle.nextDeadline(70, &fast) orelse return error.TestUnexpectedResult;
+    const fast_timer = fast_deadline.recovery orelse return error.TestUnexpectedResult;
+    const slow_deadline = lifecycle.nextDeadline(71, &slow) orelse return error.TestUnexpectedResult;
+    const slow_timer = slow_deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expect(fast_timer.deadline_millis < slow_timer.deadline_millis);
+
+    const connections = [_]EndpointConnectionInstalledKeyPollView{
+        .{
+            .connection_id = 70,
+            .connection = &fast,
+            .poll_options = fast_options,
+        },
+        .{
+            .connection_id = 71,
+            .connection = &slow,
+            .poll_options = slow_options,
+        },
+    };
+    var before_out: [1]EndpointPolledDatagramResult = undefined;
+    const before_deadline = try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions(
+        &connections,
+        fast_timer.deadline_millis - 1,
+        &before_out,
+    );
+    try std.testing.expect(before_deadline == null);
+    try std.testing.expectEqual(@as(usize, 1), fast.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
+
+    var due_out: [1]EndpointPolledDatagramResult = undefined;
+    const due = (try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions(
+        &connections,
+        fast_timer.deadline_millis,
+        &due_out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due.deadline.kind);
+    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 70), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(@as(usize, 1), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), due.drain.first_error);
+    defer std.testing.allocator.free(due_out[0].datagram);
+    try std.testing.expectEqual(@as(u64, 70), due_out[0].connection_id);
+    try std.testing.expectEqual(@as(usize, 2), fast.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(u8, 1), fast.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 0), slow.recovery_state.pto_count);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        due_out[0].datagram,
+        secrets.client,
+        1,
+        .{ .reset_stream = fast_reset_frame },
     ));
 }
 

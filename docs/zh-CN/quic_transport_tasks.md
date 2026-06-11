@@ -438,6 +438,12 @@ close 和 route cleanup 事件。
   wakeup 可以显式 poll 或 drain `.zero_rtt` 输出。单元测试证明 deadline 前路径仍无副作用，
   packet-space 选项不匹配时会在 recovery state 变化前拒绝，到期 Application PTO 可以发出或
   drain protected 0-RTT `RESET_STREAM` probe。
+- 2026-06-11：新增 `EndpointConnectionInstalledKeyPollView`、
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndPollDatagramWithInstalledKeyOptions()` 和
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions()`。
+  这些是调用方持有 connection map 时的显式 installed-key due-deadline wakeup 形态。单元测试证明
+  两个 accepted 0-RTT connection 之间会保持 earliest-deadline selection，deadline 前无副作用，
+  到期后可以 poll 或 drain protected 0-RTT `RESET_STREAM` 输出，且较晚 deadline 的连接不被修改。
 - 2026-06-10：新增 `EndpointConnectionView` 和
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()`，服务于调用方持有
   connection map 的可嵌入 socket loop。lifecycle 现在可以在不接管 connection storage
