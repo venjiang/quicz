@@ -322,8 +322,9 @@ paths. `processDueDeadlineAndPollDatagramWithInstalledKeyOptions()` and
 service due recovery wakeups with explicit installed-key output choices, such
 as accepted 0-RTT; the cross-connection `WithInstalledKeyOptions` variants
 preserve the same explicit choice while selecting the earliest due connection
-from a caller-owned map. A production TLS-owned socket event loop is still
-pending.
+from a caller-owned map. Single-connection due-deadline-to-backend poll and
+drain wrappers also preserve explicit 0-RTT recovery output before any backend
+drive. A production TLS-owned socket event loop is still pending.
 
 `Connection` is the canonical public connection handle. `QuicConnection` remains
 available as a compatibility alias for older callers while the API is

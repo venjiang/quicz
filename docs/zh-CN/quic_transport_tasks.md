@@ -444,6 +444,12 @@ close 和 route cleanup 事件。
   这些是调用方持有 connection map 时的显式 installed-key due-deadline wakeup 形态。单元测试证明
   两个 accepted 0-RTT connection 之间会保持 earliest-deadline selection，deadline 前无副作用，
   到期后可以 poll 或 drain protected 0-RTT `RESET_STREAM` 输出，且较晚 deadline 的连接不被修改。
+- 2026-06-11：更新 single-connection due-deadline-to-backend poll 和 bounded-drain
+  wrapper，让它们保留显式 installed-key recovery output 选择。Initial recovery 仍只服务
+  pending work、不发 installed-key datagram，并可继续进入 backend drive；Handshake 和
+  Application recovery 会先校验调用方传入的输出空间再 poll。单元测试证明 accepted 0-RTT PTO
+  wakeup 在 poll 和 drain wrapper 中都会返回 protected 0-RTT `RESET_STREAM` recovery datagram，
+  并在 backend drive 前停止。
 - 2026-06-10：新增 `EndpointConnectionView` 和
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()`，服务于调用方持有
   connection map 的可嵌入 socket loop。lifecycle 现在可以在不接管 connection storage

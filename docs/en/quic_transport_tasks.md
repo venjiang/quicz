@@ -508,6 +508,14 @@ QUIC unless the gap is named and the verification evidence is added here.
   across two accepted 0-RTT connections, before-deadline no-op behavior, and
   protected 0-RTT `RESET_STREAM` poll/drain output without mutating the later
   connection.
+- 2026-06-11: Updated the single-connection due-deadline-to-backend poll and
+  bounded-drain wrappers to preserve explicit installed-key recovery output
+  choices. Initial recovery still services pending work without emitting an
+  installed-key datagram and can continue into backend drive; Handshake and
+  Application recovery now validate the caller-provided output space before
+  polling. Unit coverage proves accepted 0-RTT PTO wakeups return protected
+  0-RTT `RESET_STREAM` recovery datagrams and stop before backend drive in both
+  the poll and drain wrappers.
 - 2026-06-10: Added `EndpointConnectionView` and
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()` for embeddable
   socket loops where callers own the connection map. The lifecycle now combines
