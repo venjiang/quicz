@@ -159,11 +159,25 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
 `processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`,
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processPendingWorkAndDrainDatagrams`,
 `processDueDeadlineAndPollDatagram`,
 `processDueDeadlineAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processDueDeadlineAcrossConnectionsAndPollDatagram`,
 `processDueDeadlineAcrossConnectionsAndDrainDatagrams`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
@@ -212,8 +226,16 @@ single-connection installed-key receive-to-backend-close-to-output loop steps,
 single-connection installed-key receive-to-backend-close-to-bounded-drain loop steps,
 single-connection compatible-version receive-to-backend-to-output loop steps,
 single-connection compatible-version receive-to-backend-close-to-output loop steps,
+single-connection pending-work-to-backend-to-output loop steps,
 single-connection pending-work-to-backend-to-bounded-drain loop steps,
+single-connection pending-work-to-backend-close-to-output loop steps,
 single-connection pending-work-to-backend-close-to-bounded-drain loop steps,
+single-connection compatible-version pending-work-to-backend-to-output loop steps,
+single-connection compatible-version pending-work-to-backend-close-to-output loop steps,
+single-connection due-deadline-to-backend-to-output loop steps,
+single-connection due-deadline-to-backend-close-to-output loop steps,
+single-connection compatible-version due-deadline-to-backend-to-output loop steps,
+single-connection compatible-version due-deadline-to-backend-close-to-output loop steps,
 single-connection due-deadline-to-backend-to-bounded-drain loop steps,
 single-connection due-deadline-to-backend-close-to-bounded-drain loop steps,
 close-propagating TLS backend drive,
@@ -648,10 +670,14 @@ QUIC unless the gap is named and the verification evidence is added here.
   OrClose form queues CONNECTION_CLOSE and stops before output draining when no
   compatible version is selected. Dropped datagrams do not drive any backend,
   and close-propagating peer-parameter errors stop before output draining.
-- 2026-06-10: Added `EndpointPendingWorkCryptoBackendDatagramDrainResult` and
+- 2026-06-10: Added pending-work-to-backend-to-output and
   pending-work-to-backend-to-bounded-drain loop steps:
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram()`,
   `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram()`,
   `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram()`,
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams()`,
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams()`,
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams()`,
@@ -664,11 +690,18 @@ QUIC unless the gap is named and the verification evidence is added here.
   single-connection compatible-version form proves peer Version Information is
   applied before bounded drain, while its OrClose form queues CONNECTION_CLOSE
   and stops before output draining when no compatible version is selected.
-- 2026-06-10: Added `EndpointDueWorkCryptoBackendDatagramDrainResult` and
+  The single-connection output-polling forms prove one-datagram polling,
+  close-before-poll suppression, compatible peer Version Information handling,
+  and compatible-version close-before-poll suppression.
+- 2026-06-10: Added due-deadline-to-backend-to-output and
   due-deadline-to-backend-to-bounded-drain loop steps:
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram()`,
   `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram()`,
   `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram()`,
   `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram()`,
   `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`,
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams()`,
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams()`,
@@ -689,7 +722,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   drive, close-propagating drain suppression, and an Initial recovery wakeup
   that continues into Handshake backend output, emits only the first protected
   datagram under a one-slot budget, and delivers the remaining backend CRYPTO
-  through a later drain.
+  through a later drain. The single-connection output-polling forms prove the
+  same non-output deadline backend progression with one-datagram polling,
+  close-before-poll suppression, compatible peer Version Information handling,
+  and compatible-version close-before-poll suppression.
 - 2026-06-10: Extended the socket-facing lifecycle surface with
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeys()`. The helper
   combines version-independent feed classification with routed installed-key

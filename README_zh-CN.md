@@ -184,15 +184,23 @@ socket-loop 和 TLS-backend loop 入口 `feedDatagram`、`feedDatagramWithInstal
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
 `processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`、
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `processPendingWorkAndDrainDatagrams`、
 `processDueDeadlineAndPollDatagram`、`processDueDeadlineAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `processDueDeadlineAcrossConnectionsAndPollDatagram`、
 `processDueDeadlineAcrossConnectionsAndDrainDatagrams`、
@@ -255,13 +263,21 @@ single-connection compatible-version receive-to-backend-to-output loop step、
 single-connection compatible-version receive-to-backend-to-bounded-drain loop step、
 single-connection compatible-version receive-to-backend-close-to-output loop step、
 single-connection compatible-version receive-to-backend-close-to-bounded-drain loop step、
+single-connection pending-work-to-backend-to-output loop step、
 single-connection pending-work-to-backend-to-bounded-drain loop step、
+single-connection pending-work-to-backend-close-to-output loop step、
 single-connection pending-work-to-backend-close-to-bounded-drain loop step、
+single-connection compatible-version pending-work-to-backend-to-output loop step、
 single-connection compatible-version pending-work-to-backend-to-bounded-drain loop step、
+single-connection compatible-version pending-work-to-backend-close-to-output loop step、
 single-connection compatible-version pending-work-to-backend-close-to-bounded-drain loop step、
+single-connection due-deadline-to-backend-to-output loop step、
 single-connection due-deadline-to-backend-to-bounded-drain loop step、
+single-connection due-deadline-to-backend-close-to-output loop step、
 single-connection due-deadline-to-backend-close-to-bounded-drain loop step、
+single-connection compatible-version due-deadline-to-backend-to-output loop step、
 single-connection compatible-version due-deadline-to-backend-to-bounded-drain loop step、
+single-connection compatible-version due-deadline-to-backend-close-to-output loop step、
 single-connection compatible-version due-deadline-to-backend-close-to-bounded-drain loop step、
 pending-work-to-bounded-drain loop step、pending-work-to-backend-to-output loop step、pending-work-to-backend-to-bounded-drain
 loop step、due-deadline-to-backend-to-output loop

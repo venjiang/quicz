@@ -146,11 +146,25 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
 `processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `processPendingWorkAndDrainDatagrams`、
 `processDueDeadlineAndPollDatagram`、
 `processDueDeadlineAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `processDueDeadlineAcrossConnectionsAndPollDatagram`、
 `processDueDeadlineAcrossConnectionsAndDrainDatagrams`、
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`、
@@ -192,8 +206,16 @@ single-connection installed-key receive-to-backend-close-to-output loop step、
 single-connection installed-key receive-to-backend-close-to-bounded-drain loop step、
 single-connection compatible-version receive-to-backend-to-output loop step、
 single-connection compatible-version receive-to-backend-close-to-output loop step、
+single-connection pending-work-to-backend-to-output loop step、
 single-connection pending-work-to-backend-to-bounded-drain loop step、
+single-connection pending-work-to-backend-close-to-output loop step、
 single-connection pending-work-to-backend-close-to-bounded-drain loop step、
+single-connection compatible-version pending-work-to-backend-to-output loop step、
+single-connection compatible-version pending-work-to-backend-close-to-output loop step、
+single-connection due-deadline-to-backend-to-output loop step、
+single-connection due-deadline-to-backend-close-to-output loop step、
+single-connection compatible-version due-deadline-to-backend-to-output loop step、
+single-connection compatible-version due-deadline-to-backend-close-to-output loop step、
 single-connection due-deadline-to-backend-to-bounded-drain loop step、
 single-connection due-deadline-to-backend-close-to-bounded-drain loop step、
 pending-work-to-bounded-drain loop step、pending-work-to-backend-to-output loop step、due-deadline-to-backend-to-output loop
@@ -567,10 +589,14 @@ close 和 route cleanup 事件。
   未选出 compatible version 时会排队 CONNECTION_CLOSE 并在 output draining 前停止。
   dropped datagram 不会驱动 backend，close-propagating peer-parameter 错误会在
   output draining 前停止。
-- 2026-06-10：新增 `EndpointPendingWorkCryptoBackendDatagramDrainResult`，以及
+- 2026-06-10：新增 pending-work-to-backend-to-output 和
   pending-work-to-backend-to-bounded-drain loop step：
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram()`、
   `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`、
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram()`、
   `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`、
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram()`、
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram()`、
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams()`、
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams()`、
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams()`
@@ -582,12 +608,18 @@ close 和 route cleanup 事件。
   compatible-version 形态证明 peer Version Information 会先应用再执行 bounded drain，
   其 OrClose 形态在未选出 compatible version 时会排队 CONNECTION_CLOSE 并在 output
   draining 前停止；close-propagating
-  backend error 会在 output draining 前停止。
-- 2026-06-10：新增 `EndpointDueWorkCryptoBackendDatagramDrainResult`，以及
+  backend error 会在 output draining 前停止。单连接 output-polling 形态证明
+  one-datagram polling、close-before-poll suppression、compatible peer Version
+  Information 处理，以及 compatible-version close-before-poll suppression。
+- 2026-06-10：新增 due-deadline-to-backend-to-output 和
   due-deadline-to-backend-to-bounded-drain loop step：
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram()`、
   `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram()`、
   `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram()`、
   `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram()`、
   `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`、
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams()`、
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams()`、
@@ -605,7 +637,10 @@ close 和 route cleanup 事件。
   recovery datagram 所有权、无输出 deadline 后的 backend drive、close-propagating
   drain suppression，以及 Initial recovery wakeup 不产出 installed-key datagram
   时继续进入 Handshake backend output；一格预算只发出第一段 protected datagram，
-  剩余 backend CRYPTO 可由后续 drain 交付给 peer。
+  剩余 backend CRYPTO 可由后续 drain 交付给 peer。单连接 output-polling 形态证明同样的
+  no-output deadline backend progression：one-datagram polling、close-before-poll
+  suppression、compatible peer Version Information 处理，以及 compatible-version
+  close-before-poll suppression。
 - 2026-06-05：扩展 `examples/tls_openssl_backend_adapter.zig`，让 server
   connection probe 通过 OpenSSL-backed backend 拉取真实 pair-transcript 1-RTT
   secrets，报告 handshake confirmation，并通过同一条 `driveCryptoBackendInSpace()`

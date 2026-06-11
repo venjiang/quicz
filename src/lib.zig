@@ -4220,6 +4220,58 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process pending work, drive one backend, then poll installed-key output.
+    ///
+    /// This is the single-connection output-polling form for no-new-datagram
+    /// socket-loop ticks. Terminal idle or close cleanup stops before backend
+    /// progress; live connections then drive the caller-owned backend and poll
+    /// one installed-key datagram.
+    pub fn processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
+        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
+            return .{
+                .pending_work = pending_sweep,
+                .backend = .{
+                    .backend = .{},
+                    .datagram = null,
+                },
+            };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .pending_work = pending_sweep,
+            .backend = try self.driveCryptoBackendsInSpaceAndPollDatagram(
+                backend_space,
+                &drive_views,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+            ),
+        };
+    }
+
     /// Process pending work, drive one backend, then drain installed-key output.
     ///
     /// This is the single-connection bounded-output form for no-new-datagram
@@ -4329,6 +4381,57 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process pending work, drive close-propagating backend, then poll output.
+    ///
+    /// Terminal idle or close cleanup stops before backend progress; backend
+    /// peer transport-parameter errors queue CONNECTION_CLOSE and return
+    /// before installed-key output polling.
+    pub fn processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
+        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
+            return .{
+                .pending_work = pending_sweep,
+                .backend = .{
+                    .backend = .{},
+                    .datagram = null,
+                },
+            };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .pending_work = pending_sweep,
+            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+                backend_space,
+                &drive_views,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+            ),
+        };
+    }
+
     /// Process pending work, drive one compatible-version backend, then drain output.
     ///
     /// This is the single-connection bounded-output form for no-new-datagram
@@ -4385,6 +4488,58 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process pending work, drive one compatible-version backend, then poll output.
+    ///
+    /// This is the single-connection output-polling form for no-new-datagram
+    /// RFC 9368-compatible handshake ticks.
+    pub fn processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
+        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
+            return .{
+                .pending_work = pending_sweep,
+                .backend = .{
+                    .backend = .{},
+                    .datagram = null,
+                },
+            };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .pending_work = pending_sweep,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+                backend_space,
+                &drive_views,
+                compatibilities,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+            ),
+        };
+    }
+
     /// Process pending work, drive compatible-version close path, then drain output.
     ///
     /// This is the single-connection OrClose form of
@@ -4437,6 +4592,58 @@ pub const EndpointConnectionLifecycle = struct {
                 now_millis,
                 poll_options.space,
                 out,
+            ),
+        };
+    }
+
+    /// Process pending work, drive compatible-version close path, then poll output.
+    ///
+    /// Peer Version Information errors queue CONNECTION_CLOSE and return before
+    /// installed-key output polling.
+    pub fn processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
+        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
+            return .{
+                .pending_work = pending_sweep,
+                .backend = .{
+                    .backend = .{},
+                    .datagram = null,
+                },
+            };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .pending_work = pending_sweep,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+                backend_space,
+                &drive_views,
+                compatibilities,
+                &poll_views,
+                now_millis,
+                poll_options.space,
             ),
         };
     }
@@ -4586,6 +4793,59 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process a due deadline, drive one backend, then poll installed-key output.
+    ///
+    /// Due recovery datagrams keep explicit ownership and stop before backend
+    /// progress. Terminal idle or close cleanup also stops before backend
+    /// progress because the caller-owned connection is no longer live.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            poll_options.destination_connection_id,
+            poll_options.source_connection_id,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceAndPollDatagram(
+                backend_space,
+                &drive_views,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+            ),
+        };
+    }
+
     /// Process a due deadline, drive one backend, then drain installed-key output.
     ///
     /// This is the single-connection bounded-output form for timer wakeups.
@@ -4638,6 +4898,59 @@ pub const EndpointConnectionLifecycle = struct {
                 now_millis,
                 poll_options.space,
                 out,
+            ),
+        };
+    }
+
+    /// Process a due deadline, drive a close-propagating backend, then poll output.
+    ///
+    /// Due recovery datagrams and terminal idle/close cleanup stop before
+    /// backend progress. Backend peer transport-parameter errors queue
+    /// CONNECTION_CLOSE and return before installed-key output polling.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            poll_options.destination_connection_id,
+            poll_options.source_connection_id,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+                backend_space,
+                &drive_views,
+                &poll_views,
+                now_millis,
+                poll_options.space,
             ),
         };
     }
@@ -4699,6 +5012,60 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process a due deadline, drive one compatible-version backend, then poll output.
+    ///
+    /// This is the single-connection output-polling form for RFC
+    /// 9368-compatible timer wakeups.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            poll_options.destination_connection_id,
+            poll_options.source_connection_id,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
+                backend_space,
+                &drive_views,
+                compatibilities,
+                &poll_views,
+                now_millis,
+                poll_options.space,
+            ),
+        };
+    }
+
     /// Process a due deadline, drive one compatible-version backend, then drain output.
     ///
     /// This is the single-connection bounded-output form for RFC
@@ -4753,6 +5120,60 @@ pub const EndpointConnectionLifecycle = struct {
                 now_millis,
                 poll_options.space,
                 out,
+            ),
+        };
+    }
+
+    /// Process a due deadline, drive compatible-version close path, then poll output.
+    ///
+    /// Peer Version Information errors queue CONNECTION_CLOSE and return before
+    /// installed-key output polling.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            poll_options.destination_connection_id,
+            poll_options.source_connection_id,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+                backend_space,
+                &drive_views,
+                compatibilities,
+                &poll_views,
+                now_millis,
+                poll_options.space,
             ),
         };
     }
@@ -22771,6 +23192,88 @@ test "EndpointConnectionLifecycle single pending-work backend loop step drains i
     );
 }
 
+test "EndpointConnectionLifecycle single pending-work backend loop step polls installed-key output" {
+    const OutputBackend = struct {
+        outbound: []const u8,
+        sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x29, 0x39, 0x49, 0x59 };
+    const server_dcid = [_]u8{ 0xb9, 0xc9, 0xd9, 0xe9 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var backend = OutputBackend{ .outbound = "single pending poll output" };
+    var scratch: [128]u8 = undefined;
+    const result = try lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram(
+        192,
+        &server,
+        10,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "single pending poll output".len), result.backend.backend.progress.outbound_bytes);
+    try std.testing.expect(backend.sent);
+
+    const polled = result.backend.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 192), polled.connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(11, polled.datagram);
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("single pending poll output", response_crypto[0..response_len]);
+}
+
 test "EndpointConnectionLifecycle single pending-work backend OrClose stops before output drain" {
     const BadBackend = struct {
         peer_sent: bool = false,
@@ -22840,6 +23343,83 @@ test "EndpointConnectionLifecycle single pending-work backend OrClose stops befo
                 .source_connection_id = &server_dcid,
             },
             &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle single pending-work backend OrClose stops before output poll" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0x59 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try server.sendCryptoInSpace(.handshake, "queued before bad pending poll");
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+            193,
+            &server,
+            10,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            .{
+                .space = .handshake,
+                .destination_connection_id = &server_dcid,
+                .source_connection_id = &server_dcid,
+            },
         ),
     );
     try std.testing.expect(backend.peer_sent);
@@ -22982,6 +23562,134 @@ test "EndpointConnectionLifecycle single pending-work compatible backend drain a
     try std.testing.expectEqualStrings("single pending compatible output", response_crypto[0..response_len]);
 }
 
+test "EndpointConnectionLifecycle single pending-work compatible backend poll applies peer information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        outbound: []const u8,
+        peer_sent: bool = false,
+        outbound_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x2a, 0x3a, 0x4a, 0x5a };
+    const server_dcid = [_]u8{ 0xba, 0xca, 0xda, 0xea };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 9876,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var backend = Backend{
+        .peer_transport_parameters = peer_params_out.getWritten(),
+        .outbound = "single pending compatible poll output",
+    };
+    var scratch: [256]u8 = undefined;
+    const result = try lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram(
+        194,
+        &server,
+        10,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(peer_params_out.getWritten().len, result.backend.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expect(result.backend.backend.progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), result.backend.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "single pending compatible poll output".len), result.backend.backend.progress.outbound_bytes);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(backend.outbound_sent);
+    try std.testing.expectEqual(@as(u64, 9876), server.peer_max_data);
+    const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
+
+    const polled = result.backend.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 194), polled.connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(11, polled.datagram);
+    var response_crypto: [80]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("single pending compatible poll output", response_crypto[0..response_len]);
+}
+
 test "EndpointConnectionLifecycle single pending-work compatible OrClose stops before output drain" {
     const BadBackend = struct {
         peer_transport_parameters: []const u8,
@@ -23067,6 +23775,100 @@ test "EndpointConnectionLifecycle single pending-work compatible OrClose stops b
                 .source_connection_id = &server_dcid,
             },
             &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle single pending-work compatible OrClose stops before output poll" {
+    const BadBackend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xab, 0xbc, 0xcd, 0x5a };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 9876,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try server.sendCryptoInSpace(.handshake, "queued before compatible pending poll close");
+
+    var backend = BadBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+            195,
+            &server,
+            10,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            &[_]VersionCompatibility{},
+            .{
+                .space = .handshake,
+                .destination_connection_id = &server_dcid,
+                .source_connection_id = &server_dcid,
+            },
         ),
     );
     try std.testing.expect(backend.peer_sent);
@@ -25972,6 +26774,123 @@ test "EndpointConnectionLifecycle single due-deadline backend drain continues af
     );
 }
 
+test "EndpointConnectionLifecycle single due-deadline backend poll continues after Initial recovery" {
+    const OutputBackend = struct {
+        outbound: []const u8,
+        sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x2b, 0x3b, 0x4b, 0x5b };
+    const server_dcid = [_]u8{ 0xbb, 0xcb, 0xdb, 0xeb };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    _ = try client.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(196, &client);
+    const deadline = lifecycle.nextDeadline(196, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, deadline.kind);
+    const recovery_timer = deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, recovery_timer.space);
+
+    var backend = OutputBackend{ .outbound = "single due poll output" };
+    var scratch: [128]u8 = undefined;
+    const before_deadline = try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram(
+        196,
+        &client,
+        recovery_timer.deadline_millis - 1,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &server_dcid,
+            .source_connection_id = &client_dcid,
+        },
+    );
+    try std.testing.expect(before_deadline == null);
+    try std.testing.expect(!backend.sent);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const result = (try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram(
+        196,
+        &client,
+        recovery_timer.deadline_millis,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &server_dcid,
+            .source_connection_id = &client_dcid,
+        },
+    )) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, result.due_work.deadline.kind);
+    try std.testing.expectEqual(@as(?[]u8, null), result.due_work.datagram);
+    const serviced = result.due_work.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 196), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.initial, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+
+    const driven = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), driven.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), driven.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "single due poll output".len), driven.backend.progress.outbound_bytes);
+    try std.testing.expect(backend.sent);
+
+    const polled = driven.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 196), polled.connection_id);
+
+    try server.processProtectedHandshakeDatagramWithInstalledKeys(
+        recovery_timer.deadline_millis + 1,
+        polled.datagram,
+    );
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try server.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("single due poll output", response_crypto[0..response_len]);
+}
+
 test "EndpointConnectionLifecycle single due-deadline backend OrClose stops before output drain" {
     const BadBackend = struct {
         peer_sent: bool = false,
@@ -26049,6 +26968,91 @@ test "EndpointConnectionLifecycle single due-deadline backend OrClose stops befo
                 .source_connection_id = &client_dcid,
             },
             &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, client.connectionState());
+    try std.testing.expect(client.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle single due-deadline backend OrClose stops before output poll" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x2c, 0x3c, 0x4c, 0x5c };
+    const server_dcid = [_]u8{ 0xbc, 0xcc, 0xdc, 0xec };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try client.sendCryptoInSpace(.handshake, "queued before due bad backend poll");
+
+    _ = try client.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(197, &client);
+    const deadline = lifecycle.nextDeadline(197, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, deadline.kind);
+    const recovery_timer = deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, recovery_timer.space);
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+            197,
+            &client,
+            recovery_timer.deadline_millis,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            .{
+                .space = .handshake,
+                .destination_connection_id = &server_dcid,
+                .source_connection_id = &client_dcid,
+            },
         ),
     );
     try std.testing.expect(backend.peer_sent);
@@ -26206,6 +27210,149 @@ test "EndpointConnectionLifecycle single due-deadline compatible backend drain a
     try std.testing.expectEqualStrings("single due compatible output", response_crypto[0..response_len]);
 }
 
+test "EndpointConnectionLifecycle single due-deadline compatible backend poll applies peer information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        outbound: []const u8,
+        peer_sent: bool = false,
+        outbound_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x2d, 0x3d, 0x4d, 0x5d };
+    const server_dcid = [_]u8{ 0xbd, 0xcd, 0xdd, 0xed };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 9876,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    _ = try server.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(198, &server);
+    const deadline = lifecycle.nextDeadline(198, &server) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, deadline.kind);
+    const recovery_timer = deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, recovery_timer.space);
+
+    var backend = Backend{
+        .peer_transport_parameters = peer_params_out.getWritten(),
+        .outbound = "single due compatible poll output",
+    };
+    var scratch: [256]u8 = undefined;
+    const result = (try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram(
+        198,
+        &server,
+        recovery_timer.deadline_millis,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+    )) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, result.due_work.deadline.kind);
+    try std.testing.expectEqual(@as(?[]u8, null), result.due_work.datagram);
+    const serviced = result.due_work.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 198), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.initial, serviced.timer.space);
+
+    const driven = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), driven.backend.connections_driven);
+    try std.testing.expectEqual(peer_params_out.getWritten().len, driven.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expect(driven.backend.progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), driven.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(usize, 1), driven.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "single due compatible poll output".len), driven.backend.progress.outbound_bytes);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(backend.outbound_sent);
+    try std.testing.expectEqual(@as(u64, 9876), server.peer_max_data);
+    const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
+
+    const polled = driven.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 198), polled.connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(
+        recovery_timer.deadline_millis + 1,
+        polled.datagram,
+    );
+    var response_crypto: [80]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("single due compatible poll output", response_crypto[0..response_len]);
+}
+
 test "EndpointConnectionLifecycle single due-deadline compatible OrClose stops before output drain" {
     const BadBackend = struct {
         peer_transport_parameters: []const u8,
@@ -26300,6 +27447,109 @@ test "EndpointConnectionLifecycle single due-deadline compatible OrClose stops b
                 .source_connection_id = &client_dcid,
             },
             &out,
+        ),
+    );
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle single due-deadline compatible OrClose stops before output poll" {
+    const BadBackend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x2e, 0x3e, 0x4e, 0x5e };
+    const server_dcid = [_]u8{ 0xbe, 0xce, 0xde, 0xee };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 9876,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try server.sendCryptoInSpace(.handshake, "queued before due compatible poll close");
+
+    _ = try server.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(199, &server);
+    const deadline = lifecycle.nextDeadline(199, &server) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, deadline.kind);
+    const recovery_timer = deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.initial, recovery_timer.space);
+
+    var backend = BadBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+            199,
+            &server,
+            recovery_timer.deadline_millis,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            &[_]VersionCompatibility{},
+            .{
+                .space = .handshake,
+                .destination_connection_id = &server_dcid,
+                .source_connection_id = &client_dcid,
+            },
         ),
     );
     try std.testing.expect(backend.peer_sent);
