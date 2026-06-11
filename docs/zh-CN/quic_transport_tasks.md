@@ -430,6 +430,14 @@ close 和 route cleanup 事件。
   到期的 idle/close deadline 返回空 drain result；到期的 installed-key recovery
   deadline 复用 `processPendingWorkAndDrainDatagrams()`。单元测试证明单连接和跨连接
   Application PTO wakeup 都会 drain 1-RTT PING probe，并保留 earliest-deadline selection。
+- 2026-06-11：新增
+  `EndpointConnectionLifecycle.processDueDeadlineAndPollDatagramWithInstalledKeyOptions()` 和
+  `EndpointConnectionLifecycle.processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions()`，
+  供 socket loop 在 recovery deadline 到期后显式选择 installed-key 输出空间。默认
+  `installedKeyPollOptions()` 仍用于 Handshake 和 1-RTT 映射；accepted 0-RTT 的 PTO
+  wakeup 可以显式 poll 或 drain `.zero_rtt` 输出。单元测试证明 deadline 前路径仍无副作用，
+  packet-space 选项不匹配时会在 recovery state 变化前拒绝，到期 Application PTO 可以发出或
+  drain protected 0-RTT `RESET_STREAM` probe。
 - 2026-06-10：新增 `EndpointConnectionView` 和
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()`，服务于调用方持有
   connection map 的可嵌入 socket loop。lifecycle 现在可以在不接管 connection storage

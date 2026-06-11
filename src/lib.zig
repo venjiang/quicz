@@ -4805,6 +4805,92 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    fn installedKeyOptionsMatchRecoveryDeadline(
+        deadline: EndpointConnectionDeadline,
+        options: EndpointPollInstalledKeyDatagramOptions,
+    ) bool {
+        if (deadline.kind != .recovery) return false;
+        const timer = deadline.recovery orelse return false;
+        return switch (options.space) {
+            .handshake => timer.space == .handshake,
+            .zero_rtt, .application => timer.space == .application,
+        };
+    }
+
+    /// Process a due recovery deadline with caller-selected installed-key output.
+    ///
+    /// Use this when Application recovery should poll 0-RTT output instead of
+    /// the default 1-RTT mapping from `installedKeyPollOptions()`. Non-recovery
+    /// deadlines still run pending work and return no datagram. A packet-space
+    /// mismatch is rejected before recovery state is mutated.
+    pub fn processDueDeadlineAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!?EndpointDueWorkDatagramResult {
+        const deadline = self.nextDeadline(connection_id, connection) orelse return null;
+        if (deadline.deadline_millis > now_millis) return null;
+
+        const pending_datagram = if (deadline.kind == .recovery) pending: {
+            if (!installedKeyOptionsMatchRecoveryDeadline(deadline, options)) return error.InvalidPacket;
+            break :pending try self.processPendingWorkAndPollDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                options,
+            );
+        } else EndpointPendingWorkDatagramResult{
+            .pending_work = try self.processPendingWork(connection_id, connection, now_millis),
+            .datagram = null,
+        };
+
+        return .{
+            .deadline = deadline,
+            .pending_work = pending_datagram.pending_work,
+            .datagram = pending_datagram.datagram,
+        };
+    }
+
+    /// Process a due recovery deadline with caller-selected installed-key drain.
+    ///
+    /// This is the bounded-output form of
+    /// `processDueDeadlineAndPollDatagramWithInstalledKeyOptions()`. It lets a
+    /// socket loop service an Application recovery timer with explicit 0-RTT
+    /// output options while preserving the caller-owned drain budget.
+    pub fn processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkDatagramDrainResult {
+        const deadline = self.nextDeadline(connection_id, connection) orelse return null;
+        if (deadline.deadline_millis > now_millis) return null;
+
+        const pending_drain = if (deadline.kind == .recovery) pending: {
+            if (!installedKeyOptionsMatchRecoveryDeadline(deadline, options)) return error.InvalidPacket;
+            break :pending try self.processPendingWorkAndDrainDatagrams(
+                connection_id,
+                connection,
+                now_millis,
+                options,
+                out,
+            );
+        } else EndpointPendingWorkDatagramDrainResult{
+            .pending_work = try self.processPendingWork(connection_id, connection, now_millis),
+            .drain = .{},
+        };
+
+        return .{
+            .deadline = deadline,
+            .pending_work = pending_drain.pending_work,
+            .drain = pending_drain.drain,
+        };
+    }
+
     /// Process the due endpoint-visible deadline for one connection handle.
     ///
     /// Socket loops can call this after waking from `nextDeadline()`. Calls
@@ -26737,6 +26823,201 @@ test "EndpointConnectionLifecycle processPendingWorkAndDrainDatagrams drains ins
         .ping => {},
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "EndpointConnectionLifecycle processDueDeadlineAndPollDatagramWithInstalledKeyOptions emits zero RTT PTO probe" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xef };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installZeroRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+    });
+    try client.confirmHandshake();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "bye", false);
+    try client.resetStream(stream_id, 19);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 19,
+        .final_size = 3,
+    };
+
+    const options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    };
+    const first = (try lifecycle.pollDatagram(66, &client, 10, options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        first,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const next = lifecycle.nextDeadline(66, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
+    try std.testing.expectEqual(EndpointInstalledKeyDatagramSpace.application, next.installedKeyPollOptions(
+        &server_dcid,
+        &client_dcid,
+    ).?.space);
+
+    const before_deadline = try lifecycle.processDueDeadlineAndPollDatagramWithInstalledKeyOptions(
+        66,
+        &client,
+        recovery_timer.deadline_millis - 1,
+        options,
+    );
+    try std.testing.expect(before_deadline == null);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(u8, 0), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processDueDeadlineAndPollDatagramWithInstalledKeyOptions(
+        66,
+        &client,
+        recovery_timer.deadline_millis,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &server_dcid,
+            .source_connection_id = &client_dcid,
+        },
+    ));
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+    try std.testing.expectEqual(@as(u8, 0), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const due = (try lifecycle.processDueDeadlineAndPollDatagramWithInstalledKeyOptions(
+        66,
+        &client,
+        recovery_timer.deadline_millis,
+        options,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due.deadline.kind);
+    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 66), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    const probe = due.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_reset_streams.items.len);
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        probe,
+        secrets.client,
+        1,
+        .{ .reset_stream = reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions drains zero RTT PTO probe" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x11, 0x21, 0x31, 0x41 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xf0 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installZeroRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+    });
+    try client.confirmHandshake();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "bye", false);
+    try client.resetStream(stream_id, 23);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 23,
+        .final_size = 3,
+    };
+
+    const options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    };
+    const first = (try lifecycle.pollDatagram(67, &client, 10, options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        first,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const next = lifecycle.nextDeadline(67, &client) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+
+    var before_out: [1]EndpointPolledDatagramResult = undefined;
+    const before_deadline = try lifecycle.processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions(
+        67,
+        &client,
+        recovery_timer.deadline_millis - 1,
+        options,
+        &before_out,
+    );
+    try std.testing.expect(before_deadline == null);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(u8, 0), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    var due_out: [1]EndpointPolledDatagramResult = undefined;
+    const due = (try lifecycle.processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions(
+        67,
+        &client,
+        recovery_timer.deadline_millis,
+        options,
+        &due_out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due.deadline.kind);
+    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 67), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    try std.testing.expectEqual(@as(usize, 1), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), due.drain.first_error);
+    defer std.testing.allocator.free(due_out[0].datagram);
+    try std.testing.expectEqual(@as(u64, 67), due_out[0].connection_id);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        due_out[0].datagram,
+        secrets.client,
+        1,
+        .{ .reset_stream = reset_frame },
+    ));
 }
 
 test "EndpointConnectionLifecycle processDueDeadlineAndPollDatagram gates recovery wakeups" {

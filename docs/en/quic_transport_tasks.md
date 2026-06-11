@@ -488,6 +488,17 @@ QUIC unless the gap is named and the verification evidence is added here.
   `processPendingWorkAndDrainDatagrams()`. Unit coverage proves single-handle
   and cross-connection Application PTO wakeups drain 1-RTT PING probes while
   preserving earliest-deadline selection.
+- 2026-06-11: Added
+  `EndpointConnectionLifecycle.processDueDeadlineAndPollDatagramWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions()`
+  for socket loops that need explicit installed-key output selection after a
+  due recovery deadline. This keeps the default `installedKeyPollOptions()`
+  mapping for Handshake and 1-RTT while allowing accepted 0-RTT PTO wakeups to
+  poll or drain `.zero_rtt` output. Unit coverage proves the before-deadline
+  path is still a no-op, mismatched packet-space options are rejected before
+  recovery state mutation, and due Application PTO wakeups can emit or drain a
+  protected 0-RTT `RESET_STREAM` probe.
 - 2026-06-10: Added `EndpointConnectionView` and
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()` for embeddable
   socket loops where callers own the connection map. The lifecycle now combines
