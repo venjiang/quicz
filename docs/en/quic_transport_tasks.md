@@ -248,7 +248,8 @@ loop steps, pending-work-to-bounded-drain loop steps,
 pending-work-to-backend-to-bounded-drain loop steps,
 due-deadline-to-backend-to-output loop steps,
 due-deadline-to-bounded-drain loop steps,
-due-deadline-to-backend-to-bounded-drain loop steps, and event-loop wakeup
+due-deadline-to-backend-to-bounded-drain loop steps,
+cross-connection due-deadline terminal-cleanup backend suppression, and event-loop wakeup
 selection across caller-owned connection maps.
 `EndpointConnectionDeadline.installedKeyPollOptions()`
 maps recovery wakeups returned by `nextDeadline()` into installed-key poll
@@ -740,7 +741,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   through a later drain. The single-connection output-polling forms prove the
   same non-output deadline backend progression with one-datagram polling,
   close-before-poll suppression, compatible peer Version Information handling,
-  and compatible-version close-before-poll suppression.
+  and compatible-version close-before-poll suppression. Cross-connection
+  output-polling and bounded-drain forms now also stop before backend progress
+  after terminal idle/close cleanup, including close-propagating and
+  compatible-version variants.
 - 2026-06-10: Extended the socket-facing lifecycle surface with
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeys()`. The helper
   combines version-independent feed classification with routed installed-key

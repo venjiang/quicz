@@ -223,7 +223,9 @@ single-connection due-deadline-to-backend-to-bounded-drain loop step、
 single-connection due-deadline-to-backend-close-to-bounded-drain loop step、
 pending-work-to-bounded-drain loop step、pending-work-to-backend-to-output loop step、due-deadline-to-backend-to-output loop
 step、pending-work-to-backend-to-bounded-drain loop step、due-deadline-to-backend-to-bounded-drain
-loop step、due-deadline-to-bounded-drain loop step、close-propagating TLS backend drive、RFC 9368 compatible-version backend sweep，
+loop step、due-deadline-to-bounded-drain loop step、
+cross-connection due-deadline terminal-cleanup backend suppression、
+close-propagating TLS backend drive、RFC 9368 compatible-version backend sweep，
 以及 caller-owned connection map 上的 event-loop wakeup selection。
 `EndpointConnectionDeadline.installedKeyPollOptions()` 会把
 `nextDeadline()` 返回的 recovery wakeup 映射为 Handshake 和 1-RTT 路径的
@@ -653,7 +655,9 @@ close 和 route cleanup 事件。
   剩余 backend CRYPTO 可由后续 drain 交付给 peer。单连接 output-polling 形态证明同样的
   no-output deadline backend progression：one-datagram polling、close-before-poll
   suppression、compatible peer Version Information 处理，以及 compatible-version
-  close-before-poll suppression。
+  close-before-poll suppression。跨连接 output-polling 和 bounded-drain 形态现在也会在
+  terminal idle/close cleanup 后停止，不再驱动 backend；close-propagating 和
+  compatible-version 变体同样覆盖该边界。
 - 2026-06-05：扩展 `examples/tls_openssl_backend_adapter.zig`，让 server
   connection probe 通过 OpenSSL-backed backend 拉取真实 pair-transcript 1-RTT
   secrets，报告 handshake confirmation，并通过同一条 `driveCryptoBackendInSpace()`

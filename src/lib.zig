@@ -5388,9 +5388,9 @@ pub const EndpointConnectionLifecycle = struct {
     /// A due recovery wakeup can already allocate a protected datagram. In that
     /// case this step returns immediately with the due datagram and leaves
     /// backend progress for a later loop iteration, preserving one-output
-    /// ownership for callers. Idle, close, and Initial recovery wakeups have no
-    /// installed-key datagram, so they can continue into backend drive and
-    /// installed-key output polling.
+    /// ownership for callers. Terminal idle/close cleanup also stops before
+    /// backend progress; live Initial recovery wakeups can continue into backend
+    /// drive and installed-key output polling when they emit no datagram.
     pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram(
         self: *EndpointConnectionLifecycle,
         deadline_connections: []const EndpointConnectionPollView,
@@ -5404,7 +5404,12 @@ pub const EndpointConnectionLifecycle = struct {
             deadline_connections,
             now_millis,
         )) orelse return null;
-        if (due_work.datagram != null) return .{ .due_work = due_work };
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
         return .{
             .due_work = due_work,
             .backend = try self.driveCryptoBackendsInSpaceAndPollDatagram(
@@ -5419,10 +5424,10 @@ pub const EndpointConnectionLifecycle = struct {
 
     /// Process the earliest due deadline, then drive TLS backends and drain output.
     ///
-    /// If the due deadline already emits a recovery datagram, backend work is
-    /// skipped so ownership of that allocated datagram remains explicit. When
-    /// the due step has no datagram, backend progress and bounded output
-    /// draining run in one lifecycle-owned step.
+    /// If the due deadline already emits a recovery datagram or terminally
+    /// retires the selected connection, backend work is skipped. Live no-output
+    /// deadlines can continue into backend progress and bounded output draining
+    /// in one lifecycle-owned step.
     pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams(
         self: *EndpointConnectionLifecycle,
         deadline_connections: []const EndpointConnectionPollView,
@@ -5437,7 +5442,12 @@ pub const EndpointConnectionLifecycle = struct {
             deadline_connections,
             now_millis,
         )) orelse return null;
-        if (due_work.datagram != null) return .{ .due_work = due_work };
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
         return .{
             .due_work = due_work,
             .backend = try self.driveCryptoBackendsInSpaceAndDrainDatagrams(
@@ -5469,7 +5479,12 @@ pub const EndpointConnectionLifecycle = struct {
             deadline_connections,
             now_millis,
         )) orelse return null;
-        if (due_work.datagram != null) return .{ .due_work = due_work };
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
         return .{
             .due_work = due_work,
             .backend = try self.driveCryptoBackendsInSpaceOrCloseAndPollDatagram(
@@ -5497,7 +5512,12 @@ pub const EndpointConnectionLifecycle = struct {
             deadline_connections,
             now_millis,
         )) orelse return null;
-        if (due_work.datagram != null) return .{ .due_work = due_work };
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
         return .{
             .due_work = due_work,
             .backend = try self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
@@ -5526,7 +5546,12 @@ pub const EndpointConnectionLifecycle = struct {
             deadline_connections,
             now_millis,
         )) orelse return null;
-        if (due_work.datagram != null) return .{ .due_work = due_work };
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
         return .{
             .due_work = due_work,
             .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram(
@@ -5556,7 +5581,12 @@ pub const EndpointConnectionLifecycle = struct {
             deadline_connections,
             now_millis,
         )) orelse return null;
-        if (due_work.datagram != null) return .{ .due_work = due_work };
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
         return .{
             .due_work = due_work,
             .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
@@ -5586,7 +5616,12 @@ pub const EndpointConnectionLifecycle = struct {
             deadline_connections,
             now_millis,
         )) orelse return null;
-        if (due_work.datagram != null) return .{ .due_work = due_work };
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
         return .{
             .due_work = due_work,
             .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
@@ -5616,7 +5651,12 @@ pub const EndpointConnectionLifecycle = struct {
             deadline_connections,
             now_millis,
         )) orelse return null;
-        if (due_work.datagram != null) return .{ .due_work = due_work };
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
         return .{
             .due_work = due_work,
             .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
@@ -28147,7 +28187,7 @@ test "EndpointConnectionLifecycle due-deadline backend drain returns recovery da
     try std.testing.expectEqual(@as(usize, 0), backend.pulls);
 }
 
-test "EndpointConnectionLifecycle due-deadline backend loop drives backend after non-output deadline" {
+test "EndpointConnectionLifecycle due-deadline backend poll skips terminal cleanup" {
     const CountingBackend = struct {
         pulls: usize = 0,
 
@@ -28210,13 +28250,12 @@ test "EndpointConnectionLifecycle due-deadline backend loop drives backend after
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, result.due_work.deadline.kind);
     try std.testing.expectEqual(@as(?[]u8, null), result.due_work.datagram);
     try std.testing.expectEqual(ConnectionState.closed, idle.connectionState());
-    const driven = result.backend orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), driven.backend.connections_driven);
-    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
-    try std.testing.expectEqual(@as(?EndpointPolledDatagramResult, null), driven.datagram);
+    try std.testing.expect(result.due_work.pending_work.idle_retired != null);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramResult, null), result.backend);
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
 }
 
-test "EndpointConnectionLifecycle due-deadline backend loop drains after non-output deadline" {
+test "EndpointConnectionLifecycle due-deadline backend drain skips terminal cleanup" {
     const CountingBackend = struct {
         pulls: usize = 0,
 
@@ -28316,18 +28355,12 @@ test "EndpointConnectionLifecycle due-deadline backend loop drains after non-out
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, result.due_work.deadline.kind);
     try std.testing.expectEqual(@as(?[]u8, null), result.due_work.datagram);
     try std.testing.expectEqual(ConnectionState.closed, idle.connectionState());
-    const driven = result.backend orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), driven.backend.connections_driven);
-    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
-    try std.testing.expectEqual(@as(usize, 2), driven.drain.datagrams_written);
-    try std.testing.expectEqual(@as(?Error, null), driven.drain.first_error);
-    defer std.testing.allocator.free(out[0].datagram);
-    defer std.testing.allocator.free(out[1].datagram);
-    try std.testing.expectEqual(@as(u64, 95), out[0].connection_id);
-    try std.testing.expectEqual(@as(u64, 96), out[1].connection_id);
+    try std.testing.expect(result.due_work.pending_work.idle_retired != null);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramDrainResult, null), result.backend);
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
 }
 
-test "EndpointConnectionLifecycle due-deadline close-propagating backend loop stops before output poll" {
+test "EndpointConnectionLifecycle due-deadline close-propagating backend poll skips terminal cleanup" {
     const BadBackend = struct {
         peer_sent: bool = false,
         output_pulled: bool = false,
@@ -28392,25 +28425,24 @@ test "EndpointConnectionLifecycle due-deadline close-propagating backend loop st
         .scratch = &scratch,
     }};
 
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram(
-            &deadline_connections,
-            idle_deadline,
-            .handshake,
-            &drive_views,
-            &[_]EndpointConnectionPollView{},
-            .handshake,
-        ),
-    );
+    const result = (try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+        &deadline_connections,
+        idle_deadline,
+        .handshake,
+        &drive_views,
+        &[_]EndpointConnectionPollView{},
+        .handshake,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, result.due_work.deadline.kind);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramResult, null), result.backend);
     try std.testing.expectEqual(ConnectionState.closed, idle.connectionState());
-    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
-    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
-    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(ConnectionState.active, server.connectionState());
+    try std.testing.expect(server.pending_close == null);
 }
 
-test "EndpointConnectionLifecycle due-deadline compatible-version backend loop applies peer information" {
+test "EndpointConnectionLifecycle due-deadline compatible-version backend poll skips terminal cleanup" {
     const Backend = struct {
         peer_transport_parameters: []const u8,
         peer_sent: bool = false,
@@ -28502,14 +28534,13 @@ test "EndpointConnectionLifecycle due-deadline compatible-version backend loop a
     )) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, result.due_work.deadline.kind);
     try std.testing.expectEqual(@as(?[]u8, null), result.due_work.datagram);
-    const driven = result.backend orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), driven.backend.connections_driven);
-    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), driven.backend.progress.peer_compatible_version_selected);
-    try std.testing.expectEqual(@as(u64, 7777), server.peer_max_data);
-    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(result.due_work.pending_work.idle_retired != null);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramResult, null), result.backend);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expect(!backend.peer_sent);
 }
 
-test "EndpointConnectionLifecycle due-deadline compatible-version close path stops before output poll" {
+test "EndpointConnectionLifecycle due-deadline compatible-version close path skips terminal cleanup" {
     const Backend = struct {
         output_pulled: bool = false,
         peer_transport_parameters: []const u8,
@@ -28591,24 +28622,23 @@ test "EndpointConnectionLifecycle due-deadline compatible-version close path sto
         .scratch = &scratch,
     }};
 
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
-            &deadline_connections,
-            idle_deadline,
-            .handshake,
-            &drive_views,
-            &[_]VersionCompatibility{},
-            &[_]EndpointConnectionPollView{},
-            .handshake,
-        ),
-    );
+    const result = (try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+        &deadline_connections,
+        idle_deadline,
+        .handshake,
+        &drive_views,
+        &[_]VersionCompatibility{},
+        &[_]EndpointConnectionPollView{},
+        .handshake,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, result.due_work.deadline.kind);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramResult, null), result.backend);
     try std.testing.expectEqual(ConnectionState.closed, idle.connectionState());
-    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expect(server.peerVersionInformation() == null);
-    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
-    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(ConnectionState.active, server.connectionState());
+    try std.testing.expect(server.pending_close == null);
 }
 
 test "EndpointConnectionLifecycle pollDatagramAcrossConnections selects first output" {

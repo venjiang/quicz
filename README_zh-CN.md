@@ -285,7 +285,8 @@ single-connection compatible-version due-deadline-to-backend-close-to-bounded-dr
 pending-work-to-bounded-drain loop step、pending-work-to-backend-to-output loop step、pending-work-to-backend-to-bounded-drain
 loop step、due-deadline-to-backend-to-output loop
 step、due-deadline-to-bounded-drain loop step、due-deadline-to-backend-to-bounded-drain
-loop step、close-propagating TLS backend drive、RFC 9368 compatible-version backend sweep，
+loop step、cross-connection due-deadline terminal-cleanup backend suppression、
+close-propagating TLS backend drive、RFC 9368 compatible-version backend sweep，
 以及 caller-owned connection map 上的 event-loop wakeup selection；
 `EndpointConnectionDeadline.installedKeyPollOptions()`
 会把 `nextDeadline()` 返回的 recovery wakeup 映射为 Handshake 和 1-RTT 路径的

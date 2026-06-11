@@ -307,6 +307,7 @@ pending-work-to-bounded-drain loop steps, pending-work-to-backend-to-output loop
 pending-work-to-backend-to-bounded-drain loop steps, due-deadline-to-backend-to-output
 loop steps, due-deadline-to-bounded-drain loop steps,
 due-deadline-to-backend-to-bounded-drain loop steps,
+cross-connection due-deadline terminal-cleanup backend suppression,
 close-propagating TLS backend drive, RFC 9368 compatible-version
 backend sweeps, and event-loop wakeup selection across caller-owned connection
 maps.
