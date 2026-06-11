@@ -450,6 +450,12 @@ close 和 route cleanup 事件。
   Application recovery 会先校验调用方传入的输出空间再 poll。单元测试证明 accepted 0-RTT PTO
   wakeup 在 poll 和 drain wrapper 中都会返回 protected 0-RTT `RESET_STREAM` recovery datagram，
   并在 backend drive 前停止。
+- 2026-06-11：新增
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()` 和
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions()`。
+  这两个入口把显式 installed-key recovery output 选择贯通到调用方持有 connection map 的 backend
+  sweep 前。单元测试证明 accepted 0-RTT PTO wakeup 会按最早 deadline 被选中，发出 protected
+  0-RTT `RESET_STREAM` datagram，跳过 backend drive/drain，并且不修改较晚 deadline 的连接。
 - 2026-06-10：新增 `EndpointConnectionView` 和
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()`，服务于调用方持有
   connection map 的可嵌入 socket loop。lifecycle 现在可以在不接管 connection storage

@@ -5612,6 +5612,42 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process the earliest due deadline with explicit output, then drive TLS backends.
+    ///
+    /// This is the caller-owned connection map form for loops that need
+    /// accepted 0-RTT recovery wakeups to retain `.zero_rtt` packetization
+    /// before any backend drive is attempted.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        deadline_connections: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagramWithInstalledKeyOptions(
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceAndPollDatagram(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
     /// Process the earliest due deadline, then drive TLS backends and drain output.
     ///
     /// If the due deadline already emits a recovery datagram or terminally
@@ -5629,6 +5665,43 @@ pub const EndpointConnectionLifecycle = struct {
         out: []EndpointPolledDatagramResult,
     ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
         const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagram(
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceAndDrainDatagrams(
+                backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Process the earliest due deadline with explicit output, then drain output.
+    ///
+    /// This is the bounded-output form of
+    /// `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        deadline_connections: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndPollDatagramWithInstalledKeyOptions(
             deadline_connections,
             now_millis,
         )) orelse return null;
@@ -27575,6 +27648,317 @@ test "EndpointConnectionLifecycle due-deadline backend drain keeps explicit zero
         secrets.client,
         1,
         .{ .reset_stream = reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle cross due-deadline backend poll keeps explicit zero RTT recovery output" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const fast_client_dcid = [_]u8{ 0x18, 0x28, 0x38, 0x48 };
+    const fast_server_dcid = [_]u8{ 0xa7, 0xb7, 0xc7, 0xd7 };
+    const slow_client_dcid = [_]u8{ 0x19, 0x29, 0x39, 0x49 };
+    const slow_server_dcid = [_]u8{ 0xa8, 0xb8, 0xc8, 0xd8 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var fast = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer fast.deinit();
+    try fast.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try fast.confirmHandshake();
+
+    var slow = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 200 });
+    defer slow.deinit();
+    try slow.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try slow.confirmHandshake();
+
+    const fast_stream_id = try fast.openStream();
+    try fast.sendOnStream(fast_stream_id, "bye", false);
+    try fast.resetStream(fast_stream_id, 61);
+    const fast_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = fast_stream_id,
+        .application_error_code = 61,
+        .final_size = 3,
+    };
+    const slow_stream_id = try slow.openStream();
+    try slow.sendOnStream(slow_stream_id, "bye", false);
+    try slow.resetStream(slow_stream_id, 62);
+    const slow_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = slow_stream_id,
+        .application_error_code = 62,
+        .final_size = 3,
+    };
+
+    const fast_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &fast_server_dcid,
+        .source_connection_id = &fast_client_dcid,
+    };
+    const slow_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &slow_server_dcid,
+        .source_connection_id = &slow_client_dcid,
+    };
+    const fast_first = (try lifecycle.pollDatagram(74, &fast, 10, fast_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(fast_first);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        fast_first,
+        secrets.client,
+        0,
+        .{ .reset_stream = fast_reset_frame },
+    ));
+    const slow_first = (try lifecycle.pollDatagram(75, &slow, 10, slow_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(slow_first);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        slow_first,
+        secrets.client,
+        0,
+        .{ .reset_stream = slow_reset_frame },
+    ));
+
+    const fast_deadline = lifecycle.nextDeadline(74, &fast) orelse return error.TestUnexpectedResult;
+    const fast_timer = fast_deadline.recovery orelse return error.TestUnexpectedResult;
+    const slow_deadline = lifecycle.nextDeadline(75, &slow) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(fast_deadline.deadline_millis < slow_deadline.deadline_millis);
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const deadline_connections = [_]EndpointConnectionInstalledKeyPollView{
+        .{
+            .connection_id = 74,
+            .connection = &fast,
+            .poll_options = fast_options,
+        },
+        .{
+            .connection_id = 75,
+            .connection = &slow,
+            .poll_options = slow_options,
+        },
+    };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 76,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+
+    const before_deadline = try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions(
+        &deadline_connections,
+        fast_timer.deadline_millis - 1,
+        .application,
+        &drive_views,
+        &[_]EndpointConnectionPollView{},
+        .application,
+    );
+    try std.testing.expect(before_deadline == null);
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+
+    const due = (try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions(
+        &deadline_connections,
+        fast_timer.deadline_millis,
+        .application,
+        &drive_views,
+        &[_]EndpointConnectionPollView{},
+        .application,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 74), due.due_work.deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due.due_work.deadline.kind);
+    const serviced = due.due_work.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 74), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    const probe = due.due_work.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe);
+    try std.testing.expect(due.backend == null);
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+    try std.testing.expectEqual(@as(usize, 2), fast.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(u8, 1), fast.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 0), slow.recovery_state.pto_count);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        probe,
+        secrets.client,
+        1,
+        .{ .reset_stream = fast_reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle cross due-deadline backend drain keeps explicit zero RTT recovery output" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const fast_client_dcid = [_]u8{ 0x1a, 0x2a, 0x3a, 0x4a };
+    const fast_server_dcid = [_]u8{ 0xa9, 0xb9, 0xc9, 0xd9 };
+    const slow_client_dcid = [_]u8{ 0x1b, 0x2b, 0x3b, 0x4b };
+    const slow_server_dcid = [_]u8{ 0xaa, 0xba, 0xca, 0xda };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var fast = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer fast.deinit();
+    try fast.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try fast.confirmHandshake();
+
+    var slow = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 200 });
+    defer slow.deinit();
+    try slow.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try slow.confirmHandshake();
+
+    const fast_stream_id = try fast.openStream();
+    try fast.sendOnStream(fast_stream_id, "bye", false);
+    try fast.resetStream(fast_stream_id, 71);
+    const fast_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = fast_stream_id,
+        .application_error_code = 71,
+        .final_size = 3,
+    };
+    const slow_stream_id = try slow.openStream();
+    try slow.sendOnStream(slow_stream_id, "bye", false);
+    try slow.resetStream(slow_stream_id, 72);
+    const slow_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = slow_stream_id,
+        .application_error_code = 72,
+        .final_size = 3,
+    };
+
+    const fast_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &fast_server_dcid,
+        .source_connection_id = &fast_client_dcid,
+    };
+    const slow_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &slow_server_dcid,
+        .source_connection_id = &slow_client_dcid,
+    };
+    const fast_first = (try lifecycle.pollDatagram(77, &fast, 10, fast_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(fast_first);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        fast_first,
+        secrets.client,
+        0,
+        .{ .reset_stream = fast_reset_frame },
+    ));
+    const slow_first = (try lifecycle.pollDatagram(78, &slow, 10, slow_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(slow_first);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        slow_first,
+        secrets.client,
+        0,
+        .{ .reset_stream = slow_reset_frame },
+    ));
+
+    const fast_deadline = lifecycle.nextDeadline(77, &fast) orelse return error.TestUnexpectedResult;
+    const fast_timer = fast_deadline.recovery orelse return error.TestUnexpectedResult;
+    const slow_deadline = lifecycle.nextDeadline(78, &slow) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(fast_deadline.deadline_millis < slow_deadline.deadline_millis);
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const deadline_connections = [_]EndpointConnectionInstalledKeyPollView{
+        .{
+            .connection_id = 77,
+            .connection = &fast,
+            .poll_options = fast_options,
+        },
+        .{
+            .connection_id = 78,
+            .connection = &slow,
+            .poll_options = slow_options,
+        },
+    };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 79,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    var out: [1]EndpointPolledDatagramResult = undefined;
+
+    const before_deadline = try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+        &deadline_connections,
+        fast_timer.deadline_millis - 1,
+        .application,
+        &drive_views,
+        &[_]EndpointConnectionPollView{},
+        .application,
+        &out,
+    );
+    try std.testing.expect(before_deadline == null);
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+
+    const due = (try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+        &deadline_connections,
+        fast_timer.deadline_millis,
+        .application,
+        &drive_views,
+        &[_]EndpointConnectionPollView{},
+        .application,
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 77), due.due_work.deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due.due_work.deadline.kind);
+    const serviced = due.due_work.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 77), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    const probe = due.due_work.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe);
+    try std.testing.expect(due.backend == null);
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+    try std.testing.expectEqual(@as(usize, 2), fast.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(u8, 1), fast.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 0), slow.recovery_state.pto_count);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        probe,
+        secrets.client,
+        1,
+        .{ .reset_stream = fast_reset_frame },
     ));
 }
 

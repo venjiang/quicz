@@ -516,6 +516,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   polling. Unit coverage proves accepted 0-RTT PTO wakeups return protected
   0-RTT `RESET_STREAM` recovery datagrams and stop before backend drive in both
   the poll and drain wrappers.
+- 2026-06-11: Added
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions()`.
+  These carry explicit installed-key recovery output selection through
+  caller-owned connection maps before backend sweeps. Unit coverage proves
+  accepted 0-RTT PTO wakeups are selected by earliest deadline, emit protected
+  0-RTT `RESET_STREAM` datagrams, skip backend drive/drain, and leave the later
+  connection untouched.
 - 2026-06-10: Added `EndpointConnectionView` and
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()` for embeddable
   socket loops where callers own the connection map. The lifecycle now combines
