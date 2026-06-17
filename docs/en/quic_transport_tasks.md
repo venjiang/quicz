@@ -183,6 +183,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWorkAndDrainDatagrams`,
 `processDueDeadlineAndPollDatagram`,
 `processDueDeadlineAndDrainDatagrams`,
+`processDueDeadlineAndSelectNextDeadline`,
 `processDueDeadlineAcrossConnectionsAndSelectNextDeadline`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
@@ -663,11 +664,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   drive, Version Information is applied, endpoint recovery scheduling is
   refreshed, and the resulting recovery deadline is selected without polling output.
 - 2026-06-17: Added
+  `EndpointConnectionLifecycle.processDueDeadlineAndSelectNextDeadline()` and
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndSelectNextDeadline()`
-  as the no-output due-deadline-to-next-deadline socket-loop planning step.
-  Unit coverage proves calls before the earliest deadline are no-ops, a due
-  idle deadline retires endpoint route state, and the next recovery deadline is
-  returned for the remaining caller-owned connection map.
+  as no-output due-deadline-to-next-deadline socket-loop planning steps. Unit
+  coverage proves calls before the deadline are no-ops, a due recovery deadline
+  can be serviced and rescheduled for a single connection, a due idle deadline
+  retires endpoint route state, and the next recovery deadline is returned for
+  the remaining caller-owned connection map.
 - 2026-06-10: Added `EndpointConnectionPollView` and
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndPollDatagram()`
   so embeddable socket loops can dispatch the earliest already-due deadline

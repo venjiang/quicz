@@ -5011,6 +5011,32 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process one due deadline, then select the connection's next deadline.
+    ///
+    /// This is the single-connection no-output due-deadline wakeup step for
+    /// simple socket loops. It applies due idle/close/recovery work for the
+    /// caller-owned connection and returns the connection's next
+    /// endpoint-visible deadline after the lifecycle state has been refreshed.
+    pub fn processDueDeadlineAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+    ) Error!?EndpointDueWorkNextDeadlineResult {
+        const deadline = self.nextDeadline(connection_id, connection) orelse return null;
+        if (deadline.deadline_millis > now_millis) return null;
+
+        return .{
+            .deadline = deadline,
+            .pending_work = try self.processPendingWork(
+                connection_id,
+                connection,
+                now_millis,
+            ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
+        };
+    }
+
     /// Process the earliest due deadline, then select the next deadline.
     ///
     /// This is the no-output due-deadline wakeup step for embeddable socket
@@ -25632,6 +25658,58 @@ test "EndpointConnectionLifecycle selects deadline across caller-owned connectio
     const recovery_timer = third.recovery orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
     try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
+}
+
+test "EndpointConnectionLifecycle single due-deadline step selects next deadline" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(80, &conn);
+    const due_deadline = lifecycle.nextDeadline(80, &conn) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due_deadline.kind);
+    const due_timer = due_deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, due_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, due_timer.kind);
+
+    const before = try lifecycle.processDueDeadlineAndSelectNextDeadline(
+        80,
+        &conn,
+        due_deadline.deadline_millis - 1,
+    );
+    try std.testing.expect(before == null);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
+
+    const due = (try lifecycle.processDueDeadlineAndSelectNextDeadline(
+        80,
+        &conn,
+        due_deadline.deadline_millis,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 80), due.deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due.deadline.kind);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), due.pending_work.idle_retired);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), due.pending_work.close_retired);
+    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 80), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const next = due.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 80), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    try std.testing.expect(next.deadline_millis > due.deadline.deadline_millis);
+    const next_timer = next.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, next_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, next_timer.kind);
 }
 
 test "EndpointConnectionLifecycle due-deadline cleanup selects next deadline" {

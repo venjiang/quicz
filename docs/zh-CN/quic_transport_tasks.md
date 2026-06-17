@@ -176,6 +176,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processPendingWorkAndDrainDatagrams`、
 `processDueDeadlineAndPollDatagram`、
 `processDueDeadlineAndDrainDatagrams`、
+`processDueDeadlineAndSelectNextDeadline`、
 `processDueDeadlineAcrossConnectionsAndSelectNextDeadline`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
@@ -582,10 +583,12 @@ close 和 route cleanup 事件。
   Version Information 会被应用，endpoint recovery scheduling 会被刷新，并在不 poll output
   的情况下选出对应 recovery deadline。
 - 2026-06-17：新增
+  `EndpointConnectionLifecycle.processDueDeadlineAndSelectNextDeadline()` 和
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndSelectNextDeadline()`，
   作为 no-output due-deadline-to-next-deadline socket-loop planning step。单元测试证明
-  最早 deadline 前调用无副作用，到期 idle deadline 会退休 endpoint route state，并为剩余
-  caller-owned connection map 返回下一条 recovery deadline。
+  deadline 前调用无副作用，单连接到期 recovery deadline 会被服务并重新调度，到期 idle
+  deadline 会退休 endpoint route state，并为剩余 caller-owned connection map 返回下一条
+  recovery deadline。
 - 2026-06-10：新增 `EndpointConnectionPollView` 和
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndPollDatagram()`，
   让可嵌入 socket loop 在不把 connection storage 交给 lifecycle 的前提下，跨调用方持有的
