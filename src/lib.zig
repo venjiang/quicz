@@ -4410,6 +4410,46 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process pending work, drive one close-propagating backend, then select a deadline.
+    ///
+    /// This is the OrClose form of
+    /// `processPendingWorkAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`.
+    /// Terminal idle or close cleanup stops before backend progress. Live
+    /// connections continue into backend drive, where peer transport-parameter
+    /// errors queue CONNECTION_CLOSE before returning.
+    pub fn processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!EndpointPendingWorkCryptoBackendNextDeadlineResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
+        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
+            return .{
+                .pending_work = pending_sweep,
+                .backend = .{
+                    .backend = .{},
+                    .next_deadline = self.nextDeadline(connection_id, connection),
+                },
+            };
+        }
+
+        return .{
+            .pending_work = pending_sweep,
+            .backend = try self.driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+                connection_id,
+                connection,
+                backend_space,
+                backend,
+                scratch,
+            ),
+        };
+    }
+
     /// Process pending work, drive one backend, then poll installed-key output.
     ///
     /// This is the single-connection output-polling form for no-new-datagram
@@ -24060,6 +24100,141 @@ test "EndpointConnectionLifecycle single pending-work backend next deadline stop
     try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), result.backend.next_deadline);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle single pending-work close backend loop step selects next deadline" {
+    const NoopBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(71, &conn);
+    const recovery_before = lifecycle.nextDeadline(71, &conn) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, recovery_before.kind);
+
+    var backend = NoopBackend{};
+    var scratch: [8]u8 = undefined;
+    const result = try lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+        71,
+        &conn,
+        recovery_before.deadline_millis,
+        .handshake,
+        backend.backend(),
+        &scratch,
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const next = result.backend.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 71), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    try std.testing.expect(next.deadline_millis > recovery_before.deadline_millis);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
+    try std.testing.expectEqual(@as(?[]const u8, null), try conn.pollTxInSpace(.handshake, 30, &scratch));
+}
+
+test "EndpointConnectionLifecycle single pending-work close backend stops before next deadline on peer error" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+    try conn.confirmHandshake();
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(72, &conn);
+    const recovery_before = lifecycle.nextDeadline(72, &conn) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, recovery_before.kind);
+
+    var backend = BadBackend{};
+    var scratch: [8]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+            72,
+            &conn,
+            recovery_before.deadline_millis,
+            .handshake,
+            backend.backend(),
+            &scratch,
+        ),
+    );
+
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(?i64, null), conn.closeDeadlineMillis());
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), lifecycle.nextDeadline(72, &conn));
 }
 
 test "EndpointConnectionLifecycle pending-work cross-connection poll waits for recovery service" {
