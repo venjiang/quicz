@@ -11492,7 +11492,10 @@ pub const EndpointConnectionLifecycle = struct {
         dcid: []const u8,
         scid: []const u8,
     ) Error!?[]u8 {
-        const datagram = try connection.pollProtectedHandshakeDatagramWithInstalledKeys(now_millis, dcid, scid);
+        const datagram = connection.pollProtectedHandshakeDatagramWithInstalledKeys(now_millis, dcid, scid) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         errdefer if (datagram) |bytes| connection.allocator.free(bytes);
         try self.armRecoveryTimerFromConnection(connection_id, connection);
         return datagram;
@@ -55208,6 +55211,57 @@ test "EndpointConnectionLifecycle installed-key Handshake OrClose stops before p
 
     try client.processProtectedHandshakeDatagramWithInstalledKeys(13, close_packet);
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+}
+
+test "EndpointConnectionLifecycle refreshes recovery timer when installed-key Handshake poll rejects closed connection" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x18, 0x28, 0x38, 0x48 };
+    const server_dcid = [_]u8{ 0xa8, 0xb8, 0xc8, 0xd8 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try client.sendCryptoInSpace(.handshake, "client handshake");
+    const first = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        41,
+        &client,
+        10,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    var close_buf: [64]u8 = undefined;
+    _ = (try client.pollTx(11, &close_buf)) orelse return error.TestUnexpectedResult;
+    const close_deadline = client.closeDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectError(error.ConnectionClosed, client.checkCloseTimeouts(close_deadline));
+    try std.testing.expectEqual(ConnectionState.closed, client.connectionState());
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadlineMillis());
+
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+            41,
+            &client,
+            11,
+            &server_dcid,
+            &client_dcid,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
 }
 
 test "EndpointConnectionLifecycle routes installed-key Handshake then drives backend and polls output" {
