@@ -69,6 +69,14 @@ pub const EndpointProtectedLongDatagramResult = struct {
 };
 
 /// Endpoint result after routing caller-keyed long input through backend drive.
+pub const EndpointRoutedCryptoBackendDriveProtectedLongDatagramResult = struct {
+    /// Endpoint route selected for the triggering datagram.
+    route: endpoint.RouteResult,
+    /// Backend drive and caller-keyed long-header output poll result.
+    backend: EndpointCryptoBackendDriveProtectedLongDatagramResult,
+};
+
+/// Endpoint result after routing caller-keyed long input through backend drive.
 pub const EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult = struct {
     /// Endpoint route selected for the triggering datagram.
     route: endpoint.RouteResult,
@@ -342,6 +350,14 @@ pub const EndpointCryptoBackendDriveDatagramResult = struct {
     /// Backend drive progress collected before polling output.
     backend: EndpointCryptoBackendDriveSweepResult,
     /// Protected datagram emitted after backend progress, if any.
+    datagram: ?EndpointPolledDatagramResult = null,
+};
+
+/// Result from one backend drive followed by caller-keyed long-packet polling.
+pub const EndpointCryptoBackendDriveProtectedLongDatagramResult = struct {
+    /// Backend progress collected before polling output.
+    backend: CryptoBackendProgress,
+    /// Caller-keyed Initial/Handshake CRYPTO datagram emitted after backend progress, if any.
     datagram: ?EndpointPolledDatagramResult = null,
 };
 

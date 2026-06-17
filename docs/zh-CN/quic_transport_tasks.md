@@ -123,10 +123,16 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`、
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`、
 `drainProtectedLongCryptoDatagramsInSpace`、
+`driveCryptoBackendInSpaceAndPollProtectedLongCryptoDatagram`、
+`driveCryptoBackendInSpaceOrCloseAndPollProtectedLongCryptoDatagram`、
 `driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams`、
 `driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams`、
+`processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram`、
+`processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram`、
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`、
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram`、
+`processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram`、
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`、
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram`、
@@ -321,6 +327,18 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndPollProtectedLongCryptoDatagram()`、
+  其 `OrClose` 变体、
+  `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram()`、
+  其 `OrClose` 变体，以及 routed
+  `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram()`
+  这一组 API，作为 caller-keyed Initial/Handshake
+  receive-to-backend-to-output loop step。单元测试证明非 routed 处理会驱动
+  backend progress 并 poll 一个 caller-keyed protected long response，route
+  selection 会在 backend delivery 前拦截 connection handle mismatch，成功 routed
+  Handshake CRYPTO receive 会 poll 一个 response，close-propagating backend
+  peer-parameter 错误会在 output polling 前停止。
 - 2026-06-18：新增
   `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram()`、
   其 `OrClose` 变体，以及 routed

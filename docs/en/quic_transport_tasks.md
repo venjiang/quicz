@@ -237,10 +237,16 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`driveCryptoBackendInSpaceAndPollProtectedLongCryptoDatagram`,
+`driveCryptoBackendInSpaceOrCloseAndPollProtectedLongCryptoDatagram`,
 `driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams`,
 `driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams`,
+`processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram`,
+`processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram`,
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram`,
+`processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram`,
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram`,
@@ -348,6 +354,18 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndPollProtectedLongCryptoDatagram()`,
+  its `OrClose` variant,
+  `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram()`,
+  its `OrClose` variant, and the routed
+  `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram()`
+  pair as caller-keyed Initial/Handshake receive-to-backend-to-output loop
+  steps. Unit coverage proves non-routed processing drives backend progress
+  and polls one caller-keyed protected long response, route selection stops
+  mismatched connection handles before backend delivery, successful routed
+  Handshake CRYPTO receive polls one response, and close-propagating backend
+  peer-parameter errors stop before output polling.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram()`,
   its `OrClose` variant, and the routed
