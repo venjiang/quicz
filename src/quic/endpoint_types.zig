@@ -394,6 +394,15 @@ pub const EndpointDueWorkNextDeadlineResult = struct {
     next_deadline: ?EndpointConnectionDeadline = null,
 };
 
+/// Result from due-deadline work followed by backend drive and deadline selection.
+pub const EndpointDueWorkCryptoBackendNextDeadlineResult = struct {
+    /// Due-deadline work applied before optional backend/deadline processing.
+    due_work: EndpointDueWorkNextDeadlineResult,
+    /// Backend drive result and next endpoint-visible deadline when the due
+    /// step left the selected connection live.
+    backend: ?EndpointCryptoBackendDriveNextDeadlineResult = null,
+};
+
 /// Result from due-deadline work followed by optional backend/output processing.
 pub const EndpointDueWorkCryptoBackendDatagramResult = struct {
     /// Due deadline work applied before backend/output processing.

@@ -86,6 +86,7 @@ pub const EndpointDatagramDrainResult = endpoint_types.EndpointDatagramDrainResu
 pub const EndpointDueWorkDatagramResult = endpoint_types.EndpointDueWorkDatagramResult;
 pub const EndpointDueWorkDatagramDrainResult = endpoint_types.EndpointDueWorkDatagramDrainResult;
 pub const EndpointDueWorkNextDeadlineResult = endpoint_types.EndpointDueWorkNextDeadlineResult;
+pub const EndpointDueWorkCryptoBackendNextDeadlineResult = endpoint_types.EndpointDueWorkCryptoBackendNextDeadlineResult;
 pub const EndpointDueWorkCryptoBackendDatagramResult = endpoint_types.EndpointDueWorkCryptoBackendDatagramResult;
 pub const EndpointDueWorkCryptoBackendDatagramDrainResult = endpoint_types.EndpointDueWorkCryptoBackendDatagramDrainResult;
 pub const EndpointFeedInstalledKeyDatagramResult = endpoint_types.EndpointFeedInstalledKeyDatagramResult;
@@ -5043,6 +5044,41 @@ pub const EndpointConnectionLifecycle = struct {
                 now_millis,
             ),
             .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+        };
+    }
+
+    /// Process the earliest due deadline, drive backends, then select the next deadline.
+    ///
+    /// This is the no-output timer/backend planning step for due wakeups. A
+    /// terminal idle/close deadline stops before backend progress because the
+    /// selected caller-owned connection is no longer live. Recovery and other
+    /// live due work continue into backend drive, and the backend result carries
+    /// the final post-backend wakeup.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        due_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!?EndpointDueWorkCryptoBackendNextDeadlineResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndSelectNextDeadline(
+            due_connections,
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceAndSelectNextDeadline(
+                backend_space,
+                drive_views,
+                deadline_connections,
+            ),
         };
     }
 
@@ -25561,6 +25597,107 @@ test "EndpointConnectionLifecycle due-deadline cleanup selects next deadline" {
     try std.testing.expectEqual(@as(u64, 82), next.connection_id);
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
     try std.testing.expectEqual(recovery_deadline.deadline_millis, next.deadline_millis);
+}
+
+test "EndpointConnectionLifecycle due-deadline backend loop step selects next deadline" {
+    const NoopBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var due_connection = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer due_connection.deinit();
+    try due_connection.confirmHandshake();
+    _ = try due_connection.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(201, &due_connection);
+    const due_deadline = lifecycle.nextDeadline(201, &due_connection) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due_deadline.kind);
+
+    var backend_connection = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer backend_connection.deinit();
+    try backend_connection.confirmHandshake();
+    _ = try backend_connection.recordPacketSentInSpace(.application, 20, 100);
+
+    var backend = NoopBackend{};
+    var scratch: [8]u8 = undefined;
+    const due_connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 201, .connection = &due_connection },
+        .{ .connection_id = 202, .connection = &backend_connection },
+    };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 202,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const deadline_connections = [_]EndpointConnectionView{
+        .{ .connection_id = 201, .connection = &due_connection },
+        .{ .connection_id = 202, .connection = &backend_connection },
+    };
+
+    const before = try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline(
+        &due_connections,
+        due_deadline.deadline_millis - 1,
+        .handshake,
+        &drive_views,
+        &deadline_connections,
+    );
+    try std.testing.expect(before == null);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+
+    const result = (try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline(
+        &due_connections,
+        due_deadline.deadline_millis,
+        .handshake,
+        &drive_views,
+        &deadline_connections,
+    )) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(@as(u64, 201), result.due_work.deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, result.due_work.deadline.kind);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), result.due_work.pending_work.idle_retired);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), result.due_work.pending_work.close_retired);
+    const serviced = result.due_work.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 201), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    try std.testing.expectEqual(ConnectionState.active, due_connection.connectionState());
+    try std.testing.expectEqual(ConnectionState.active, backend_connection.connectionState());
+
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+    try std.testing.expectEqual(@as(usize, 2), lifecycle.recoveryTimerCount());
+    const next = backend_result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 202), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
+    try std.testing.expectEqual(@as(?[]const u8, null), try backend_connection.pollTxInSpace(.handshake, 30, &scratch));
 }
 
 test "EndpointConnectionDeadline derives installed-key poll options" {

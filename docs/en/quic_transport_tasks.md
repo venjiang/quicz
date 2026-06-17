@@ -194,6 +194,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processDueDeadlineAcrossConnectionsAndPollDatagram`,
 `processDueDeadlineAcrossConnectionsAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
@@ -734,10 +735,17 @@ QUIC unless the gap is named and the verification evidence is added here.
   `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram()`.
   The helpers process the earliest due caller-owned connection first, return a
   due recovery datagram before driving TLS backends, and only continue into
-  backend drive/output polling for non-output deadlines such as idle or close
-  wakeups. Unit coverage proves one-output ownership, close-propagating backend
+  backend drive/output polling for live no-output due work; terminal idle/close
+  cleanup stops before backend progress. Unit coverage proves one-output ownership, close-propagating backend
   errors, compatible Version Information application, and compatible-version
   close propagation through the same lifecycle-owned wakeup API.
+- 2026-06-18: Added `EndpointDueWorkCryptoBackendNextDeadlineResult` and
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`
+  as the no-output due-deadline-to-backend-drive-to-next-deadline socket-loop
+  step. Unit coverage proves the earliest due recovery deadline is serviced
+  before backend drive, backend progress refreshes another connection's
+  recovery scheduling, and the resulting recovery deadline is selected without
+  polling output.
 - 2026-06-10: Added `EndpointCryptoBackendDriveView`,
   `EndpointCryptoBackendDriveSweepResult`, and
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndArmConnections()`

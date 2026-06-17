@@ -187,6 +187,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `processDueDeadlineAcrossConnectionsAndPollDatagram`、
 `processDueDeadlineAcrossConnectionsAndDrainDatagrams`、
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`、
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`、
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`、
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
@@ -640,9 +641,16 @@ close 和 route cleanup 事件。
   `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram()`。
   这些 helper 会先处理 caller-owned connection 集合中最早到期的 deadline；如果 due
   recovery 已经产出 datagram，则直接把 datagram 交还调用方，不继续驱动 TLS backend；
-  idle/close 这类无输出 wakeup 才继续进入 backend drive 和 output polling。单元测试证明
+  live no-output due work 才继续进入 backend drive 和 output polling，terminal idle/close
+  cleanup 会在 backend progress 之前停止。单元测试证明
   one-output ownership、close-propagating backend error、compatible Version Information
   应用，以及 compatible-version close propagation 都经过同一个 lifecycle-owned wakeup API。
+- 2026-06-18：新增 `EndpointDueWorkCryptoBackendNextDeadlineResult` 和
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`，
+  作为 no-output due-deadline-to-backend-drive-to-next-deadline socket-loop step。
+  单元测试证明最早到期的 recovery deadline 会先被服务，backend progress 会刷新另一条
+  connection 的 recovery scheduling，并在不 poll output 的情况下选出对应 recovery
+  deadline。
 - 2026-06-10：新增 `EndpointCryptoBackendDriveView`、
   `EndpointCryptoBackendDriveSweepResult` 和
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndArmConnections()`，
