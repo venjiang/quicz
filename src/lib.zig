@@ -35,6 +35,7 @@ pub const LossDetectionTimerDeadline = transport_types.LossDetectionTimerDeadlin
 pub const HandshakeTrafficSecrets = crypto_types.HandshakeTrafficSecrets;
 pub const ZeroRttTrafficSecrets = crypto_types.ZeroRttTrafficSecrets;
 pub const OneRttTrafficSecrets = crypto_types.OneRttTrafficSecrets;
+pub const CryptoBackend = crypto_types.CryptoBackend;
 pub const CryptoBackendProgress = crypto_types.CryptoBackendProgress;
 pub const TlsBackendStatus = tls_backend_module.TlsBackendStatus;
 pub const TlsBackendPacketSpace = tls_backend_module.TlsBackendPacketSpace;
@@ -12444,86 +12445,6 @@ pub const EndpointConnectionLifecycle = struct {
             .routes_retired = self.router.retireConnectionRoutes(connection_id),
             .recovery_timer_disarmed = self.recovery_timers.disarmConnection(connection_id),
         };
-    }
-};
-
-/// Pluggable TLS/crypto backend hook driven by QUIC CRYPTO byte streams.
-///
-/// The connection owns QUIC packet-number-space buffering and packetization;
-/// the backend owns TLS transcript parsing, handshake data production, and
-/// handshake-complete decisions. Callback errors abort the current drive step.
-pub const CryptoBackend = struct {
-    /// Opaque backend state passed to all callbacks.
-    context: *anyopaque,
-    /// Consume contiguous CRYPTO bytes received in `space`.
-    receive: *const fn (context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void,
-    /// Copy backend-produced CRYPTO bytes for `space` into `out_buf`.
-    ///
-    /// Return null when no bytes are currently available. Non-empty returned
-    /// slices are copied into connection-owned CRYPTO send queues before this
-    /// callback is invoked again.
-    pull: *const fn (context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8,
-    /// Optional hook receiving this endpoint's encoded transport parameters.
-    ///
-    /// The slice is valid only during the callback; backends that need to hold
-    /// it for TLS transcript construction must copy it. The connection may call
-    /// this more than once, so backends should treat it as idempotent setup.
-    set_local_transport_parameters: ?*const fn (context: *anyopaque, data: []const u8) Error!void = null,
-    /// Optional hook returning peer transport-parameter extension bytes.
-    ///
-    /// Return null until no new peer extension is available. Backends should
-    /// return each parsed peer extension at most once because applying
-    /// transport parameters resets initial peer limits.
-    pull_peer_transport_parameters: ?*const fn (context: *anyopaque, out_buf: []u8) Error!?[]const u8 = null,
-    /// Optional hook returning TLS-produced Handshake traffic secrets.
-    ///
-    /// Return null until secrets are available. The connection derives packet
-    /// protection keys for installed-key Handshake long-packet helpers.
-    pull_handshake_traffic_secrets: ?*const fn (context: *anyopaque) Error!?HandshakeTrafficSecrets = null,
-    /// Optional hook returning TLS-produced 0-RTT traffic secrets.
-    ///
-    /// Return null until secrets are available. Clients usually return `local`
-    /// and servers usually return `peer`.
-    pull_zero_rtt_traffic_secrets: ?*const fn (context: *anyopaque) Error!?ZeroRttTrafficSecrets = null,
-    /// Optional hook returning TLS-produced 1-RTT traffic secrets.
-    ///
-    /// Return null until secrets are available. The connection derives packet
-    /// protection keys and installs endpoint-owned key-phase state from the
-    /// returned secrets.
-    pull_1rtt_traffic_secrets: ?*const fn (context: *anyopaque) Error!?OneRttTrafficSecrets = null,
-    /// Optional handshake-complete probe. When true, the connection marks the
-    /// modeled handshake confirmed after CRYPTO input/output has been driven.
-    handshake_confirmed: ?*const fn (context: *anyopaque) bool = null,
-
-    fn isHandshakeConfirmed(self: CryptoBackend) bool {
-        if (self.handshake_confirmed) |confirmed| return confirmed(self.context);
-        return false;
-    }
-
-    fn setLocalTransportParameters(self: CryptoBackend, data: []const u8) Error!bool {
-        const set_local = self.set_local_transport_parameters orelse return false;
-        try set_local(self.context, data);
-        return true;
-    }
-
-    fn pullPeerTransportParameters(self: CryptoBackend, out_buf: []u8) Error!?[]const u8 {
-        const pull_peer = self.pull_peer_transport_parameters orelse return null;
-        return try pull_peer(self.context, out_buf);
-    }
-
-    fn pullHandshakeTrafficSecrets(self: CryptoBackend) Error!?HandshakeTrafficSecrets {
-        const pull_secrets = self.pull_handshake_traffic_secrets orelse return null;
-        return try pull_secrets(self.context);
-    }
-
-    fn pullZeroRttTrafficSecrets(self: CryptoBackend) Error!?ZeroRttTrafficSecrets {
-        const pull_secrets = self.pull_zero_rtt_traffic_secrets orelse return null;
-        return try pull_secrets(self.context);
-    }
-
-    fn pullOneRttTrafficSecrets(self: CryptoBackend) Error!?OneRttTrafficSecrets {
-        const pull_secrets = self.pull_1rtt_traffic_secrets orelse return null;
-        return try pull_secrets(self.context);
     }
 };
 

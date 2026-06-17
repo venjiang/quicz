@@ -1,11 +1,12 @@
-const quicz = @import("../lib.zig");
+const crypto_types = @import("crypto_types.zig");
+const transport_types = @import("transport_types.zig");
 
-const Error = quicz.Error;
-const PacketNumberSpace = quicz.PacketNumberSpace;
-const CryptoBackend = quicz.CryptoBackend;
-const HandshakeTrafficSecrets = quicz.HandshakeTrafficSecrets;
-const ZeroRttTrafficSecrets = quicz.ZeroRttTrafficSecrets;
-const OneRttTrafficSecrets = quicz.OneRttTrafficSecrets;
+const Error = transport_types.Error;
+const PacketNumberSpace = transport_types.PacketNumberSpace;
+const CryptoBackend = crypto_types.CryptoBackend;
+const HandshakeTrafficSecrets = crypto_types.HandshakeTrafficSecrets;
+const ZeroRttTrafficSecrets = crypto_types.ZeroRttTrafficSecrets;
+const OneRttTrafficSecrets = crypto_types.OneRttTrafficSecrets;
 
 /// Status returned by C-ABI TLS backend callbacks.
 ///
