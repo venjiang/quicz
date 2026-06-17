@@ -235,6 +235,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processPendingWorkAcrossConnectionsAndSelectNextDeadline`、`processPendingWorkAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDrainDatagrams`、
+`processPendingWorkAcrossConnectionsAndPollDatagramWithInstalledKeyOptions`、
+`processPendingWorkAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions`、
 `processPendingWorkAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`、
@@ -820,6 +822,12 @@ close 和 route cleanup 事件。
   单元测试证明跨连接选择和 bounded drain 会保留调用方选择的 0-RTT packetization，
   且不改变默认 `pollDatagramAcrossConnections()` 和
   `drainDatagramsAcrossConnections()` 行为。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndPollDatagramWithInstalledKeyOptions()` 和
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions()`。
+  这两个入口让跨连接 timer tick 可以先服务 pending recovery work，再按调用方选择的
+  installed-key 输出选项发包。单元测试证明未到期 tick 仍无输出，到期 accepted 0-RTT
+  recovery work 会在 poll 和 bounded-drain 形态中发出 protected 0-RTT `RESET_STREAM` probe。
 - 2026-06-11：更新 single-connection due-deadline-to-backend poll 和 bounded-drain
   wrapper，让它们保留显式 installed-key recovery output 选择。Initial recovery 仍只服务
   pending work、不发 installed-key datagram，并可继续进入 backend drive；Handshake 和

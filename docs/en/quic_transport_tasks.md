@@ -173,6 +173,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWorkAcrossConnectionsAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDrainDatagrams`,
+`processPendingWorkAcrossConnectionsAndPollDatagramWithInstalledKeyOptions`,
+`processPendingWorkAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
@@ -919,6 +921,14 @@ QUIC unless the gap is named and the verification evidence is added here.
   and bounded draining preserve caller-selected 0-RTT packetization while
   leaving default `pollDatagramAcrossConnections()` and
   `drainDatagramsAcrossConnections()` behavior unchanged.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndPollDatagramWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions()`.
+  These let cross-connection timer ticks service pending recovery work and then
+  emit caller-selected installed-key output. Unit coverage proves before-due
+  ticks remain no-output and due accepted 0-RTT recovery work emits protected
+  0-RTT `RESET_STREAM` probes through both poll and bounded-drain forms.
 - 2026-06-11: Updated the single-connection due-deadline-to-backend poll and
   bounded-drain wrappers to preserve explicit installed-key recovery output
   choices. Initial recovery still services pending work without emitting an

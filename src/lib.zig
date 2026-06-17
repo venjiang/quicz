@@ -4328,6 +4328,34 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process pending work across connections, then poll with explicit output options.
+    ///
+    /// This is the caller-owned connection map form for timer ticks that need
+    /// pending recovery work to keep non-default installed-key packetization,
+    /// such as accepted 0-RTT recovery probes.
+    pub fn processPendingWorkAcrossConnectionsAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) Error!EndpointPendingWorkSweepDatagramResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        if (pending_work.recovery_serviced_count == 0) {
+            return .{ .pending_work = pending_work };
+        }
+
+        return .{
+            .pending_work = pending_work,
+            .datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+                poll_views,
+                now_millis,
+            ),
+        };
+    }
+
     /// Process pending work across connections, then drain installed-key output.
     ///
     /// This is the bounded-output form of
@@ -4359,6 +4387,38 @@ pub const EndpointConnectionLifecycle = struct {
                 poll_views,
                 now_millis,
                 poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Process pending work across connections, then drain explicit output.
+    ///
+    /// This is the bounded-output form of
+    /// `processPendingWorkAcrossConnectionsAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processPendingWorkAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkSweepDatagramDrainResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        if (pending_work.recovery_serviced_count == 0) {
+            return .{
+                .pending_work = pending_work,
+                .drain = .{},
+            };
+        }
+
+        return .{
+            .pending_work = pending_work,
+            .drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+                poll_views,
+                now_millis,
                 out,
             ),
         };
@@ -28094,6 +28154,196 @@ test "EndpointConnectionLifecycle pending-work cross-connection drain returns bo
     try std.testing.expectEqual(@as(u8, 1), second.recovery_state.pto_count);
     try std.testing.expectEqual(@as(usize, 2), first.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 2), second.sentPacketCount(.application));
+}
+
+test "EndpointConnectionLifecycle pending-work cross-connection poll keeps explicit zero RTT output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x2a, 0x3a, 0x4a, 0x5a };
+    const server_dcid = [_]u8{ 0xb2, 0xc2, 0xd2, 0xe2 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try client.confirmHandshake();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "bye", false);
+    try client.resetStream(stream_id, 71);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 71,
+        .final_size = 3,
+    };
+
+    const options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    };
+    const first = (try lifecycle.pollDatagram(211, &client, 10, options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        first,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
+
+    const deadline = lifecycle.nextDeadline(211, &client) orelse return error.TestUnexpectedResult;
+    const timer = deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, timer.space);
+
+    const pending_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 211,
+        .connection = &client,
+    }};
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{.{
+        .connection_id = 211,
+        .connection = &client,
+        .poll_options = options,
+    }};
+
+    const early = try lifecycle.processPendingWorkAcrossConnectionsAndPollDatagramWithInstalledKeyOptions(
+        &pending_connections,
+        timer.deadline_millis - 1,
+        &poll_views,
+    );
+    try std.testing.expectEqual(@as(usize, 0), early.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(?EndpointPolledDatagramResult, null), early.datagram);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+
+    const due = try lifecycle.processPendingWorkAcrossConnectionsAndPollDatagramWithInstalledKeyOptions(
+        &pending_connections,
+        timer.deadline_millis,
+        &poll_views,
+    );
+    try std.testing.expectEqual(@as(usize, 1), due.pending_work.recovery_serviced_count);
+    const probe = due.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe.datagram);
+    try std.testing.expectEqual(@as(u64, 211), probe.connection_id);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        probe.datagram,
+        secrets.client,
+        1,
+        .{ .reset_stream = reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle pending-work cross-connection drain keeps explicit zero RTT output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const first_client_dcid = [_]u8{ 0x2b, 0x3b, 0x4b, 0x5b };
+    const first_server_dcid = [_]u8{ 0xb3, 0xc3, 0xd3, 0xe3 };
+    const second_client_dcid = [_]u8{ 0x2c, 0x3c, 0x4c, 0x5c };
+    const second_server_dcid = [_]u8{ 0xb4, 0xc4, 0xd4, 0xe4 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var first = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer first.deinit();
+    try first.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try first.confirmHandshake();
+    const first_stream_id = try first.openStream();
+    try first.sendOnStream(first_stream_id, "bye", false);
+    try first.resetStream(first_stream_id, 72);
+    const first_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = first_stream_id,
+        .application_error_code = 72,
+        .final_size = 3,
+    };
+
+    var second = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer second.deinit();
+    try second.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try second.confirmHandshake();
+    const second_stream_id = try second.openStream();
+    try second.sendOnStream(second_stream_id, "bye", false);
+    try second.resetStream(second_stream_id, 73);
+    const second_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = second_stream_id,
+        .application_error_code = 73,
+        .final_size = 3,
+    };
+
+    const first_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &first_server_dcid,
+        .source_connection_id = &first_client_dcid,
+    };
+    const second_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &second_server_dcid,
+        .source_connection_id = &second_client_dcid,
+    };
+    const first_sent = (try lifecycle.pollDatagram(212, &first, 20, first_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first_sent);
+    const second_sent = (try lifecycle.pollDatagram(213, &second, 20, second_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_sent);
+
+    const first_deadline = lifecycle.nextDeadline(212, &first) orelse return error.TestUnexpectedResult;
+    const first_timer = first_deadline.recovery orelse return error.TestUnexpectedResult;
+    const second_deadline = lifecycle.nextDeadline(213, &second) orelse return error.TestUnexpectedResult;
+    const second_timer = second_deadline.recovery orelse return error.TestUnexpectedResult;
+    const now_millis = @max(first_timer.deadline_millis, second_timer.deadline_millis);
+
+    const pending_connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 212, .connection = &first },
+        .{ .connection_id = 213, .connection = &second },
+    };
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{
+        .{
+            .connection_id = 212,
+            .connection = &first,
+            .poll_options = first_options,
+        },
+        .{
+            .connection_id = 213,
+            .connection = &second,
+            .poll_options = second_options,
+        },
+    };
+    var out: [2]EndpointPolledDatagramResult = undefined;
+
+    const drained = try lifecycle.processPendingWorkAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions(
+        &pending_connections,
+        now_millis,
+        &poll_views,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 2), drained.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 2), drained.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), drained.drain.first_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    defer std.testing.allocator.free(out[1].datagram);
+    try std.testing.expectEqual(@as(u64, 212), out[0].connection_id);
+    try std.testing.expectEqual(@as(u64, 213), out[1].connection_id);
+    try std.testing.expectEqual(@as(u8, 1), first.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(u8, 1), second.recovery_state.pto_count);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        out[0].datagram,
+        secrets.client,
+        1,
+        .{ .reset_stream = first_reset_frame },
+    ));
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        out[1].datagram,
+        secrets.client,
+        1,
+        .{ .reset_stream = second_reset_frame },
+    ));
 }
 
 test "EndpointConnectionLifecycle pending-work backend loop step polls PTO output" {
