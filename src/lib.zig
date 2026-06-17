@@ -13012,6 +13012,72 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process installed-key 1-RTT input, drive a backend, and select a wakeup.
+    ///
+    /// This is the direct no-output receive-to-backend step for socket loops
+    /// that have already selected a connection. It lets post-handshake
+    /// Application-space CRYPTO advance through the TLS backend while leaving
+    /// ACK and CRYPTO output queued for a later installed-key poll or drain.
+    pub fn processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        try self.processProtectedShortDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            dcid_len,
+            datagram,
+        );
+        return self.driveCryptoBackendInSpaceAndSelectNextDeadline(
+            connection_id,
+            connection,
+            backend_space,
+            backend,
+            scratch,
+        );
+    }
+
+    /// Route installed-key 1-RTT input, drive a backend, and select a wakeup.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing
+    /// or backend callbacks. On success, output remains queued for a later
+    /// installed-key output step.
+    pub fn processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveNextDeadlineResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .backend = try self.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+                connection_id,
+                connection,
+                now_millis,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+                backend_space,
+                backend,
+                scratch,
+            ),
+        };
+    }
+
     /// Process one installed-key 1-RTT datagram, then poll installed-key output.
     ///
     /// This is the single-connection receive-to-output loop step for callers
@@ -50068,6 +50134,255 @@ test "EndpointConnectionLifecycle installed-key short receive selects deadline w
     );
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
+test "EndpointConnectionLifecycle installed-key short receive drives application backend and selects deadline" {
+    const Backend = struct {
+        received: [64]u8 = undefined,
+        received_len: usize = 0,
+        outbound: []const u8,
+        outbound_sent: bool = false,
+        receive_calls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, bytes: []const u8) Error!void {
+            if (space != .application) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            @memcpy(self.received[self.received_len..][0..bytes.len], bytes);
+            self.received_len += bytes.len;
+            self.receive_calls += 1;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out: []u8) Error!?[]const u8 {
+            if (space != .application) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.outbound_sent) return null;
+            if (out.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x35, 0x36, 0x37, 0x38 };
+    const server_dcid = [_]u8{ 0xc5, 0xc6, 0xc7, 0xc8 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try client.sendCryptoInSpace(.application, "client app crypto");
+    const crypto_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        55,
+        &client,
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(crypto_datagram);
+
+    var backend = Backend{ .outbound = "server app crypto" };
+    var scratch: [64]u8 = undefined;
+    const result = try server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        65,
+        &server,
+        11,
+        server_dcid.len,
+        crypto_datagram,
+        .application,
+        backend.backend(),
+        &scratch,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "client app crypto".len), result.backend.progress.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.progress.outbound_chunks);
+    try std.testing.expectEqualStrings("client app crypto", backend.received[0..backend.received_len]);
+    try std.testing.expect(backend.outbound_sent);
+    const next = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 65), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
+    try std.testing.expectEqual(server.idleTimeoutDeadlineMillis().?, next.deadline_millis);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    const response = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        65,
+        &server,
+        12,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response);
+    try client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
+        55,
+        &client,
+        13,
+        client_dcid.len,
+        response,
+    );
+    var recv_buf: [64]u8 = undefined;
+    const recv_len = (try client.recvCryptoInSpace(.application, &recv_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server app crypto", recv_buf[0..recv_len]);
+}
+
+test "EndpointConnectionLifecycle routes installed-key short receive then drives application backend deadline" {
+    const Backend = struct {
+        received: [64]u8 = undefined,
+        received_len: usize = 0,
+        receive_calls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, bytes: []const u8) Error!void {
+            if (space != .application) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            @memcpy(self.received[self.received_len..][0..bytes.len], bytes);
+            self.received_len += bytes.len;
+            self.receive_calls += 1;
+        }
+
+        fn pull(_: *anyopaque, space: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            if (space != .application) return error.InvalidPacket;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x39, 0x3a, 0x3b, 0x3c };
+    const server_dcid = [_]u8{ 0xc9, 0xca, 0xcb, 0xcc };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_039);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 39;
+    const server_connection_id: u64 = 49;
+
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendCryptoInSpace(.application, "routed app crypto");
+    const crypto_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_connection_id,
+        &client,
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(crypto_datagram);
+
+    var backend = Backend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        client_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        crypto_datagram,
+        .application,
+        backend.backend(),
+        &scratch,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), backend.receive_calls);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(?i64, null), server.idleTimeoutDeadlineMillis());
+
+    const result = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        crypto_datagram,
+        .application,
+        backend.backend(),
+        &scratch,
+    );
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, result.route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend.receive_calls);
+    try std.testing.expectEqualStrings("routed app crypto", backend.received[0..backend.received_len]);
+    const next = result.backend.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
 }
 
 test "EndpointConnectionLifecycle installed-key short OrClose receive stops before direct poll" {

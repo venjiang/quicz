@@ -379,6 +379,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline`,
 `processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`,
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams`,
@@ -735,6 +737,16 @@ QUIC unless the gap is named and the verification evidence is added here.
   deadline while preserving ACK output for later installed-key short-packet
   polling, and the routed form rejects connection-handle mismatches before
   packet processing.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`
+  and
+  `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`
+  as installed-key 1-RTT receive-to-Application-backend-to-next-deadline
+  no-output loop steps. Unit coverage proves successful Application CRYPTO
+  receive is delivered to the backend, ACK/CRYPTO output remains queued for a
+  later installed-key short-packet poll, and the idle deadline is returned; the
+  routed form rejects connection-handle mismatches before packet processing or
+  backend callbacks.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagram()`
   and the cross-connection

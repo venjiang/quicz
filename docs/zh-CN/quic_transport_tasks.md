@@ -234,6 +234,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`、
 `processRoutedProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline`、
 `processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`、
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
 `feedDatagramWithInstalledKeysAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndDrainDatagrams`、
@@ -675,6 +677,15 @@ close 和 route cleanup 事件。
   loop step。单元测试证明 successful installed-key PING receive 会刷新 idle
   deadline、保留 ACK 输出供后续 installed-key short-packet poll；routed 变体会在
   packet processing 前拦截 connection handle mismatch。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`
+  和
+  `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`，
+  作为 installed-key 1-RTT receive-to-Application-backend-to-next-deadline
+  no-output loop step。单元测试证明 successful Application CRYPTO receive 会交给
+  backend、保留 ACK/CRYPTO output 供后续 installed-key short-packet poll，并返回
+  idle deadline；routed 变体会在 packet processing 和 backend callback 前拦截
+  connection handle mismatch。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagram()`
   和 cross-connection
