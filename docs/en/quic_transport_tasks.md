@@ -151,6 +151,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`,
@@ -443,6 +447,18 @@ QUIC unless the gap is named and the verification evidence is added here.
   single-connection wrappers share the cross-connection behavior, dropped
   datagrams do not drive backend callbacks, and OrClose peer-parameter errors
   stop before backend output while queueing close state.
+- 2026-06-18: Added the RFC 9368-compatible no-output forms
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`,
+  and
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`.
+  These helpers let socket loops process an installed-key datagram, apply peer
+  Version Information through the TLS backend, and recompute the next wakeup
+  without polling output. Unit coverage proves compatible peer information is
+  applied for both cross-connection and single-connection forms, backend CRYPTO
+  output remains queued for the existing protected output path, and the OrClose
+  variant stops before backend output when peer Version Information is invalid.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams()`
   as the close-propagating accepted Initial backend-to-bounded-drain step. Unit
