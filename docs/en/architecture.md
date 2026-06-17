@@ -68,8 +68,10 @@ remain the public aggregation point for exported names and compatibility aliases
 Implementation code moves under `src/quic/` by responsibility; for example,
 `src/quic/transport_types.zig` owns shared transport state enums and version
 compatibility helpers, `src/quic/crypto_types.zig` owns shared TLS
-traffic-secret and backend-progress types, and `src/quic/tls_backend.zig` owns
-the C-ABI TLS adapter while `lib.zig` re-exports the stable public surface.
+traffic-secret and backend-progress types, `src/quic/endpoint_types.zig` owns
+endpoint datagram option types that are shared by lifecycle helpers, and
+`src/quic/tls_backend.zig` owns the C-ABI TLS adapter while `lib.zig`
+re-exports the stable public surface.
 
 ### Packet Protection Layer
 
