@@ -1055,6 +1055,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   Application loss-time deadline with no due datagram can continue into backend
   work and emit caller-selected 0-RTT `RESET_STREAM` output through both poll
   and bounded-drain forms.
+- 2026-06-18: Split internal connection bookkeeping records into
+  `src/quic/connection_state.zig` while keeping `src/lib.zig` as the stable
+  public module root. The new module owns pending STREAM/CRYPTO frames,
+  sent-packet metadata, pending close/control frames, path-challenge records,
+  RTT/PTO snapshots, and connection-ID rollback snapshots. Validation keeps the
+  same 856-test transport suite green, proving the split is behavior-preserving.
 - 2026-06-10: Added `EndpointConnectionView` and
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()` for embeddable
   socket loops where callers own the connection map. The lifecycle now combines

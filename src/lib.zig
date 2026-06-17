@@ -14,6 +14,7 @@ const tls_backend_module = @import("quic/tls_backend.zig");
 const endpoint_types = @import("quic/endpoint_types.zig");
 const connection_config = @import("quic/connection_config.zig");
 const connection_version = @import("quic/connection_version.zig");
+const connection_state = @import("quic/connection_state.zig");
 const packet_context = @import("quic/packet_context.zig");
 const protocol_limits = @import("quic/protocol_limits.zig");
 const buffer = @import("quic/buffer.zig");
@@ -130,6 +131,7 @@ test {
     _ = endpoint_types;
     _ = connection_config;
     _ = connection_version;
+    _ = connection_state;
 }
 
 const max_quic_varint = protocol_limits.max_quic_varint;
@@ -142,6 +144,30 @@ const close_state_pto_multiplier = protocol_limits.close_state_pto_multiplier;
 const max_path_challenge_transmissions = protocol_limits.max_path_challenge_transmissions;
 const packet_threshold_loss_gap = protocol_limits.packet_threshold_loss_gap;
 const anti_amplification_multiplier = protocol_limits.anti_amplification_multiplier;
+
+const EcnAckValidationResult = connection_state.EcnAckValidationResult;
+const PendingStreamFrame = connection_state.PendingStreamFrame;
+const PendingCryptoFrame = connection_state.PendingCryptoFrame;
+const PendingRecvStreamFrame = connection_state.PendingRecvStreamFrame;
+const PendingBlockedFrame = connection_state.PendingBlockedFrame;
+const PendingMaxFrame = connection_state.PendingMaxFrame;
+const PendingCloseFrame = connection_state.PendingCloseFrame;
+const PeerCloseSnapshot = connection_state.PeerCloseSnapshot;
+const PendingPathChallenge = connection_state.PendingPathChallenge;
+const OutstandingPathChallenge = connection_state.OutstandingPathChallenge;
+const SentPacket = connection_state.SentPacket;
+const RttEstimateSnapshot = connection_state.RttEstimateSnapshot;
+const PtoBackoffSnapshot = connection_state.PtoBackoffSnapshot;
+const ActiveConnectionId = connection_state.ActiveConnectionId;
+const ActiveConnectionIdSnapshot = connection_state.ActiveConnectionIdSnapshot;
+const LocalConnectionId = connection_state.LocalConnectionId;
+const LocalConnectionIdSnapshot = connection_state.LocalConnectionIdSnapshot;
+const deinitPendingStreamFrameSlice = connection_state.deinitPendingStreamFrameSlice;
+const deinitPendingCryptoFrameSlice = connection_state.deinitPendingCryptoFrameSlice;
+const deinitSentPacketSlice = connection_state.deinitSentPacketSlice;
+const clearSentPacketList = connection_state.clearSentPacketList;
+const deinitSentPacketList = connection_state.deinitSentPacketList;
+const deinitPendingCloseFrame = connection_state.deinitPendingCloseFrame;
 
 const PeerTransportParameterValidationError = Error || error{
     VersionNegotiationError,
@@ -12512,22 +12538,6 @@ pub const EndpointConnectionLifecycle = struct {
     }
 };
 
-const EcnAckValidationResult = struct {
-    ce_congestion_event: bool = false,
-};
-
-const PendingStreamFrame = struct {
-    stream_id: u64,
-    offset: u64,
-    fin: bool,
-    data: []u8,
-};
-
-const PendingCryptoFrame = struct {
-    offset: u64,
-    data: []u8,
-};
-
 const BuiltProtectedLongPacket = struct {
     space: PacketNumberSpace,
     packet_number: u64,
@@ -12600,93 +12610,6 @@ const BuiltProtectedShortPacket = struct {
         }
     }
 };
-
-const PendingRecvStreamFrame = struct {
-    offset: u64,
-    data: []u8,
-};
-
-const PendingBlockedFrame = union(enum) {
-    data: frame.DataBlockedFrame,
-    stream_data: frame.StreamDataBlockedFrame,
-    streams_bidi: frame.StreamsBlockedBidiFrame,
-    streams_uni: frame.StreamsBlockedUniFrame,
-};
-
-const PendingMaxFrame = union(enum) {
-    data: frame.MaxDataFrame,
-    stream_data: frame.MaxStreamDataFrame,
-    streams_bidi: frame.MaxStreamsBidiFrame,
-    streams_uni: frame.MaxStreamsUniFrame,
-};
-
-const PendingCloseFrame = union(enum) {
-    connection: frame.ConnectionCloseFrame,
-    application: frame.ApplicationCloseFrame,
-};
-
-const PeerCloseSnapshot = enum { absent, present };
-
-const PendingPathChallenge = struct {
-    data: [8]u8,
-    transmissions: u8 = 0,
-};
-
-const OutstandingPathChallenge = struct {
-    data: [8]u8,
-    sent_time_millis: i64,
-    transmissions: u8,
-};
-
-const SentPacket = struct {
-    packet_number: u64,
-    sent_time_millis: i64,
-    bytes: usize,
-    ecn_codepoint: EcnCodepoint = .not_ect,
-    stream_frame: ?PendingStreamFrame = null,
-    crypto_frame: ?PendingCryptoFrame = null,
-    reset_stream_frame: ?frame.ResetStreamFrame = null,
-    stop_sending_frame: ?frame.StopSendingFrame = null,
-
-    fn deinit(self: *SentPacket, allocator: std.mem.Allocator) void {
-        if (self.stream_frame) |pending| {
-            allocator.free(pending.data);
-            self.stream_frame = null;
-        }
-        if (self.crypto_frame) |pending| {
-            allocator.free(pending.data);
-            self.crypto_frame = null;
-        }
-    }
-};
-
-fn deinitPendingStreamFrameSlice(allocator: std.mem.Allocator, frames: []PendingStreamFrame) void {
-    for (frames) |pending| {
-        allocator.free(pending.data);
-    }
-}
-
-fn deinitPendingCryptoFrameSlice(allocator: std.mem.Allocator, frames: []PendingCryptoFrame) void {
-    for (frames) |pending| {
-        allocator.free(pending.data);
-    }
-}
-
-fn deinitSentPacketSlice(allocator: std.mem.Allocator, sent_packets: []SentPacket) void {
-    for (sent_packets) |*sent_packet| {
-        sent_packet.deinit(allocator);
-    }
-}
-
-fn clearSentPacketList(allocator: std.mem.Allocator, sent_packets: *std.ArrayList(SentPacket)) void {
-    deinitSentPacketSlice(allocator, sent_packets.items);
-    sent_packets.items.len = 0;
-}
-
-fn deinitSentPacketList(allocator: std.mem.Allocator, sent_packets: *std.ArrayList(SentPacket)) void {
-    clearSentPacketList(allocator, sent_packets);
-    sent_packets.deinit(allocator);
-}
 
 const LossDetectionResult = struct {
     lost_bytes: usize = 0,
@@ -12801,44 +12724,6 @@ const PacketNumberSpaceView = struct {
     ecn_largest_acknowledged: *?u64,
     ecn_counts: *frame.EcnCounts,
     ecn_validation_state: *EcnValidationState,
-};
-
-const RttEstimateSnapshot = struct {
-    first_rtt_sample_sent_time_millis: ?i64,
-    latest_rtt_ms: ?u64,
-    min_rtt_ms: ?u64,
-    smoothed_rtt_ms: u64,
-    rttvar_ms: u64,
-};
-
-const PtoBackoffSnapshot = struct {
-    initial: u8,
-    handshake: u8,
-    application: u8,
-};
-
-const ActiveConnectionId = struct {
-    sequence_number: u64,
-    connection_id: []u8,
-    stateless_reset_token: [16]u8,
-    retired: bool = false,
-};
-
-const ActiveConnectionIdSnapshot = struct {
-    retired: bool,
-};
-
-const LocalConnectionId = struct {
-    sequence_number: u64,
-    retire_prior_to: u64,
-    connection_id: []u8,
-    stateless_reset_token: [16]u8,
-    sent: bool = false,
-    retired: bool = false,
-};
-
-const LocalConnectionIdSnapshot = struct {
-    retired: bool,
 };
 
 fn quicVarIntWireLen(value: u64) Error!usize {
@@ -13186,13 +13071,6 @@ fn maxFrameWireLen(max_frame: PendingMaxFrame) Error!usize {
         .streams_uni => |streams| {
             return addWireLen(len, try quicVarIntWireLen(streams.maximum_streams));
         },
-    }
-}
-
-fn deinitPendingCloseFrame(close: *PendingCloseFrame, allocator: std.mem.Allocator) void {
-    switch (close.*) {
-        .connection => |connection| allocator.free(connection.reason_phrase),
-        .application => |application| allocator.free(application.reason_phrase),
     }
 }
 
