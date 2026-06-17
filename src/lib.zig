@@ -10378,6 +10378,114 @@ pub const EndpointConnectionLifecycle = struct {
         return route;
     }
 
+    /// Process explicit key-update 1-RTT input and select the next wakeup.
+    ///
+    /// This is the no-output form for callers that own current and next
+    /// packet-protection keys and only need endpoint timer interest after
+    /// receive processing. ACK or data output remains queued for a later
+    /// poll/drain step.
+    pub fn processProtectedShortDatagramWithKeyUpdateAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        receive_keys: protection.ShortPacketKeyUpdateKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!?EndpointConnectionDeadline {
+        try self.processProtectedShortDatagramWithKeyUpdate(
+            connection_id,
+            connection,
+            now_millis,
+            receive_keys,
+            dcid_len,
+            datagram,
+        );
+        return self.nextDeadline(connection_id, connection);
+    }
+
+    /// Process explicit key-update 1-RTT input with close propagation and select a wakeup.
+    ///
+    /// Authenticated Application plaintext errors queue CONNECTION_CLOSE and
+    /// return before ordinary wakeup selection.
+    pub fn processProtectedShortDatagramWithKeyUpdateOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        receive_keys: protection.ShortPacketKeyUpdateKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!?EndpointConnectionDeadline {
+        try self.processProtectedShortDatagramWithKeyUpdateOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            receive_keys,
+            dcid_len,
+            datagram,
+        );
+        return self.nextDeadline(connection_id, connection);
+    }
+
+    /// Route explicit key-update 1-RTT input and select the next wakeup.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    /// On success, the routed destination CID length is used to open the short
+    /// packet and output remains queued for a later explicit-phase poll/drain.
+    pub fn processRoutedProtectedShortDatagramWithKeyUpdateAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.ShortPacketKeyUpdateKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!EndpointRoutedNextDeadlineResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .next_deadline = try self.processProtectedShortDatagramWithKeyUpdateAndSelectNextDeadline(
+                connection_id,
+                connection,
+                now_millis,
+                receive_keys,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+            ),
+        };
+    }
+
+    /// Route explicit key-update 1-RTT input through close propagation and select a wakeup.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    /// Authenticated Application plaintext errors queue CONNECTION_CLOSE and
+    /// return before ordinary wakeup selection.
+    pub fn processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.ShortPacketKeyUpdateKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!EndpointRoutedNextDeadlineResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .next_deadline = try self.processProtectedShortDatagramWithKeyUpdateOrCloseAndSelectNextDeadline(
+                connection_id,
+                connection,
+                now_millis,
+                receive_keys,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+            ),
+        };
+    }
+
     /// Process explicit key-update 1-RTT input, then poll one explicit-phase output.
     ///
     /// This is the one-output socket-loop step for callers that own current
@@ -48348,6 +48456,81 @@ test "EndpointConnectionLifecycle routes explicit key update short receive and p
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
 }
 
+test "EndpointConnectionLifecycle explicit key update receive selects deadline without polling output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x1f, 0x2f, 0x3f, 0x4f };
+    const server_dcid = [_]u8{ 0xaf, 0xbf, 0xcf, 0xdf };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    var client_send_state = protection.Aes128KeyPhaseState.init(secrets.client, false);
+    var server_send_state = protection.Aes128KeyPhaseState.init(secrets.server, false);
+    client_send_state.initiateKeyUpdate();
+
+    try client.sendPing();
+    const ping = (try client_lifecycle.pollProtectedShortDatagramWithKeyPhaseState(
+        36,
+        &client,
+        10,
+        &server_dcid,
+        &client_send_state,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping);
+
+    const next = (try server_lifecycle.processProtectedShortDatagramWithKeyUpdateAndSelectNextDeadline(
+        46,
+        &server,
+        11,
+        protection.Aes128KeyPhaseState.init(secrets.client, false).keyUpdateKeys(),
+        server_dcid.len,
+        ping,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 46), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
+    try std.testing.expectEqual(server.idleTimeoutDeadlineMillis().?, next.deadline_millis);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    const ack = (try server_lifecycle.pollProtectedShortDatagramWithKeyPhaseState(
+        46,
+        &server,
+        12,
+        &client_dcid,
+        &server_send_state,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    try client_lifecycle.processProtectedShortDatagramWithKeyUpdate(
+        36,
+        &client,
+        13,
+        protection.Aes128KeyPhaseState.init(secrets.server, false).keyUpdateKeys(),
+        client_dcid.len,
+        ack,
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
 test "EndpointConnectionLifecycle explicit key update OrClose receive stops before poll" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x17, 0x27, 0x37, 0x47 };
@@ -48512,6 +48695,117 @@ test "EndpointConnectionLifecycle routes explicit key update short receive and d
         12,
         secrets.server,
         out[0].datagram,
+    );
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &client_dcid, client_route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
+test "EndpointConnectionLifecycle routes explicit key update receive and selects deadline" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x2f, 0x3f, 0x4f, 0x5f };
+    const server_dcid = [_]u8{ 0xbf, 0xcf, 0xdf, 0xef };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    var client_send_state = protection.Aes128KeyPhaseState.init(secrets.client, false);
+    var server_send_state = protection.Aes128KeyPhaseState.init(secrets.server, false);
+    client_send_state.initiateKeyUpdate();
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_026);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 37;
+    const server_connection_id: u64 = 47;
+
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendPing();
+    const ping = (try client_lifecycle.pollProtectedShortDatagramWithKeyPhaseState(
+        client_connection_id,
+        &client,
+        10,
+        &server_dcid,
+        &client_send_state,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping);
+
+    const server_receive_keys = protection.Aes128KeyPhaseState.init(secrets.client, false).keyUpdateKeys();
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdateAndSelectNextDeadline(
+        client_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        server_receive_keys,
+        ping,
+    ));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(?i64, null), server.idleTimeoutDeadlineMillis());
+
+    const result = try server_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdateAndSelectNextDeadline(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        server_receive_keys,
+        ping,
+    );
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, result.route.destination_connection_id.asSlice());
+    const next = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    const ack = (try server_lifecycle.pollProtectedShortDatagramWithKeyPhaseState(
+        server_connection_id,
+        &server,
+        12,
+        &client_dcid,
+        &server_send_state,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    const client_route = try client_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdate(
+        client_connection_id,
+        &client,
+        client_receive_path,
+        13,
+        protection.Aes128KeyPhaseState.init(secrets.server, false).keyUpdateKeys(),
+        ack,
     );
     try std.testing.expectEqual(client_connection_id, client_route.connection_id);
     try std.testing.expectEqualSlices(u8, &client_dcid, client_route.destination_connection_id.asSlice());

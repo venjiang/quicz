@@ -351,6 +351,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramWithKeyUpdateAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams`,
+`processProtectedShortDatagramWithKeyUpdateAndSelectNextDeadline`,
+`processProtectedShortDatagramWithKeyUpdateOrCloseAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramWithKeyUpdateAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndSelectNextDeadline`,
 `processProtectedShortDatagramWithKeyPhaseStateAndPollDatagram`,
 `processProtectedShortDatagramWithKeyPhaseStateOrCloseAndPollDatagram`,
 `processRoutedProtectedShortDatagramWithKeyPhaseStateAndPollDatagram`,
@@ -393,6 +397,7 @@ backend-drive-to-next-deadline loop steps,
 backend-drive-to-bounded-drain output steps,
 explicit key-update 1-RTT receive-to-output loop steps,
 explicit key-update 1-RTT receive-to-bounded-drain loop steps,
+explicit key-update 1-RTT receive-to-next-deadline loop steps,
 caller-owned key-phase 1-RTT receive-to-output loop steps,
 caller-owned key-phase 1-RTT receive-to-bounded-drain loop steps,
 caller-owned key-phase 1-RTT receive-to-next-deadline loop steps,
@@ -594,6 +599,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   and drains Application-space ACK output, and close-propagating authenticated
   Application frame errors stop before ordinary explicit-phase output polling
   or draining.
+- 2026-06-18: Added explicit key-update 1-RTT short
+  receive-to-next-deadline no-output steps:
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithKeyUpdateAndSelectNextDeadline()`,
+  its `OrClose` variant, and the routed
+  `processRoutedProtectedShortDatagramWithKeyUpdateAndSelectNextDeadline()`
+  pair. Unit coverage proves successful next-key-phase PING receive refreshes
+  the idle deadline while preserving ACK output for later explicit-phase
+  short-packet polling, and the routed form rejects connection-handle
+  mismatches before packet processing.
 - 2026-06-18: Added caller-keyed 1-RTT short
   receive-to-output poll and drain steps:
   `EndpointConnectionLifecycle.processProtectedShortDatagramAndPollDatagram()`,
