@@ -297,6 +297,14 @@ pub const EndpointPendingWorkCryptoBackendDatagramDrainResult = struct {
     backend: EndpointCryptoBackendDriveDatagramDrainResult,
 };
 
+/// Result from pending-work sweep followed by backend drive and deadline selection.
+pub const EndpointPendingWorkCryptoBackendNextDeadlineResult = struct {
+    /// Pending-work actions applied before backend/deadline processing.
+    pending_work: EndpointPendingWorkSweepResult,
+    /// Backend drive result and next endpoint-visible deadline.
+    backend: EndpointCryptoBackendDriveNextDeadlineResult,
+};
+
 /// Summary from driving crypto backends across caller-owned connections.
 pub const EndpointCryptoBackendDriveSweepResult = struct {
     /// Number of connection/backend pairs driven.
