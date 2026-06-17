@@ -307,10 +307,14 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram`,
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`,
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `processProtectedZeroRttDatagramAndPollShortDatagram`,
 `processProtectedZeroRttDatagramAndDrainShortDatagrams`,
 `processProtectedZeroRttDatagramOrCloseAndPollShortDatagram`,
@@ -632,6 +636,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   before backend delivery, successful routed Handshake CRYPTO receive drives
   backend progress and polls one protected Handshake response, and
   close-propagating backend peer-parameter errors stop before output polling.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`,
+  its `OrClose` variant, and the routed
+  `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`
+  pair as installed-key Handshake receive-to-backend-to-next-deadline
+  no-output loop steps. Unit coverage proves successful receive delivers
+  Handshake CRYPTO to the backend, preserves backend output for later polling,
+  and returns an idle deadline; the routed form rejects connection-handle
+  mismatches before backend drive.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndPollDatagram()`,
   `processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram()`,

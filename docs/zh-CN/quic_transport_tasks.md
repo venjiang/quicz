@@ -162,10 +162,14 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram`、
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`、
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `processProtectedZeroRttDatagramAndPollShortDatagram`、
 `processProtectedZeroRttDatagramAndDrainShortDatagrams`、
 `processProtectedZeroRttDatagramOrCloseAndPollShortDatagram`、
@@ -585,6 +589,14 @@ close 和 route cleanup 事件。
   成功 routed Handshake CRYPTO receive 会驱动 backend progress 并 poll 一个 protected
   Handshake response，close-propagating backend peer-parameter 错误会在 output
   polling 前停止。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`、
+  其 `OrClose` 变体，以及 routed
+  `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`
+  这一组 API，作为 installed-key Handshake receive-to-backend-to-next-deadline
+  no-output loop step。单元测试证明 successful receive 会把 Handshake CRYPTO
+  交给 backend、保留 backend 输出供后续 poll，并返回 idle deadline；routed 变体会在 backend
+  drive 前拦截 connection handle mismatch。
 - 2026-06-18：新增
   `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndPollDatagram()`、
   `processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram()`、

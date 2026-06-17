@@ -100,6 +100,14 @@ pub const EndpointRoutedCryptoBackendDriveDatagramDrainResult = struct {
     backend: EndpointCryptoBackendDriveDatagramDrainResult,
 };
 
+/// Endpoint result after routing installed-key input through backend drive.
+pub const EndpointRoutedCryptoBackendDriveNextDeadlineResult = struct {
+    /// Endpoint route selected for the triggering datagram.
+    route: endpoint.RouteResult,
+    /// Backend drive and next wakeup selection result.
+    backend: EndpointCryptoBackendDriveNextDeadlineResult,
+};
+
 /// Endpoint result after routing input and polling installed-key output.
 pub const EndpointRoutedDatagramResult = struct {
     /// Endpoint route selected for the triggering datagram.
