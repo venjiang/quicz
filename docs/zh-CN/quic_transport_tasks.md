@@ -214,6 +214,10 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedShortDatagramWithKeyPhaseStateOrCloseAndDrainDatagrams`、
 `processRoutedProtectedShortDatagramWithKeyPhaseStateAndDrainDatagrams`、
 `processRoutedProtectedShortDatagramWithKeyPhaseStateOrCloseAndDrainDatagrams`、
+`processProtectedShortDatagramWithKeyPhaseStateAndSelectNextDeadline`、
+`processProtectedShortDatagramWithKeyPhaseStateOrCloseAndSelectNextDeadline`、
+`processRoutedProtectedShortDatagramWithKeyPhaseStateAndSelectNextDeadline`、
+`processRoutedProtectedShortDatagramWithKeyPhaseStateOrCloseAndSelectNextDeadline`、
 `processProtectedShortDatagramWithInstalledKeysAndPollDatagram`、
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram`、
 `processProtectedShortDatagramWithInstalledKeysAndDrainDatagrams`、
@@ -520,6 +524,15 @@ close 和 route cleanup 事件。
   会推进 caller-owned receive state，并 poll 或 drain Application-space ACK
   output；close-propagating 的认证后 Application frame 错误会在普通 stateful
   output polling 或 draining 前保留 caller-owned receive state。
+- 2026-06-18：新增 caller-owned key-phase-state 1-RTT short
+  receive-to-next-deadline no-output step：
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithKeyPhaseStateAndSelectNextDeadline()`、
+  其 `OrClose` 变体，以及 routed
+  `processRoutedProtectedShortDatagramWithKeyPhaseStateAndSelectNextDeadline()`。
+  单元测试证明 successful next-key-phase PING receive 会推进 caller-owned receive
+  state、刷新 idle deadline，并保留 ACK 输出供后续 stateful short-packet poll；
+  routed 变体会在 packet processing 或 key-phase advancement 前拦截 connection
+  handle mismatch。
 - 2026-06-18：新增 explicit key-update 1-RTT short
   receive-to-output poll 和 drain step：
   `EndpointConnectionLifecycle.processProtectedShortDatagramWithKeyUpdateAndPollDatagram()`、

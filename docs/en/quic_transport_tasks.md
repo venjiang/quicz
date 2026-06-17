@@ -359,6 +359,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramWithKeyPhaseStateOrCloseAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramWithKeyPhaseStateAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramWithKeyPhaseStateOrCloseAndDrainDatagrams`,
+`processProtectedShortDatagramWithKeyPhaseStateAndSelectNextDeadline`,
+`processProtectedShortDatagramWithKeyPhaseStateOrCloseAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramWithKeyPhaseStateAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramWithKeyPhaseStateOrCloseAndSelectNextDeadline`,
 `processProtectedShortDatagramWithInstalledKeysAndPollDatagram`,
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram`,
 `processProtectedShortDatagramWithInstalledKeysAndDrainDatagrams`,
@@ -391,6 +395,7 @@ explicit key-update 1-RTT receive-to-output loop steps,
 explicit key-update 1-RTT receive-to-bounded-drain loop steps,
 caller-owned key-phase 1-RTT receive-to-output loop steps,
 caller-owned key-phase 1-RTT receive-to-bounded-drain loop steps,
+caller-owned key-phase 1-RTT receive-to-next-deadline loop steps,
 single-connection installed-key 1-RTT receive-to-output loop steps,
 single-connection installed-key 1-RTT receive-to-bounded-drain loop steps,
 single-connection installed-key 1-RTT receive-to-next-deadline loop steps,
@@ -563,6 +568,16 @@ QUIC unless the gap is named and the verification evidence is added here.
   drains Application-space ACK output, and close-propagating authenticated
   Application frame errors preserve caller-owned receive state before ordinary
   stateful output polling or draining.
+- 2026-06-18: Added caller-owned key-phase-state 1-RTT short
+  receive-to-next-deadline no-output steps:
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithKeyPhaseStateAndSelectNextDeadline()`,
+  its `OrClose` variant, and the routed
+  `processRoutedProtectedShortDatagramWithKeyPhaseStateAndSelectNextDeadline()`
+  pair. Unit coverage proves successful next-key-phase PING receive advances
+  caller-owned receive state, refreshes the idle deadline, and preserves ACK
+  output for later stateful short-packet polling; the routed form rejects
+  connection-handle mismatches before packet processing or key-phase
+  advancement.
 - 2026-06-18: Added explicit key-update 1-RTT short
   receive-to-output poll and drain steps:
   `EndpointConnectionLifecycle.processProtectedShortDatagramWithKeyUpdateAndPollDatagram()`,
