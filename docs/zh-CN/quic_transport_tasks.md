@@ -241,6 +241,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions`、
 `processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
@@ -836,6 +838,12 @@ close 和 route cleanup 事件。
   这两个入口让普通 backend sweep 在 TLS progress 之后保留每个调用方持有 connection 的
   installed-key 输出选项。单元测试证明 backend sweep 可以 poll 和 bounded-drain 调用方选择的
   0-RTT `RESET_STREAM` 输出，且不改变默认统一 output space 的 backend 输出 helper。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()` 和
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions()`。
+  这两个入口把显式 installed-key 输出贯通到 no-new-datagram 的 pending-work/backend tick。
+  单元测试证明到期 accepted 0-RTT recovery work 会先被 service，再经过 backend progress，
+  最后按调用方选择的 0-RTT poll 或 bounded-drain 输出路径发出。
 - 2026-06-11：更新 single-connection due-deadline-to-backend poll 和 bounded-drain
   wrapper，让它们保留显式 installed-key recovery output 选择。Initial recovery 仍只服务
   pending work、不发 installed-key datagram，并可继续进入 backend drive；Handshake 和
