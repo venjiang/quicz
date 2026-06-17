@@ -925,6 +925,13 @@ close 和 route cleanup 事件。
   选择。单元测试证明到期 accepted 0-RTT PTO wakeup 会保留 protected 0-RTT
   `RESET_STREAM` output，并在 poll、drain 和 close-propagating 形态中都停在
   backend work 前。
+- 2026-06-18：修正 cross-connection due-deadline backend
+  `WithInstalledKeyOptions` 变体，让显式 installed-key 输出不仅用于 due recovery wakeup，
+  也继续用于 backend poll/drain。普通变体仍使用 `EndpointConnectionPollView` 加共享
+  `EndpointInstalledKeyDatagramSpace`；显式变体则端到端使用
+  `EndpointConnectionInstalledKeyPollView`。单元测试证明 Application loss-time deadline
+  在 due 阶段没有 datagram 时，可以继续进入 backend work，并通过 poll 和 bounded-drain
+  形态发出调用方选择的 0-RTT `RESET_STREAM` 输出。
 - 2026-06-10：新增 `EndpointConnectionView` 和
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()`，服务于调用方持有
   connection map 的可嵌入 socket loop。lifecycle 现在可以在不接管 connection storage

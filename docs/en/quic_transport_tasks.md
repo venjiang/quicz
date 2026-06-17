@@ -1046,6 +1046,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   backend sweeps. Unit coverage proves due accepted 0-RTT PTO wakeups keep
   protected 0-RTT `RESET_STREAM` output and stop before backend work in poll,
   drain, and close-propagating forms.
+- 2026-06-18: Fixed the cross-connection due-deadline backend
+  `WithInstalledKeyOptions` variants so explicit installed-key output is used
+  by backend polling and draining, not only by the due recovery wakeup. The
+  normal variants still use `EndpointConnectionPollView` plus a shared
+  `EndpointInstalledKeyDatagramSpace`; the explicit variants now use
+  `EndpointConnectionInstalledKeyPollView` end to end. Unit coverage proves an
+  Application loss-time deadline with no due datagram can continue into backend
+  work and emit caller-selected 0-RTT `RESET_STREAM` output through both poll
+  and bounded-drain forms.
 - 2026-06-10: Added `EndpointConnectionView` and
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()` for embeddable
   socket loops where callers own the connection map. The lifecycle now combines

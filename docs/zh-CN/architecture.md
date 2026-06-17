@@ -74,6 +74,27 @@ connection-ID、Initial datagram、path-validation 和 anti-amplification 边界
 发现测试的文件增加显式 `test` import。这样既保留 `@import("quicz")` 调用方式，又能按
 transport 职责扩展内部模块。
 
+### 模块拆分策略
+
+Zig 源文件本身就是 namespace，构建脚本决定公开 module root。因此 quicz 保持
+`src/lib.zig` 作为稳定 root 和 re-export 层，`src/quic/` 下的实现文件则按清晰的 transport
+职责拥有代码。只有当一组类型和函数有单一协议归属、内部依赖稳定，并且测试可以随实现迁移且不改变
+公开 `@import("quicz")` 表面时，才适合拆分。
+
+推荐拆分顺序：
+
+1. 先迁出纯 helper 和数据契约，例如 wire-length helper、stream bookkeeping 类型、recovery
+   snapshot、packet-context helper。
+2. 数据契约隔离后，再迁出有状态子域，例如 stream send/receive state、connection ID state、
+   path validation、ECN 和 loss recovery。
+3. endpoint lifecycle 编排最后迁移，因为它同时连接 connection storage view、route state、
+   timer、backend drive 和 output polling。
+4. 测试尽量跟随被验证的实现文件迁移，并在 `src/lib.zig` 保留 root-level test import，确保
+   `zig build test` 继续发现这些测试。
+
+避免新增 `utils.zig`、`helpers.zig`、`state.zig` 这类兜底文件。命名要结合 Zig 的完整
+namespace 理解，避免在文件名和类型名里重复同一领域词。
+
 ### Packet protection layer
 
 包保护层负责 long/short packet 编解码、AEAD、header protection、Retry integrity、

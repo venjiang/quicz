@@ -88,6 +88,31 @@ root stable and add explicit `test` imports for files whose tests must be
 discovered by `zig build test`. This preserves `@import("quicz")` call sites
 while letting implementation modules grow by transport responsibility.
 
+### Module Split Policy
+
+Zig source files are namespaces, and the build script decides the public module
+root. quicz therefore keeps `src/lib.zig` as the stable root and re-export
+layer, while implementation files under `src/quic/` own coherent transport
+responsibilities. A split is appropriate when a group of types and functions has
+one protocol owner, stable internal dependencies, and tests that can be moved
+with it without changing the public `@import("quicz")` surface.
+
+Recommended split order:
+
+1. Move pure helpers and data contracts first, such as wire-length helpers,
+   stream bookkeeping types, recovery snapshots, and packet-context helpers.
+2. Move stateful subdomains after their data contracts are isolated, such as
+   stream send/receive state, connection ID state, path validation, ECN, and
+   loss recovery.
+3. Move endpoint lifecycle orchestration last, because it ties connection
+   storage views, route state, timers, backend drive, and output polling
+   together.
+4. Keep tests next to the implementation they validate, and keep root-level
+   test imports in `src/lib.zig` so `zig build test` continues to discover them.
+
+Avoid catch-all files such as `utils.zig`, `helpers.zig`, or `state.zig`.
+Names should be meaningful in their fully-qualified Zig namespace.
+
 ### Packet Protection Layer
 
 The packet protection layer owns long/short packet coding, AEAD, header
