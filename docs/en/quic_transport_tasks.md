@@ -147,6 +147,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`,
@@ -425,6 +429,20 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-18: Added
+  `EndpointFeedCryptoBackendDriveNextDeadlineResult`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline()`,
+  and
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline()`
+  so installed-key socket loops can process an inbound datagram, drive
+  Handshake/1-RTT backend progress, and update the next endpoint-visible
+  deadline without polling output. Unit coverage proves backend-produced
+  Handshake CRYPTO remains queued for the existing protected output path,
+  single-connection wrappers share the cross-connection behavior, dropped
+  datagrams do not drive backend callbacks, and OrClose peer-parameter errors
+  stop before backend output while queueing close state.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams()`
   as the close-propagating accepted Initial backend-to-bounded-drain step. Unit

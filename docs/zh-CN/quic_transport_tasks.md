@@ -125,6 +125,10 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`、
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`、
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams`、
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
+`feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`、
 `drainProtectedLongCryptoDatagramsInSpace`、
 `driveCryptoBackendInSpaceAndPollProtectedLongCryptoDatagram`、
 `driveCryptoBackendInSpaceOrCloseAndPollProtectedLongCryptoDatagram`、
@@ -396,6 +400,17 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-18：新增 `EndpointFeedCryptoBackendDriveNextDeadlineResult`、
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`、
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`、
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline()`
+  和
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline()`，
+  让 installed-key socket loop 可以在处理入站 datagram 后驱动 Handshake/1-RTT backend
+  progress，并只更新下一次 endpoint-visible deadline，而不立即 poll output。单元测试证明
+  backend 产出的 Handshake CRYPTO 会留给已有 protected output path，single-connection
+  wrapper 复用 cross-connection 行为，dropped datagram 不会触发 backend callback，且
+  OrClose peer-parameter 错误会在排队 close state 后停在 backend output 之前。
 - 2026-06-18：新增
   `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams()`，
   作为 close-propagating accepted Initial backend-to-bounded-drain step。单元测试证明

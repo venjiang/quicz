@@ -491,6 +491,14 @@ pub const EndpointFeedInstalledKeyDatagramDrainResult = struct {
     drain: ?EndpointDatagramDrainResult = null,
 };
 
+/// Result from feeding one installed-key datagram, then driving backend and selecting a wakeup.
+pub const EndpointFeedCryptoBackendDriveNextDeadlineResult = struct {
+    /// Receive classification and processing result.
+    feed: EndpointFeedInstalledKeyDatagramResult,
+    /// Backend drive and deadline selection result when `feed` routed to a connection.
+    backend: ?EndpointCryptoBackendDriveNextDeadlineResult = null,
+};
+
 /// Result from feeding one installed-key datagram, then driving backend output.
 pub const EndpointFeedCryptoBackendDriveDatagramResult = struct {
     /// Receive classification and processing result.
