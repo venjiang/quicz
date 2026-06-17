@@ -3183,6 +3183,51 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Drive one TLS backend with close propagation, then drain caller-keyed output.
+    ///
+    /// This is the close-propagating variant of
+    /// `driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams()`.
+    /// Backend peer transport-parameter errors queue a protected
+    /// `CONNECTION_CLOSE`, refresh endpoint recovery state, and return before
+    /// any caller-keyed CRYPTO output is drained.
+    pub fn driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        drain_space: PacketNumberSpace,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        keys: protection.Aes128PacketProtectionKeys,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveProtectedLongDatagramDrainResult {
+        const backend_progress = try self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+            connection_id,
+            connection,
+            backend_space,
+            backend,
+            scratch,
+        );
+        return .{
+            .backend = backend_progress,
+            .drain = self.drainProtectedLongCryptoDatagramsInSpace(
+                connection_id,
+                connection,
+                drain_space,
+                now_millis,
+                dcid,
+                scid,
+                initial_token,
+                keys,
+                out,
+            ),
+        };
+    }
+
     fn accumulateCryptoBackendProgress(
         result: *EndpointCryptoBackendDriveSweepResult,
         progress: CryptoBackendProgress,
@@ -34342,6 +34387,141 @@ test "EndpointConnectionLifecycle drives backend and drains caller-keyed long cr
         "server keyed drain oneserver keyed drain two",
         response_crypto[0..response_len],
     );
+}
+
+test "EndpointConnectionLifecycle caller-keyed long backend OrClose stops before output drain" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x14, 0x24, 0x34, 0x44 };
+    const server_dcid = [_]u8{ 0xa4, 0xb4, 0xc4, 0xd4 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    try client.sendCryptoInSpace(.handshake, "caller-keyed bad backend input");
+    const client_datagram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        10,
+        &server_dcid,
+        &client_dcid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    try lifecycle.processProtectedLongDatagramInSpace(
+        64,
+        &server,
+        .handshake,
+        11,
+        secrets.client,
+        client_datagram,
+    );
+
+    var backend = BadBackend{};
+    var scratch: [128]u8 = undefined;
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams(
+            64,
+            &server,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            .handshake,
+            12,
+            &client_dcid,
+            &server_dcid,
+            &[_]u8{},
+            secrets.server,
+            &drained,
+        ),
+    );
+    try std.testing.expectEqualStrings("caller-keyed bad backend input", backend.received[0..backend.received_len]);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+
+    const close_packet = (try lifecycle.pollProtectedLongDatagram(
+        64,
+        &server,
+        13,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        .{ .handshake = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(14, .{ .handshake = secrets.server }, close_packet));
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "EndpointConnectionLifecycle processes long datagram then drives backend and drains output" {

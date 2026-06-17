@@ -122,6 +122,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`、
 `drainProtectedLongCryptoDatagramsInSpace`、
 `driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams`、
+`driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams`、
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
@@ -200,6 +201,7 @@ cross-connection pending-work-to-bounded-drain loop step、receive-to-backend-to
 loop step、跨连接 TLS backend drive、
 backend-drive-to-datagram output step、backend-drive-to-bounded-drain output step、
 backend-drive-to-caller-keyed long-header drain step、
+close-propagating backend-drive-to-caller-keyed long-header drain step、
 caller-keyed receive-to-backend-to-bounded-drain loop step、
 installed-key Handshake receive-to-backend-to-bounded-drain loop step、
 close-propagating installed-key Handshake backend-drain loop step、
@@ -266,6 +268,13 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-17：新增
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams()`，
+  作为 close-propagating caller-keyed Initial/Handshake backend-drive 到 bounded-drain
+  的核心 step。单元测试证明 backend peer transport-parameter 错误会消费已收到的
+  Handshake CRYPTO，但在 backend output pull 或 caller-keyed long-header CRYPTO drain
+  前停止，刷新 endpoint recovery state，并留下 protected Handshake
+  `TRANSPORT_PARAMETER_ERROR` close 给 peer。
 - 2026-06-05：把当前 C TLS 示例边界迁移到 Zig 0.16 的 `addTranslateC`
   构建路径。C ABI 声明现在放在小 header 中，Zig 示例通过 `@import("c")`
   引入；当前示例中的手写 `extern fn` / `extern struct` 已移除。

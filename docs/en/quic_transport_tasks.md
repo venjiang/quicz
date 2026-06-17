@@ -204,6 +204,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams`,
+`driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams`,
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
@@ -221,6 +222,7 @@ receive-to-backend-to-output loop steps,
 receive-to-backend-to-bounded-drain loop steps, cross-connection TLS backend drive, backend-drive-to-datagram output steps,
 backend-drive-to-bounded-drain output steps,
 backend-drive-to-caller-keyed long-header drain steps,
+close-propagating backend-drive-to-caller-keyed long-header drain steps,
 caller-keyed receive-to-backend-to-bounded-drain loop steps,
 installed-key Handshake receive-to-backend-to-bounded-drain loop steps,
 close-propagating installed-key Handshake backend-drain loop steps,
@@ -292,6 +294,14 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-17: Added
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams()`
+  as the close-propagating caller-keyed Initial/Handshake backend-drive to
+  bounded-drain step. Unit coverage proves backend peer transport-parameter
+  errors consume already received Handshake CRYPTO, stop before backend output
+  pull or caller-keyed long-header CRYPTO drain, refresh endpoint recovery
+  state, and leave a protected Handshake `TRANSPORT_PARAMETER_ERROR` close for
+  the peer.
 - 2026-06-05: Migrated the current C TLS example boundary to Zig 0.16's
   `addTranslateC` build path. The C ABI declarations now live in small header
   files and the Zig examples import them with `@import("c")`; handwritten

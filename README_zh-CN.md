@@ -242,6 +242,7 @@ socket-loop 和 TLS-backend loop 入口 `feedDatagram`、`feedDatagramWithInstal
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams`、
+`driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams`、
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
@@ -261,6 +262,7 @@ single-connection backend-drive-to-bounded-drain output step、
 single-connection compatible-version backend-drive-to-datagram output step、
 single-connection compatible-version backend-drive-to-bounded-drain output step、
 backend-drive-to-caller-keyed long-header drain step、
+close-propagating backend-drive-to-caller-keyed long-header drain step、
 caller-keyed receive-to-backend-to-bounded-drain loop step、
 installed-key Handshake receive-to-backend-to-bounded-drain loop step、
 close-propagating installed-key Handshake backend-drain loop step、
