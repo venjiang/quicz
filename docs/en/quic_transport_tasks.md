@@ -243,9 +243,13 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram`,
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`,
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
@@ -344,6 +348,15 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram()`,
+  its `OrClose` variant, and the routed
+  `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram()`
+  pair as installed-key Handshake receive-to-backend-to-output loop steps.
+  Unit coverage proves route selection stops mismatched connection handles
+  before backend delivery, successful routed Handshake CRYPTO receive drives
+  backend progress and polls one protected Handshake response, and
+  close-propagating backend peer-parameter errors stop before output polling.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndPollDatagram()`
   and its `OrClose` variant as routed installed-key 1-RTT

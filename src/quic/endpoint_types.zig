@@ -77,6 +77,14 @@ pub const EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult = str
 };
 
 /// Endpoint result after routing installed-key input through backend drive.
+pub const EndpointRoutedCryptoBackendDriveDatagramResult = struct {
+    /// Endpoint route selected for the triggering datagram.
+    route: endpoint.RouteResult,
+    /// Backend drive and installed-key output poll result.
+    backend: EndpointCryptoBackendDriveDatagramResult,
+};
+
+/// Endpoint result after routing installed-key input through backend drive.
 pub const EndpointRoutedCryptoBackendDriveDatagramDrainResult = struct {
     /// Endpoint route selected for the triggering datagram.
     route: endpoint.RouteResult,

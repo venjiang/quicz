@@ -56,6 +56,7 @@ pub const EndpointIssuedConnectionIdResult = endpoint_types.EndpointIssuedConnec
 pub const EndpointAcceptedProtectedInitialResult = endpoint_types.EndpointAcceptedProtectedInitialResult;
 pub const EndpointProtectedLongDatagramResult = endpoint_types.EndpointProtectedLongDatagramResult;
 pub const EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult = endpoint_types.EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult;
+pub const EndpointRoutedCryptoBackendDriveDatagramResult = endpoint_types.EndpointRoutedCryptoBackendDriveDatagramResult;
 pub const EndpointRoutedCryptoBackendDriveDatagramDrainResult = endpoint_types.EndpointRoutedCryptoBackendDriveDatagramDrainResult;
 pub const EndpointRoutedDatagramResult = endpoint_types.EndpointRoutedDatagramResult;
 pub const EndpointRoutedDatagramDrainResult = endpoint_types.EndpointRoutedDatagramDrainResult;
@@ -7858,6 +7859,41 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Process installed-key Handshake input, drive backend, and poll one output.
+    ///
+    /// This is the one-output form of
+    /// `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams()`.
+    /// It keeps the connection/backend storage caller-owned while combining
+    /// installed-key Handshake receive, backend progress, and one protected
+    /// Handshake datagram poll in a single lifecycle-owned step.
+    pub fn processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        try self.processProtectedHandshakeDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+
+        return try self.driveCryptoBackendInSpaceAndPollDatagram(
+            connection_id,
+            connection,
+            .handshake,
+            backend,
+            scratch,
+            now_millis,
+            poll_options,
+        );
+    }
+
     /// Process installed-key Handshake input through close-propagating backend.
     ///
     /// This preserves the success behavior of
@@ -7904,6 +7940,42 @@ pub const EndpointConnectionLifecycle = struct {
             now_millis,
             .handshake,
             out,
+        );
+    }
+
+    /// Process installed-key Handshake input through close-propagating backend, then poll output.
+    ///
+    /// This preserves the success behavior of
+    /// `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram()`,
+    /// while using the close-propagating receive and backend-drive paths.
+    /// Authenticated frame errors or backend peer transport-parameter errors
+    /// return before output polling, leaving protected close output to the
+    /// existing installed-key Handshake output path.
+    pub fn processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+
+        return try self.driveCryptoBackendInSpaceOrCloseAndPollDatagram(
+            connection_id,
+            connection,
+            .handshake,
+            backend,
+            scratch,
+            now_millis,
+            poll_options,
         );
     }
 
@@ -8028,6 +8100,41 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Route installed-key Handshake input, drive backend, and poll one output.
+    ///
+    /// This is the routed socket-loop form of
+    /// `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram()`.
+    /// The endpoint lifecycle owns route validation before the caller-owned
+    /// connection processes the installed-key Handshake datagram and backend
+    /// progress. Connection/backend/socket storage and the optional output
+    /// datagram remain caller-owned.
+    pub fn processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .backend = try self.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                datagram,
+                backend,
+                scratch,
+                poll_options,
+            ),
+        };
+    }
+
     /// Route installed-key Handshake input through close-propagating backend.
     ///
     /// This is the routed socket-loop form of
@@ -8077,6 +8184,41 @@ pub const EndpointConnectionLifecycle = struct {
                 now_millis,
                 .handshake,
                 out,
+            ),
+        };
+    }
+
+    /// Route installed-key Handshake input through close-propagating backend, then poll output.
+    ///
+    /// This is the routed socket-loop form of
+    /// `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram()`.
+    /// Route errors and connection-id mismatches fail before packet processing.
+    /// Authenticated frame errors or backend peer transport-parameter errors
+    /// return before output polling and leave protected close output to the
+    /// existing installed-key Handshake poll/drain path.
+    pub fn processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .backend = try self.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                datagram,
+                backend,
+                scratch,
+                poll_options,
             ),
         };
     }
@@ -38072,6 +38214,133 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive stops befo
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
 }
 
+test "EndpointConnectionLifecycle routes installed-key Handshake then drives backend and polls output" {
+    const Backend = struct {
+        outbound: []const u8,
+        sent: bool = false,
+        received: [64]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x17, 0x27, 0x37, 0x47 };
+    const server_dcid = [_]u8{ 0xa7, 0xb7, 0xc7, 0xd7 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_017);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const server_connection_id: u64 = 76;
+    try lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendCryptoInSpace(.handshake, "routed installed input");
+    const client_datagram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = Backend{ .outbound = "routed installed response" };
+    var scratch: [96]u8 = undefined;
+    const poll_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .handshake,
+        .destination_connection_id = &client_dcid,
+        .source_connection_id = &server_dcid,
+    };
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram(
+            server_connection_id + 1,
+            &server,
+            server_receive_path,
+            11,
+            client_datagram,
+            backend.backend(),
+            &scratch,
+            poll_options,
+        ),
+    );
+    try std.testing.expect(!backend.sent);
+    try std.testing.expectEqual(@as(usize, 0), backend.received_len);
+
+    const result = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        client_datagram,
+        backend.backend(),
+        &scratch,
+        poll_options,
+    );
+
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, result.route.destination_connection_id.asSlice());
+    try std.testing.expectEqualStrings("routed installed input", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "routed installed input".len), result.backend.backend.progress.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "routed installed response".len), result.backend.backend.progress.outbound_bytes);
+    const response = result.backend.datagram orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, response.connection_id);
+    defer std.testing.allocator.free(response.datagram);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, response.datagram);
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("routed installed response", response_crypto[0..response_len]);
+}
+
 test "EndpointConnectionLifecycle routes installed-key Handshake then drives backend and drains output" {
     const Backend = struct {
         outbound: []const u8,
@@ -38200,6 +38469,137 @@ test "EndpointConnectionLifecycle routes installed-key Handshake then drives bac
     var response_crypto: [64]u8 = undefined;
     const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("routed installed response", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle routed installed-key Handshake backend OrClose stops before poll" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+        received: [64]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x18, 0x28, 0x38, 0x48 };
+    const server_dcid = [_]u8{ 0xa8, 0xb8, 0xc8, 0xd8 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_018);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const server_connection_id: u64 = 77;
+    try lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendCryptoInSpace(.handshake, "routed installed bad input");
+    const client_datagram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = BadBackend{};
+    var scratch: [96]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram(
+            server_connection_id,
+            &server,
+            server_receive_path,
+            11,
+            client_datagram,
+            backend.backend(),
+            &scratch,
+            .{
+                .space = .handshake,
+                .destination_connection_id = &client_dcid,
+                .source_connection_id = &server_dcid,
+            },
+        ),
+    );
+    try std.testing.expectEqualStrings("routed installed bad input", backend.received[0..backend.received_len]);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+
+    const close_packet = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        server_connection_id,
+        &server,
+        12,
+        &client_dcid,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, close_packet);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "EndpointConnectionLifecycle routed installed-key Handshake backend OrClose stops before drain" {

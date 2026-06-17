@@ -129,9 +129,13 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`、
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
+`processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram`、
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`、
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`、
@@ -317,6 +321,15 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram()`、
+  其 `OrClose` 变体，以及 routed
+  `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram()`
+  这一组 API，作为 installed-key Handshake receive-to-backend-to-output loop step。
+  单元测试证明 route selection 会在 backend delivery 前拦截 connection handle mismatch，
+  成功 routed Handshake CRYPTO receive 会驱动 backend progress 并 poll 一个 protected
+  Handshake response，close-propagating backend peer-parameter 错误会在 output
+  polling 前停止。
 - 2026-06-18：新增
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndPollDatagram()`
   及其 `OrClose` 变体，作为 routed installed-key 1-RTT
