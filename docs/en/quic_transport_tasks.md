@@ -173,6 +173,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processPendingWork`,
 `processPendingWorkAcrossConnections`, `processPendingWorkAndSelectNextDeadline`,
 `processPendingWorkAndPollDatagram`,
@@ -1371,6 +1373,17 @@ QUIC unless the gap is named and the verification evidence is added here.
   Handshake CRYPTO input still drives compatible backend progress, compatible
   Version Information is applied, and caller-selected 0-RTT output is emitted
   through poll and bounded-drain forms.
+- 2026-06-18: Added the RFC 9368-compatible close-propagating explicit-output
+  variants
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions()`.
+  These carry per-connection installed-key output options through routed
+  receive-to-compatible-backend loop steps while preserving OrClose semantics.
+  Unit coverage proves successful compatible Version Information application
+  leaves the connection open and emits caller-selected 0-RTT output through
+  poll and bounded-drain forms; dropped datagrams still return before backend
+  drive.
 - 2026-06-10: Added `EndpointFeedCryptoBackendDriveDatagramDrainResult` and
   receive-to-backend-to-bounded-drain loop steps:
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams()`,
