@@ -3914,6 +3914,25 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process one connection's pending work, then select its next deadline.
+    ///
+    /// This is the single-connection no-output wakeup planning step for simple
+    /// socket loops. It applies endpoint-owned idle/close/recovery work first,
+    /// then returns the next endpoint-visible deadline without polling output
+    /// or driving a backend.
+    pub fn processPendingWorkAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+    ) Error!EndpointPendingWorkNextDeadlineResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        return .{
+            .pending_work = pendingWorkSweepFromSingle(pending_work),
+            .next_deadline = self.nextDeadline(connection_id, connection),
+        };
+    }
+
     /// Process pending work across connections, then poll installed-key output.
     ///
     /// This is the no-backend cross-connection timer tick for socket loops.
@@ -23824,6 +23843,55 @@ test "EndpointConnectionLifecycle pending-work sweep selects next deadline" {
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
     try std.testing.expectEqual(recovery_before.deadline_millis, next.deadline_millis);
     try std.testing.expect(next.recovery != null);
+}
+
+test "EndpointConnectionLifecycle single pending-work selects next deadline" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(68, &conn);
+    const recovery_before = lifecycle.nextDeadline(68, &conn) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, recovery_before.kind);
+
+    const before = try lifecycle.processPendingWorkAndSelectNextDeadline(
+        68,
+        &conn,
+        recovery_before.deadline_millis - 1,
+    );
+    try std.testing.expectEqual(@as(usize, 0), before.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), before.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), before.pending_work.recovery_serviced_count);
+    const unchanged = before.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 68), unchanged.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, unchanged.kind);
+    try std.testing.expectEqual(recovery_before.deadline_millis, unchanged.deadline_millis);
+    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
+
+    const result = try lifecycle.processPendingWorkAndSelectNextDeadline(
+        68,
+        &conn,
+        recovery_before.deadline_millis,
+    );
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const next = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 68), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    try std.testing.expect(next.deadline_millis > recovery_before.deadline_millis);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
 }
 
 test "EndpointConnectionLifecycle pending-work cross-connection poll waits for recovery service" {

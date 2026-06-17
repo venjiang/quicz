@@ -156,7 +156,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processPendingWork`,
-`processPendingWorkAcrossConnections`, `processPendingWorkAndPollDatagram`,
+`processPendingWorkAcrossConnections`, `processPendingWorkAndSelectNextDeadline`,
+`processPendingWorkAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDrainDatagrams`,
@@ -719,6 +720,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   across caller-owned connections without taking over connection storage. Unit
   coverage proves one pass can retire an idle connection and service another
   connection's due recovery timer while preserving the latter connection.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processPendingWorkAndSelectNextDeadline()` as the
+  single-connection no-output pending-work-to-next-deadline planning step. Unit
+  coverage proves an early recovery deadline is preserved and a due recovery
+  deadline is serviced before the next recovery wakeup is selected.
 - 2026-06-10: Added `EndpointPendingWorkCryptoBackendDatagramResult` and
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram()`
   for no-new-datagram loop ticks. The helper applies idle/close/recovery
