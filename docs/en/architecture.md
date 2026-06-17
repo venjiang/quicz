@@ -84,6 +84,9 @@ protected long-packet key bundles, and modeled ECN validation enums,
 `src/quic/protocol_limits.zig` owns shared QUIC scalar limits such as varint,
 stream-count, connection-ID, Initial datagram, path-validation, and
 anti-amplification bounds,
+`src/quic/wire_len.zig` owns QUIC varint, protected datagram, and frame
+wire-length budgeting used by send-path padding, coalescing, and bounded output
+sizing,
 and `src/quic/tls_backend.zig` owns the C-ABI TLS adapter while `lib.zig`
 re-exports the stable public surface.
 

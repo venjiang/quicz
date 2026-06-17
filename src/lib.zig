@@ -18,6 +18,7 @@ const connection_state = @import("quic/connection_state.zig");
 const packet_context = @import("quic/packet_context.zig");
 const protocol_limits = @import("quic/protocol_limits.zig");
 const buffer = @import("quic/buffer.zig");
+const wire_len = @import("quic/wire_len.zig");
 
 pub const Error = transport_types.Error;
 pub const ConnectionSide = transport_types.ConnectionSide;
@@ -132,6 +133,7 @@ test {
     _ = connection_config;
     _ = connection_version;
     _ = connection_state;
+    _ = wire_len;
 }
 
 const max_quic_varint = protocol_limits.max_quic_varint;
@@ -168,6 +170,32 @@ const deinitSentPacketSlice = connection_state.deinitSentPacketSlice;
 const clearSentPacketList = connection_state.clearSentPacketList;
 const deinitSentPacketList = connection_state.deinitSentPacketList;
 const deinitPendingCloseFrame = connection_state.deinitPendingCloseFrame;
+const quicVarIntWireLen = wire_len.quicVarIntWireLen;
+const protectedLongDatagramWireLen = wire_len.protectedLongDatagramWireLen;
+const protectedLongPlaintextLenForMinDatagram = wire_len.protectedLongPlaintextLenForMinDatagram;
+const protectedShortDatagramWireLen = wire_len.protectedShortDatagramWireLen;
+const protectedShortPlaintextLenForMinDatagram = wire_len.protectedShortPlaintextLenForMinDatagram;
+const addWireLen = wire_len.addWireLen;
+const streamFrameWireLen = wire_len.streamFrameWireLen;
+const cryptoFrameWireLen = wire_len.cryptoFrameWireLen;
+const maxStreamFrameDataLen = wire_len.maxStreamFrameDataLen;
+const maxCryptoFrameDataLen = wire_len.maxCryptoFrameDataLen;
+const ackFrameWireLen = wire_len.ackFrameWireLen;
+const pathResponseFrameWireLen = wire_len.pathResponseFrameWireLen;
+const pathChallengeFrameWireLen = wire_len.pathChallengeFrameWireLen;
+const pingFrameWireLen = wire_len.pingFrameWireLen;
+const resetStreamFrameWireLen = wire_len.resetStreamFrameWireLen;
+const stopSendingFrameWireLen = wire_len.stopSendingFrameWireLen;
+const retireConnectionIdFrameWireLen = wire_len.retireConnectionIdFrameWireLen;
+const newConnectionIdFrameWireLen = wire_len.newConnectionIdFrameWireLen;
+const newTokenFrameWireLen = wire_len.newTokenFrameWireLen;
+const handshakeDoneFrameWireLen = wire_len.handshakeDoneFrameWireLen;
+const closeReasonLenWireLen = wire_len.closeReasonLenWireLen;
+const connectionCloseFrameWireLen = wire_len.connectionCloseFrameWireLen;
+const applicationCloseFrameWireLen = wire_len.applicationCloseFrameWireLen;
+const closeFrameWireLen = wire_len.closeFrameWireLen;
+const blockedFrameWireLen = wire_len.blockedFrameWireLen;
+const maxFrameWireLen = wire_len.maxFrameWireLen;
 
 const PeerTransportParameterValidationError = Error || error{
     VersionNegotiationError,
@@ -12726,83 +12754,6 @@ const PacketNumberSpaceView = struct {
     ecn_validation_state: *EcnValidationState,
 };
 
-fn quicVarIntWireLen(value: u64) Error!usize {
-    if (value <= 63) return 1;
-    if (value <= 16383) return 2;
-    if (value <= 1073741823) return 4;
-    if (value <= max_quic_varint) return 8;
-    return error.Internal;
-}
-
-fn protectedLongDatagramWireLen(
-    header: packet.LongHeader,
-    packet_number_len: u8,
-    plaintext_len: usize,
-) Error!usize {
-    if (packet_number_len == 0 or packet_number_len > 4) return error.InvalidPacket;
-    const protected_payload_len = std.math.add(usize, plaintext_len, protection.aead_tag_len) catch return error.BufferTooSmall;
-    const protected_payload_len_u64 = std.math.cast(u64, protected_payload_len) orelse return error.BufferTooSmall;
-    const wire_length = std.math.add(u64, protected_payload_len_u64, packet_number_len) catch return error.BufferTooSmall;
-
-    var header_len: usize = 1 + 4 + 1 + header.dcid.len + 1 + header.scid.len;
-    if (header.packet_type == .initial) {
-        const token_len_u64 = std.math.cast(u64, header.token.len) orelse return error.BufferTooSmall;
-        header_len = try addWireLen(header_len, try quicVarIntWireLen(token_len_u64));
-        header_len = try addWireLen(header_len, header.token.len);
-    }
-    header_len = try addWireLen(header_len, try quicVarIntWireLen(wire_length));
-    header_len = try addWireLen(header_len, packet_number_len);
-    return try addWireLen(header_len, protected_payload_len);
-}
-
-fn protectedLongPlaintextLenForMinDatagram(
-    header: packet.LongHeader,
-    packet_number_len: u8,
-    plaintext_len: usize,
-    min_datagram_len: usize,
-) Error!usize {
-    if (min_datagram_len == 0) return plaintext_len;
-    var expanded_len = plaintext_len;
-    while (try protectedLongDatagramWireLen(header, packet_number_len, expanded_len) < min_datagram_len) {
-        const current_len = try protectedLongDatagramWireLen(header, packet_number_len, expanded_len);
-        expanded_len = try addWireLen(expanded_len, min_datagram_len - current_len);
-    }
-    return expanded_len;
-}
-
-fn protectedShortDatagramWireLen(
-    dcid_len: usize,
-    packet_number_len: u8,
-    plaintext_len: usize,
-) Error!usize {
-    if (packet_number_len == 0 or packet_number_len > 4) return error.InvalidPacket;
-    var len: usize = 1;
-    len = try addWireLen(len, dcid_len);
-    len = try addWireLen(len, packet_number_len);
-    len = try addWireLen(len, plaintext_len);
-    len = try addWireLen(len, protection.aead_tag_len);
-    return len;
-}
-
-fn protectedShortPlaintextLenForMinDatagram(
-    dcid_len: usize,
-    packet_number_len: u8,
-    plaintext_len: usize,
-    min_datagram_len: usize,
-) Error!usize {
-    if (min_datagram_len == 0) return plaintext_len;
-    var expanded_len = plaintext_len;
-    while (try protectedShortDatagramWireLen(dcid_len, packet_number_len, expanded_len) < min_datagram_len) {
-        const current_len = try protectedShortDatagramWireLen(dcid_len, packet_number_len, expanded_len);
-        expanded_len = try addWireLen(expanded_len, min_datagram_len - current_len);
-    }
-    return expanded_len;
-}
-
-fn addWireLen(current: usize, extra: usize) Error!usize {
-    return std.math.add(usize, current, extra) catch return error.Internal;
-}
-
 fn saturatingMulU64(a: u64, b: u64) u64 {
     return std.math.mul(u64, a, b) catch std.math.maxInt(u64);
 }
@@ -12860,218 +12811,6 @@ fn zeroEcnCounts() frame.EcnCounts {
 
 fn saturatingAddU64(a: u64, b: u64) u64 {
     return std.math.add(u64, a, b) catch std.math.maxInt(u64);
-}
-
-fn streamFrameWireLen(stream_id: u64, offset: u64, data_len: usize) Error!usize {
-    var len: usize = 1; // frame type
-    len = try addWireLen(len, try quicVarIntWireLen(stream_id));
-    if (offset != 0) {
-        len = try addWireLen(len, try quicVarIntWireLen(offset));
-    }
-    len = try addWireLen(len, try quicVarIntWireLen(std.math.cast(u64, data_len) orelse return error.Internal));
-    return addWireLen(len, data_len);
-}
-
-fn cryptoFrameWireLen(offset: u64, data_len: usize) Error!usize {
-    var len: usize = 1; // frame type
-    len = try addWireLen(len, try quicVarIntWireLen(offset));
-    len = try addWireLen(len, try quicVarIntWireLen(std.math.cast(u64, data_len) orelse return error.Internal));
-    return addWireLen(len, data_len);
-}
-
-fn maxStreamFrameDataLen(stream_id: u64, offset: u64, remaining: usize, max_datagram_size: usize) Error!usize {
-    if (try streamFrameWireLen(stream_id, offset, 0) > max_datagram_size) return error.BufferTooSmall;
-    if (remaining == 0) return 0;
-
-    var best: usize = 0;
-    var low: usize = 1;
-    var high: usize = remaining;
-    while (low <= high) {
-        const mid = low + (high - low) / 2;
-        const encoded_len = try streamFrameWireLen(stream_id, offset, mid);
-        if (encoded_len <= max_datagram_size) {
-            best = mid;
-            if (mid == std.math.maxInt(usize)) break;
-            low = mid + 1;
-        } else {
-            if (mid == 0) break;
-            high = mid - 1;
-        }
-    }
-
-    if (best == 0) return error.BufferTooSmall;
-    return best;
-}
-
-fn maxCryptoFrameDataLen(offset: u64, remaining: usize, max_datagram_size: usize) Error!usize {
-    if (try cryptoFrameWireLen(offset, 0) > max_datagram_size) return error.BufferTooSmall;
-    if (remaining == 0) return 0;
-
-    var best: usize = 0;
-    var low: usize = 1;
-    var high: usize = remaining;
-    while (low <= high) {
-        const mid = low + (high - low) / 2;
-        const encoded_len = try cryptoFrameWireLen(offset, mid);
-        if (encoded_len <= max_datagram_size) {
-            best = mid;
-            if (mid == std.math.maxInt(usize)) break;
-            low = mid + 1;
-        } else {
-            if (mid == 0) break;
-            high = mid - 1;
-        }
-    }
-
-    if (best == 0) return error.BufferTooSmall;
-    return best;
-}
-
-fn ackFrameWireLen(ack: frame.AckFrame) Error!usize {
-    var len: usize = 1; // frame type
-    len = try addWireLen(len, try quicVarIntWireLen(ack.largest_acknowledged));
-    len = try addWireLen(len, try quicVarIntWireLen(ack.ack_delay));
-    len = try addWireLen(len, try quicVarIntWireLen(std.math.cast(u64, ack.ranges.len) orelse return error.Internal));
-    len = try addWireLen(len, try quicVarIntWireLen(ack.first_ack_range));
-    for (ack.ranges) |range| {
-        len = try addWireLen(len, try quicVarIntWireLen(range.gap));
-        len = try addWireLen(len, try quicVarIntWireLen(range.ack_range));
-    }
-    return len;
-}
-
-fn pathResponseFrameWireLen() usize {
-    return 9; // frame type + 8-byte path validation data
-}
-
-fn pathChallengeFrameWireLen() usize {
-    return 9; // frame type + 8-byte path validation data
-}
-
-fn pingFrameWireLen() usize {
-    return 1; // frame type only
-}
-
-fn resetStreamFrameWireLen(reset: frame.ResetStreamFrame) Error!usize {
-    if (reset.stream_id > max_quic_varint or reset.application_error_code > max_quic_varint or reset.final_size > max_quic_varint) {
-        return error.InvalidPacket;
-    }
-
-    var len: usize = 1; // frame type
-    len = try addWireLen(len, try quicVarIntWireLen(reset.stream_id));
-    len = try addWireLen(len, try quicVarIntWireLen(reset.application_error_code));
-    return addWireLen(len, try quicVarIntWireLen(reset.final_size));
-}
-
-fn stopSendingFrameWireLen(stop_sending: frame.StopSendingFrame) Error!usize {
-    if (stop_sending.stream_id > max_quic_varint or stop_sending.application_error_code > max_quic_varint) {
-        return error.InvalidPacket;
-    }
-
-    var len: usize = 1; // frame type
-    len = try addWireLen(len, try quicVarIntWireLen(stop_sending.stream_id));
-    return addWireLen(len, try quicVarIntWireLen(stop_sending.application_error_code));
-}
-
-fn retireConnectionIdFrameWireLen(sequence_number: u64) Error!usize {
-    const len: usize = 1; // frame type
-    return addWireLen(len, try quicVarIntWireLen(sequence_number));
-}
-
-fn newConnectionIdFrameWireLen(local_id: LocalConnectionId) Error!usize {
-    if (local_id.connection_id.len == 0 or local_id.connection_id.len > max_connection_id_len) return error.InvalidPacket;
-    if (local_id.retire_prior_to > local_id.sequence_number) return error.InvalidPacket;
-
-    var len: usize = 1; // frame type
-    len = try addWireLen(len, try quicVarIntWireLen(local_id.sequence_number));
-    len = try addWireLen(len, try quicVarIntWireLen(local_id.retire_prior_to));
-    len = try addWireLen(len, 1); // connection ID length
-    len = try addWireLen(len, local_id.connection_id.len);
-    return addWireLen(len, local_id.stateless_reset_token.len);
-}
-
-fn newTokenFrameWireLen(token: []const u8) Error!usize {
-    if (token.len == 0) return error.InvalidPacket;
-    const token_len = std.math.cast(u64, token.len) orelse return error.BufferTooSmall;
-    if (token_len > max_quic_varint) return error.BufferTooSmall;
-
-    var len: usize = 1; // frame type
-    len = try addWireLen(len, try quicVarIntWireLen(token_len));
-    return addWireLen(len, token.len);
-}
-
-fn handshakeDoneFrameWireLen() usize {
-    return 1; // frame type only
-}
-
-fn closeReasonLenWireLen(reason_len: usize) Error!usize {
-    const value = std.math.cast(u64, reason_len) orelse return error.BufferTooSmall;
-    if (value > max_quic_varint) return error.BufferTooSmall;
-    return quicVarIntWireLen(value);
-}
-
-fn connectionCloseFrameWireLen(close: frame.ConnectionCloseFrame) Error!usize {
-    if (close.error_code > max_quic_varint or close.frame_type > max_quic_varint) return error.InvalidPacket;
-
-    var len: usize = 1; // frame type
-    len = try addWireLen(len, try quicVarIntWireLen(close.error_code));
-    len = try addWireLen(len, try quicVarIntWireLen(close.frame_type));
-    len = try addWireLen(len, try closeReasonLenWireLen(close.reason_phrase.len));
-    return addWireLen(len, close.reason_phrase.len);
-}
-
-fn applicationCloseFrameWireLen(close: frame.ApplicationCloseFrame) Error!usize {
-    if (close.error_code > max_quic_varint) return error.InvalidPacket;
-
-    var len: usize = 1; // frame type
-    len = try addWireLen(len, try quicVarIntWireLen(close.error_code));
-    len = try addWireLen(len, try closeReasonLenWireLen(close.reason_phrase.len));
-    return addWireLen(len, close.reason_phrase.len);
-}
-
-fn closeFrameWireLen(close: PendingCloseFrame) Error!usize {
-    return switch (close) {
-        .connection => |connection| connectionCloseFrameWireLen(connection),
-        .application => |application| applicationCloseFrameWireLen(application),
-    };
-}
-
-fn blockedFrameWireLen(blocked: PendingBlockedFrame) Error!usize {
-    var len: usize = 1; // frame type
-    switch (blocked) {
-        .data => |data| {
-            return addWireLen(len, try quicVarIntWireLen(data.maximum_data));
-        },
-        .stream_data => |stream_data| {
-            len = try addWireLen(len, try quicVarIntWireLen(stream_data.stream_id));
-            return addWireLen(len, try quicVarIntWireLen(stream_data.maximum_stream_data));
-        },
-        .streams_bidi => |streams| {
-            return addWireLen(len, try quicVarIntWireLen(streams.maximum_streams));
-        },
-        .streams_uni => |streams| {
-            return addWireLen(len, try quicVarIntWireLen(streams.maximum_streams));
-        },
-    }
-}
-
-fn maxFrameWireLen(max_frame: PendingMaxFrame) Error!usize {
-    var len: usize = 1; // frame type
-    switch (max_frame) {
-        .data => |data| {
-            return addWireLen(len, try quicVarIntWireLen(data.maximum_data));
-        },
-        .stream_data => |stream_data| {
-            len = try addWireLen(len, try quicVarIntWireLen(stream_data.stream_id));
-            return addWireLen(len, try quicVarIntWireLen(stream_data.maximum_stream_data));
-        },
-        .streams_bidi => |streams| {
-            return addWireLen(len, try quicVarIntWireLen(streams.maximum_streams));
-        },
-        .streams_uni => |streams| {
-            return addWireLen(len, try quicVarIntWireLen(streams.maximum_streams));
-        },
-    }
 }
 
 fn deinitPeerClose(close: *PeerClose, allocator: std.mem.Allocator) void {

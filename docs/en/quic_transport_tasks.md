@@ -1061,6 +1061,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   sent-packet metadata, pending close/control frames, path-challenge records,
   RTT/PTO snapshots, and connection-ID rollback snapshots. Validation keeps the
   same 856-test transport suite green, proving the split is behavior-preserving.
+- 2026-06-18: Split QUIC wire-length budgeting helpers into
+  `src/quic/wire_len.zig` while keeping internal compatibility aliases in
+  `src/lib.zig`. The new module owns varint length, protected long/short
+  datagram length, ACK/CRYPTO/STREAM/control-frame length, and bounded frame
+  data slicing budgets. Unit coverage now checks varint boundaries and
+  Initial/short datagram minimum-length expansion to keep send-path budgeting
+  behavior unchanged.
 - 2026-06-10: Added `EndpointConnectionView` and
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()` for embeddable
   socket loops where callers own the connection map. The lifecycle now combines

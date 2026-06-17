@@ -71,6 +71,8 @@ version-information validation policy，
 long-packet key bundle，以及建模的 ECN validation enum，
 `src/quic/protocol_limits.zig` 负责共享的 QUIC 标量限制，例如 varint、stream-count、
 connection-ID、Initial datagram、path-validation 和 anti-amplification 边界，
+`src/quic/wire_len.zig` 负责 QUIC varint、protected datagram 和 frame wire-length
+预算，用于发送路径的 padding、coalescing 和 bounded output sizing，
 `src/quic/tls_backend.zig` 负责 C-ABI TLS adapter，`lib.zig` 继续 re-export 稳定公共表面。
 
 从 `src/lib.zig` 迁出实现代码时，应保持公开 module root 稳定，并为需要被 `zig build test`
