@@ -101,6 +101,11 @@ fn tlsBackendInputStatusError(status: TlsBackendStatus) Error!void {
     };
 }
 
+fn tlsBackendPendingOutputStatusError(status: TlsBackendStatus, written_len: usize) Error!void {
+    if (status == .pending and written_len != 0) return error.Internal;
+    try tlsBackendStatusError(status);
+}
+
 /// C-ABI TLS backend adapter for real QUIC TLS libraries.
 ///
 /// This keeps C library bindings outside the transport core. Callbacks use a
@@ -162,8 +167,8 @@ pub const TlsBackend = struct {
             out_buf.len,
             &written_len,
         );
-        if (status == .pending) return null;
-        try tlsBackendStatusError(status);
+        if (status == .pending and written_len == 0) return null;
+        try tlsBackendPendingOutputStatusError(status, written_len);
         if (written_len > out_buf.len) return error.BufferTooSmall;
         return out_buf[0..written_len];
     }
@@ -180,8 +185,8 @@ pub const TlsBackend = struct {
         const pull_peer = self.pull_peer_transport_parameters orelse return null;
         var written_len: usize = 0;
         const status = pull_peer(self.context, out_buf.ptr, out_buf.len, &written_len);
-        if (status == .pending) return null;
-        try tlsBackendStatusError(status);
+        if (status == .pending and written_len == 0) return null;
+        try tlsBackendPendingOutputStatusError(status, written_len);
         if (written_len > out_buf.len) return error.BufferTooSmall;
         return out_buf[0..written_len];
     }
@@ -274,5 +279,60 @@ test "TlsBackend adapter rejects pending from input callbacks" {
     try std.testing.expectEqual(
         @as(?[]const u8, null),
         try crypto_backend.pull(crypto_backend.context, .handshake, &scratch),
+    );
+}
+
+test "TlsBackend adapter rejects pending pull callbacks that report bytes" {
+    const PendingBytesBackend = struct {
+        fn receive(
+            _: *anyopaque,
+            _: TlsBackendPacketSpace,
+            _: [*]const u8,
+            _: usize,
+        ) callconv(.c) TlsBackendStatus {
+            return .ok;
+        }
+
+        fn pull(
+            _: *anyopaque,
+            _: TlsBackendPacketSpace,
+            out: [*]u8,
+            out_len: usize,
+            written_len: *usize,
+        ) callconv(.c) TlsBackendStatus {
+            if (out_len > 0) out[0] = 0xaa;
+            written_len.* = 1;
+            return .pending;
+        }
+
+        fn pullPeerTransportParameters(
+            _: *anyopaque,
+            out: [*]u8,
+            out_len: usize,
+            written_len: *usize,
+        ) callconv(.c) TlsBackendStatus {
+            if (out_len > 0) out[0] = 0xbb;
+            written_len.* = 1;
+            return .pending;
+        }
+    };
+
+    var context: u8 = 0;
+    var tls_backend = TlsBackend{
+        .context = &context,
+        .receive = PendingBytesBackend.receive,
+        .pull = PendingBytesBackend.pull,
+        .pull_peer_transport_parameters = PendingBytesBackend.pullPeerTransportParameters,
+    };
+    const crypto_backend = tls_backend.cryptoBackend();
+
+    var scratch: [8]u8 = undefined;
+    try std.testing.expectError(
+        error.Internal,
+        crypto_backend.pull(crypto_backend.context, .handshake, &scratch),
+    );
+    try std.testing.expectError(
+        error.Internal,
+        crypto_backend.pullPeerTransportParameters(&scratch),
     );
 }
