@@ -161,6 +161,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWorkAcrossConnectionsAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
@@ -649,6 +650,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   step. Unit coverage proves pending idle retirement runs before backend drive,
   backend progress refreshes endpoint recovery scheduling, and the resulting
   recovery deadline is selected without polling output.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`
+  as the single-connection no-output pending-work/backend/deadline step. Unit
+  coverage proves due recovery work is serviced before backend drive and idle
+  retirement stops before backend progress on the same connection.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline()`
   as the close-propagating no-output pending-work-to-backend-drive-to-next-deadline
