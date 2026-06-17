@@ -141,8 +141,11 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDrainDatagrams`,
+`processAcceptedProtectedInitialWithCryptoBackendAndSelectNextDeadline`,
+`processAcceptedProtectedInitialWithCryptoBackendOrCloseAndSelectNextDeadline`,
 `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`,
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`,
+`processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
@@ -716,6 +719,17 @@ QUIC unless the gap is named and the verification evidence is added here.
   does not pull output after the peer-parameter error, exposes a close-timeout
   deadline through the lifecycle, and the client can decrypt the protected
   Initial close.
+- 2026-06-18: Added
+  `EndpointAcceptedInitialCryptoBackendNextDeadlineResult`,
+  `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendAndSelectNextDeadline()`,
+  and
+  `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndSelectNextDeadline()`
+  so accepted Initial socket loops can authenticate and route the client
+  Initial, drive Initial-space TLS backend progress, and update the next
+  endpoint-visible deadline without immediately polling protected output. Unit
+  coverage proves backend-produced Initial CRYPTO remains queued for the
+  existing protected long-packet poll path, and that the OrClose variant stops
+  before backend output when peer transport-parameter validation queues a close.
 - 2026-06-10: Added `EndpointAcceptedInitialCryptoBackendDatagramDrainResult`,
   `EndpointConnectionLifecycle.drainProtectedLongCryptoDatagramsInSpace()`, and
   `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams()`

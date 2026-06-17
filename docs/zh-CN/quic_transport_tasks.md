@@ -119,6 +119,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `feedDatagramWithInstalledKeys`、`feedDatagramWithInstalledKeysAcrossConnections`、
 `feedDatagramWithInstalledKeysAndSelectNextDeadline`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndSelectNextDeadline`、
+`processAcceptedProtectedInitialWithCryptoBackendAndSelectNextDeadline`、
+`processAcceptedProtectedInitialWithCryptoBackendOrCloseAndSelectNextDeadline`、
 `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`、
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`、
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`、
@@ -649,6 +651,15 @@ close 和 route cleanup 事件。
   long-packet poll path 发出。单元测试证明 backend 会消费 client Initial CRYPTO，peer
   parameter 错误后不会拉取 output，lifecycle 会暴露 close-timeout deadline，且 client
   能解开 protected Initial close。
+- 2026-06-18：新增 `EndpointAcceptedInitialCryptoBackendNextDeadlineResult`、
+  `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendAndSelectNextDeadline()`
+  和
+  `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndSelectNextDeadline()`，
+  让 accepted Initial socket loop 可以在认证并路由 client Initial、驱动 Initial-space
+  TLS backend 后，只更新下一次 endpoint-visible deadline，而不立即 poll protected
+  output。单元测试证明 backend 产出的 Initial CRYPTO 会继续留给已有 protected
+  long-packet poll path，并且 OrClose 变体在 peer transport-parameter validation 排队
+  close 后会停在 backend output 之前。
 - 2026-06-10：新增 `EndpointAcceptedInitialCryptoBackendDatagramDrainResult`、
   `EndpointConnectionLifecycle.drainProtectedLongCryptoDatagramsInSpace()` 和
   `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams()`，

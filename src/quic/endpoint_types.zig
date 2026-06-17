@@ -518,6 +518,16 @@ pub const EndpointAcceptedProtectedInitialResponseResult = struct {
     response_datagram: []u8,
 };
 
+/// Endpoint result after accepting a protected Initial and selecting a wakeup deadline.
+pub const EndpointAcceptedInitialCryptoBackendNextDeadlineResult = struct {
+    /// Authentication, packet processing, and route installation result.
+    accepted_initial: EndpointAcceptedProtectedInitialResult,
+    /// Initial-space backend progress after consuming received client CRYPTO.
+    backend: CryptoBackendProgress,
+    /// Next endpoint-visible deadline after backend progress has been applied.
+    next_deadline: ?EndpointConnectionDeadline = null,
+};
+
 /// Endpoint result after accepting a protected Initial and driving a TLS backend.
 pub const EndpointAcceptedInitialCryptoBackendDatagramResult = struct {
     /// Authentication, packet processing, and route installation result.
