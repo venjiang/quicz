@@ -240,6 +240,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`、
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
@@ -479,6 +481,14 @@ close 和 route cleanup 事件。
   selected compatible version、保留 backend output 给后续 installed-key output path；
   OrClose 变体在 peer Version Information 无法匹配 configured compatibility 时会排队
   CONNECTION_CLOSE，并停在 deadline selection 和 backend output pull 之前。
+- 2026-06-18：新增 routed installed-key 1-RTT short
+  receive-to-compatible-backend no-output 形态：
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`
+  和
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`。
+  单元测试证明 route selection 和 connection-id mismatch 检查发生在 packet processing
+  与 backend callback 之前；成功路径会使用 routed DCID 长度处理 short packet，再通过
+  compatible-version backend 应用 peer Version Information 并选择下一次 deadline。
 - 2026-06-18：新增 `EndpointFeedCryptoBackendDriveNextDeadlineResult`、
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`、
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`、

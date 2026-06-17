@@ -13213,6 +13213,77 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Route installed-key 1-RTT input through compatible-version backend drive.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing
+    /// or backend callbacks. On success, peer Version Information is handled
+    /// by the compatible-version backend path before wakeup selection.
+    pub fn processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveNextDeadlineResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .backend = try self.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline(
+                connection_id,
+                connection,
+                now_millis,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+                backend_space,
+                backend,
+                scratch,
+                compatibilities,
+            ),
+        };
+    }
+
+    /// Route installed-key 1-RTT input through compatible-version close propagation.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing
+    /// or backend callbacks. Authenticated frame errors or peer Version
+    /// Information errors queue CONNECTION_CLOSE and stop before ordinary
+    /// deadline selection.
+    pub fn processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveNextDeadlineResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .backend = try self.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+                connection_id,
+                connection,
+                now_millis,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+                backend_space,
+                backend,
+                scratch,
+                compatibilities,
+            ),
+        };
+    }
+
     /// Process installed-key 1-RTT input, drive a backend, and poll output.
     ///
     /// This is the direct receive-to-backend-to-output step for socket loops
@@ -50856,6 +50927,168 @@ test "EndpointConnectionLifecycle installed-key short compatible backend deadlin
     try std.testing.expectEqualStrings("server compatible app crypto", recv_buf[0..recv_len]);
 }
 
+test "EndpointConnectionLifecycle routes installed-key short compatible backend deadline" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        received: [96]u8 = undefined,
+        received_len: usize = 0,
+        receive_calls: usize = 0,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, bytes: []const u8) Error!void {
+            if (space != .application) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.received_len + bytes.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..bytes.len], bytes);
+            self.received_len += bytes.len;
+            self.receive_calls += 1;
+        }
+
+        fn pull(_: *anyopaque, space: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            if (space != .application) return error.InvalidPacket;
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x45, 0x56, 0x67, 0x78 };
+    const server_dcid = [_]u8{ 0xd5, 0xe6, 0xf7, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 8642,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+        .max_idle_timeout_ms = 30,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+        .max_idle_timeout_ms = 30,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_045);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 45;
+    const server_connection_id: u64 = 65;
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendCryptoInSpace(.application, "routed compatible app crypto");
+    const crypto_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_connection_id,
+        &client,
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(crypto_datagram);
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline(
+        client_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        crypto_datagram,
+        .application,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), backend.receive_calls);
+    try std.testing.expect(!backend.peer_sent);
+    try std.testing.expect(server.peerVersionInformation() == null);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    const result = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        crypto_datagram,
+        .application,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+    );
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, result.route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), result.backend.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqualStrings("routed compatible app crypto", backend.received[0..backend.received_len]);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expectEqual(@as(u64, 8642), server.peer_max_data);
+    const next = result.backend.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+}
+
 test "EndpointConnectionLifecycle routes installed-key short receive then drives application backend deadline" {
     const Backend = struct {
         received: [64]u8 = undefined,
@@ -50982,6 +51215,122 @@ test "EndpointConnectionLifecycle routes installed-key short receive then drives
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+}
+
+test "EndpointConnectionLifecycle routed installed-key short compatible backend OrClose validates route first" {
+    const BadBackend = struct {
+        receive_calls: usize = 0,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, _: []const u8) Error!void {
+            if (space != .application) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.receive_calls += 1;
+        }
+
+        fn pull(_: *anyopaque, space: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            if (space != .application) return error.InvalidPacket;
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.peer_sent = true;
+            if (out.len == 0) return error.BufferTooSmall;
+            out[0] = 0;
+            return out[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x4d, 0x4e, 0x4f, 0x50 };
+    const server_dcid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_046);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 46;
+    const server_connection_id: u64 = 66;
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendCryptoInSpace(.application, "route compatible before close");
+    const crypto_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_connection_id,
+        &client,
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(crypto_datagram);
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        client_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        crypto_datagram,
+        .application,
+        backend.backend(),
+        &scratch,
+        &[_]VersionCompatibility{},
+    ));
+    try std.testing.expectEqual(@as(usize, 0), backend.receive_calls);
+    try std.testing.expect(!backend.peer_sent);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(?i64, null), server.idleTimeoutDeadlineMillis());
+    try std.testing.expectEqual(ConnectionState.active, server.connectionState());
 }
 
 test "EndpointConnectionLifecycle installed-key short compatible backend OrClose stops before deadline" {

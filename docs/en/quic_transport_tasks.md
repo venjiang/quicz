@@ -385,6 +385,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
@@ -514,6 +516,16 @@ QUIC unless the gap is named and the verification evidence is added here.
   path; the OrClose variant queues CONNECTION_CLOSE and stops before deadline
   selection or backend output pull when peer Version Information cannot match
   the configured compatibility set.
+- 2026-06-18: Added the routed installed-key 1-RTT short
+  receive-to-compatible-backend no-output forms
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`
+  and
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`.
+  Unit coverage proves route selection and connection-id mismatch checks happen
+  before packet processing or backend callbacks; successful paths use the
+  routed DCID length to process the short packet, apply peer Version
+  Information through the compatible-version backend, and select the next
+  deadline.
 - 2026-06-18: Added
   `EndpointFeedCryptoBackendDriveNextDeadlineResult`,
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`,
