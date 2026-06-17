@@ -3376,6 +3376,30 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Drive crypto backends, then poll installed-key output with explicit options.
+    ///
+    /// This is the caller-owned connection map form for backend sweep loops
+    /// that need each connection to retain its own installed-key output choice.
+    pub fn driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
+            space,
+            drive_views,
+        );
+        return .{
+            .backend = backend,
+            .datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+                poll_views,
+                now_millis,
+            ),
+        };
+    }
+
     /// Drive one backend, then poll one installed-key datagram.
     ///
     /// This is the single-connection backend-drive-to-datagram step for simple
@@ -3436,6 +3460,32 @@ pub const EndpointConnectionLifecycle = struct {
                 poll_views,
                 now_millis,
                 poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Drive crypto backends, then drain installed-key output with explicit options.
+    ///
+    /// This is the bounded-output form of
+    /// `driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn driveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
+            space,
+            drive_views,
+        );
+        return .{
+            .backend = backend,
+            .drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+                poll_views,
+                now_millis,
                 out,
             ),
         };
@@ -38222,6 +38272,237 @@ test "EndpointConnectionLifecycle backend drive drains caller-owned output slots
     defer std.testing.allocator.free(out[1].datagram);
     try std.testing.expectEqual(@as(u64, 106), out[0].connection_id);
     try std.testing.expectEqual(@as(u64, 107), out[1].connection_id);
+}
+
+test "EndpointConnectionLifecycle backend drive polls explicit installed-key output" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const idle_client_dcid = [_]u8{ 0x4a, 0x5a, 0x6a, 0x7a };
+    const idle_server_dcid = [_]u8{ 0xd4, 0xe4, 0xf4, 0x04 };
+    const ready_client_dcid = [_]u8{ 0x4b, 0x5b, 0x6b, 0x7b };
+    const ready_server_dcid = [_]u8{ 0xd5, 0xe5, 0xf5, 0x05 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+
+    var idle = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer idle.deinit();
+    try idle.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try idle.confirmHandshake();
+
+    var ready = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer ready.deinit();
+    try ready.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try ready.confirmHandshake();
+    const stream_id = try ready.openStream();
+    try ready.sendOnStream(stream_id, "bye", false);
+    try ready.resetStream(stream_id, 81);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 81,
+        .final_size = 3,
+    };
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 125,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{
+        .{
+            .connection_id = 126,
+            .connection = &idle,
+            .poll_options = .{
+                .space = .zero_rtt,
+                .destination_connection_id = &idle_server_dcid,
+                .source_connection_id = &idle_client_dcid,
+            },
+        },
+        .{
+            .connection_id = 127,
+            .connection = &ready,
+            .poll_options = .{
+                .space = .zero_rtt,
+                .destination_connection_id = &ready_server_dcid,
+                .source_connection_id = &ready_client_dcid,
+            },
+        },
+    };
+
+    const result = try lifecycle.driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions(
+        .handshake,
+        &drive_views,
+        &poll_views,
+        10,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+    const polled = result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 127), polled.connection_id);
+    try std.testing.expectEqual(@as(usize, 0), idle.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), ready.sentPacketCount(.application));
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        polled.datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle backend drive drains explicit installed-key output" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const first_client_dcid = [_]u8{ 0x4c, 0x5c, 0x6c, 0x7c };
+    const first_server_dcid = [_]u8{ 0xd6, 0xe6, 0xf6, 0x06 };
+    const second_client_dcid = [_]u8{ 0x4d, 0x5d, 0x6d, 0x7d };
+    const second_server_dcid = [_]u8{ 0xd7, 0xe7, 0xf7, 0x07 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+
+    var first = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer first.deinit();
+    try first.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try first.confirmHandshake();
+    const first_stream_id = try first.openStream();
+    try first.sendOnStream(first_stream_id, "bye", false);
+    try first.resetStream(first_stream_id, 82);
+    const first_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = first_stream_id,
+        .application_error_code = 82,
+        .final_size = 3,
+    };
+
+    var second = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer second.deinit();
+    try second.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try second.confirmHandshake();
+    const second_stream_id = try second.openStream();
+    try second.sendOnStream(second_stream_id, "bye", false);
+    try second.resetStream(second_stream_id, 83);
+    const second_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = second_stream_id,
+        .application_error_code = 83,
+        .final_size = 3,
+    };
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 128,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{
+        .{
+            .connection_id = 129,
+            .connection = &first,
+            .poll_options = .{
+                .space = .zero_rtt,
+                .destination_connection_id = &first_server_dcid,
+                .source_connection_id = &first_client_dcid,
+            },
+        },
+        .{
+            .connection_id = 130,
+            .connection = &second,
+            .poll_options = .{
+                .space = .zero_rtt,
+                .destination_connection_id = &second_server_dcid,
+                .source_connection_id = &second_client_dcid,
+            },
+        },
+    };
+    var out: [2]EndpointPolledDatagramResult = undefined;
+
+    const result = try lifecycle.driveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+        .handshake,
+        &drive_views,
+        &poll_views,
+        10,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+    try std.testing.expectEqual(@as(usize, 2), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    defer std.testing.allocator.free(out[1].datagram);
+    try std.testing.expectEqual(@as(u64, 129), out[0].connection_id);
+    try std.testing.expectEqual(@as(u64, 130), out[1].connection_id);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        out[0].datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = first_reset_frame },
+    ));
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        out[1].datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = second_reset_frame },
+    ));
 }
 
 test "EndpointConnectionLifecycle single backend drive drains bounded output" {

@@ -236,6 +236,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendInSpaceAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceAndPollDatagram`,
 `driveCryptoBackendsInSpaceAndDrainDatagrams`,
+`driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions`,
+`driveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceOrCloseAndArmConnections`,
 `driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`,
 `driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
@@ -929,6 +931,14 @@ QUIC unless the gap is named and the verification evidence is added here.
   emit caller-selected installed-key output. Unit coverage proves before-due
   ticks remain no-output and due accepted 0-RTT recovery work emits protected
   0-RTT `RESET_STREAM` probes through both poll and bounded-drain forms.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions()`.
+  These let normal backend sweeps preserve each caller-owned connection's
+  installed-key output options after TLS progress. Unit coverage proves backend
+  sweeps can poll and bounded-drain caller-selected 0-RTT `RESET_STREAM`
+  output without changing the default uniform-space backend output helpers.
 - 2026-06-11: Updated the single-connection due-deadline-to-backend poll and
   bounded-drain wrappers to preserve explicit installed-key recovery output
   choices. Initial recovery still services pending work without emitting an
