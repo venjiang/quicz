@@ -254,6 +254,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
@@ -969,6 +971,14 @@ QUIC unless the gap is named and the verification evidence is added here.
   close-propagating backend ticks. Unit coverage proves due accepted 0-RTT
   recovery work is serviced, OrClose backend progress runs successfully, and
   caller-selected 0-RTT output is emitted through poll and bounded-drain forms.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions()`.
+  These preserve caller-selected installed-key output after RFC
+  9368-compatible backend progress. Unit coverage proves compatible Version
+  Information is applied and caller-selected 0-RTT `RESET_STREAM` output is
+  emitted through both poll and bounded-drain forms.
 - 2026-06-11: Updated the single-connection due-deadline-to-backend poll and
   bounded-drain wrappers to preserve explicit installed-key recovery output
   choices. Initial recovery still services pending work without emitting an

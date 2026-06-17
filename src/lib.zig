@@ -3938,6 +3938,33 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Drive compatible-version backends, then poll explicit installed-key output.
+    ///
+    /// This preserves each caller-owned connection's output options after
+    /// RFC 9368-compatible backend progress has applied peer Version
+    /// Information.
+    pub fn driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections(
+            space,
+            drive_views,
+            compatibilities,
+        );
+        return .{
+            .backend = backend,
+            .datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+                poll_views,
+                now_millis,
+            ),
+        };
+    }
+
     /// Drive one compatible-version backend, then poll one installed-key datagram.
     ///
     /// This is the single-connection form of
@@ -3997,6 +4024,34 @@ pub const EndpointConnectionLifecycle = struct {
                 poll_views,
                 now_millis,
                 poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Drive compatible-version backends, then drain explicit installed-key output.
+    ///
+    /// This is the bounded-output form of
+    /// `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections(
+            space,
+            drive_views,
+            compatibilities,
+        );
+        return .{
+            .backend = backend,
+            .drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+                poll_views,
+                now_millis,
                 out,
             ),
         };
@@ -40290,6 +40345,278 @@ test "EndpointConnectionLifecycle compatible-version backend drive drains after 
     try std.testing.expect(backend.peer_sent);
     try std.testing.expectEqual(@as(usize, 0), result.drain.datagrams_written);
     try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+}
+
+test "EndpointConnectionLifecycle compatible backend drive polls explicit installed-key output" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x8a, 0x9a, 0xaa, 0xba };
+    const server_dcid = [_]u8{ 0x18, 0x28, 0x38, 0x48 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 8642,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try client.confirmHandshake();
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "bye", false);
+    try client.resetStream(stream_id, 121);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 121,
+        .final_size = 3,
+    };
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 137,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{.{
+        .connection_id = 138,
+        .connection = &client,
+        .poll_options = .{
+            .space = .zero_rtt,
+            .destination_connection_id = &server_dcid,
+            .source_connection_id = &client_dcid,
+        },
+    }};
+
+    const result = try lifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions(
+        .handshake,
+        &drive_views,
+        &compatibilities,
+        &poll_views,
+        10,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), result.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(u64, 8642), server.peer_max_data);
+    try std.testing.expect(backend.peer_sent);
+    const polled = result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 138), polled.connection_id);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        polled.datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle compatible backend drive drains explicit installed-key output" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const first_client_dcid = [_]u8{ 0x8b, 0x9b, 0xab, 0xbb };
+    const first_server_dcid = [_]u8{ 0x19, 0x29, 0x39, 0x49 };
+    const second_client_dcid = [_]u8{ 0x8c, 0x9c, 0xac, 0xbc };
+    const second_server_dcid = [_]u8{ 0x1a, 0x2a, 0x3a, 0x4a };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 9753,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var first = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer first.deinit();
+    try first.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try first.confirmHandshake();
+    const first_stream_id = try first.openStream();
+    try first.sendOnStream(first_stream_id, "bye", false);
+    try first.resetStream(first_stream_id, 122);
+    const first_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = first_stream_id,
+        .application_error_code = 122,
+        .final_size = 3,
+    };
+
+    var second = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer second.deinit();
+    try second.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try second.confirmHandshake();
+    const second_stream_id = try second.openStream();
+    try second.sendOnStream(second_stream_id, "bye", false);
+    try second.resetStream(second_stream_id, 123);
+    const second_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = second_stream_id,
+        .application_error_code = 123,
+        .final_size = 3,
+    };
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 139,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{
+        .{
+            .connection_id = 140,
+            .connection = &first,
+            .poll_options = .{
+                .space = .zero_rtt,
+                .destination_connection_id = &first_server_dcid,
+                .source_connection_id = &first_client_dcid,
+            },
+        },
+        .{
+            .connection_id = 141,
+            .connection = &second,
+            .poll_options = .{
+                .space = .zero_rtt,
+                .destination_connection_id = &second_server_dcid,
+                .source_connection_id = &second_client_dcid,
+            },
+        },
+    };
+    var out: [2]EndpointPolledDatagramResult = undefined;
+
+    const result = try lifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions(
+        .handshake,
+        &drive_views,
+        &compatibilities,
+        &poll_views,
+        10,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), result.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(u64, 9753), server.peer_max_data);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expectEqual(@as(usize, 2), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    defer std.testing.allocator.free(out[1].datagram);
+    try std.testing.expectEqual(@as(u64, 140), out[0].connection_id);
+    try std.testing.expectEqual(@as(u64, 141), out[1].connection_id);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        out[0].datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = first_reset_frame },
+    ));
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        out[1].datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = second_reset_frame },
+    ));
 }
 
 test "EndpointConnectionLifecycle compatible-version close backend drive stops before drain" {
