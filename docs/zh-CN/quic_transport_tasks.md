@@ -232,6 +232,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `processPendingWork`、`processPendingWorkAcrossConnections`、
@@ -1198,6 +1200,13 @@ close 和 route cleanup 事件。
   receive-to-backend loop step，同时保留 OrClose backend 行为。单元测试证明 routed
   Handshake CRYPTO input 仍会驱动 backend，并在 close-propagating backend 成功推进后
   通过 poll 和 bounded-drain 形态发出调用方选择的 0-RTT output。
+- 2026-06-18：新增 RFC 9368-compatible explicit-output 变体：
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()` 和
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions()`。
+  这两个入口把 per-connection installed-key output options 贯通到 routed
+  receive-to-compatible-backend loop step。单元测试证明 routed Handshake CRYPTO
+  input 仍会驱动 compatible backend progress、compatible Version Information 会被应用，
+  并通过 poll 和 bounded-drain 形态发出调用方选择的 0-RTT output。
 - 2026-06-10：新增 `EndpointFeedCryptoBackendDriveDatagramDrainResult`，以及
   receive-to-backend-to-bounded-drain loop step：
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams()`、

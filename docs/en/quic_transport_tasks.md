@@ -169,6 +169,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processPendingWork`,
@@ -1360,6 +1362,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   Unit coverage proves routed Handshake CRYPTO input still drives the backend,
   and caller-selected 0-RTT output is emitted through poll and bounded-drain
   forms after successful close-propagating backend progress.
+- 2026-06-18: Added the RFC 9368-compatible explicit-output variants
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions()`.
+  These carry per-connection installed-key output options through routed
+  receive-to-compatible-backend loop steps. Unit coverage proves routed
+  Handshake CRYPTO input still drives compatible backend progress, compatible
+  Version Information is applied, and caller-selected 0-RTT output is emitted
+  through poll and bounded-drain forms.
 - 2026-06-10: Added `EndpointFeedCryptoBackendDriveDatagramDrainResult` and
   receive-to-backend-to-bounded-drain loop steps:
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams()`,
