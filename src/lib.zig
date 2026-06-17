@@ -166,6 +166,17 @@ fn validateInitialDestinationConnectionIdLength(dcid: []const u8) Error!void {
     }
 }
 
+fn protectedLongDatagramKeysForSpace(
+    space: PacketNumberSpace,
+    keys: protection.Aes128PacketProtectionKeys,
+) Error!ProtectedLongDatagramKeys {
+    return switch (space) {
+        .initial => .{ .initial = keys },
+        .handshake => .{ .handshake = keys },
+        .application => error.InvalidPacket,
+    };
+}
+
 /// Endpoint/event-loop owner for QUIC loss detection timer scheduling.
 ///
 /// This helper does not own `Connection` objects and performs no socket I/O.
@@ -6821,6 +6832,340 @@ pub const EndpointConnectionLifecycle = struct {
     ) Error!void {
         try connection.processProtectedLongDatagramInSpace(space, now_millis, keys, datagram);
         try self.armRecoveryTimerFromConnection(connection_id, connection);
+    }
+
+    /// Process caller-keyed Initial/Handshake input, then poll one long-header output.
+    ///
+    /// This is the lightweight socket-loop step for ACK, PING, close, or
+    /// already queued CRYPTO responses when no TLS backend drive is needed.
+    /// The caller owns any returned datagram.
+    pub fn processProtectedLongDatagramInSpaceAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+    ) Error!?EndpointPolledDatagramResult {
+        try self.processProtectedLongDatagramInSpace(
+            connection_id,
+            connection,
+            space,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        const output = try self.pollProtectedLongDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+            scid,
+            initial_token,
+            try protectedLongDatagramKeysForSpace(space, send_keys),
+        );
+        return if (output) |bytes| .{
+            .connection_id = connection_id,
+            .datagram = bytes,
+        } else null;
+    }
+
+    /// Process caller-keyed Initial/Handshake input with close propagation, then poll output.
+    ///
+    /// Authenticated frame errors queue CONNECTION_CLOSE and return before
+    /// ordinary caller-keyed long-header output polling.
+    pub fn processProtectedLongDatagramInSpaceOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+    ) Error!?EndpointPolledDatagramResult {
+        try self.processProtectedLongDatagramInSpaceOrClose(
+            connection_id,
+            connection,
+            space,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        const output = try self.pollProtectedLongDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+            scid,
+            initial_token,
+            try protectedLongDatagramKeysForSpace(space, send_keys),
+        );
+        return if (output) |bytes| .{
+            .connection_id = connection_id,
+            .datagram = bytes,
+        } else null;
+    }
+
+    /// Route caller-keyed Initial/Handshake input, then poll one long-header output.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    /// On success, the selected connection is processed and then polled for one
+    /// long-header output datagram in the same packet number space.
+    pub fn processRoutedProtectedLongDatagramInSpaceAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .datagram = try self.processProtectedLongDatagramInSpaceAndPollDatagram(
+                connection_id,
+                connection,
+                space,
+                now_millis,
+                receive_keys,
+                datagram,
+                dcid,
+                scid,
+                initial_token,
+                send_keys,
+            ),
+        };
+    }
+
+    /// Route caller-keyed Initial/Handshake input through close propagation, then poll output.
+    ///
+    /// This preserves routed receive behavior while ensuring authenticated
+    /// frame errors stop before ordinary long-header output polling.
+    pub fn processRoutedProtectedLongDatagramInSpaceOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .datagram = try self.processProtectedLongDatagramInSpaceOrCloseAndPollDatagram(
+                connection_id,
+                connection,
+                space,
+                now_millis,
+                receive_keys,
+                datagram,
+                dcid,
+                scid,
+                initial_token,
+                send_keys,
+            ),
+        };
+    }
+
+    /// Process caller-keyed Initial/Handshake input, then drain long-header output.
+    ///
+    /// This is the bounded-output form of
+    /// `processProtectedLongDatagramInSpaceAndPollDatagram()`. The caller owns
+    /// each initialized output datagram.
+    pub fn processProtectedLongDatagramInSpaceAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointDatagramDrainResult {
+        try self.processProtectedLongDatagramInSpace(
+            connection_id,
+            connection,
+            space,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        const output_keys = try protectedLongDatagramKeysForSpace(space, send_keys);
+        var result = EndpointDatagramDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const output = self.pollProtectedLongDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                dcid,
+                scid,
+                initial_token,
+                output_keys,
+            ) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = .{
+                .connection_id = connection_id,
+                .datagram = output orelse return result,
+            };
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
+    /// Process caller-keyed Initial/Handshake input with close propagation, then drain output.
+    ///
+    /// Authenticated frame errors queue CONNECTION_CLOSE and return before any
+    /// ordinary caller-keyed long-header output is drained.
+    pub fn processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointDatagramDrainResult {
+        try self.processProtectedLongDatagramInSpaceOrClose(
+            connection_id,
+            connection,
+            space,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        const output_keys = try protectedLongDatagramKeysForSpace(space, send_keys);
+        var result = EndpointDatagramDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const output = self.pollProtectedLongDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                dcid,
+                scid,
+                initial_token,
+                output_keys,
+            ) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = .{
+                .connection_id = connection_id,
+                .datagram = output orelse return result,
+            };
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
+    /// Route caller-keyed Initial/Handshake input, then drain long-header output.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    pub fn processRoutedProtectedLongDatagramInSpaceAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramDrainResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .drain = try self.processProtectedLongDatagramInSpaceAndDrainDatagrams(
+                connection_id,
+                connection,
+                space,
+                now_millis,
+                receive_keys,
+                datagram,
+                dcid,
+                scid,
+                initial_token,
+                send_keys,
+                out,
+            ),
+        };
+    }
+
+    /// Route caller-keyed Initial/Handshake input through close propagation, then drain output.
+    ///
+    /// This preserves routed receive behavior while ensuring authenticated
+    /// frame errors stop before ordinary long-header output draining.
+    pub fn processRoutedProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramDrainResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .drain = try self.processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams(
+                connection_id,
+                connection,
+                space,
+                now_millis,
+                receive_keys,
+                datagram,
+                dcid,
+                scid,
+                initial_token,
+                send_keys,
+                out,
+            ),
+        };
     }
 
     /// Process caller-keyed long-header input, drive backend, and drain output.
@@ -38278,6 +38623,195 @@ test "EndpointConnectionLifecycle refreshes protected long CRYPTO space timer li
     try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.handshake));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), server_lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle processes long datagram in space and polls output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try client.sendCryptoInSpace(.handshake, "long poll input");
+    const client_datagram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        10,
+        &server_scid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+    try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.handshake));
+
+    const result = (try lifecycle.processProtectedLongDatagramInSpaceAndPollDatagram(
+        91,
+        &server,
+        .handshake,
+        11,
+        secrets.client,
+        client_datagram,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(result.datagram);
+
+    try std.testing.expectEqual(@as(u64, 91), result.connection_id);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.handshake));
+    var crypto_buf: [32]u8 = undefined;
+    const recv_len = (try server.recvCryptoInSpace(.handshake, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("long poll input", crypto_buf[0..recv_len]);
+
+    try client.processProtectedLongDatagramInSpace(.handshake, 12, secrets.server, result.datagram);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
+}
+
+test "EndpointConnectionLifecycle routes long datagram in space and drains output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x12, 0x22, 0x32, 0x42 };
+    const server_scid = [_]u8{ 0xab, 0xbb, 0xcb, 0xdb };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_091);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(92, &server_scid, server_receive_path, .{ .sequence_number = 0 });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try client.sendCryptoInSpace(.handshake, "routed long drain input");
+    const client_datagram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        10,
+        &server_scid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var drained: [2]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedLongDatagramInSpaceAndDrainDatagrams(
+        93,
+        &server,
+        .handshake,
+        server_receive_path,
+        11,
+        secrets.client,
+        client_datagram,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+        &drained,
+    ));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.handshake));
+
+    const result = try lifecycle.processRoutedProtectedLongDatagramInSpaceAndDrainDatagrams(
+        92,
+        &server,
+        .handshake,
+        server_receive_path,
+        11,
+        secrets.client,
+        client_datagram,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+        &drained,
+    );
+    defer for (drained[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(@as(u64, 92), result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_scid, result.route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 92), drained[0].connection_id);
+
+    try client.processProtectedLongDatagramInSpace(.handshake, 12, secrets.server, drained[0].datagram);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
+}
+
+test "EndpointConnectionLifecycle long OrClose poll stops before output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x13, 0x23, 0x33, 0x43 };
+    const server_scid = [_]u8{ 0xac, 0xbc, 0xcc, 0xdc };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var plaintext: [1200]u8 = undefined;
+    @memset(&plaintext, 0);
+    plaintext[0] = @intFromEnum(frame.FrameType.handshake_done);
+
+    const invalid_initial = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &original_dcid,
+        .scid = &client_scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(invalid_initial);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processProtectedLongDatagramInSpaceOrCloseAndPollDatagram(
+        94,
+        &server,
+        .initial,
+        10,
+        secrets.client,
+        invalid_initial,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    ));
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+
+    const close_packet = (try lifecycle.pollProtectedLongDatagram(
+        94,
+        &server,
+        11,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(12, .{ .initial = secrets.server }, close_packet));
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
 }
 
 test "EndpointConnectionLifecycle routes long datagram then drives backend and drains output" {

@@ -127,6 +127,14 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `driveCryptoBackendInSpaceOrCloseAndPollProtectedLongCryptoDatagram`、
 `driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams`、
 `driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams`、
+`processProtectedLongDatagramInSpaceAndPollDatagram`、
+`processProtectedLongDatagramInSpaceOrCloseAndPollDatagram`、
+`processProtectedLongDatagramInSpaceAndDrainDatagrams`、
+`processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams`、
+`processRoutedProtectedLongDatagramInSpaceAndPollDatagram`、
+`processRoutedProtectedLongDatagramInSpaceOrCloseAndPollDatagram`、
+`processRoutedProtectedLongDatagramInSpaceAndDrainDatagrams`、
+`processRoutedProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams`、
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram`、
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram`、
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`、
@@ -377,6 +385,18 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-18：新增 caller-keyed Initial/Handshake long-packet
+  receive-to-output poll 和 drain step：
+  `EndpointConnectionLifecycle.processProtectedLongDatagramInSpaceAndPollDatagram()`、
+  `processProtectedLongDatagramInSpaceOrCloseAndPollDatagram()`、
+  `processRoutedProtectedLongDatagramInSpaceAndPollDatagram()`、
+  `processRoutedProtectedLongDatagramInSpaceOrCloseAndPollDatagram()`、
+  `processProtectedLongDatagramInSpaceAndDrainDatagrams()`、
+  `processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams()`、
+  `processRoutedProtectedLongDatagramInSpaceAndDrainDatagrams()` 和
+  `processRoutedProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams()`。
+  单元测试证明 protected Handshake receive 后可直接输出 ACK、routed drain 会在 packet
+  processing 前拦截 route mismatch，以及 close-propagating Initial frame 错误会在普通输出前停止。
 - 2026-06-18：把 version-list matching 和本地 RFC 9368 version-information
   validation policy 迁移到 `src/quic/connection_version.zig`。`src/lib.zig`
   现在在 Version Negotiation follow-up 和 backend peer-version selection 中调用该聚焦模块，

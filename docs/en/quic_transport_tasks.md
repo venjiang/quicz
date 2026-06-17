@@ -241,6 +241,14 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendInSpaceOrCloseAndPollProtectedLongCryptoDatagram`,
 `driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams`,
 `driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams`,
+`processProtectedLongDatagramInSpaceAndPollDatagram`,
+`processProtectedLongDatagramInSpaceOrCloseAndPollDatagram`,
+`processProtectedLongDatagramInSpaceAndDrainDatagrams`,
+`processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams`,
+`processRoutedProtectedLongDatagramInSpaceAndPollDatagram`,
+`processRoutedProtectedLongDatagramInSpaceOrCloseAndPollDatagram`,
+`processRoutedProtectedLongDatagramInSpaceAndDrainDatagrams`,
+`processRoutedProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams`,
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram`,
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram`,
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
@@ -404,6 +412,19 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-18: Added caller-keyed Initial/Handshake long-packet
+  receive-to-output poll and drain steps:
+  `EndpointConnectionLifecycle.processProtectedLongDatagramInSpaceAndPollDatagram()`,
+  `processProtectedLongDatagramInSpaceOrCloseAndPollDatagram()`,
+  `processRoutedProtectedLongDatagramInSpaceAndPollDatagram()`,
+  `processRoutedProtectedLongDatagramInSpaceOrCloseAndPollDatagram()`,
+  `processProtectedLongDatagramInSpaceAndDrainDatagrams()`,
+  `processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams()`,
+  `processRoutedProtectedLongDatagramInSpaceAndDrainDatagrams()`, and
+  `processRoutedProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams()`.
+  Unit coverage proves direct ACK output after protected Handshake receive,
+  routed drain output with route mismatch rejection before packet processing,
+  and close-propagating Initial frame errors stopping before ordinary output.
 - 2026-06-18: Moved version-list matching and local RFC 9368
   version-information validation policy into `src/quic/connection_version.zig`.
   `src/lib.zig` now calls the focused module for Version Negotiation follow-up
