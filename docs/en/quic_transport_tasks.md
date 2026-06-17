@@ -1308,6 +1308,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   calling backend callbacks such as local transport-parameter setup, inbound
   CRYPTO delivery, or outbound CRYPTO pull. Unit coverage proves the rejected
   path leaves backend callback counters untouched.
+- 2026-06-18: Tightened `driveCryptoBackendInSpace()` closing-state semantics.
+  Closing or closed connections now return `ConnectionClosed` before local
+  transport-parameter setup, inbound CRYPTO delivery, or outbound CRYPTO pull.
+  Unit coverage proves backend callback counters remain untouched.
 - 2026-06-18: Split QUIC wire-length budgeting helpers into
   `src/quic/wire_len.zig` while keeping internal compatibility aliases in
   `src/lib.zig`. The new module owns varint length, protected long/short

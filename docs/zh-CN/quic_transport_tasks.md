@@ -1155,6 +1155,9 @@ close 和 route cleanup 事件。
   上的失败语义。现在 drive 会先拒绝已 discarded 的 space，再调用 backend callback，例如本端
   transport-parameter setup、入站 CRYPTO 投递或出站 CRYPTO 拉取。单元测试证明被拒绝路径不会
   触发 backend callback 计数。
+- 2026-06-18：收紧 `driveCryptoBackendInSpace()` 在 closing/closed 连接上的失败语义。
+  现在 drive 会在本端 transport-parameter setup、入站 CRYPTO 投递或出站 CRYPTO 拉取前返回
+  `ConnectionClosed`。单元测试证明该路径不会触发 backend callback 计数。
 - 2026-06-18：把 QUIC wire-length 预算 helper 拆到 `src/quic/wire_len.zig`，
   同时保持 `src/lib.zig` 的内部兼容别名。新模块负责 varint 长度、protected
   long/short datagram 长度、ACK/CRYPTO/STREAM/control frame 长度和 bounded frame data
