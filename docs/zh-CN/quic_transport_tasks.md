@@ -324,7 +324,10 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
-`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、`nextDeadline` 和
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`、
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
+`nextDeadline` 和
 `nextDeadlineAcrossConnections`，
 由同一个 lifecycle owner 驱动 timer、route cleanup、close、
 installed-key packet receive、跨连接 receive dispatch、due-deadline service、
@@ -876,6 +879,12 @@ close 和 route cleanup 事件。
   这两个入口把显式 installed-key 输出贯通到 pending-work 加 RFC 9368-compatible backend tick。
   单元测试证明到期 accepted 0-RTT recovery work 会被 service、compatible Version Information
   会被应用，并通过 poll 和 bounded-drain 形态发出调用方选择的 0-RTT 输出。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions()` 和
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions()`。
+  这两个入口在成功的 close-propagating RFC 9368-compatible backend sweep 中保留显式
+  installed-key 输出，同时维持现有出错时停止在输出前的语义。单元测试证明 compatible
+  Version Information 会被应用，并通过 poll 和 bounded-drain 形态发出调用方选择的 0-RTT 输出。
 - 2026-06-11：更新 single-connection due-deadline-to-backend poll 和 bounded-drain
   wrapper，让它们保留显式 installed-key recovery output 选择。Initial recovery 仍只服务
   pending work、不发 installed-key datagram，并可继续进入 backend drive；Handshake 和
