@@ -165,6 +165,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
@@ -1349,6 +1351,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   receive-to-backend loop step. Unit coverage proves a routed Handshake CRYPTO
   datagram still drives backend input while caller-selected 0-RTT output is
   emitted through poll and bounded-drain forms from caller-owned connections.
+- 2026-06-18: Added the close-propagating explicit-output variants
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions()`.
+  These carry per-connection installed-key output options through routed
+  receive-to-backend loop steps while preserving OrClose backend behavior.
+  Unit coverage proves routed Handshake CRYPTO input still drives the backend,
+  and caller-selected 0-RTT output is emitted through poll and bounded-drain
+  forms after successful close-propagating backend progress.
 - 2026-06-10: Added `EndpointFeedCryptoBackendDriveDatagramDrainResult` and
   receive-to-backend-to-bounded-drain loop steps:
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams()`,
