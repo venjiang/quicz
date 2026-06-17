@@ -1068,6 +1068,14 @@ QUIC unless the gap is named and the verification evidence is added here.
   data slicing budgets. Unit coverage now checks varint boundaries and
   Initial/short datagram minimum-length expansion to keep send-path budgeting
   behavior unchanged.
+- 2026-06-18: Split ACK/frame packet-type rule helpers into
+  `src/quic/frame_rules.zig` while keeping the public
+  `framePacketTypeErrorCode()` wrapper and internal compatibility aliases in
+  `src/lib.zig`. The new module owns ACK range validation, ACK membership,
+  ack-eliciting classification, packet-number-space to frame-packet-type
+  mapping, and the RFC 9000 frame/packet-type admission table. Unit coverage
+  now checks ACK range membership and Initial, Handshake, 0-RTT, and 1-RTT
+  frame admission rules.
 - 2026-06-10: Added `EndpointConnectionView` and
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()` for embeddable
   socket loops where callers own the connection map. The lifecycle now combines

@@ -81,6 +81,9 @@ rollback snapshots,
 RFC 9368 version-information validation policy,
 `src/quic/packet_context.zig` owns packet-type context, caller-supplied
 protected long-packet key bundles, and modeled ECN validation enums,
+`src/quic/frame_rules.zig` owns ACK range validation, ACK packet-number
+membership, ack-eliciting classification, and RFC 9000 packet-type/frame
+admission rules,
 `src/quic/protocol_limits.zig` owns shared QUIC scalar limits such as varint,
 stream-count, connection-ID, Initial datagram, path-validation, and
 anti-amplification bounds,

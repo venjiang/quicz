@@ -942,6 +942,12 @@ close 和 route cleanup 事件。
   long/short datagram 长度、ACK/CRYPTO/STREAM/control frame 长度和 bounded frame data
   切片预算。新增单元测试覆盖 varint 边界和 Initial/short datagram 最小长度扩展，证明该拆分
   不改变发送路径的长度预算语义。
+- 2026-06-18：把 ACK/frame packet-type 规则 helper 拆到
+  `src/quic/frame_rules.zig`，同时保持 `src/lib.zig` 的公开
+  `framePacketTypeErrorCode()` 包装和内部兼容别名。新模块负责 ACK range 校验、ACK
+  membership 判断、ack-eliciting 分类、packet-number-space 到 frame packet type 映射，以及
+  RFC 9000 frame/packet-type 许可表。新增单元测试覆盖 ACK range membership 和 Initial、
+  Handshake、0-RTT、1-RTT frame 许可规则。
 - 2026-06-10：新增 `EndpointConnectionView` 和
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()`，服务于调用方持有
   connection map 的可嵌入 socket loop。lifecycle 现在可以在不接管 connection storage

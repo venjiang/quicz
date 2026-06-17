@@ -19,6 +19,7 @@ const packet_context = @import("quic/packet_context.zig");
 const protocol_limits = @import("quic/protocol_limits.zig");
 const buffer = @import("quic/buffer.zig");
 const wire_len = @import("quic/wire_len.zig");
+const frame_rules = @import("quic/frame_rules.zig");
 
 pub const Error = transport_types.Error;
 pub const ConnectionSide = transport_types.ConnectionSide;
@@ -134,6 +135,7 @@ test {
     _ = connection_version;
     _ = connection_state;
     _ = wire_len;
+    _ = frame_rules;
 }
 
 const max_quic_varint = protocol_limits.max_quic_varint;
@@ -196,6 +198,13 @@ const applicationCloseFrameWireLen = wire_len.applicationCloseFrameWireLen;
 const closeFrameWireLen = wire_len.closeFrameWireLen;
 const blockedFrameWireLen = wire_len.blockedFrameWireLen;
 const maxFrameWireLen = wire_len.maxFrameWireLen;
+const ackFrameRangesAreValid = frame_rules.ackFrameRangesAreValid;
+const ackFrameContains = frame_rules.ackFrameContains;
+const frameIsAckEliciting = frame_rules.frameIsAckEliciting;
+const frameAllowedInPacketNumberSpace = frame_rules.frameAllowedInPacketNumberSpace;
+const defaultFramePacketTypeForSpace = frame_rules.defaultFramePacketTypeForSpace;
+const packetNumberSpaceForFramePacketType = frame_rules.packetNumberSpaceForFramePacketType;
+const frameAllowedInFramePacketType = frame_rules.frameAllowedInFramePacketType;
 
 const PeerTransportParameterValidationError = Error || error{
     VersionNegotiationError,
@@ -12839,52 +12848,6 @@ fn elapsedMillis(sent_time_millis: i64, now_millis: i64) u64 {
     return @intCast(delta);
 }
 
-fn ackFrameRangesAreValid(ack: frame.AckFrame) bool {
-    if (ack.first_ack_range > ack.largest_acknowledged) return false;
-
-    var range_largest = ack.largest_acknowledged;
-    var range_smallest = range_largest - ack.first_ack_range;
-    for (ack.ranges) |range| {
-        const skipped = std.math.add(u64, range.gap, 2) catch return false;
-        if (range_smallest < skipped) return false;
-        range_largest = range_smallest - skipped;
-        if (range.ack_range > range_largest) return false;
-        range_smallest = range_largest - range.ack_range;
-    }
-
-    return true;
-}
-
-fn ackFrameContains(ack: frame.AckFrame, packet_number: u64) bool {
-    if (ack.first_ack_range > ack.largest_acknowledged) return false;
-
-    var range_largest = ack.largest_acknowledged;
-    var range_smallest = range_largest - ack.first_ack_range;
-    if (packet_number >= range_smallest and packet_number <= range_largest) return true;
-
-    for (ack.ranges) |range| {
-        const skipped = std.math.add(u64, range.gap, 2) catch return false;
-        if (range_smallest < skipped) return false;
-        range_largest = range_smallest - skipped;
-        if (range.ack_range > range_largest) return false;
-        range_smallest = range_largest - range.ack_range;
-        if (packet_number >= range_smallest and packet_number <= range_largest) return true;
-    }
-
-    return false;
-}
-
-fn frameIsAckEliciting(decoded: frame.Frame) bool {
-    return switch (decoded) {
-        .padding, .ack, .ack_ecn, .connection_close, .application_close => false,
-        else => true,
-    };
-}
-
-fn frameAllowedInPacketNumberSpace(decoded: frame.Frame, space: PacketNumberSpace) bool {
-    return frameAllowedInFramePacketType(decoded, defaultFramePacketTypeForSpace(space));
-}
-
 /// Classify a decoded frame that is not permitted in an RFC 9000 packet type.
 ///
 /// The frame codec handles malformed or unknown frame types separately via
@@ -12892,8 +12855,7 @@ fn frameAllowedInPacketNumberSpace(decoded: frame.Frame, space: PacketNumberSpac
 /// syntactically valid but appear in the wrong Initial, Handshake, 0-RTT, or
 /// 1-RTT packet context.
 pub fn framePacketTypeErrorCode(decoded: frame.Frame, packet_type: FramePacketType) ?transport_error.TransportErrorCode {
-    if (frameAllowedInFramePacketType(decoded, packet_type)) return null;
-    return .protocol_violation;
+    return frame_rules.framePacketTypeErrorCode(decoded, packet_type);
 }
 
 const FramePayloadCloseError = struct {
@@ -12953,22 +12915,6 @@ fn classifyFramePayloadCloseError(
     return null;
 }
 
-fn defaultFramePacketTypeForSpace(space: PacketNumberSpace) FramePacketType {
-    return switch (space) {
-        .initial => .initial,
-        .handshake => .handshake,
-        .application => .one_rtt,
-    };
-}
-
-fn packetNumberSpaceForFramePacketType(packet_type: FramePacketType) PacketNumberSpace {
-    return switch (packet_type) {
-        .initial => .initial,
-        .handshake => .handshake,
-        .zero_rtt, .one_rtt => .application,
-    };
-}
-
 const ProtectedLongPacketSpace = struct {
     packet_type: packet.PacketType,
     frame_packet_type: FramePacketType,
@@ -13013,39 +12959,6 @@ fn protectedLongPacketRouteFor(
             .keys = handshake_keys,
         } else null,
         .retry => null,
-    };
-}
-
-fn frameAllowedInFramePacketType(decoded: frame.Frame, packet_type: FramePacketType) bool {
-    return switch (packet_type) {
-        .initial, .handshake => switch (decoded) {
-            .padding, .ping, .ack, .ack_ecn, .crypto, .connection_close => true,
-            else => false,
-        },
-        // RFC 9000 Table 3 marks RETIRE_CONNECTION_ID as a 0/1-RTT frame, but
-        // Section 12.5 permits treating it as a 0-RTT protocol violation.
-        .zero_rtt => switch (decoded) {
-            .padding,
-            .ping,
-            .reset_stream,
-            .stop_sending,
-            .stream,
-            .max_data,
-            .max_stream_data,
-            .max_streams_bidi,
-            .max_streams_uni,
-            .data_blocked,
-            .stream_data_blocked,
-            .streams_blocked_bidi,
-            .streams_blocked_uni,
-            .new_connection_id,
-            .path_challenge,
-            .connection_close,
-            .application_close,
-            => true,
-            else => false,
-        },
-        .one_rtt => true,
     };
 }
 
