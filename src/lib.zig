@@ -4160,6 +4160,36 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process pending work, drive compatible-version backends, then select a deadline.
+    ///
+    /// This is the no-output RFC 9368-compatible timer/backend planning step.
+    /// It applies pending endpoint work first, lets backend progress apply
+    /// compatible Version Information, and selects the next deadline from the
+    /// updated caller-owned connection map without polling output.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!EndpointPendingWorkCryptoBackendNextDeadlineResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline(
+                backend_space,
+                drive_views,
+                compatibilities,
+                deadline_connections,
+            ),
+        };
+    }
+
     /// Process pending work, drive compatible-version backends, then poll output.
     ///
     /// This is the no-new-datagram socket-loop step for RFC 9368-compatible
@@ -23847,6 +23877,133 @@ test "EndpointConnectionLifecycle pending-work close backend loop step selects n
     try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
     try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
     try std.testing.expectEqual(@as(?[]const u8, null), try backend_connection.pollTxInSpace(.handshake, 30, &scratch));
+}
+
+test "EndpointConnectionLifecycle pending-work compatible backend loop step selects next deadline" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+    const peer_params = peer_params_out.getWritten();
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var idle_conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer idle_conn.deinit();
+    try idle_conn.confirmHandshake();
+
+    const idle_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const idle_cid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    try lifecycle.registerConnectionId(195, &idle_cid, idle_path, .{ .sequence_number = 0 });
+
+    try idle_conn.sendPing();
+    var idle_payload_buf: [16]u8 = undefined;
+    _ = (try idle_conn.pollTx(10, &idle_payload_buf)) orelse return error.TestUnexpectedResult;
+    const idle_deadline = idle_conn.idleTimeoutDeadlineMillis() orelse return error.TestUnexpectedResult;
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+        .initial_rtt_ms = 100,
+    });
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+    try backend_connection.confirmHandshake();
+    _ = try backend_connection.recordPacketSentInSpace(.application, 20, 100);
+
+    var backend = Backend{ .peer_transport_parameters = peer_params };
+    var scratch: [256]u8 = undefined;
+    const pending_connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 195, .connection = &idle_conn },
+        .{ .connection_id = 196, .connection = &backend_connection },
+    };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 196,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const deadline_connections = [_]EndpointConnectionView{
+        .{ .connection_id = 195, .connection = &idle_conn },
+        .{ .connection_id = 196, .connection = &backend_connection },
+    };
+
+    const result = try lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline(
+        &pending_connections,
+        idle_deadline,
+        .handshake,
+        &drive_views,
+        &compatibilities,
+        &deadline_connections,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(ConnectionState.closed, idle_conn.connectionState());
+    try std.testing.expectEqual(ConnectionState.active, backend_connection.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(peer_params.len, result.backend.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expect(result.backend.backend.progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), result.backend.backend.progress.peer_compatible_version_selected);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expectEqual(@as(u64, 4321), backend_connection.peer_max_data);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    const next = result.backend.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 196), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
 }
 
 test "EndpointConnectionLifecycle pending-work backend loop step drains queued output" {
