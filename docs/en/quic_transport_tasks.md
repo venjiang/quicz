@@ -207,6 +207,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams`,
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
+`processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
 `drainProtectedLongCryptoDatagramsInSpace`,
@@ -226,6 +228,8 @@ backend-drive-to-caller-keyed long-header drain steps,
 close-propagating backend-drive-to-caller-keyed long-header drain steps,
 caller-keyed receive-to-backend-to-bounded-drain loop steps,
 caller-keyed receive-to-backend-close-to-bounded-drain loop steps,
+routed caller-keyed receive-to-backend-to-bounded-drain loop steps,
+routed caller-keyed receive-to-backend-close-to-bounded-drain loop steps,
 installed-key Handshake receive-to-backend-to-bounded-drain loop steps,
 close-propagating installed-key Handshake backend-drain loop steps,
 single-connection installed-key receive-to-backend-to-output loop steps,
@@ -311,6 +315,14 @@ QUIC unless the gap is named and the verification evidence is added here.
   authenticated Handshake CRYPTO datagram is processed before backend delivery,
   backend peer transport-parameter errors stop before output pull or drain, and
   the peer receives the protected Handshake `TRANSPORT_PARAMETER_ERROR` close.
+- 2026-06-17: Added
+  `EndpointConnectionLifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams()`
+  and its `OrClose` variant as routed caller-keyed long-header
+  receive-to-backend-to-bounded-drain steps. Unit coverage proves route
+  selection happens before packet processing, connection-id mismatches stop
+  before backend delivery, successful routed Handshake CRYPTO produces a
+  protected response, and backend peer transport-parameter errors stop before
+  output drain while leaving a protected Handshake close for the peer.
 - 2026-06-05: Migrated the current C TLS example boundary to Zig 0.16's
   `addTranslateC` build path. The C ABI declarations now live in small header
   files and the Zig examples import them with `@import("c")`; handwritten

@@ -718,6 +718,14 @@ pub const EndpointProtectedLongDatagramResult = struct {
     processed_packets: usize,
 };
 
+/// Endpoint result after routing caller-keyed long input through backend drive.
+pub const EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult = struct {
+    /// Endpoint route selected for the triggering datagram.
+    route: endpoint.RouteResult,
+    /// Backend drive and bounded caller-keyed long-header output drain result.
+    backend: EndpointCryptoBackendDriveProtectedLongDatagramDrainResult,
+};
+
 /// Endpoint result after processing a path-validation protected short datagram.
 pub const EndpointPathValidatedShortDatagramResult = struct {
     /// Endpoint route selected before packet protection was removed.
@@ -6571,6 +6579,112 @@ pub const EndpointConnectionLifecycle = struct {
             datagram,
         );
         return route;
+    }
+
+    /// Route caller-keyed long-header input, drive backend, and drain output.
+    ///
+    /// This is the routed socket-loop form of
+    /// `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams()`.
+    /// The endpoint lifecycle owns route validation before the caller-owned
+    /// connection processes the packet and backend progress. Caller-owned
+    /// connection/backend/socket storage and output datagrams remain outside
+    /// the lifecycle.
+    pub fn processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult {
+        const route = try self.processRoutedProtectedLongDatagramInSpace(
+            connection_id,
+            connection,
+            space,
+            path,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        return .{
+            .route = route,
+            .backend = try self.driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams(
+                connection_id,
+                connection,
+                space,
+                backend,
+                scratch,
+                space,
+                now_millis,
+                dcid,
+                scid,
+                initial_token,
+                send_keys,
+                out,
+            ),
+        };
+    }
+
+    /// Route caller-keyed long-header input through close-propagating backend.
+    ///
+    /// This is the routed socket-loop form of
+    /// `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams()`.
+    /// Route errors or connection-id mismatches fail before packet processing.
+    /// Authenticated frame errors or backend peer transport-parameter errors
+    /// return before output draining and leave the protected close to the
+    /// existing caller-keyed long-header output path.
+    pub fn processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult {
+        const route = try self.processRoutedProtectedLongDatagramInSpaceOrClose(
+            connection_id,
+            connection,
+            space,
+            path,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        return .{
+            .route = route,
+            .backend = try self.driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams(
+                connection_id,
+                connection,
+                space,
+                backend,
+                scratch,
+                space,
+                now_millis,
+                dcid,
+                scid,
+                initial_token,
+                send_keys,
+                out,
+            ),
+        };
     }
 
     /// Poll one caller-keyed protected 0-RTT datagram and refresh timers.
@@ -33163,6 +33277,285 @@ test "EndpointConnectionLifecycle refreshes protected long CRYPTO space timer li
     try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.handshake));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), server_lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle routes long datagram then drives backend and drains output" {
+    const Backend = struct {
+        outbound: []const u8,
+        sent: bool = false,
+        received: [64]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x15, 0x25, 0x35, 0x45 };
+    const server_dcid = [_]u8{ 0xa5, 0xb5, 0xc5, 0xd5 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_015);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const server_connection_id: u64 = 74;
+    try lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendCryptoInSpace(.handshake, "routed backend input");
+    const client_datagram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        10,
+        &server_dcid,
+        &client_dcid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = Backend{ .outbound = "routed backend response" };
+    var scratch: [96]u8 = undefined;
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
+            server_connection_id + 1,
+            &server,
+            .handshake,
+            server_receive_path,
+            11,
+            secrets.client,
+            client_datagram,
+            backend.backend(),
+            &scratch,
+            &client_dcid,
+            &server_dcid,
+            &[_]u8{},
+            secrets.server,
+            &drained,
+        ),
+    );
+    try std.testing.expect(!backend.sent);
+    try std.testing.expectEqual(@as(usize, 0), backend.received_len);
+
+    const result = try lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
+        server_connection_id,
+        &server,
+        .handshake,
+        server_receive_path,
+        11,
+        secrets.client,
+        client_datagram,
+        backend.backend(),
+        &scratch,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        secrets.server,
+        &drained,
+    );
+    defer for (drained[0..result.backend.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, result.route.destination_connection_id.asSlice());
+    try std.testing.expectEqualStrings("routed backend input", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "routed backend input".len), result.backend.backend.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "routed backend response".len), result.backend.backend.outbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.backend.drain.first_error);
+    try std.testing.expectEqual(server_connection_id, drained[0].connection_id);
+
+    try client.processProtectedLongDatagramInSpace(.handshake, 12, secrets.server, drained[0].datagram);
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("routed backend response", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle routed long backend OrClose stops before drain" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+        received: [64]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x16, 0x26, 0x36, 0x46 };
+    const server_dcid = [_]u8{ 0xa6, 0xb6, 0xc6, 0xd6 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_016);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const server_connection_id: u64 = 75;
+    try lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendCryptoInSpace(.handshake, "routed bad backend input");
+    const client_datagram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        10,
+        &server_dcid,
+        &client_dcid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = BadBackend{};
+    var scratch: [96]u8 = undefined;
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams(
+            server_connection_id,
+            &server,
+            .handshake,
+            server_receive_path,
+            11,
+            secrets.client,
+            client_datagram,
+            backend.backend(),
+            &scratch,
+            &client_dcid,
+            &server_dcid,
+            &[_]u8{},
+            secrets.server,
+            &drained,
+        ),
+    );
+    try std.testing.expectEqualStrings("routed bad backend input", backend.received[0..backend.received_len]);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+
+    const close_packet = (try lifecycle.pollProtectedLongDatagram(
+        server_connection_id,
+        &server,
+        12,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        .{ .handshake = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(13, .{ .handshake = secrets.server }, close_packet));
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    switch (client.peerClose() orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "EndpointConnectionLifecycle refreshes caller-keyed zero RTT timer lifecycle" {

@@ -125,6 +125,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams`、
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`、
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`、
+`processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`、
@@ -205,6 +207,8 @@ backend-drive-to-caller-keyed long-header drain step、
 close-propagating backend-drive-to-caller-keyed long-header drain step、
 caller-keyed receive-to-backend-to-bounded-drain loop step、
 caller-keyed receive-to-backend-close-to-bounded-drain loop step、
+routed caller-keyed receive-to-backend-to-bounded-drain loop step、
+routed caller-keyed receive-to-backend-close-to-bounded-drain loop step、
 installed-key Handshake receive-to-backend-to-bounded-drain loop step、
 close-propagating installed-key Handshake backend-drain loop step、
 single-connection installed-key receive-to-backend-to-output loop step、
@@ -284,6 +288,13 @@ close 和 route cleanup 事件。
   CRYPTO datagram 会先完成处理再交付 backend，backend peer transport-parameter 错误会在
   output pull 或 drain 前停止，并让 peer 收到 protected Handshake
   `TRANSPORT_PARAMETER_ERROR` close。
+- 2026-06-17：新增
+  `EndpointConnectionLifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams()`
+  及其 `OrClose` 变体，作为 routed caller-keyed long-header
+  receive-to-backend-to-bounded-drain 核心 step。单元测试证明 route selection
+  发生在 packet processing 前，connection-id mismatch 会在 backend delivery 前停止，
+  成功 routed Handshake CRYPTO 会产出 protected response，backend peer
+  transport-parameter 错误会在 output drain 前停止并留下 protected Handshake close 给 peer。
 - 2026-06-05：把当前 C TLS 示例边界迁移到 Zig 0.16 的 `addTranslateC`
   构建路径。C ABI 声明现在放在小 header 中，Zig 示例通过 `@import("c")`
   引入；当前示例中的手写 `extern fn` / `extern struct` 已移除。
