@@ -249,8 +249,10 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`、
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`、
@@ -500,6 +502,15 @@ close 和 route cleanup 事件。
   backend 会应用 peer Version Information 并立即进入 installed-key output poll；
   OrClose 变体在 compatible-version 校验失败时会排队 close，并停在 backend output pull
   与 installed-key output poll 之前。
+- 2026-06-18：新增 direct installed-key 1-RTT short
+  receive-to-compatible-backend-to-output bounded-drain 形态：
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`
+  和
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`。
+  单元测试证明 Application-space CRYPTO 经 installed-key short receive 后，compatible
+  backend 会应用 peer Version Information，并在同一步进入 caller-bounded installed-key
+  output drain；OrClose 变体在 compatible-version 校验失败时会排队 close，并停在
+  backend output pull 与 bounded drain 之前。
 - 2026-06-18：新增 `EndpointFeedCryptoBackendDriveNextDeadlineResult`、
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`、
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`、

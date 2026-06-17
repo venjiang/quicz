@@ -394,8 +394,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
@@ -538,6 +540,17 @@ QUIC unless the gap is named and the verification evidence is added here.
   compatible backend, and the same step immediately polls installed-key output;
   the OrClose variant queues close and stops before backend output pull or
   installed-key output polling when compatible-version validation fails.
+- 2026-06-18: Added the direct installed-key 1-RTT short
+  receive-to-compatible-backend-to-output bounded-drain forms
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`
+  and
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`.
+  Unit coverage proves Application-space CRYPTO is received through the
+  installed-key short path, peer Version Information is applied by the
+  compatible backend, and the same step drains installed-key output into the
+  caller-provided bounded output slice; the OrClose variant queues close and
+  stops before backend output pull or bounded draining when compatible-version
+  validation fails.
 - 2026-06-18: Added
   `EndpointFeedCryptoBackendDriveNextDeadlineResult`,
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`,
