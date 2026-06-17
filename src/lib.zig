@@ -9960,6 +9960,115 @@ pub const EndpointConnectionLifecycle = struct {
         return route;
     }
 
+    /// Process caller-keyed 1-RTT input and select the next wakeup.
+    ///
+    /// This is the no-output socket-loop step for received 1-RTT short
+    /// packets when packet-protection keys remain caller-owned. The endpoint
+    /// lifecycle refreshes recovery state after receive and returns the next
+    /// endpoint-visible deadline without polling ACK, STREAM, close, or PTO
+    /// output.
+    pub fn processProtectedShortDatagramAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!?EndpointConnectionDeadline {
+        try self.processProtectedShortDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            receive_keys,
+            dcid_len,
+            datagram,
+        );
+        return self.nextDeadline(connection_id, connection);
+    }
+
+    /// Process caller-keyed 1-RTT input with close propagation and select a wakeup.
+    ///
+    /// Authenticated Application plaintext errors queue CONNECTION_CLOSE and
+    /// return before ordinary wakeup selection.
+    pub fn processProtectedShortDatagramOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+    ) Error!?EndpointConnectionDeadline {
+        try self.processProtectedShortDatagramOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            receive_keys,
+            dcid_len,
+            datagram,
+        );
+        return self.nextDeadline(connection_id, connection);
+    }
+
+    /// Route caller-keyed 1-RTT input and select the next wakeup.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    /// On success, the routed destination CID length is used to open the short
+    /// packet, and output remains queued for a later caller-keyed poll/drain.
+    pub fn processRoutedProtectedShortDatagramAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!EndpointRoutedNextDeadlineResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .next_deadline = try self.processProtectedShortDatagramAndSelectNextDeadline(
+                connection_id,
+                connection,
+                now_millis,
+                receive_keys,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+            ),
+        };
+    }
+
+    /// Route caller-keyed 1-RTT input through close propagation and select a wakeup.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    /// Authenticated Application plaintext errors queue CONNECTION_CLOSE and
+    /// return before ordinary wakeup selection.
+    pub fn processRoutedProtectedShortDatagramOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!EndpointRoutedNextDeadlineResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .next_deadline = try self.processProtectedShortDatagramOrCloseAndSelectNextDeadline(
+                connection_id,
+                connection,
+                now_millis,
+                receive_keys,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+            ),
+        };
+    }
+
     /// Process caller-keyed 1-RTT input, then poll one caller-keyed output.
     ///
     /// This is the one-output socket-loop step for received 1-RTT short
@@ -47892,6 +48001,77 @@ test "EndpointConnectionLifecycle routes caller-keyed short receive and polls AC
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
 }
 
+test "EndpointConnectionLifecycle caller-keyed short receive selects deadline without polling output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x16, 0x26, 0x36, 0x46 };
+    const server_dcid = [_]u8{ 0xa6, 0xb6, 0xc6, 0xd6 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    try client.sendPing();
+    const ping = (try client_lifecycle.pollProtectedShortDatagram(
+        16,
+        &client,
+        10,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping);
+
+    const next = (try server_lifecycle.processProtectedShortDatagramAndSelectNextDeadline(
+        26,
+        &server,
+        11,
+        secrets.client,
+        server_dcid.len,
+        ping,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 26), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
+    try std.testing.expectEqual(server.idleTimeoutDeadlineMillis().?, next.deadline_millis);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    const ack = (try server_lifecycle.pollProtectedShortDatagram(
+        26,
+        &server,
+        12,
+        &client_dcid,
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    try client_lifecycle.processProtectedShortDatagram(
+        16,
+        &client,
+        13,
+        secrets.server,
+        client_dcid.len,
+        ack,
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
 test "EndpointConnectionLifecycle caller-keyed short OrClose receive stops before poll" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x13, 0x23, 0x33, 0x43 };
@@ -48040,6 +48220,111 @@ test "EndpointConnectionLifecycle routes caller-keyed short receive and drains A
         12,
         secrets.server,
         out[0].datagram,
+    );
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
+test "EndpointConnectionLifecycle routes caller-keyed short receive and selects deadline" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x17, 0x27, 0x37, 0x47 };
+    const server_dcid = [_]u8{ 0xa7, 0xb7, 0xc7, 0xd7 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_017);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 17;
+    const server_connection_id: u64 = 27;
+
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendPing();
+    const ping = (try client_lifecycle.pollProtectedShortDatagram(
+        client_connection_id,
+        &client,
+        10,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping);
+
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramAndSelectNextDeadline(
+        client_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        secrets.client,
+        ping,
+    ));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(?i64, null), server.idleTimeoutDeadlineMillis());
+
+    const result = try server_lifecycle.processRoutedProtectedShortDatagramAndSelectNextDeadline(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        secrets.client,
+        ping,
+    );
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, result.route.destination_connection_id.asSlice());
+    const next = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    const ack = (try server_lifecycle.pollProtectedShortDatagram(
+        server_connection_id,
+        &server,
+        12,
+        &client_dcid,
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    const client_route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        client_connection_id,
+        &client,
+        client_receive_path,
+        13,
+        secrets.server,
+        ack,
     );
     try std.testing.expectEqual(client_connection_id, client_route.connection_id);
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));

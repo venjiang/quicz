@@ -343,6 +343,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramOrCloseAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramOrCloseAndDrainDatagrams`,
+`processProtectedShortDatagramAndSelectNextDeadline`,
+`processProtectedShortDatagramOrCloseAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramOrCloseAndSelectNextDeadline`,
 `processProtectedShortDatagramWithKeyUpdateAndPollDatagram`,
 `processProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram`,
 `processRoutedProtectedShortDatagramWithKeyUpdateAndPollDatagram`,
@@ -391,6 +395,7 @@ cross-connection pending-work-to-bounded-drain loop steps,
 cross-connection due-deadline-to-next-deadline loop steps,
 receive-to-output loop steps,
 receive-to-bounded-drain loop steps,
+caller-keyed 1-RTT receive-to-next-deadline loop steps,
 receive-to-backend-to-output loop steps,
 receive-to-backend-to-bounded-drain loop steps, cross-connection TLS backend drive, backend-drive-to-datagram output steps,
 backend-drive-to-next-deadline loop steps,
@@ -622,6 +627,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   before packet processing, successful routed caller-keyed PING receive polls
   and drains Application-space ACK output, and close-propagating authenticated
   Application frame errors stop before ordinary output polling or draining.
+- 2026-06-18: Added caller-keyed 1-RTT short
+  receive-to-next-deadline no-output steps:
+  `EndpointConnectionLifecycle.processProtectedShortDatagramAndSelectNextDeadline()`,
+  its `OrClose` variant, and the routed
+  `processRoutedProtectedShortDatagramAndSelectNextDeadline()` pair. Unit
+  coverage proves successful caller-keyed PING receive refreshes the idle
+  deadline while preserving ACK output for later caller-keyed short-packet
+  polling, and the routed form rejects connection-handle mismatches before
+  packet processing.
 - 2026-06-18: Added caller-keyed and installed-key 0-RTT
   receive-to-short-output drain steps:
   `EndpointConnectionLifecycle.processProtectedZeroRttDatagramAndDrainShortDatagrams()`,

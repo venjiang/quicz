@@ -198,6 +198,10 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedShortDatagramOrCloseAndDrainDatagrams`、
 `processRoutedProtectedShortDatagramAndDrainDatagrams`、
 `processRoutedProtectedShortDatagramOrCloseAndDrainDatagrams`、
+`processProtectedShortDatagramAndSelectNextDeadline`、
+`processProtectedShortDatagramOrCloseAndSelectNextDeadline`、
+`processRoutedProtectedShortDatagramAndSelectNextDeadline`、
+`processRoutedProtectedShortDatagramOrCloseAndSelectNextDeadline`、
 `processProtectedShortDatagramWithKeyUpdateAndPollDatagram`、
 `processProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram`、
 `processRoutedProtectedShortDatagramWithKeyUpdateAndPollDatagram`、
@@ -573,6 +577,14 @@ close 和 route cleanup 事件。
   mismatch，成功 routed caller-keyed PING receive 会 poll 和 drain
   Application-space ACK output，close-propagating 的认证后 Application frame 错误
   会在普通 output polling 或 draining 前停止。
+- 2026-06-18：新增 caller-keyed 1-RTT short
+  receive-to-next-deadline no-output step：
+  `EndpointConnectionLifecycle.processProtectedShortDatagramAndSelectNextDeadline()`、
+  其 `OrClose` 变体，以及 routed
+  `processRoutedProtectedShortDatagramAndSelectNextDeadline()`。
+  单元测试证明 successful caller-keyed PING receive 会刷新 idle deadline、保留 ACK
+  输出供后续 caller-keyed short-packet poll；routed 变体会在 packet processing
+  前拦截 connection handle mismatch。
 - 2026-06-18：新增 caller-keyed 和 installed-key 0-RTT
   receive-to-short-output drain step：
   `EndpointConnectionLifecycle.processProtectedZeroRttDatagramAndDrainShortDatagrams()`、
