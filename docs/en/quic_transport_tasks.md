@@ -197,6 +197,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
 `processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
@@ -1155,6 +1157,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   single-connection no-output pending-work-to-next-deadline planning step. Unit
   coverage proves an early recovery deadline is preserved and a due recovery
   deadline is serviced before the next recovery wakeup is selected.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions()`.
+  These carry explicit installed-key output through pending-work plus
+  close-propagating RFC 9368-compatible backend ticks. Unit coverage proves due
+  accepted 0-RTT recovery work is serviced, compatible Version Information is
+  applied, and caller-selected 0-RTT output is emitted through poll and bounded
+  drain forms while preserving stop-before-output error behavior.
 - 2026-06-10: Added `EndpointPendingWorkCryptoBackendDatagramResult` and
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram()`
   for no-new-datagram loop ticks. The helper applies idle/close/recovery

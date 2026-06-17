@@ -259,6 +259,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
 `processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
@@ -1017,6 +1019,13 @@ close 和 route cleanup 事件。
   可以在不接管 connection storage 的前提下，跨调用方持有的连接集合执行 idle timeout、
   close/drain timeout 和 recovery timer work。单元测试证明同一轮 sweep 可以退休一条 idle
   connection，并 service 另一条连接的到期 recovery timer，同时保留后者为 active。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions()` 和
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions()`。
+  这两个入口把显式 installed-key 输出贯通到 pending-work 加 close-propagating
+  RFC 9368-compatible backend tick。单元测试证明到期 accepted 0-RTT recovery work
+  会被 service、compatible Version Information 会被应用，并通过 poll 和 bounded-drain
+  形态发出调用方选择的 0-RTT 输出，同时保留出错时停止在输出前的语义。
 - 2026-06-10：新增 `EndpointPendingWorkCryptoBackendDatagramResult` 和
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram()`，
   服务于没有新入站 datagram 的 loop tick。该 helper 会先处理 idle/close/recovery
