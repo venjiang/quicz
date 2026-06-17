@@ -64,6 +64,8 @@ datagram 选项契约，
 transport-parameter 值，
 `src/quic/connection_version.zig` 负责 version-list selection 和本地 RFC 9368
 version-information validation policy，
+`src/quic/packet_context.zig` 负责 packet-type context、调用方提供的 protected
+long-packet key bundle，以及建模的 ECN validation enum，
 `src/quic/tls_backend.zig` 负责 C-ABI TLS adapter，`lib.zig` 继续 re-export 稳定公共表面。
 
 从 `src/lib.zig` 迁出实现代码时，应保持公开 module root 稳定，并为需要被 `zig build test`

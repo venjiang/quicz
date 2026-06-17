@@ -75,6 +75,8 @@ fixed-storage transport-parameter values that do not need access to the
 connection state machine,
 `src/quic/connection_version.zig` owns version-list selection and local
 RFC 9368 version-information validation policy,
+`src/quic/packet_context.zig` owns packet-type context, caller-supplied
+protected long-packet key bundles, and modeled ECN validation enums,
 and `src/quic/tls_backend.zig` owns the C-ABI TLS adapter while `lib.zig`
 re-exports the stable public surface.
 
