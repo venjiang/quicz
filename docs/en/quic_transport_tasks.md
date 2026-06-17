@@ -910,6 +910,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   across two accepted 0-RTT connections, before-deadline no-op behavior, and
   protected 0-RTT `RESET_STREAM` poll/drain output without mutating the later
   connection.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.pollDatagramAcrossConnectionsWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.drainDatagramsAcrossConnectionsWithInstalledKeyOptions()`.
+  These are the reusable caller-owned-map output helpers for explicit
+  installed-key poll options. Unit coverage proves cross-connection selection
+  and bounded draining preserve caller-selected 0-RTT packetization while
+  leaving default `pollDatagramAcrossConnections()` and
+  `drainDatagramsAcrossConnections()` behavior unchanged.
 - 2026-06-11: Updated the single-connection due-deadline-to-backend poll and
   bounded-drain wrappers to preserve explicit installed-key recovery output
   choices. Initial recovery still services pending work without emitting an

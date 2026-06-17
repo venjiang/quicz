@@ -813,6 +813,13 @@ close 和 route cleanup 事件。
   这些是调用方持有 connection map 时的显式 installed-key due-deadline wakeup 形态。单元测试证明
   两个 accepted 0-RTT connection 之间会保持 earliest-deadline selection，deadline 前无副作用，
   到期后可以 poll 或 drain protected 0-RTT `RESET_STREAM` 输出，且较晚 deadline 的连接不被修改。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.pollDatagramAcrossConnectionsWithInstalledKeyOptions()` 和
+  `EndpointConnectionLifecycle.drainDatagramsAcrossConnectionsWithInstalledKeyOptions()`。
+  这两个入口是调用方持有 connection map 时的可复用显式 installed-key 输出 helper。
+  单元测试证明跨连接选择和 bounded drain 会保留调用方选择的 0-RTT packetization，
+  且不改变默认 `pollDatagramAcrossConnections()` 和
+  `drainDatagramsAcrossConnections()` 行为。
 - 2026-06-11：更新 single-connection due-deadline-to-backend poll 和 bounded-drain
   wrapper，让它们保留显式 installed-key recovery output 选择。Initial recovery 仍只服务
   pending work、不发 installed-key datagram，并可继续进入 backend drive；Handshake 和

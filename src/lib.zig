@@ -11255,6 +11255,33 @@ pub const EndpointConnectionLifecycle = struct {
         return null;
     }
 
+    /// Poll the first installed-key datagram using per-connection options.
+    ///
+    /// This form lets caller-owned connection maps preserve non-default output
+    /// choices such as accepted 0-RTT long-header packetization while still
+    /// using lifecycle-owned recovery timer mirroring.
+    pub fn pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+    ) Error!?EndpointPolledDatagramResult {
+        for (connections) |view| {
+            const datagram = try self.pollDatagram(
+                view.connection_id,
+                view.connection,
+                now_millis,
+                view.poll_options,
+            );
+            if (datagram) |bytes| {
+                return .{
+                    .connection_id = view.connection_id,
+                    .datagram = bytes,
+                };
+            }
+        }
+        return null;
+    }
+
     /// Drain installed-key datagrams into caller-owned result slots.
     ///
     /// The output slice bounds work per socket-loop iteration and gives the
@@ -11275,6 +11302,31 @@ pub const EndpointConnectionLifecycle = struct {
                 connections,
                 now_millis,
                 space,
+            ) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = polled orelse return result;
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
+    /// Drain installed-key datagrams using per-connection output options.
+    ///
+    /// This is the bounded-output form of
+    /// `pollDatagramAcrossConnectionsWithInstalledKeyOptions()`.
+    pub fn drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointDatagramDrainResult {
+        var result = EndpointDatagramDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const polled = self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+                connections,
+                now_millis,
             ) catch |err| {
                 result.first_error = err;
                 return result;
@@ -37652,6 +37704,179 @@ test "EndpointConnectionLifecycle drains datagrams across caller-owned output sl
         &connections,
         12,
         .application,
+        &empty_batch,
+    );
+    try std.testing.expectEqual(@as(usize, 0), empty_result.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), empty_result.first_error);
+}
+
+test "EndpointConnectionLifecycle polls datagrams across explicit installed-key options" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const idle_client_dcid = [_]u8{ 0x92, 0x10, 0x20, 0x30 };
+    const idle_server_dcid = [_]u8{ 0xa9, 0x10, 0x20, 0x30 };
+    const ready_client_dcid = [_]u8{ 0x92, 0x11, 0x21, 0x31 };
+    const ready_server_dcid = [_]u8{ 0xa9, 0x11, 0x21, 0x31 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var idle = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer idle.deinit();
+    try idle.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try idle.confirmHandshake();
+
+    var ready = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer ready.deinit();
+    try ready.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try ready.confirmHandshake();
+    const stream_id = try ready.openStream();
+    try ready.sendOnStream(stream_id, "bye", false);
+    try ready.resetStream(stream_id, 61);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 61,
+        .final_size = 3,
+    };
+
+    const connections = [_]EndpointConnectionInstalledKeyPollView{
+        .{
+            .connection_id = 121,
+            .connection = &idle,
+            .poll_options = .{
+                .space = .zero_rtt,
+                .destination_connection_id = &idle_server_dcid,
+                .source_connection_id = &idle_client_dcid,
+            },
+        },
+        .{
+            .connection_id = 122,
+            .connection = &ready,
+            .poll_options = .{
+                .space = .zero_rtt,
+                .destination_connection_id = &ready_server_dcid,
+                .source_connection_id = &ready_client_dcid,
+            },
+        },
+    };
+
+    const polled = (try lifecycle.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+        &connections,
+        10,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 122), polled.connection_id);
+    try std.testing.expectEqual(@as(usize, 0), idle.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), ready.sentPacketCount(.application));
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        polled.datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
+
+    const none = try lifecycle.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+        &connections,
+        11,
+    );
+    try std.testing.expect(none == null);
+}
+
+test "EndpointConnectionLifecycle drains datagrams across explicit installed-key options" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const first_client_dcid = [_]u8{ 0x93, 0x10, 0x20, 0x30 };
+    const first_server_dcid = [_]u8{ 0xa8, 0x10, 0x20, 0x30 };
+    const second_client_dcid = [_]u8{ 0x93, 0x11, 0x21, 0x31 };
+    const second_server_dcid = [_]u8{ 0xa8, 0x11, 0x21, 0x31 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var first = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer first.deinit();
+    try first.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try first.confirmHandshake();
+    const first_stream_id = try first.openStream();
+    try first.sendOnStream(first_stream_id, "bye", false);
+    try first.resetStream(first_stream_id, 62);
+    const first_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = first_stream_id,
+        .application_error_code = 62,
+        .final_size = 3,
+    };
+
+    var second = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer second.deinit();
+    try second.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try second.confirmHandshake();
+    const second_stream_id = try second.openStream();
+    try second.sendOnStream(second_stream_id, "bye", false);
+    try second.resetStream(second_stream_id, 63);
+    const second_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = second_stream_id,
+        .application_error_code = 63,
+        .final_size = 3,
+    };
+
+    const connections = [_]EndpointConnectionInstalledKeyPollView{
+        .{
+            .connection_id = 123,
+            .connection = &first,
+            .poll_options = .{
+                .space = .zero_rtt,
+                .destination_connection_id = &first_server_dcid,
+                .source_connection_id = &first_client_dcid,
+            },
+        },
+        .{
+            .connection_id = 124,
+            .connection = &second,
+            .poll_options = .{
+                .space = .zero_rtt,
+                .destination_connection_id = &second_server_dcid,
+                .source_connection_id = &second_client_dcid,
+            },
+        },
+    };
+
+    var batch: [2]EndpointPolledDatagramResult = undefined;
+    const result = lifecycle.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+        &connections,
+        10,
+        &batch,
+    );
+    try std.testing.expectEqual(@as(usize, 2), result.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.first_error);
+    defer std.testing.allocator.free(batch[0].datagram);
+    defer std.testing.allocator.free(batch[1].datagram);
+    try std.testing.expectEqual(@as(u64, 123), batch[0].connection_id);
+    try std.testing.expectEqual(@as(u64, 124), batch[1].connection_id);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        batch[0].datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = first_reset_frame },
+    ));
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        batch[1].datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = second_reset_frame },
+    ));
+
+    var empty_batch: [1]EndpointPolledDatagramResult = undefined;
+    const empty_result = lifecycle.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+        &connections,
+        11,
         &empty_batch,
     );
     try std.testing.expectEqual(@as(usize, 0), empty_result.datagrams_written);
