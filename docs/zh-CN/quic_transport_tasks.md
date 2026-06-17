@@ -162,6 +162,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
@@ -597,6 +598,11 @@ close 和 route cleanup 事件。
   socket-loop step。单元测试证明 pending idle retirement 会先于 compatible Version
   Information application 执行，endpoint recovery scheduling 会被刷新，并在不 poll output
   的情况下选出对应 recovery deadline。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`，
+  作为 single-connection RFC 9368 compatible-version no-output pending-work/backend/deadline
+  step。单元测试证明 due recovery work 后会应用 compatible Version Information，
+  且同一 connection idle retirement 会在 backend progress 前停止。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`，
   作为 close-propagating RFC 9368 compatible-version no-output
