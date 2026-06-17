@@ -21322,6 +21322,7 @@ pub const Connection = struct {
         peer_transport_parameter_policy: PeerTransportParameterDrivePolicy,
     ) Error!CryptoBackendProgress {
         if (scratch.len == 0) return error.BufferTooSmall;
+        if (self.packetNumberSpace(space).discarded.*) return error.InvalidPacket;
 
         var progress = CryptoBackendProgress{};
 
@@ -26802,6 +26803,50 @@ test "driveCryptoBackendInSpace requires scratch buffer before consuming crypto"
     var read_buf: [8]u8 = undefined;
     const n = (try conn.recvCryptoInSpace(.handshake, &read_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("client", read_buf[0..n]);
+}
+
+test "driveCryptoBackendInSpace rejects discarded space before backend callbacks" {
+    const TrackingBackend = struct {
+        set_local_count: usize = 0,
+        receive_count: usize = 0,
+        pull_count: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .set_local_transport_parameters = setLocalTransportParameters,
+            };
+        }
+
+        fn setLocalTransportParameters(context: *anyopaque, _: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.set_local_count += 1;
+        }
+
+        fn receive(context: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.receive_count += 1;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pull_count += 1;
+            return null;
+        }
+    };
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+    try conn.discardPacketNumberSpace(.handshake);
+
+    var backend = TrackingBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(error.InvalidPacket, conn.driveCryptoBackendInSpace(.handshake, backend.backend(), &scratch));
+    try std.testing.expectEqual(@as(usize, 0), backend.set_local_count);
+    try std.testing.expectEqual(@as(usize, 0), backend.receive_count);
+    try std.testing.expectEqual(@as(usize, 0), backend.pull_count);
 }
 
 test "driveCryptoBackendInSpace preserves crypto input when backend receive fails" {

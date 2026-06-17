@@ -1303,6 +1303,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   locks down the low-bit stream-ID encoding, offset overflow rejection, and
   invalid-range overlap behavior before the stateful stream send/receive
   machines are migrated.
+- 2026-06-18: Tightened `driveCryptoBackendInSpace()` failure semantics for
+  discarded packet number spaces. The drive now rejects a discarded space before
+  calling backend callbacks such as local transport-parameter setup, inbound
+  CRYPTO delivery, or outbound CRYPTO pull. Unit coverage proves the rejected
+  path leaves backend callback counters untouched.
 - 2026-06-18: Split QUIC wire-length budgeting helpers into
   `src/quic/wire_len.zig` while keeping internal compatibility aliases in
   `src/lib.zig`. The new module owns varint length, protected long/short
