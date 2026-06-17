@@ -392,6 +392,14 @@ pub const EndpointFeedInstalledKeyDatagramResult = union(enum) {
     dropped,
 };
 
+/// Result from feeding one installed-key datagram, then draining output.
+pub const EndpointFeedInstalledKeyDatagramDrainResult = struct {
+    /// Receive classification and processing result.
+    feed: EndpointFeedInstalledKeyDatagramResult,
+    /// Bounded output drain when `feed` routed to a connection.
+    drain: ?EndpointDatagramDrainResult = null,
+};
+
 /// Result from feeding one installed-key datagram, then driving backend output.
 pub const EndpointFeedCryptoBackendDriveDatagramResult = struct {
     /// Receive classification and processing result.
