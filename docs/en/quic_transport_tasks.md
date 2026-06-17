@@ -381,6 +381,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`,
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
@@ -500,6 +502,18 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-18: Added the direct installed-key 1-RTT short
+  receive-to-compatible-backend no-output forms
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`
+  and
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`.
+  Unit coverage proves Application-space CRYPTO is authenticated and received
+  through the installed-key short-packet path before the compatible-version
+  backend applies peer Version Information, reports the selected compatible
+  version, and leaves backend output queued for a later installed-key output
+  path; the OrClose variant queues CONNECTION_CLOSE and stops before deadline
+  selection or backend output pull when peer Version Information cannot match
+  the configured compatibility set.
 - 2026-06-18: Added
   `EndpointFeedCryptoBackendDriveNextDeadlineResult`,
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`,
