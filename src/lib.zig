@@ -16,6 +16,7 @@ const connection_config = @import("quic/connection_config.zig");
 const connection_version = @import("quic/connection_version.zig");
 const connection_state = @import("quic/connection_state.zig");
 const packet_number_space = @import("quic/packet_number_space.zig");
+const stream_id_rules = @import("quic/stream_id.zig");
 const packet_context = @import("quic/packet_context.zig");
 const protocol_limits = @import("quic/protocol_limits.zig");
 const buffer = @import("quic/buffer.zig");
@@ -138,6 +139,7 @@ test {
     _ = connection_version;
     _ = connection_state;
     _ = packet_number_space;
+    _ = stream_id_rules;
     _ = wire_len;
     _ = frame_rules;
 }
@@ -212,6 +214,13 @@ const defaultFramePacketTypeForSpace = frame_rules.defaultFramePacketTypeForSpac
 const packetNumberSpaceForFramePacketType = frame_rules.packetNumberSpaceForFramePacketType;
 const frameAllowedInFramePacketType = frame_rules.frameAllowedInFramePacketType;
 const zeroEcnCounts = packet_number_space.zeroEcnCounts;
+const streamEndOffset = stream_id_rules.endOffset;
+const streamRangesOverlap = stream_id_rules.rangesOverlap;
+const isBidirectionalStream = stream_id_rules.isBidirectional;
+const isLocalStreamInitiator = stream_id_rules.isLocalInitiator;
+const isLocalBidirectionalStream = stream_id_rules.isLocalBidirectional;
+const isLocalUnidirectionalStream = stream_id_rules.isLocalUnidirectional;
+const streamCountForId = stream_id_rules.countForId;
 
 const PeerTransportParameterValidationError = Error || error{
     VersionNegotiationError,
@@ -14359,19 +14368,6 @@ fn deinitPeerClose(close: *PeerClose, allocator: std.mem.Allocator) void {
     }
 }
 
-fn streamEndOffset(offset: u64, data_len: usize) ?u64 {
-    const len = std.math.cast(u64, data_len) orelse return null;
-    const end = std.math.add(u64, offset, len) catch return null;
-    if (end > max_quic_varint) return null;
-    return end;
-}
-
-fn streamRangesOverlap(a_offset: u64, a_len: usize, b_offset: u64, b_len: usize) bool {
-    const a_end = streamEndOffset(a_offset, a_len) orelse return true;
-    const b_end = streamEndOffset(b_offset, b_len) orelse return true;
-    return a_offset < b_end and b_offset < a_end;
-}
-
 fn elapsedMillis(sent_time_millis: i64, now_millis: i64) u64 {
     if (now_millis <= sent_time_millis) return 0;
     const delta = std.math.sub(i64, now_millis, sent_time_millis) catch return std.math.maxInt(u64);
@@ -14490,27 +14486,6 @@ fn protectedLongPacketRouteFor(
         } else null,
         .retry => null,
     };
-}
-
-fn isBidirectionalStream(stream_id: u64) bool {
-    return (stream_id & 0x02) == 0;
-}
-
-fn isLocalStreamInitiator(side: ConnectionSide, stream_id: u64) bool {
-    const initiator: ConnectionSide = if ((stream_id & 0x01) == 0) .client else .server;
-    return initiator == side;
-}
-
-fn isLocalBidirectionalStream(side: ConnectionSide, stream_id: u64) bool {
-    return isBidirectionalStream(stream_id) and isLocalStreamInitiator(side, stream_id);
-}
-
-fn isLocalUnidirectionalStream(side: ConnectionSide, stream_id: u64) bool {
-    return !isBidirectionalStream(stream_id) and isLocalStreamInitiator(side, stream_id);
-}
-
-fn streamCountForId(stream_id: u64) u64 {
-    return stream_id / 4 + 1;
 }
 
 const SendStreamState = struct {

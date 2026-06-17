@@ -72,6 +72,8 @@ long-packet key bundle，以及建模的 ECN validation enum，
 `src/quic/packet_number_space.zig` 负责每个 packet number space 的包号、ACK、recovery、
 CRYPTO buffer、sent-packet、PTO probe、congestion probe 和 ECN validation 存储，以及
 connection logic 使用的借用字段 view，
+`src/quic/stream_id.zig` 负责 stream ID 方向/发起方分类、stream count 推导，以及
+QUIC varint stream offset/range helper，
 `src/quic/frame_rules.zig` 负责 ACK range 判断、ACK packet-number membership、
 ack-eliciting 分类和 RFC 9000 packet-type/frame 许可规则，
 `src/quic/protocol_limits.zig` 负责共享的 QUIC 标量限制，例如 varint、stream-count、

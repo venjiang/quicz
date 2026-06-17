@@ -84,6 +84,8 @@ protected long-packet key bundles, and modeled ECN validation enums,
 `src/quic/packet_number_space.zig` owns per-space packet number, ACK, recovery,
 CRYPTO buffering, sent-packet, PTO-probe, congestion-probe, and ECN validation
 storage plus borrowed field views used by connection logic,
+`src/quic/stream_id.zig` owns stream-ID direction/initiator classification,
+stream-count derivation, and QUIC-varint stream offset/range helpers,
 `src/quic/frame_rules.zig` owns ACK range validation, ACK packet-number
 membership, ack-eliciting classification, and RFC 9000 packet-type/frame
 admission rules,

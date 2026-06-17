@@ -1147,6 +1147,10 @@ close 和 route cleanup 事件。
   和内部兼容别名。新模块负责每个 space 的 packet-number、ACK、recovery、CRYPTO
   buffer、sent-packet、PTO probe、congestion probe 和 ECN validation state，以及借用字段
   view。验证保持 899 个测试通过，并保留现有公开 `@import("quicz")` 表面。
+- 2026-06-18：把 stream ID 方向、发起方、stream count，以及 QUIC varint stream
+  offset/range helper 拆到 `src/quic/stream_id.zig`，同时保持 `src/lib.zig` 内部兼容
+  别名。聚焦单元测试固定低位 stream ID 编码、offset 溢出拒绝和非法 range 视为 overlap 的
+  行为，后续再迁移有状态 stream send/receive state machine。
 - 2026-06-18：把 QUIC wire-length 预算 helper 拆到 `src/quic/wire_len.zig`，
   同时保持 `src/lib.zig` 的内部兼容别名。新模块负责 varint 长度、protected
   long/short datagram 长度、ACK/CRYPTO/STREAM/control frame 长度和 bounded frame data

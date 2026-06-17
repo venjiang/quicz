@@ -1297,6 +1297,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   PTO-probe, congestion-probe, and ECN validation state plus borrowed field
   views. Validation keeps the 899-test suite green and preserves the existing
   public `@import("quicz")` surface.
+- 2026-06-18: Split stream-ID direction, initiator, stream-count, and
+  QUIC-varint stream offset/range helpers into `src/quic/stream_id.zig` while
+  keeping `src/lib.zig` internal compatibility aliases. Focused unit coverage
+  locks down the low-bit stream-ID encoding, offset overflow rejection, and
+  invalid-range overlap behavior before the stateful stream send/receive
+  machines are migrated.
 - 2026-06-18: Split QUIC wire-length budgeting helpers into
   `src/quic/wire_len.zig` while keeping internal compatibility aliases in
   `src/lib.zig`. The new module owns varint length, protected long/short
