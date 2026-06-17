@@ -167,6 +167,14 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedShortDatagramOrCloseAndDrainDatagrams`、
 `processRoutedProtectedShortDatagramAndDrainDatagrams`、
 `processRoutedProtectedShortDatagramOrCloseAndDrainDatagrams`、
+`processProtectedShortDatagramWithKeyUpdateAndPollDatagram`、
+`processProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram`、
+`processRoutedProtectedShortDatagramWithKeyUpdateAndPollDatagram`、
+`processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram`、
+`processProtectedShortDatagramWithKeyUpdateAndDrainDatagrams`、
+`processProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams`、
+`processRoutedProtectedShortDatagramWithKeyUpdateAndDrainDatagrams`、
+`processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndDrainDatagrams`、
@@ -277,6 +285,8 @@ cross-connection due-deadline-to-next-deadline loop step、receive-to-backend-to
 loop step、receive-to-output loop step、receive-to-bounded-drain loop step、跨连接 TLS backend drive、
 backend-drive-to-next-deadline loop step、
 backend-drive-to-datagram output step、backend-drive-to-bounded-drain output step、
+explicit key-update 1-RTT receive-to-output loop step、
+explicit key-update 1-RTT receive-to-bounded-drain loop step、
 backend-drive-to-caller-keyed long-header drain step、
 close-propagating backend-drive-to-caller-keyed long-header drain step、
 caller-keyed receive-to-backend-to-bounded-drain loop step、
@@ -351,6 +361,20 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-18：新增 explicit key-update 1-RTT short
+  receive-to-output poll 和 drain step：
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithKeyUpdateAndPollDatagram()`、
+  `processProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram()`、
+  `processRoutedProtectedShortDatagramWithKeyUpdateAndPollDatagram()`、
+  `processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram()`、
+  `processProtectedShortDatagramWithKeyUpdateAndDrainDatagrams()`、
+  `processProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams()`、
+  `processRoutedProtectedShortDatagramWithKeyUpdateAndDrainDatagrams()` 和
+  `processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams()`。
+  单元测试证明 route selection 会在 packet processing 前拦截 connection handle
+  mismatch，成功 routed next-key-phase PING receive 会 poll 和 drain
+  Application-space ACK output，close-propagating 的认证后 Application frame 错误
+  会在普通 explicit-phase output polling 或 draining 前停止。
 - 2026-06-18：新增 caller-keyed 1-RTT short
   receive-to-output poll 和 drain step：
   `EndpointConnectionLifecycle.processProtectedShortDatagramAndPollDatagram()`、

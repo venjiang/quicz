@@ -281,6 +281,14 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramOrCloseAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramOrCloseAndDrainDatagrams`,
+`processProtectedShortDatagramWithKeyUpdateAndPollDatagram`,
+`processProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram`,
+`processRoutedProtectedShortDatagramWithKeyUpdateAndPollDatagram`,
+`processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram`,
+`processProtectedShortDatagramWithKeyUpdateAndDrainDatagrams`,
+`processProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams`,
+`processRoutedProtectedShortDatagramWithKeyUpdateAndDrainDatagrams`,
+`processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `nextDeadline`, and
@@ -300,6 +308,8 @@ receive-to-backend-to-output loop steps,
 receive-to-backend-to-bounded-drain loop steps, cross-connection TLS backend drive, backend-drive-to-datagram output steps,
 backend-drive-to-next-deadline loop steps,
 backend-drive-to-bounded-drain output steps,
+explicit key-update 1-RTT receive-to-output loop steps,
+explicit key-update 1-RTT receive-to-bounded-drain loop steps,
 backend-drive-to-caller-keyed long-header drain steps,
 close-propagating backend-drive-to-caller-keyed long-header drain steps,
 caller-keyed receive-to-backend-to-bounded-drain loop steps,
@@ -378,6 +388,22 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-18: Added explicit key-update 1-RTT short
+  receive-to-output poll and drain steps:
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithKeyUpdateAndPollDatagram()`,
+  `processProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram()`,
+  `processRoutedProtectedShortDatagramWithKeyUpdateAndPollDatagram()`,
+  `processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram()`,
+  `processProtectedShortDatagramWithKeyUpdateAndDrainDatagrams()`,
+  `processProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams()`,
+  `processRoutedProtectedShortDatagramWithKeyUpdateAndDrainDatagrams()`,
+  and
+  `processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams()`.
+  Unit coverage proves route selection stops mismatched connection handles
+  before packet processing, successful routed next-key-phase PING receive polls
+  and drains Application-space ACK output, and close-propagating authenticated
+  Application frame errors stop before ordinary explicit-phase output polling
+  or draining.
 - 2026-06-18: Added caller-keyed 1-RTT short
   receive-to-output poll and drain steps:
   `EndpointConnectionLifecycle.processProtectedShortDatagramAndPollDatagram()`,

@@ -8530,6 +8530,322 @@ pub const EndpointConnectionLifecycle = struct {
         return route;
     }
 
+    /// Process explicit key-update 1-RTT input, then poll one explicit-phase output.
+    ///
+    /// This is the one-output socket-loop step for callers that own current
+    /// and next packet-protection keys rather than a mutable key-phase state.
+    /// The receive side uses key-update selection; the output side uses the
+    /// caller-provided send keys and wire key-phase bit.
+    pub fn processProtectedShortDatagramWithKeyUpdateAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        receive_keys: protection.ShortPacketKeyUpdateKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+        dcid: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        send_key_phase: bool,
+    ) Error!?EndpointPolledDatagramResult {
+        try self.processProtectedShortDatagramWithKeyUpdate(
+            connection_id,
+            connection,
+            now_millis,
+            receive_keys,
+            dcid_len,
+            datagram,
+        );
+        const output = try self.pollProtectedShortDatagramWithKeyPhase(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+            send_keys,
+            send_key_phase,
+        );
+        return if (output) |bytes| .{
+            .connection_id = connection_id,
+            .datagram = bytes,
+        } else null;
+    }
+
+    /// Process explicit key-update 1-RTT input with close propagation, then poll output.
+    ///
+    /// Authenticated Application plaintext errors queue CONNECTION_CLOSE and
+    /// return before ordinary explicit-phase output polling.
+    pub fn processProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        receive_keys: protection.ShortPacketKeyUpdateKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+        dcid: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        send_key_phase: bool,
+    ) Error!?EndpointPolledDatagramResult {
+        try self.processProtectedShortDatagramWithKeyUpdateOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            receive_keys,
+            dcid_len,
+            datagram,
+        );
+        const output = try self.pollProtectedShortDatagramWithKeyPhase(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+            send_keys,
+            send_key_phase,
+        );
+        return if (output) |bytes| .{
+            .connection_id = connection_id,
+            .datagram = bytes,
+        } else null;
+    }
+
+    /// Route explicit key-update 1-RTT input, then poll one explicit-phase output.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    /// On success, the routed destination CID length is used to open the short
+    /// packet, then the selected connection is polled for one response such as
+    /// an ACK.
+    pub fn processRoutedProtectedShortDatagramWithKeyUpdateAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.ShortPacketKeyUpdateKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        send_key_phase: bool,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .datagram = try self.processProtectedShortDatagramWithKeyUpdateAndPollDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                receive_keys,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+                dcid,
+                send_keys,
+                send_key_phase,
+            ),
+        };
+    }
+
+    /// Route explicit key-update 1-RTT input through close propagation, then poll output.
+    ///
+    /// This preserves routed receive behavior while ensuring authenticated
+    /// Application frame errors stop before ordinary output polling.
+    pub fn processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.ShortPacketKeyUpdateKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        send_key_phase: bool,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .datagram = try self.processProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                receive_keys,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+                dcid,
+                send_keys,
+                send_key_phase,
+            ),
+        };
+    }
+
+    /// Process explicit key-update 1-RTT input, then drain explicit-phase output.
+    ///
+    /// This is the bounded-output form of
+    /// `processProtectedShortDatagramWithKeyUpdateAndPollDatagram()`. The
+    /// caller owns each initialized output datagram.
+    pub fn processProtectedShortDatagramWithKeyUpdateAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        receive_keys: protection.ShortPacketKeyUpdateKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+        dcid: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        send_key_phase: bool,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointDatagramDrainResult {
+        try self.processProtectedShortDatagramWithKeyUpdate(
+            connection_id,
+            connection,
+            now_millis,
+            receive_keys,
+            dcid_len,
+            datagram,
+        );
+        var result = EndpointDatagramDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const output = self.pollProtectedShortDatagramWithKeyPhase(
+                connection_id,
+                connection,
+                now_millis,
+                dcid,
+                send_keys,
+                send_key_phase,
+            ) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = .{
+                .connection_id = connection_id,
+                .datagram = output orelse return result,
+            };
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
+    /// Process explicit key-update 1-RTT input with close propagation, then drain output.
+    ///
+    /// Authenticated Application plaintext errors queue CONNECTION_CLOSE and
+    /// return before ordinary explicit-phase output draining.
+    pub fn processProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        receive_keys: protection.ShortPacketKeyUpdateKeys,
+        dcid_len: usize,
+        datagram: []const u8,
+        dcid: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        send_key_phase: bool,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointDatagramDrainResult {
+        try self.processProtectedShortDatagramWithKeyUpdateOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            receive_keys,
+            dcid_len,
+            datagram,
+        );
+        var result = EndpointDatagramDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const output = self.pollProtectedShortDatagramWithKeyPhase(
+                connection_id,
+                connection,
+                now_millis,
+                dcid,
+                send_keys,
+                send_key_phase,
+            ) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = .{
+                .connection_id = connection_id,
+                .datagram = output orelse return result,
+            };
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
+    /// Route explicit key-update 1-RTT input, then drain explicit-phase output.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    /// On success, at most `out.len` Application-space datagrams are emitted
+    /// for the selected connection.
+    pub fn processRoutedProtectedShortDatagramWithKeyUpdateAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.ShortPacketKeyUpdateKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        send_key_phase: bool,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramDrainResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .drain = try self.processProtectedShortDatagramWithKeyUpdateAndDrainDatagrams(
+                connection_id,
+                connection,
+                now_millis,
+                receive_keys,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+                dcid,
+                send_keys,
+                send_key_phase,
+                out,
+            ),
+        };
+    }
+
+    /// Route explicit key-update 1-RTT input through close propagation, then drain output.
+    ///
+    /// This preserves routed receive behavior while ensuring authenticated
+    /// Application frame errors stop before ordinary output draining.
+    pub fn processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.ShortPacketKeyUpdateKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+        send_key_phase: bool,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramDrainResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .drain = try self.processProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams(
+                connection_id,
+                connection,
+                now_millis,
+                receive_keys,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+                dcid,
+                send_keys,
+                send_key_phase,
+                out,
+            ),
+        };
+    }
+
     /// Poll one caller-owned key-phase protected 1-RTT datagram and refresh timers.
     ///
     /// This bridge keeps deterministic key-update tests and external
@@ -39802,6 +40118,342 @@ test "EndpointConnectionLifecycle refreshes explicit key update short timer life
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), client_lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle routes explicit key update short receive and polls ACK output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x16, 0x26, 0x36, 0x46 };
+    const server_dcid = [_]u8{ 0xa6, 0xb6, 0xc6, 0xd6 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const next_client_keys = protection.nextAes128PacketProtectionKeys(secrets.client);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_016);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 16;
+    const server_connection_id: u64 = 26;
+
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendPing();
+    const ping = (try client_lifecycle.pollProtectedShortDatagramWithKeyPhase(
+        client_connection_id,
+        &client,
+        10,
+        &server_dcid,
+        next_client_keys,
+        true,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping);
+    try std.testing.expect(try protection.peekShortPacketKeyPhaseAes128(secrets.client.hp, ping, server_dcid.len));
+
+    const receive_keys = protection.ShortPacketKeyUpdateKeys{
+        .current = secrets.client,
+        .next = next_client_keys,
+        .current_key_phase = false,
+    };
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdateAndPollDatagram(
+        client_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        receive_keys,
+        ping,
+        &client_dcid,
+        secrets.server,
+        false,
+    ));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    const result = try server_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdateAndPollDatagram(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        receive_keys,
+        ping,
+        &client_dcid,
+        secrets.server,
+        false,
+    );
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, result.route.destination_connection_id.asSlice());
+    const ack = result.datagram orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, ack.connection_id);
+    defer std.testing.allocator.free(ack.datagram);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    const client_route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        client_connection_id,
+        &client,
+        client_receive_path,
+        12,
+        secrets.server,
+        ack.datagram,
+    );
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &client_dcid, client_route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
+test "EndpointConnectionLifecycle explicit key update OrClose receive stops before poll" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x17, 0x27, 0x37, 0x47 };
+    const server_dcid = [_]u8{ 0xa7, 0xb7, 0xc7, 0xd7 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const next_client_keys = protection.nextAes128PacketProtectionKeys(secrets.client);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_017);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const server_connection_id: u64 = 27;
+    try lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_short = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = true,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), next_client_keys, &unknown_frame);
+    defer std.testing.allocator.free(invalid_short);
+
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndPollDatagram(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        .{
+            .current = secrets.client,
+            .next = next_client_keys,
+            .current_key_phase = false,
+        },
+        invalid_short,
+        &client_dcid,
+        secrets.server,
+        false,
+    ));
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+}
+
+test "EndpointConnectionLifecycle routes explicit key update short receive and drains ACK output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x18, 0x28, 0x38, 0x48 };
+    const server_dcid = [_]u8{ 0xa8, 0xb8, 0xc8, 0xd8 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const next_client_keys = protection.nextAes128PacketProtectionKeys(secrets.client);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_018);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 18;
+    const server_connection_id: u64 = 28;
+
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendPing();
+    const ping = (try client_lifecycle.pollProtectedShortDatagramWithKeyPhase(
+        client_connection_id,
+        &client,
+        10,
+        &server_dcid,
+        next_client_keys,
+        true,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping);
+    try std.testing.expect(try protection.peekShortPacketKeyPhaseAes128(secrets.client.hp, ping, server_dcid.len));
+
+    const receive_keys = protection.ShortPacketKeyUpdateKeys{
+        .current = secrets.client,
+        .next = next_client_keys,
+        .current_key_phase = false,
+    };
+    var mismatch_out: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdateAndDrainDatagrams(
+        client_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        receive_keys,
+        ping,
+        &client_dcid,
+        secrets.server,
+        false,
+        &mismatch_out,
+    ));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    var out: [2]EndpointPolledDatagramResult = undefined;
+    const result = try server_lifecycle.processRoutedProtectedShortDatagramWithKeyUpdateAndDrainDatagrams(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        receive_keys,
+        ping,
+        &client_dcid,
+        secrets.server,
+        false,
+        &out,
+    );
+    defer for (out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, result.route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(server_connection_id, out[0].connection_id);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    const client_route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        client_connection_id,
+        &client,
+        client_receive_path,
+        12,
+        secrets.server,
+        out[0].datagram,
+    );
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &client_dcid, client_route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
+test "EndpointConnectionLifecycle explicit key update OrClose receive stops before drain" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x19, 0x29, 0x39, 0x49 };
+    const server_dcid = [_]u8{ 0xa9, 0xb9, 0xc9, 0xd9 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const next_client_keys = protection.nextAes128PacketProtectionKeys(secrets.client);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_019);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const server_connection_id: u64 = 29;
+    try lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_short = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = true,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), next_client_keys, &unknown_frame);
+    defer std.testing.allocator.free(invalid_short);
+
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedShortDatagramWithKeyUpdateOrCloseAndDrainDatagrams(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        .{
+            .current = secrets.client,
+            .next = next_client_keys,
+            .current_key_phase = false,
+        },
+        invalid_short,
+        &client_dcid,
+        secrets.server,
+        false,
+        &out,
+    ));
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
 }
 
 test "EndpointConnectionLifecycle refreshes caller-owned key phase short timer lifecycle" {
