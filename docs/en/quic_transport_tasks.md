@@ -935,6 +935,17 @@ QUIC unless the gap is named and the verification evidence is added here.
   backend sweeps. Unit coverage proves due accepted 0-RTT PTO wakeups keep
   protected 0-RTT `RESET_STREAM` recovery output and stop before backend drive
   in both poll and bounded-drain forms.
+- 2026-06-18: Added the RFC 9368-compatible explicit-output due-deadline
+  backend variants:
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions()`,
+  and
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions()`.
+  These keep explicit installed-key recovery output selection before compatible
+  backend sweeps. Unit coverage proves due accepted 0-RTT PTO wakeups keep
+  protected 0-RTT `RESET_STREAM` output and stop before backend work in poll,
+  drain, and close-propagating forms.
 - 2026-06-10: Added `EndpointConnectionView` and
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()` for embeddable
   socket loops where callers own the connection map. The lifecycle now combines

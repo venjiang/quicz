@@ -832,6 +832,17 @@ close 和 route cleanup 事件。
   这两个入口会在 OrClose backend sweep 前保留调用方选择的 installed-key output space。
   单元测试证明到期 accepted 0-RTT PTO wakeup 会保留 protected 0-RTT `RESET_STREAM`
   recovery output，并在 poll 和 bounded-drain 形态中都停在 backend drive 前。
+- 2026-06-18：新增 RFC 9368-compatible explicit-output due-deadline backend
+  变体：
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions()`
+  和
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions()`。
+  这些入口会在 compatible backend sweep 前保留显式 installed-key recovery output
+  选择。单元测试证明到期 accepted 0-RTT PTO wakeup 会保留 protected 0-RTT
+  `RESET_STREAM` output，并在 poll、drain 和 close-propagating 形态中都停在
+  backend work 前。
 - 2026-06-10：新增 `EndpointConnectionView` 和
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()`，服务于调用方持有
   connection map 的可嵌入 socket loop。lifecycle 现在可以在不接管 connection storage
