@@ -218,6 +218,10 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram`、
 `processProtectedShortDatagramWithInstalledKeysAndDrainDatagrams`、
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams`、
+`processProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline`、
+`processProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`、
+`processRoutedProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline`、
+`processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`、
 `feedDatagramWithInstalledKeysAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndDrainDatagrams`、
@@ -626,6 +630,14 @@ close 和 route cleanup 事件。
   发生在 packet processing 前，connection-id mismatch 会在 ACK generation 前停止，
   成功 routed installed-key PING receive 会 poll 一个 ACK datagram 给 peer，认证后的
   frame 错误会排队 close 并在 output polling 前停止。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline()`、
+  其 `OrClose` 变体，以及 routed
+  `processRoutedProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline()`
+  这一组 API，作为 installed-key 1-RTT receive-to-next-deadline no-output
+  loop step。单元测试证明 successful installed-key PING receive 会刷新 idle
+  deadline、保留 ACK 输出供后续 installed-key short-packet poll；routed 变体会在
+  packet processing 前拦截 connection handle mismatch。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagram()`
   和 cross-connection

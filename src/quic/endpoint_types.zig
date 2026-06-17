@@ -124,6 +124,14 @@ pub const EndpointRoutedDatagramDrainResult = struct {
     drain: EndpointDatagramDrainResult,
 };
 
+/// Endpoint result after routing input and selecting the next wakeup.
+pub const EndpointRoutedNextDeadlineResult = struct {
+    /// Endpoint route selected for the triggering datagram.
+    route: endpoint.RouteResult,
+    /// Earliest endpoint-visible deadline after receive processing.
+    next_deadline: ?EndpointConnectionDeadline,
+};
+
 /// Endpoint result after processing a path-validation protected short datagram.
 pub const EndpointPathValidatedShortDatagramResult = struct {
     /// Endpoint route selected before packet protection was removed.

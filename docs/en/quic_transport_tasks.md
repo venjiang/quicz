@@ -363,6 +363,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram`,
 `processProtectedShortDatagramWithInstalledKeysAndDrainDatagrams`,
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams`,
+`processProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline`,
+`processProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams`,
@@ -389,6 +393,7 @@ caller-owned key-phase 1-RTT receive-to-output loop steps,
 caller-owned key-phase 1-RTT receive-to-bounded-drain loop steps,
 single-connection installed-key 1-RTT receive-to-output loop steps,
 single-connection installed-key 1-RTT receive-to-bounded-drain loop steps,
+single-connection installed-key 1-RTT receive-to-next-deadline loop steps,
 backend-drive-to-caller-keyed long-header drain steps,
 close-propagating backend-drive-to-caller-keyed long-header drain steps,
 caller-keyed receive-to-backend-to-bounded-drain loop steps,
@@ -399,6 +404,7 @@ installed-key Handshake receive-to-backend-to-bounded-drain loop steps,
 close-propagating installed-key Handshake backend-drain loop steps,
 routed installed-key 1-RTT receive-to-output loop steps,
 routed installed-key 1-RTT receive-to-bounded-drain loop steps,
+routed installed-key 1-RTT receive-to-next-deadline loop steps,
 single-connection installed-key receive-to-backend-to-output loop steps,
 single-connection installed-key receive-to-backend-to-bounded-drain loop steps,
 single-connection installed-key receive-to-backend-close-to-output loop steps,
@@ -677,6 +683,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   generation, successful routed installed-key PING receive polls one ACK
   datagram for the peer, and authenticated frame errors queue close while
   stopping before output polling.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline()`,
+  its `OrClose` variant, and the routed
+  `processRoutedProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline()`
+  pair as installed-key 1-RTT receive-to-next-deadline no-output loop steps.
+  Unit coverage proves successful installed-key PING receive refreshes the idle
+  deadline while preserving ACK output for later installed-key short-packet
+  polling, and the routed form rejects connection-handle mismatches before
+  packet processing.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagram()`
   and the cross-connection
