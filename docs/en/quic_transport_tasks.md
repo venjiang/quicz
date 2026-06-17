@@ -206,6 +206,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams`,
 `driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams`,
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
+`processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
 `drainProtectedLongCryptoDatagramsInSpace`,
@@ -224,6 +225,7 @@ backend-drive-to-bounded-drain output steps,
 backend-drive-to-caller-keyed long-header drain steps,
 close-propagating backend-drive-to-caller-keyed long-header drain steps,
 caller-keyed receive-to-backend-to-bounded-drain loop steps,
+caller-keyed receive-to-backend-close-to-bounded-drain loop steps,
 installed-key Handshake receive-to-backend-to-bounded-drain loop steps,
 close-propagating installed-key Handshake backend-drain loop steps,
 single-connection installed-key receive-to-backend-to-output loop steps,
@@ -302,6 +304,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   pull or caller-keyed long-header CRYPTO drain, refresh endpoint recovery
   state, and leave a protected Handshake `TRANSPORT_PARAMETER_ERROR` close for
   the peer.
+- 2026-06-17: Added
+  `EndpointConnectionLifecycle.processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams()`
+  as the close-propagating caller-keyed long-header
+  receive-to-backend-to-bounded-drain step. Unit coverage proves an
+  authenticated Handshake CRYPTO datagram is processed before backend delivery,
+  backend peer transport-parameter errors stop before output pull or drain, and
+  the peer receives the protected Handshake `TRANSPORT_PARAMETER_ERROR` close.
 - 2026-06-05: Migrated the current C TLS example boundary to Zig 0.16's
   `addTranslateC` build path. The C ABI declarations now live in small header
   files and the Zig examples import them with `@import("c")`; handwritten
