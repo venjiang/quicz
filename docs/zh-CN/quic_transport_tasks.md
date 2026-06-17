@@ -825,6 +825,13 @@ close 和 route cleanup 事件。
   这两个入口把显式 installed-key recovery output 选择贯通到调用方持有 connection map 的 backend
   sweep 前。单元测试证明 accepted 0-RTT PTO wakeup 会按最早 deadline 被选中，发出 protected
   0-RTT `RESET_STREAM` datagram，跳过 backend drive/drain，并且不修改较晚 deadline 的连接。
+- 2026-06-18：新增 close-propagating explicit-output 变体：
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`
+  和
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions()`。
+  这两个入口会在 OrClose backend sweep 前保留调用方选择的 installed-key output space。
+  单元测试证明到期 accepted 0-RTT PTO wakeup 会保留 protected 0-RTT `RESET_STREAM`
+  recovery output，并在 poll 和 bounded-drain 形态中都停在 backend drive 前。
 - 2026-06-10：新增 `EndpointConnectionView` 和
   `EndpointConnectionLifecycle.nextDeadlineAcrossConnections()`，服务于调用方持有
   connection map 的可嵌入 socket loop。lifecycle 现在可以在不接管 connection storage
