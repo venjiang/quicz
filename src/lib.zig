@@ -3450,7 +3450,10 @@ pub const EndpointConnectionLifecycle = struct {
         backend: CryptoBackend,
         scratch: []u8,
     ) Error!CryptoBackendProgress {
-        const progress = try connection.driveCryptoBackendInSpace(space, backend, scratch);
+        const progress = connection.driveCryptoBackendInSpace(space, backend, scratch) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         try self.armRecoveryTimerFromConnection(connection_id, connection);
         return progress;
     }
@@ -4213,12 +4216,15 @@ pub const EndpointConnectionLifecycle = struct {
         scratch: []u8,
         compatibilities: []const VersionCompatibility,
     ) Error!CryptoBackendProgress {
-        const progress = try connection.driveCryptoBackendInSpaceWithCompatibleVersion(
+        const progress = connection.driveCryptoBackendInSpaceWithCompatibleVersion(
             space,
             backend,
             scratch,
             compatibilities,
-        );
+        ) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         try self.armRecoveryTimerFromConnection(connection_id, connection);
         return progress;
     }
@@ -55766,6 +55772,129 @@ test "EndpointConnectionLifecycle drives crypto backend and refreshes recovery t
     try std.testing.expectEqual(HandshakeState.confirmed, server.handshakeState());
     try std.testing.expect(server.packetNumberSpaceDiscarded(.handshake));
     try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle refreshes recovery timer after strict backend drive rejects closing connection" {
+    const TrackingBackend = struct {
+        receive_count: usize = 0,
+        pull_count: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.receive_count += 1;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pull_count += 1;
+            return null;
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(52, &conn);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expect(lifecycle.earliestRecoveryDeadline() != null);
+
+    try conn.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), conn.lossDetectionTimerDeadlineMillis());
+
+    var backend = TrackingBackend{};
+    var scratch: [16]u8 = undefined;
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+            52,
+            &conn,
+            .handshake,
+            backend.backend(),
+            &scratch,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), backend.receive_count);
+    try std.testing.expectEqual(@as(usize, 0), backend.pull_count);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle refreshes recovery timer after compatible backend drive rejects closing connection" {
+    const TrackingBackend = struct {
+        receive_count: usize = 0,
+        pull_count: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.receive_count += 1;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pull_count += 1;
+            return null;
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+    try conn.confirmHandshake();
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(53, &conn);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try conn.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), conn.lossDetectionTimerDeadlineMillis());
+
+    var backend = TrackingBackend{};
+    var scratch: [16]u8 = undefined;
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v1,
+    }};
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        lifecycle.driveCryptoBackendInSpaceWithCompatibleVersionAndArmConnection(
+            53,
+            &conn,
+            .handshake,
+            backend.backend(),
+            &scratch,
+            &compatibilities,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), backend.receive_count);
+    try std.testing.expectEqual(@as(usize, 0), backend.pull_count);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
 }
