@@ -190,6 +190,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`、
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`、
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`、
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`、
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`、
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
@@ -655,6 +656,10 @@ close 和 route cleanup 事件。
   和
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline()`，
   作为 close-propagating 与 compatible-version no-output due-deadline/backend/deadline
+  step。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`，
+  作为 compatible-version close-propagating no-output due-deadline/backend/deadline
   step。next-deadline due 路径的单元测试证明最早到期的 recovery deadline 会先被服务，
   backend progress 会刷新另一条 connection 的 recovery scheduling，compatible Version
   Information 会被应用，并在不 poll output 的情况下选出对应 recovery deadline。
