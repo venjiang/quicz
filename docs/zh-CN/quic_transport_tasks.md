@@ -147,7 +147,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
-`processPendingWork`、`processPendingWorkAcrossConnections`、`processPendingWorkAndPollDatagram`、
+`processPendingWork`、`processPendingWorkAcrossConnections`、
+`processPendingWorkAcrossConnectionsAndSelectNextDeadline`、`processPendingWorkAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDrainDatagrams`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`、
@@ -206,6 +207,7 @@ installed-key packet receive、跨连接 receive dispatch、due-deadline service
 跨连接 pending-work sweep、跨连接 due-deadline dispatch、recovery-wakeup packet output、
 installed-key packet output、caller-owned output queue 的 bounded drain、跨连接
 output dispatch、cross-connection pending-work-to-output loop step、
+cross-connection pending-work-to-next-deadline loop step、
 cross-connection pending-work-to-bounded-drain loop step、receive-to-backend-to-output loop step、receive-to-backend-to-bounded-drain
 loop step、receive-to-output loop step、receive-to-bounded-drain loop step、跨连接 TLS backend drive、
 backend-drive-to-datagram output step、backend-drive-to-bounded-drain output step、
@@ -528,6 +530,11 @@ close 和 route cleanup 事件。
   的前提下，基于调用方提供的 view slice，把 connection-owned idle/close deadline 和
   endpoint-owned recovery snapshot 合并选出最早 wakeup。单元测试证明 close timeout、idle
   timeout、recovery PTO 和没有 endpoint-visible deadline 的连接之间的选择顺序。
+- 2026-06-17：新增
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndSelectNextDeadline()`，
+  作为 no-output pending-work-to-next-deadline socket-loop planning step。单元测试证明
+  pending work 会在 wakeup selection 前退休 idle connection，较晚 recovery timer 保持
+  armed，并为剩余 caller-owned connection map 返回 recovery deadline。
 - 2026-06-10：新增 `EndpointConnectionPollView` 和
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndPollDatagram()`，
   让可嵌入 socket loop 在不把 connection storage 交给 lifecycle 的前提下，跨调用方持有的

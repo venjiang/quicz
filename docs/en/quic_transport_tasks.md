@@ -155,6 +155,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processPendingWork`,
 `processPendingWorkAcrossConnections`, `processPendingWorkAndPollDatagram`,
+`processPendingWorkAcrossConnectionsAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDrainDatagrams`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
@@ -226,7 +227,8 @@ receive dispatch, cross-connection pending-work sweep, due-deadline service,
 cross-connection due-deadline dispatch, recovery-wakeup packet output,
 installed-key packet output, bounded caller-owned output draining,
 cross-connection output dispatch, cross-connection pending-work-to-output loop
-steps, cross-connection pending-work-to-bounded-drain loop steps,
+steps, cross-connection pending-work-to-next-deadline loop steps,
+cross-connection pending-work-to-bounded-drain loop steps,
 receive-to-output loop steps,
 receive-to-bounded-drain loop steps,
 receive-to-backend-to-output loop steps,
@@ -266,8 +268,8 @@ pending-work-to-backend-to-bounded-drain loop steps,
 due-deadline-to-backend-to-output loop steps,
 due-deadline-to-bounded-drain loop steps,
 due-deadline-to-backend-to-bounded-drain loop steps,
-cross-connection due-deadline terminal-cleanup backend suppression, and event-loop wakeup
-selection across caller-owned connection maps.
+cross-connection due-deadline terminal-cleanup backend suppression, and
+event-loop wakeup selection across caller-owned connection maps.
 `EndpointConnectionDeadline.installedKeyPollOptions()`
 maps recovery wakeups returned by `nextDeadline()` into installed-key poll
 options for Handshake and 1-RTT paths. Production socket policy, full
@@ -607,6 +609,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   across a caller-provided view slice without taking ownership of connection
   storage. Unit coverage proves selection order across close timeout, idle
   timeout, recovery PTO, and connections with no endpoint-visible deadline.
+- 2026-06-17: Added
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndSelectNextDeadline()`
+  as the no-output pending-work-to-next-deadline socket-loop planning step.
+  Unit coverage proves pending work retires an idle connection before wakeup
+  selection, leaves a later recovery timer armed, and returns the recovery
+  deadline for the remaining caller-owned connection map.
 - 2026-06-10: Added `EndpointConnectionPollView` and
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndPollDatagram()`
   so embeddable socket loops can dispatch the earliest already-due deadline

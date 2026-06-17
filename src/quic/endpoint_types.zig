@@ -257,6 +257,14 @@ pub const EndpointPendingWorkSweepResult = struct {
     recovery_serviced_count: usize = 0,
 };
 
+/// Result from a pending-work sweep followed by next wakeup selection.
+pub const EndpointPendingWorkNextDeadlineResult = struct {
+    /// Pending-work actions applied before selecting the next deadline.
+    pending_work: EndpointPendingWorkSweepResult,
+    /// Next endpoint-visible deadline after pending work has been applied.
+    next_deadline: ?EndpointConnectionDeadline = null,
+};
+
 /// Result from a pending-work sweep followed by output polling.
 pub const EndpointPendingWorkSweepDatagramResult = struct {
     /// Pending-work actions applied before output processing.

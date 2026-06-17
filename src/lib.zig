@@ -70,6 +70,7 @@ pub const EndpointPendingWorkResult = endpoint_types.EndpointPendingWorkResult;
 pub const EndpointPendingWorkDatagramResult = endpoint_types.EndpointPendingWorkDatagramResult;
 pub const EndpointPendingWorkDatagramDrainResult = endpoint_types.EndpointPendingWorkDatagramDrainResult;
 pub const EndpointPendingWorkSweepResult = endpoint_types.EndpointPendingWorkSweepResult;
+pub const EndpointPendingWorkNextDeadlineResult = endpoint_types.EndpointPendingWorkNextDeadlineResult;
 pub const EndpointPendingWorkSweepDatagramResult = endpoint_types.EndpointPendingWorkSweepDatagramResult;
 pub const EndpointPendingWorkSweepDatagramDrainResult = endpoint_types.EndpointPendingWorkSweepDatagramDrainResult;
 pub const EndpointPendingWorkCryptoBackendDatagramResult = endpoint_types.EndpointPendingWorkCryptoBackendDatagramResult;
@@ -3624,6 +3625,28 @@ pub const EndpointConnectionLifecycle = struct {
             }
         }
         return sweep;
+    }
+
+    /// Process pending work, then select the next endpoint-visible deadline.
+    ///
+    /// This is the no-output wakeup planning step for socket loops. It applies
+    /// endpoint-owned idle/close/recovery work first, then returns the next
+    /// deadline from the still caller-owned connection map so callers can
+    /// update their timer without duplicating lifecycle ordering.
+    pub fn processPendingWorkAcrossConnectionsAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        deadline_connections: []const EndpointConnectionView,
+        now_millis: i64,
+    ) Error!EndpointPendingWorkNextDeadlineResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+        };
     }
 
     /// Process pending work across connections, then poll installed-key output.
@@ -23000,6 +23023,68 @@ test "EndpointConnectionLifecycle sweeps pending work across caller-owned connec
     try std.testing.expectEqual(ConnectionState.active, recovery_conn.connectionState());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(u8, 1), recovery_conn.recovery_state.pto_count);
+}
+
+test "EndpointConnectionLifecycle pending-work sweep selects next deadline" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var idle_conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
+    });
+    defer idle_conn.deinit();
+    try idle_conn.confirmHandshake();
+
+    const idle_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const idle_cid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
+    try lifecycle.registerConnectionId(66, &idle_cid, idle_path, .{ .sequence_number = 0 });
+
+    try idle_conn.sendPing();
+    var idle_payload_buf: [16]u8 = undefined;
+    _ = (try idle_conn.pollTx(10, &idle_payload_buf)) orelse return error.TestUnexpectedResult;
+    const idle_deadline = idle_conn.idleTimeoutDeadlineMillis() orelse return error.TestUnexpectedResult;
+
+    var recovery_conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer recovery_conn.deinit();
+    try recovery_conn.confirmHandshake();
+    _ = try recovery_conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(67, &recovery_conn);
+    const recovery_before = lifecycle.nextDeadline(67, &recovery_conn) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, recovery_before.kind);
+
+    const pending_connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 66, .connection = &idle_conn },
+        .{ .connection_id = 67, .connection = &recovery_conn },
+    };
+    const deadline_connections = [_]EndpointConnectionView{
+        .{ .connection_id = 66, .connection = &idle_conn },
+        .{ .connection_id = 67, .connection = &recovery_conn },
+    };
+    const result = try lifecycle.processPendingWorkAcrossConnectionsAndSelectNextDeadline(
+        &pending_connections,
+        &deadline_connections,
+        idle_deadline,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(ConnectionState.closed, idle_conn.connectionState());
+    try std.testing.expectEqual(ConnectionState.active, recovery_conn.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const next = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 67), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    try std.testing.expectEqual(recovery_before.deadline_millis, next.deadline_millis);
+    try std.testing.expect(next.recovery != null);
 }
 
 test "EndpointConnectionLifecycle pending-work cross-connection poll waits for recovery service" {
