@@ -156,6 +156,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`、
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`、
@@ -555,6 +556,12 @@ close 和 route cleanup 事件。
   作为 no-output pending-work-to-backend-drive-to-next-deadline socket-loop
   step。单元测试证明 pending idle retirement 会先于 backend drive 执行，backend progress
   会刷新 endpoint recovery scheduling，并在不 poll output 的情况下选出对应 recovery deadline。
+- 2026-06-17：新增
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline()`，
+  作为 close-propagating no-output pending-work-to-backend-drive-to-next-deadline
+  socket-loop step。单元测试证明 pending idle retirement 会先于 close-propagating
+  backend drive 执行，endpoint recovery scheduling 会被刷新，并在不 poll output
+  的情况下选出对应 recovery deadline。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndSelectNextDeadline()`，
   作为 no-output due-deadline-to-next-deadline socket-loop planning step。单元测试证明
