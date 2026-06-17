@@ -1,3 +1,5 @@
+const std = @import("std");
+
 const crypto_types = @import("crypto_types.zig");
 const transport_types = @import("transport_types.zig");
 
@@ -89,6 +91,16 @@ fn tlsBackendStatusError(status: TlsBackendStatus) Error!void {
     };
 }
 
+fn tlsBackendInputStatusError(status: TlsBackendStatus) Error!void {
+    return switch (status) {
+        .ok => {},
+        .pending => error.Internal,
+        .buffer_too_small => error.BufferTooSmall,
+        .crypto_error => error.CryptoError,
+        .internal => error.Internal,
+    };
+}
+
 /// C-ABI TLS backend adapter for real QUIC TLS libraries.
 ///
 /// This keeps C library bindings outside the transport core. Callbacks use a
@@ -137,7 +149,7 @@ pub const TlsBackend = struct {
             data.ptr,
             data.len,
         );
-        try tlsBackendStatusError(status);
+        try tlsBackendInputStatusError(status);
     }
 
     fn pullAdapter(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
@@ -160,7 +172,7 @@ pub const TlsBackend = struct {
         const self: *TlsBackend = @ptrCast(@alignCast(context));
         const set_local = self.set_local_transport_parameters orelse return;
         const status = set_local(self.context, data.ptr, data.len);
-        try tlsBackendStatusError(status);
+        try tlsBackendInputStatusError(status);
     }
 
     fn pullPeerTransportParametersAdapter(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
@@ -210,3 +222,57 @@ pub const TlsBackend = struct {
         return confirmed(self.context);
     }
 };
+
+test "TlsBackend adapter rejects pending from input callbacks" {
+    const PendingInputBackend = struct {
+        fn receive(
+            _: *anyopaque,
+            _: TlsBackendPacketSpace,
+            _: [*]const u8,
+            _: usize,
+        ) callconv(.c) TlsBackendStatus {
+            return .pending;
+        }
+
+        fn pull(
+            _: *anyopaque,
+            _: TlsBackendPacketSpace,
+            _: [*]u8,
+            _: usize,
+            _: *usize,
+        ) callconv(.c) TlsBackendStatus {
+            return .pending;
+        }
+
+        fn setLocalTransportParameters(
+            _: *anyopaque,
+            _: [*]const u8,
+            _: usize,
+        ) callconv(.c) TlsBackendStatus {
+            return .pending;
+        }
+    };
+
+    var context: u8 = 0;
+    var tls_backend = TlsBackend{
+        .context = &context,
+        .receive = PendingInputBackend.receive,
+        .pull = PendingInputBackend.pull,
+        .set_local_transport_parameters = PendingInputBackend.setLocalTransportParameters,
+    };
+    const crypto_backend = tls_backend.cryptoBackend();
+
+    try std.testing.expectError(
+        error.Internal,
+        crypto_backend.receive(crypto_backend.context, .handshake, "input"),
+    );
+    try std.testing.expectError(
+        error.Internal,
+        crypto_backend.setLocalTransportParameters("local tp"),
+    );
+    var scratch: [7]u8 = undefined;
+    try std.testing.expectEqual(
+        @as(?[]const u8, null),
+        try crypto_backend.pull(crypto_backend.context, .handshake, &scratch),
+    );
+}
