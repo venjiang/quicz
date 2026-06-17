@@ -63,6 +63,12 @@ codec, transport-parameter codec, and recovery state. It should keep transport
 semantics explicit and avoid leaking concrete TLS-library details, socket
 scheduling policy, or example fixtures into core APIs.
 
+`src/lib.zig` is the root source file for the public `quicz` module. It should
+remain the public aggregation point for exported names and compatibility aliases.
+Implementation code moves under `src/quic/` by responsibility; for example,
+`src/quic/tls_backend.zig` owns the C-ABI TLS adapter while `lib.zig` re-exports
+the stable `TlsBackend` public surface.
+
 ### Packet Protection Layer
 
 The packet protection layer owns long/short packet coding, AEAD, header
