@@ -211,6 +211,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `nextDeadline`, and
@@ -300,6 +302,15 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-17: Added
+  `EndpointConnectionLifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams()`
+  and its `OrClose` variant as routed installed-key Handshake
+  receive-to-backend-to-bounded-drain steps. Unit coverage proves route
+  selection happens before packet processing, connection-id mismatches stop
+  before backend delivery, successful routed installed-key Handshake CRYPTO
+  produces a protected response, and backend peer transport-parameter errors
+  stop before output drain while leaving a protected Handshake close for the
+  peer.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams()`
   as the close-propagating caller-keyed Initial/Handshake backend-drive to

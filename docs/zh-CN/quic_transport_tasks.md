@@ -129,6 +129,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`、
@@ -274,6 +276,13 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-17：新增
+  `EndpointConnectionLifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams()`
+  及其 `OrClose` 变体，作为 routed installed-key Handshake
+  receive-to-backend-to-bounded-drain 核心 step。单元测试证明 route selection
+  发生在 packet processing 前，connection-id mismatch 会在 backend delivery 前停止，
+  成功 routed installed-key Handshake CRYPTO 会产出 protected response，backend peer
+  transport-parameter 错误会在 output drain 前停止并留下 protected Handshake close 给 peer。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams()`，
   作为 close-propagating caller-keyed Initial/Handshake backend-drive 到 bounded-drain
