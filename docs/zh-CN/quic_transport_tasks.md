@@ -1609,6 +1609,10 @@ close 和 route cleanup 事件。
   pull-style callback 返回 `pending` 时必须报告 0 个已写字节；`pending` 同时携带 bytes
   会被视为 adapter 协议错误，避免 CRYPTO output 或对端 transport-parameter bytes
   在 C 边界被静默丢弃。
+- 2026-06-18：在 `driveCryptoBackendInSpace()` 中保留 backend receive 失败时的入站
+  CRYPTO bytes。drive loop 现在会在 `backend.receive()` 返回错误时恢复对应 packet number
+  space 的 CRYPTO read offset，避免失败的 TLS backend step 在调用方选择重试、close
+  propagation 或 teardown 前消耗输入 bytes。
 - 2026-06-04：记录实现策略：成熟非核心能力优先适配，不在仓库内重复自研。`quicz`
   自己负责 QUIC transport state、packet processing、recovery、endpoint lifecycle 和
   Zig API；TLS 等配套能力应放在窄 adapter 后面接入维护良好的库。

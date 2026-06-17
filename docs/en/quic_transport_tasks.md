@@ -1837,6 +1837,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   report zero written bytes; `pending` with bytes is rejected as an adapter
   protocol error so CRYPTO output or peer transport-parameter bytes cannot be
   silently dropped at the C boundary.
+- 2026-06-18: Preserved inbound CRYPTO bytes when backend receive fails during
+  `driveCryptoBackendInSpace()`. The drive loop now restores the packet-number
+  space CRYPTO read offset if `backend.receive()` returns an error, so a failed
+  TLS backend step no longer consumes bytes before the caller chooses retry,
+  close propagation, or teardown.
 - 2026-06-04: Recorded the implementation strategy that mature non-core
   capabilities should be adapted instead of reimplemented. QUIC transport
   state, packet processing, recovery, endpoint lifecycle, and the Zig API

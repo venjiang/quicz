@@ -21433,9 +21433,15 @@ pub const Connection = struct {
             }
         }
 
-        while (try self.recvCryptoInSpace(space, scratch)) |n| {
+        while (true) {
+            const packet_space = self.packetNumberSpace(space);
+            const crypto_read_offset_snapshot = packet_space.crypto_read_offset.*;
+            const n = (try self.recvCryptoInSpace(space, scratch)) orelse break;
             if (n == 0) return error.BufferTooSmall;
-            try backend.receive(backend.context, space, scratch[0..n]);
+            backend.receive(backend.context, space, scratch[0..n]) catch |err| {
+                packet_space.crypto_read_offset.* = crypto_read_offset_snapshot;
+                return err;
+            };
             progress.inbound_chunks += 1;
             progress.inbound_bytes += n;
         }
@@ -26893,6 +26899,42 @@ test "driveCryptoBackendInSpace requires scratch buffer before consuming crypto"
     };
     var empty: [0]u8 = .{};
     try std.testing.expectError(error.BufferTooSmall, conn.driveCryptoBackendInSpace(.handshake, backend, &empty));
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvCryptoInSpace(.handshake, &read_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("client", read_buf[0..n]);
+}
+
+test "driveCryptoBackendInSpace preserves crypto input when backend receive fails" {
+    const FailingBackend = struct {
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {
+            return error.CryptoError;
+        }
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+    };
+
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [32]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "client",
+    } });
+    try conn.processDatagramInSpace(.handshake, 0, out.getWritten());
+
+    var context: u8 = 0;
+    const backend = CryptoBackend{
+        .context = &context,
+        .receive = FailingBackend.receive,
+        .pull = FailingBackend.pull,
+    };
+    var scratch: [8]u8 = undefined;
+    try std.testing.expectError(error.CryptoError, conn.driveCryptoBackendInSpace(.handshake, backend, &scratch));
 
     var read_buf: [8]u8 = undefined;
     const n = (try conn.recvCryptoInSpace(.handshake, &read_buf)) orelse return error.TestUnexpectedResult;
