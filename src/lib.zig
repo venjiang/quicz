@@ -874,6 +874,63 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process one accepted Initial through a close-propagating TLS backend and drain output.
+    ///
+    /// This bounded-output form preserves the success behavior of
+    /// `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams()`,
+    /// while using the close-propagating backend path. Peer
+    /// transport-parameter errors queue CONNECTION_CLOSE and return before any
+    /// output slot is initialized.
+    pub fn processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        initial_accept: endpoint.InitialAcceptResult,
+        server_source_connection_id: []const u8,
+        datagram: []const u8,
+        options: endpoint.AcceptedInitialRouteOptions,
+        backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedInitialError!EndpointAcceptedInitialCryptoBackendDatagramDrainResult {
+        const accepted_initial = try self.processAcceptedProtectedInitialDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            initial_accept,
+            server_source_connection_id,
+            datagram,
+            options,
+        );
+        const backend_progress = try self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+            connection_id,
+            connection,
+            .initial,
+            backend,
+            scratch,
+        );
+        const initial_secrets = protection.deriveInitialSecrets(
+            accepted_initial.initial_accept.version,
+            accepted_initial.initial_accept.original_destination_connection_id,
+        ) catch return error.InvalidPacket;
+        return .{
+            .accepted_initial = accepted_initial,
+            .backend = backend_progress,
+            .drain = self.drainProtectedLongCryptoDatagramsInSpace(
+                connection_id,
+                connection,
+                .initial,
+                now_millis,
+                accepted_initial.initial_accept.source_connection_id,
+                server_source_connection_id,
+                &[_]u8{},
+                initial_secrets.server,
+                out,
+            ),
+        };
+    }
+
     /// Replace an Initial route's DCID with the Retry Source CID.
     ///
     /// This is the lifecycle-owned endpoint route switch after server Retry.
@@ -38044,6 +38101,135 @@ test "EndpointConnectionLifecycle accepted Initial backend OrClose queues Initia
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "EndpointConnectionLifecycle accepted Initial backend OrClose drain stops before output" {
+    const BadBackend = struct {
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+        peer_sent: bool = false,
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, bytes: []const u8) Error!void {
+            if (space != .initial) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (bytes.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[0..bytes.len], bytes);
+            self.received_len = bytes.len;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0xff;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid = [_]u8{ 0xba, 0xbb, 0xbc, 0xbd };
+    const reset_token = [_]u8{ 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f };
+    const reset_prefix = [_]u8{ 0x40, 0x22, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const supported_versions = [_]packet.Version{ .v1, .v2 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.sendCryptoInSpace(.initial, "client hello bad params drain");
+    const initial = (try client.pollInitialProtectedDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(initial);
+
+    var action_buf: [256]u8 = undefined;
+    const action = try lifecycle.handleDatagramWithVersionNegotiation(
+        &action_buf,
+        path,
+        initial,
+        &reset_prefix,
+        &supported_versions,
+    );
+    const accept = switch (action) {
+        .accept_initial => |initial_accept| initial_accept,
+        else => return error.TestUnexpectedResult,
+    };
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var backend = BadBackend{};
+    var scratch: [256]u8 = undefined;
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams(
+            208,
+            &server,
+            11,
+            accept,
+            &server_scid,
+            initial,
+            .{
+                .active_migration_disabled = true,
+                .stateless_reset_token = reset_token,
+            },
+            backend.backend(),
+            &scratch,
+            &drained,
+        ),
+    );
+
+    try std.testing.expectEqualStrings("client hello bad params drain", backend.received[0..backend.received_len]);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 2), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+
+    const close_packet = (try lifecycle.pollProtectedLongDatagram(
+        208,
+        &server,
+        12,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    const close_deadline = lifecycle.nextDeadline(208, &server) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.close_timeout, close_deadline.kind);
 }
 
 test "EndpointConnectionLifecycle rejects accepted Initial without installing routes" {

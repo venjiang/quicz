@@ -143,6 +143,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDrainDatagrams`,
 `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`,
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`,
+`processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`,
@@ -319,6 +320,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
+`processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams`,
 `nextDeadline`, and
 `nextDeadlineAcrossConnections`, with one lifecycle owner responsible for
 timers, route cleanup, close, installed-key packet receive, cross-connection
@@ -420,6 +422,13 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams()`
+  as the close-propagating accepted Initial backend-to-bounded-drain step. Unit
+  coverage proves backend peer transport-parameter errors consume already
+  received client Initial CRYPTO, stop before backend output pull or protected
+  Initial output drain, preserve installed routes, and leave a protected Initial
+  close available through the existing long-packet output path.
 - 2026-06-18: Added installed-key Handshake receive-to-output poll and drain
   steps:
   `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram()`,

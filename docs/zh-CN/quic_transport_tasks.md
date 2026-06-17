@@ -122,6 +122,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`、
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`、
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`、
+`processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams`、
 `drainProtectedLongCryptoDatagramsInSpace`、
 `driveCryptoBackendInSpaceAndPollProtectedLongCryptoDatagram`、
 `driveCryptoBackendInSpaceOrCloseAndPollProtectedLongCryptoDatagram`、
@@ -393,6 +394,12 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams()`，
+  作为 close-propagating accepted Initial backend-to-bounded-drain step。单元测试证明
+  backend peer transport-parameter 错误会先消费已接收的 client Initial CRYPTO，在 backend
+  output pull 或 protected Initial output drain 前停止，保留已安装 route，并通过已有
+  long-packet output path 留下可发送的 protected Initial close。
 - 2026-06-18：新增 installed-key Handshake receive-to-output poll 和 drain
   step：
   `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram()`、
