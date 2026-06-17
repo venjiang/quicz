@@ -291,10 +291,14 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram`,
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`processProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
+`processProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram`,
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram`,
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
+`processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram`,
 `processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams`,
@@ -627,6 +631,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   mismatched connection handles before backend delivery, successful routed
   Handshake CRYPTO receive polls one response, and close-propagating backend
   peer-parameter errors stop before output polling.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`,
+  its `OrClose` variant, and the routed
+  `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`
+  pair as caller-keyed Initial/Handshake receive-to-backend-to-next-deadline
+  no-output loop steps. Unit coverage proves successful receive delivers
+  Handshake CRYPTO to the backend, preserves backend output for later
+  caller-keyed long-packet polling, and returns an idle deadline; the routed
+  form rejects connection-handle mismatches before backend drive.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram()`,
   its `OrClose` variant, and the routed

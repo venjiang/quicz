@@ -8823,6 +8823,42 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Process caller-keyed long-header input, drive backend, and select a wakeup.
+    ///
+    /// This is the no-output socket-loop step for Initial or Handshake CRYPTO
+    /// processing before packet-protection keys are fully connection-owned.
+    /// It authenticates and processes the incoming long-header datagram,
+    /// delivers reassembled CRYPTO to `backend`, queues backend-produced CRYPTO
+    /// on the connection, refreshes endpoint recovery scheduling, and returns
+    /// the next endpoint-visible deadline without polling caller-keyed output.
+    pub fn processProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        try self.processProtectedLongDatagramInSpace(
+            connection_id,
+            connection,
+            space,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        return try self.driveCryptoBackendInSpaceAndSelectNextDeadline(
+            connection_id,
+            connection,
+            space,
+            backend,
+            scratch,
+        );
+    }
+
     /// Process caller-keyed long-header input through close-propagating backend.
     ///
     /// This preserves the success behavior of
@@ -8914,6 +8950,40 @@ pub const EndpointConnectionLifecycle = struct {
             scid,
             initial_token,
             send_keys,
+        );
+    }
+
+    /// Process caller-keyed long-header input through close propagation and select a wakeup.
+    ///
+    /// Authenticated frame errors or backend peer transport-parameter errors
+    /// queue CONNECTION_CLOSE and return before deadline selection. Successful
+    /// backend progress uses the same no-output wakeup planning contract as
+    /// the non-close-propagating path.
+    pub fn processProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        try self.processProtectedLongDatagramInSpaceOrClose(
+            connection_id,
+            connection,
+            space,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        return try self.driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+            connection_id,
+            connection,
+            space,
+            backend,
+            scratch,
         );
     }
 
@@ -9096,6 +9166,45 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Route caller-keyed long-header input, drive backend, and select a wakeup.
+    ///
+    /// This is the routed no-output socket-loop step for Initial or Handshake
+    /// CRYPTO processing when the endpoint lifecycle owns route validation and
+    /// the caller still supplies packet-protection keys. Route errors and
+    /// connection-id mismatches fail before packet processing or backend drive.
+    pub fn processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveNextDeadlineResult {
+        const route = try self.processRoutedProtectedLongDatagramInSpace(
+            connection_id,
+            connection,
+            space,
+            path,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        return .{
+            .route = route,
+            .backend = try self.driveCryptoBackendInSpaceAndSelectNextDeadline(
+                connection_id,
+                connection,
+                space,
+                backend,
+                scratch,
+            ),
+        };
+    }
+
     /// Route caller-keyed long-header input through close-propagating backend.
     ///
     /// This is the routed socket-loop form of
@@ -9196,6 +9305,45 @@ pub const EndpointConnectionLifecycle = struct {
                 scid,
                 initial_token,
                 send_keys,
+            ),
+        };
+    }
+
+    /// Route caller-keyed long-header input through close propagation and select a wakeup.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    /// Authenticated frame errors or backend peer transport-parameter errors
+    /// return before deadline selection and leave protected close output to the
+    /// existing caller-keyed long-header poll/drain path.
+    pub fn processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveNextDeadlineResult {
+        const route = try self.processRoutedProtectedLongDatagramInSpaceOrClose(
+            connection_id,
+            connection,
+            space,
+            path,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        return .{
+            .route = route,
+            .backend = try self.driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+                connection_id,
+                connection,
+                space,
+                backend,
+                scratch,
             ),
         };
     }
@@ -51322,6 +51470,251 @@ test "EndpointConnectionLifecycle processes long datagram through backend OrClos
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "EndpointConnectionLifecycle processes long datagram then drives backend and selects deadline" {
+    const Backend = struct {
+        outbound: []const u8,
+        sent: bool = false,
+        received: [96]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x23, 0x33, 0x43, 0x53 };
+    const server_dcid = [_]u8{ 0xb3, 0xc3, 0xd3, 0xe3 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .max_idle_timeout_ms = 30,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    try client.sendCryptoInSpace(.handshake, "caller keyed select input");
+    const client_datagram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        10,
+        &server_dcid,
+        &client_dcid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = Backend{ .outbound = "caller keyed select response" };
+    var scratch: [96]u8 = undefined;
+    const result = try lifecycle.processProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        74,
+        &server,
+        .handshake,
+        11,
+        secrets.client,
+        client_datagram,
+        backend.backend(),
+        &scratch,
+    );
+
+    try std.testing.expectEqualStrings("caller keyed select input", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "caller keyed select input".len), result.backend.progress.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "caller keyed select response".len), result.backend.progress.outbound_bytes);
+    const next = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 74), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
+    try std.testing.expectEqual(server.idleTimeoutDeadlineMillis().?, next.deadline_millis);
+
+    const response = (try lifecycle.pollProtectedLongDatagram(
+        74,
+        &server,
+        12,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        .{ .handshake = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response);
+
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(13, .{ .handshake = secrets.server }, response));
+    var response_crypto: [96]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("caller keyed select response", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle routes long datagram backend select before drive" {
+    const Backend = struct {
+        outbound: []const u8,
+        sent: bool = false,
+        received: [96]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x24, 0x34, 0x44, 0x54 };
+    const server_dcid = [_]u8{ 0xb4, 0xc4, 0xd4, 0xe4 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_074);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    const server_connection_id: u64 = 75;
+    try lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .max_idle_timeout_ms = 30,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try client.sendCryptoInSpace(.handshake, "routed caller keyed select input");
+    const client_datagram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        10,
+        &server_dcid,
+        &client_dcid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var backend = Backend{ .outbound = "routed caller keyed select response" };
+    var scratch: [96]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+            server_connection_id + 1,
+            &server,
+            .handshake,
+            server_receive_path,
+            11,
+            secrets.client,
+            client_datagram,
+            backend.backend(),
+            &scratch,
+        ),
+    );
+    try std.testing.expect(!backend.sent);
+    try std.testing.expectEqual(@as(usize, 0), backend.received_len);
+    try std.testing.expectEqual(@as(?i64, null), server.idleTimeoutDeadlineMillis());
+
+    const result = try lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        server_connection_id,
+        &server,
+        .handshake,
+        server_receive_path,
+        11,
+        secrets.client,
+        client_datagram,
+        backend.backend(),
+        &scratch,
+    );
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualStrings("routed caller keyed select input", backend.received[0..backend.received_len]);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.progress.outbound_chunks);
+    const next = result.backend.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
+
+    const response = (try lifecycle.pollProtectedLongDatagram(
+        server_connection_id,
+        &server,
+        12,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        .{ .handshake = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response);
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(13, .{ .handshake = secrets.server }, response));
+    var response_crypto: [96]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("routed caller keyed select response", response_crypto[0..response_len]);
 }
 
 test "EndpointConnectionLifecycle drives crypto backends across caller-owned connections" {

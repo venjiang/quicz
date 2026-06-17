@@ -146,10 +146,14 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram`、
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`、
 `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`processProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
+`processProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram`、
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram`、
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`、
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
+`processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram`、
 `processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams`、
@@ -580,6 +584,14 @@ close 和 route cleanup 事件。
   selection 会在 backend delivery 前拦截 connection handle mismatch，成功 routed
   Handshake CRYPTO receive 会 poll 一个 response，close-propagating backend
   peer-parameter 错误会在 output polling 前停止。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`、
+  其 `OrClose` 变体，以及 routed
+  `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`
+  这一组 API，作为 caller-keyed Initial/Handshake
+  receive-to-backend-to-next-deadline no-output loop step。单元测试证明 successful receive
+  会把 Handshake CRYPTO 交给 backend、保留 backend 输出供后续 caller-keyed long-packet
+  poll，并返回 idle deadline；routed 变体会在 backend drive 前拦截 connection handle mismatch。
 - 2026-06-18：新增
   `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram()`、
   其 `OrClose` 变体，以及 routed
