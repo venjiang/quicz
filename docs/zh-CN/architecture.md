@@ -56,6 +56,7 @@ fixture 泄漏到核心 API。
 
 `src/lib.zig` 是公开 `quicz` module 的 root source file，应主要作为公开导出和兼容别名的
 聚合入口。实现代码按职责逐步放到 `src/quic/` 下；例如
+`src/quic/transport_types.zig` 负责共享 transport state enum 和 version compatibility helper，
 `src/quic/crypto_types.zig` 负责共享 TLS traffic-secret 和 backend-progress 类型，
 `src/quic/tls_backend.zig` 负责 C-ABI TLS adapter，`lib.zig` 继续 re-export 稳定公共表面。
 
