@@ -179,6 +179,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processDueDeadlineAndSelectNextDeadline`、
 `processDueDeadlineAcrossConnectionsAndSelectNextDeadline`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
@@ -657,6 +658,7 @@ close 和 route cleanup 事件。
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`，
   作为 no-output due-deadline-to-backend-drive-to-next-deadline socket-loop step。
 - 2026-06-18：新增
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline()`、
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline()`，
   和
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline()`，

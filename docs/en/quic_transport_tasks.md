@@ -186,6 +186,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processDueDeadlineAndSelectNextDeadline`,
 `processDueDeadlineAcrossConnectionsAndSelectNextDeadline`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
@@ -753,6 +754,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   as no-output due-deadline-to-backend-drive-to-next-deadline socket-loop
   steps.
 - 2026-06-18: Added
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline()`
+  and
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline()`
   and
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline()`
