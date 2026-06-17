@@ -135,6 +135,8 @@ After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first
 socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithInstalledKeys`,
 `feedDatagramWithInstalledKeysAcrossConnections`,
+`feedDatagramWithInstalledKeysAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDrainDatagrams`,
 `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`,
@@ -225,6 +227,7 @@ cross-connection due-deadline dispatch, recovery-wakeup packet output,
 installed-key packet output, bounded caller-owned output draining,
 cross-connection output dispatch, cross-connection pending-work-to-output loop
 steps, cross-connection pending-work-to-bounded-drain loop steps,
+receive-to-output loop steps,
 receive-to-bounded-drain loop steps,
 receive-to-backend-to-output loop steps,
 receive-to-backend-to-bounded-drain loop steps, cross-connection TLS backend drive, backend-drive-to-datagram output steps,
@@ -306,6 +309,15 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-17: Added
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagram()`
+  and the cross-connection
+  `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram()` as
+  socket-facing installed-key receive-to-output steps. Unit coverage proves
+  feed classification routes before packet processing, the selected
+  caller-owned connection polls one 1-RTT ACK datagram, decoy connections are
+  not touched, and the single-connection wrapper preserves ACK cleanup on the
+  peer.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDrainDatagrams()`
   and the cross-connection

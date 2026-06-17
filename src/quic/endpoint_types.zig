@@ -392,6 +392,14 @@ pub const EndpointFeedInstalledKeyDatagramResult = union(enum) {
     dropped,
 };
 
+/// Result from feeding one installed-key datagram, then polling output.
+pub const EndpointFeedInstalledKeyDatagramPollResult = struct {
+    /// Receive classification and processing result.
+    feed: EndpointFeedInstalledKeyDatagramResult,
+    /// Protected datagram emitted after receive processing, if any.
+    datagram: ?EndpointPolledDatagramResult = null,
+};
+
 /// Result from feeding one installed-key datagram, then draining output.
 pub const EndpointFeedInstalledKeyDatagramDrainResult = struct {
     /// Receive classification and processing result.

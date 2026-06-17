@@ -85,6 +85,7 @@ pub const EndpointDueWorkDatagramDrainResult = endpoint_types.EndpointDueWorkDat
 pub const EndpointDueWorkCryptoBackendDatagramResult = endpoint_types.EndpointDueWorkCryptoBackendDatagramResult;
 pub const EndpointDueWorkCryptoBackendDatagramDrainResult = endpoint_types.EndpointDueWorkCryptoBackendDatagramDrainResult;
 pub const EndpointFeedInstalledKeyDatagramResult = endpoint_types.EndpointFeedInstalledKeyDatagramResult;
+pub const EndpointFeedInstalledKeyDatagramPollResult = endpoint_types.EndpointFeedInstalledKeyDatagramPollResult;
 pub const EndpointFeedInstalledKeyDatagramDrainResult = endpoint_types.EndpointFeedInstalledKeyDatagramDrainResult;
 pub const EndpointFeedCryptoBackendDriveDatagramResult = endpoint_types.EndpointFeedCryptoBackendDriveDatagramResult;
 pub const EndpointFeedCryptoBackendDriveDatagramDrainResult = endpoint_types.EndpointFeedCryptoBackendDriveDatagramDrainResult;
@@ -1544,6 +1545,78 @@ pub const EndpointConnectionLifecycle = struct {
             .stateless_reset => |reset| .{ .stateless_reset = reset },
             .dropped => .dropped,
         };
+    }
+
+    /// Feed an installed-key datagram, then poll installed-key output.
+    ///
+    /// This is the socket-facing receive-to-output step for paths that do not
+    /// need TLS backend progress after packet receive. Non-routed feed results
+    /// return without polling.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramPollResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        switch (feed) {
+            .routed => {},
+            else => return .{ .feed = feed },
+        }
+        return .{
+            .feed = feed,
+            .datagram = try self.pollDatagramAcrossConnections(
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Feed one installed-key datagram, then poll installed-key output.
+    ///
+    /// This is the single-connection receive-to-output loop step. It reuses
+    /// the cross-connection lifecycle path with one caller-owned connection so
+    /// simple socket loops do not need to build receive/poll view slices.
+    pub fn feedDatagramWithInstalledKeysAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramPollResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            &poll_views,
+            poll_options.space,
+        );
     }
 
     /// Feed an installed-key datagram, then drain installed-key output.
@@ -24696,6 +24769,149 @@ test "EndpointConnectionLifecycle dispatches installed-key receive across caller
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(?u64, null), decoy.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle feeds installed-key datagram then polls ACK output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x31, 0x42, 0x53, 0x64 };
+    const server_dcid = [_]u8{ 0xc1, 0xd2, 0xe3, 0xf4 };
+    const decoy_dcid = [_]u8{ 0xc2, 0xd3, 0xe4, 0xf5 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var decoy = try Connection.init(std.testing.allocator, .server, .{});
+    defer decoy.deinit();
+    try server.validatePeerAddress();
+    try decoy.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+    try decoy.confirmHandshake();
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try decoy.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const server_path = endpoint.Udp4Tuple{
+        .local = client_path.remote,
+        .remote = client_path.local,
+    };
+    try client_lifecycle.registerConnectionId(181, &client_dcid, client_path, .{ .sequence_number = 0 });
+    try server_lifecycle.registerConnectionId(182, &server_dcid, server_path, .{ .sequence_number = 0 });
+    try server_lifecycle.registerConnectionId(183, &decoy_dcid, server_path, .{ .sequence_number = 1 });
+
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const feed_options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .application,
+        .out = &feed_out,
+        .unpredictable_prefix = &reset_prefix,
+        .supported_versions = &versions,
+    };
+
+    try client.sendPing();
+    const first_ping = (try client_lifecycle.pollDatagram(181, &client, 10, .{
+        .space = .application,
+        .destination_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first_ping);
+
+    const receive_connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 183, .connection = &decoy },
+        .{ .connection_id = 182, .connection = &server },
+    };
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 182,
+        .connection = &server,
+        .destination_connection_id = &client_dcid,
+    }};
+    const first = try server_lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram(
+        &receive_connections,
+        server_path,
+        11,
+        first_ping,
+        feed_options,
+        &poll_views,
+        .application,
+    );
+    switch (first.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 182), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    const first_ack = first.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first_ack.datagram);
+    try std.testing.expectEqual(@as(u64, 182), first_ack.connection_id);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(?u64, null), decoy.pendingAckLargest(.application));
+
+    try client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
+        181,
+        &client,
+        12,
+        client_dcid.len,
+        first_ack.datagram,
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+
+    try client.sendPing();
+    const second_ping = (try client_lifecycle.pollDatagram(181, &client, 13, .{
+        .space = .application,
+        .destination_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_ping);
+
+    const second = try server_lifecycle.feedDatagramWithInstalledKeysAndPollDatagram(
+        182,
+        &server,
+        server_path,
+        14,
+        second_ping,
+        feed_options,
+        .{
+            .space = .application,
+            .destination_connection_id = &client_dcid,
+        },
+    );
+    switch (second.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 182), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    const second_ack = second.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_ack.datagram);
+    try std.testing.expectEqual(@as(u64, 182), second_ack.connection_id);
+
+    try client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
+        181,
+        &client,
+        15,
+        client_dcid.len,
+        second_ack.datagram,
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
 }
 
 test "EndpointConnectionLifecycle feeds installed-key datagram then drains ACK output" {

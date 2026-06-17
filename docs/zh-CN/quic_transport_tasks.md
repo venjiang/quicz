@@ -131,6 +131,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`feedDatagramWithInstalledKeysAndPollDatagram`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`、
@@ -205,7 +207,7 @@ installed-key packet receive、跨连接 receive dispatch、due-deadline service
 installed-key packet output、caller-owned output queue 的 bounded drain、跨连接
 output dispatch、cross-connection pending-work-to-output loop step、
 cross-connection pending-work-to-bounded-drain loop step、receive-to-backend-to-output loop step、receive-to-backend-to-bounded-drain
-loop step、receive-to-bounded-drain loop step、跨连接 TLS backend drive、
+loop step、receive-to-output loop step、receive-to-bounded-drain loop step、跨连接 TLS backend drive、
 backend-drive-to-datagram output step、backend-drive-to-bounded-drain output step、
 backend-drive-to-caller-keyed long-header drain step、
 close-propagating backend-drive-to-caller-keyed long-header drain step、
@@ -279,6 +281,14 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-17：新增
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagram()`
+  和 cross-connection
+  `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram()`，作为
+  socket-facing installed-key receive-to-output 核心 step。单元测试证明 feed
+  classification 会先完成 route selection，选中的 caller-owned connection 会 poll 一个
+  1-RTT ACK datagram，decoy connection 不被触碰，single-connection wrapper 也保持
+  peer ACK cleanup。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDrainDatagrams()`
   和 cross-connection
