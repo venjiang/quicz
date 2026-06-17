@@ -195,6 +195,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processDueDeadlineAcrossConnectionsAndPollDatagram`,
 `processDueDeadlineAcrossConnectionsAndDrainDatagrams`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
@@ -742,10 +743,14 @@ QUIC unless the gap is named and the verification evidence is added here.
 - 2026-06-18: Added `EndpointDueWorkCryptoBackendNextDeadlineResult` and
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`
   as the no-output due-deadline-to-backend-drive-to-next-deadline socket-loop
-  step. Unit coverage proves the earliest due recovery deadline is serviced
-  before backend drive, backend progress refreshes another connection's
-  recovery scheduling, and the resulting recovery deadline is selected without
-  polling output.
+  step.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline()`
+  as the close-propagating no-output due-deadline/backend/deadline step. Unit
+  coverage for both next-deadline due paths proves the earliest due recovery
+  deadline is serviced before backend drive, backend progress refreshes another
+  connection's recovery scheduling, and the resulting recovery deadline is
+  selected without polling output.
 - 2026-06-10: Added `EndpointCryptoBackendDriveView`,
   `EndpointCryptoBackendDriveSweepResult`, and
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndArmConnections()`
