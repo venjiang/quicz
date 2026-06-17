@@ -257,6 +257,14 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram`,
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`,
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`processProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram`,
+`processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram`,
+`processProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams`,
+`processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams`,
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram`,
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram`,
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams`,
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`,
@@ -412,6 +420,20 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-18: Added installed-key Handshake receive-to-output poll and drain
+  steps:
+  `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram()`,
+  `processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram()`,
+  `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram()`,
+  `processRoutedProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram()`,
+  `processProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams()`,
+  `processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams()`,
+  `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams()`,
+  and
+  `processRoutedProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams()`.
+  Unit coverage proves installed-key Handshake receive-to-poll, routed
+  receive-to-drain with route mismatch rejection before packet processing, and
+  close-propagating frame errors stopping before ordinary installed-key output.
 - 2026-06-18: Added caller-keyed Initial/Handshake long-packet
   receive-to-output poll and drain steps:
   `EndpointConnectionLifecycle.processProtectedLongDatagramInSpaceAndPollDatagram()`,

@@ -9672,6 +9672,271 @@ pub const EndpointConnectionLifecycle = struct {
         return route;
     }
 
+    /// Process installed-key Handshake input, then poll one installed-key output.
+    ///
+    /// This is the lightweight TLS-owned Handshake socket-loop step for ACK,
+    /// PING, close, or already queued CRYPTO output when no backend drive is
+    /// needed. The caller owns any returned datagram.
+    pub fn processProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+    ) Error!?EndpointPolledDatagramResult {
+        try self.processProtectedHandshakeDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+        const output = try self.pollProtectedHandshakeDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+            scid,
+        );
+        return if (output) |bytes| .{
+            .connection_id = connection_id,
+            .datagram = bytes,
+        } else null;
+    }
+
+    /// Process installed-key Handshake input with close propagation, then poll output.
+    ///
+    /// Authenticated frame errors queue CONNECTION_CLOSE and return before
+    /// ordinary installed-key Handshake output polling.
+    pub fn processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+    ) Error!?EndpointPolledDatagramResult {
+        try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+        const output = try self.pollProtectedHandshakeDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+            scid,
+        );
+        return if (output) |bytes| .{
+            .connection_id = connection_id,
+            .datagram = bytes,
+        } else null;
+    }
+
+    /// Route installed-key Handshake input, then poll one installed-key output.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    pub fn processRoutedProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .datagram = try self.processProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                datagram,
+                dcid,
+                scid,
+            ),
+        };
+    }
+
+    /// Route installed-key Handshake input through close propagation, then poll output.
+    ///
+    /// This preserves routed receive behavior while ensuring authenticated
+    /// Handshake frame errors stop before ordinary installed-key output polling.
+    pub fn processRoutedProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .datagram = try self.processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                datagram,
+                dcid,
+                scid,
+            ),
+        };
+    }
+
+    /// Process installed-key Handshake input, then drain installed-key output.
+    ///
+    /// This is the bounded-output form of
+    /// `processProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram()`.
+    pub fn processProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointDatagramDrainResult {
+        try self.processProtectedHandshakeDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+        var result = EndpointDatagramDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const output = self.pollProtectedHandshakeDatagramWithInstalledKeys(
+                connection_id,
+                connection,
+                now_millis,
+                dcid,
+                scid,
+            ) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = .{
+                .connection_id = connection_id,
+                .datagram = output orelse return result,
+            };
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
+    /// Process installed-key Handshake input with close propagation, then drain output.
+    ///
+    /// Authenticated frame errors queue CONNECTION_CLOSE and return before any
+    /// ordinary installed-key Handshake output is drained.
+    pub fn processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointDatagramDrainResult {
+        try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+        var result = EndpointDatagramDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const output = self.pollProtectedHandshakeDatagramWithInstalledKeys(
+                connection_id,
+                connection,
+                now_millis,
+                dcid,
+                scid,
+            ) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = .{
+                .connection_id = connection_id,
+                .datagram = output orelse return result,
+            };
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
+    /// Route installed-key Handshake input, then drain installed-key output.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    pub fn processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramDrainResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .drain = try self.processProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams(
+                connection_id,
+                connection,
+                now_millis,
+                datagram,
+                dcid,
+                scid,
+                out,
+            ),
+        };
+    }
+
+    /// Route installed-key Handshake input through close propagation, then drain output.
+    ///
+    /// This preserves routed receive behavior while ensuring authenticated
+    /// Handshake frame errors stop before ordinary installed-key output draining.
+    pub fn processRoutedProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        dcid: []const u8,
+        scid: []const u8,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramDrainResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .drain = try self.processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams(
+                connection_id,
+                connection,
+                now_millis,
+                datagram,
+                dcid,
+                scid,
+                out,
+            ),
+        };
+    }
+
     /// Route installed-key Handshake input, drive backend, and drain output.
     ///
     /// This is the routed socket-loop form of
@@ -42304,6 +42569,199 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive stops befo
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+}
+
+test "EndpointConnectionLifecycle installed-key Handshake receive polls output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x18, 0x28, 0x38, 0x48 };
+    const server_dcid = [_]u8{ 0xa8, 0xb8, 0xc8, 0xd8 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try client.sendCryptoInSpace(.handshake, "installed handshake poll");
+    const client_datagram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    const response = (try lifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram(
+        95,
+        &server,
+        11,
+        client_datagram,
+        &client_dcid,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response.datagram);
+
+    try std.testing.expectEqual(@as(u64, 95), response.connection_id);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.handshake));
+    var crypto_buf: [32]u8 = undefined;
+    const recv_len = (try server.recvCryptoInSpace(.handshake, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("installed handshake poll", crypto_buf[0..recv_len]);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, response.datagram);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
+}
+
+test "EndpointConnectionLifecycle routes installed-key Handshake receive and drains output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x19, 0x29, 0x39, 0x49 };
+    const server_dcid = [_]u8{ 0xa9, 0xb9, 0xc9, 0xd9 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_095);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    const server_connection_id: u64 = 96;
+    try lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try client.sendCryptoInSpace(.handshake, "installed handshake drain");
+    const client_datagram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    var drained: [2]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams(
+        server_connection_id + 1,
+        &server,
+        server_receive_path,
+        11,
+        client_datagram,
+        &client_dcid,
+        &server_dcid,
+        &drained,
+    ));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.handshake));
+
+    const result = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        client_datagram,
+        &client_dcid,
+        &server_dcid,
+        &drained,
+    );
+    defer for (drained[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, result.route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(server_connection_id, drained[0].connection_id);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, drained[0].datagram);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
+}
+
+test "EndpointConnectionLifecycle installed-key Handshake OrClose stops before poll" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x1a, 0x2a, 0x3a, 0x4a };
+    const server_dcid = [_]u8{ 0xaa, 0xba, 0xca, 0xda };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_handshake = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &server_dcid,
+        .scid = &client_dcid,
+        .packet_type = .handshake,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
+    defer std.testing.allocator.free(invalid_handshake);
+
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram(
+        97,
+        &server,
+        11,
+        invalid_handshake,
+        &client_dcid,
+        &server_dcid,
+    ));
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.handshake));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.handshake));
+
+    const close_packet = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        97,
+        &server,
+        12,
+        &client_dcid,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, close_packet);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
 }
 
 test "EndpointConnectionLifecycle routes installed-key Handshake then drives backend and polls output" {

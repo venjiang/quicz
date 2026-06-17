@@ -143,6 +143,14 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram`、
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams`、
 `processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`processProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram`、
+`processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram`、
+`processProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams`、
+`processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams`、
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram`、
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram`、
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams`、
+`processRoutedProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
 `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`、
@@ -385,6 +393,19 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-18：新增 installed-key Handshake receive-to-output poll 和 drain
+  step：
+  `EndpointConnectionLifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram()`、
+  `processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram()`、
+  `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram()`、
+  `processRoutedProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram()`、
+  `processProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams()`、
+  `processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams()`、
+  `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDrainDatagrams()` 和
+  `processRoutedProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams()`。
+  单元测试证明 installed-key Handshake receive-to-poll、routed receive-to-drain
+  会在 packet processing 前拦截 route mismatch，以及 close-propagating frame 错误会在普通
+  installed-key output 前停止。
 - 2026-06-18：新增 caller-keyed Initial/Handshake long-packet
   receive-to-output poll 和 drain step：
   `EndpointConnectionLifecycle.processProtectedLongDatagramInSpaceAndPollDatagram()`、
