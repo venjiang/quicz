@@ -5188,6 +5188,46 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process one due deadline, drive one compatible-version close path, then select a deadline.
+    ///
+    /// This is the close-propagating RFC 9368-compatible single-connection
+    /// no-output due-deadline backend planning step. Terminal idle/close
+    /// deadlines stop before backend progress. Live due work continues into
+    /// the compatible OrClose backend drive, where peer Version Information
+    /// errors queue CONNECTION_CLOSE before returning.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!?EndpointDueWorkCryptoBackendNextDeadlineResult {
+        const due_work = (try self.processDueDeadlineAndSelectNextDeadline(
+            connection_id,
+            connection,
+            now_millis,
+        )) orelse return null;
+        if (due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+                connection_id,
+                connection,
+                backend_space,
+                backend,
+                scratch,
+                compatibilities,
+            ),
+        };
+    }
+
     /// Process the earliest due deadline, drive backends, then select the next deadline.
     ///
     /// This is the no-output timer/backend planning step for due wakeups. A
@@ -26179,6 +26219,124 @@ test "EndpointConnectionLifecycle single due-deadline compatible backend loop st
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
     const next = backend_result.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 202), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    try std.testing.expect(next.deadline_millis > result.due_work.deadline.deadline_millis);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
+}
+
+test "EndpointConnectionLifecycle single due-deadline compatible close backend loop step selects next deadline" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+    const peer_params = peer_params_out.getWritten();
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+    try conn.confirmHandshake();
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(203, &conn);
+    const due_deadline = lifecycle.nextDeadline(203, &conn) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due_deadline.kind);
+
+    var backend = Backend{ .peer_transport_parameters = peer_params };
+    var scratch: [256]u8 = undefined;
+    const before = try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        203,
+        &conn,
+        due_deadline.deadline_millis - 1,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+    );
+    try std.testing.expect(before == null);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expect(!backend.peer_sent);
+    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
+
+    const result = (try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        203,
+        &conn,
+        due_deadline.deadline_millis,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+    )) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(@as(u64, 203), result.due_work.deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, result.due_work.deadline.kind);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), result.due_work.pending_work.idle_retired);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), result.due_work.pending_work.close_retired);
+    const serviced = result.due_work.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 203), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(peer_params.len, backend_result.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expect(backend_result.backend.progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), backend_result.backend.progress.peer_compatible_version_selected);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expectEqual(@as(u64, 4321), conn.peer_max_data);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    const next = backend_result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 203), next.connection_id);
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
     try std.testing.expect(next.deadline_millis > result.due_work.deadline.deadline_millis);
     const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;

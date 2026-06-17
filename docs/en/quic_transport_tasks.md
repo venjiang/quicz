@@ -194,6 +194,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processDueDeadlineAcrossConnectionsAndPollDatagram`,
@@ -765,8 +766,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   as the close-propagating and compatible-version no-output
   due-deadline/backend/deadline steps.
 - 2026-06-18: Added
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`
+  and
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`
-  as the compatible-version close-propagating no-output
+  as the single/cross compatible-version close-propagating no-output
   due-deadline/backend/deadline step. Unit coverage for the next-deadline due
   paths proves the earliest due recovery deadline is serviced before backend
   drive, backend progress refreshes another connection's recovery scheduling,
