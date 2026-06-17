@@ -257,6 +257,14 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`,
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`,
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
+`processProtectedZeroRttDatagramAndPollShortDatagram`,
+`processProtectedZeroRttDatagramOrCloseAndPollShortDatagram`,
+`processRoutedProtectedZeroRttDatagramAndPollShortDatagram`,
+`processRoutedProtectedZeroRttDatagramOrCloseAndPollShortDatagram`,
+`processProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram`,
+`processProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram`,
+`processRoutedProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram`,
+`processRoutedProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `nextDeadline`, and
@@ -354,6 +362,22 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-18: Added caller-keyed and installed-key 0-RTT
+  receive-to-short-output poll steps:
+  `EndpointConnectionLifecycle.processProtectedZeroRttDatagramAndPollShortDatagram()`,
+  `processProtectedZeroRttDatagramOrCloseAndPollShortDatagram()`,
+  `processRoutedProtectedZeroRttDatagramAndPollShortDatagram()`,
+  `processRoutedProtectedZeroRttDatagramOrCloseAndPollShortDatagram()`,
+  `processProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram()`,
+  `processProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram()`,
+  `processRoutedProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram()`,
+  and
+  `processRoutedProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram()`.
+  Unit coverage proves route selection stops mismatched connection handles
+  before 0-RTT processing, successful routed 0-RTT STREAM receive polls one
+  Application-space short ACK for both caller-keyed and installed-key paths,
+  and close-propagating authenticated 0-RTT frame errors stop before ordinary
+  short-output polling.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndPollProtectedLongCryptoDatagram()`,
   its `OrClose` variant,

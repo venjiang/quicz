@@ -7615,6 +7615,139 @@ pub const EndpointConnectionLifecycle = struct {
         return route;
     }
 
+    /// Process caller-keyed 0-RTT input, then poll one caller-keyed short output.
+    ///
+    /// This combines the common server loop step where an accepted 0-RTT packet
+    /// queues an Application-space ACK and the endpoint immediately polls one
+    /// 1-RTT short-header datagram. The caller supplies both the 0-RTT receive
+    /// keys and 1-RTT send keys.
+    pub fn processProtectedZeroRttDatagramAndPollShortDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+    ) Error!?EndpointPolledDatagramResult {
+        try self.processProtectedZeroRttDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        const output = try self.pollProtectedShortDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+            send_keys,
+        );
+        return if (output) |bytes| .{
+            .connection_id = connection_id,
+            .datagram = bytes,
+        } else null;
+    }
+
+    /// Process caller-keyed 0-RTT input with close propagation, then poll output.
+    ///
+    /// Authenticated 0-RTT frame errors queue CONNECTION_CLOSE and return
+    /// before polling ordinary 1-RTT output.
+    pub fn processProtectedZeroRttDatagramOrCloseAndPollShortDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+    ) Error!?EndpointPolledDatagramResult {
+        try self.processProtectedZeroRttDatagramOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            receive_keys,
+            datagram,
+        );
+        const output = try self.pollProtectedShortDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+            send_keys,
+        );
+        return if (output) |bytes| .{
+            .connection_id = connection_id,
+            .datagram = bytes,
+        } else null;
+    }
+
+    /// Route caller-keyed 0-RTT input, then poll one caller-keyed short output.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    /// On success, the endpoint processes the 0-RTT datagram and polls at most
+    /// one Application-space short-header datagram for the selected connection.
+    pub fn processRoutedProtectedZeroRttDatagramAndPollShortDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .datagram = try self.processProtectedZeroRttDatagramAndPollShortDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                receive_keys,
+                datagram,
+                dcid,
+                send_keys,
+            ),
+        };
+    }
+
+    /// Route caller-keyed 0-RTT input through close propagation, then poll output.
+    ///
+    /// This preserves routed receive behavior while ensuring authenticated
+    /// 0-RTT frame errors stop before ordinary output polling.
+    pub fn processRoutedProtectedZeroRttDatagramOrCloseAndPollShortDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        receive_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+        dcid: []const u8,
+        send_keys: protection.Aes128PacketProtectionKeys,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .datagram = try self.processProtectedZeroRttDatagramOrCloseAndPollShortDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                receive_keys,
+                datagram,
+                dcid,
+                send_keys,
+            ),
+        };
+    }
+
     /// Poll one caller-keyed protected 1-RTT datagram and refresh timers.
     ///
     /// This bridge is for endpoint loops that still receive packet-protection
@@ -8611,6 +8744,124 @@ pub const EndpointConnectionLifecycle = struct {
             datagram,
         );
         return route;
+    }
+
+    /// Process installed-key 0-RTT input, then poll one installed-key short output.
+    ///
+    /// This is the TLS-owned key variant of
+    /// `processProtectedZeroRttDatagramAndPollShortDatagram()`. The connection
+    /// owns early-data receive state and 1-RTT send keys; the endpoint owns the
+    /// route/timer boundary and returns at most one Application-space response.
+    pub fn processProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        dcid: []const u8,
+    ) Error!?EndpointPolledDatagramResult {
+        try self.processProtectedZeroRttDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+        const output = try self.pollProtectedShortDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+        );
+        return if (output) |bytes| .{
+            .connection_id = connection_id,
+            .datagram = bytes,
+        } else null;
+    }
+
+    /// Process installed-key 0-RTT input with close propagation, then poll output.
+    ///
+    /// Authenticated 0-RTT frame errors queue CONNECTION_CLOSE and return
+    /// before polling ordinary installed-key 1-RTT output.
+    pub fn processProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        dcid: []const u8,
+    ) Error!?EndpointPolledDatagramResult {
+        try self.processProtectedZeroRttDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            datagram,
+        );
+        const output = try self.pollProtectedShortDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+        );
+        return if (output) |bytes| .{
+            .connection_id = connection_id,
+            .datagram = bytes,
+        } else null;
+    }
+
+    /// Route installed-key 0-RTT input, then poll one installed-key short output.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing.
+    /// On success, the endpoint processes accepted early data and polls at most
+    /// one installed-key Application-space short-header datagram.
+    pub fn processRoutedProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        dcid: []const u8,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .datagram = try self.processProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                datagram,
+                dcid,
+            ),
+        };
+    }
+
+    /// Route installed-key 0-RTT input through close propagation, then poll output.
+    ///
+    /// This keeps TLS-owned early-data receive on the endpoint route boundary
+    /// while ensuring authenticated frame errors stop before ordinary output
+    /// polling.
+    pub fn processRoutedProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        dcid: []const u8,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .datagram = try self.processProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                datagram,
+                dcid,
+            ),
+        };
     }
 
     /// Poll one installed-key protected 1-RTT datagram and refresh recovery scheduling.
@@ -37333,6 +37584,171 @@ test "EndpointConnectionLifecycle refreshes caller-keyed zero RTT timer lifecycl
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), server_lifecycle.earliestRecoveryDeadline());
 }
 
+test "EndpointConnectionLifecycle routes caller-keyed zero RTT receive and polls short ACK" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x12, 0x22, 0x32, 0x42 };
+    const server_dcid = [_]u8{ 0xa2, 0xb2, 0xc2, 0xd2 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_012);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 12;
+    const server_connection_id: u64 = 22;
+
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "routed early", true);
+    const early = (try client_lifecycle.pollProtectedZeroRttDatagram(
+        client_connection_id,
+        &client,
+        10,
+        &server_dcid,
+        &client_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(early);
+
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedZeroRttDatagramAndPollShortDatagram(
+        client_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        secrets.client,
+        early,
+        &client_dcid,
+        secrets.server,
+    ));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+
+    const result = try server_lifecycle.processRoutedProtectedZeroRttDatagramAndPollShortDatagram(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        secrets.client,
+        early,
+        &client_dcid,
+        secrets.server,
+    );
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, result.route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    const ack = result.datagram orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, ack.connection_id);
+    defer std.testing.allocator.free(ack.datagram);
+
+    var recv_buf: [16]u8 = undefined;
+    const recv_len = (try server.recvOnStream(stream_id, &recv_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("routed early", recv_buf[0..recv_len]);
+
+    const client_route = try client_lifecycle.processRoutedProtectedShortDatagram(
+        client_connection_id,
+        &client,
+        client_receive_path,
+        12,
+        secrets.server,
+        ack.datagram,
+    );
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
+test "EndpointConnectionLifecycle caller-keyed zero RTT OrClose stops before short poll" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x13, 0x23, 0x33, 0x43 };
+    const server_dcid = [_]u8{ 0xa3, 0xb3, 0xc3, 0xd3 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_013);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const server_connection_id: u64 = 23;
+    try lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    var plaintext: [16]u8 = undefined;
+    @memset(&plaintext, 0);
+    var plaintext_out = buffer.fixedWriter(&plaintext);
+    try frame.encodeFrame(plaintext_out.writer(), .{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+
+    const invalid_zero_rtt = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &server_dcid,
+        .scid = &client_dcid,
+        .packet_type = .zero_rtt,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(invalid_zero_rtt);
+
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedZeroRttDatagramOrCloseAndPollShortDatagram(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        secrets.client,
+        invalid_zero_rtt,
+        &client_dcid,
+        secrets.server,
+    ));
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
 test "EndpointConnectionLifecycle refreshes installed-key Handshake timer lifecycle" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
@@ -37593,6 +38009,188 @@ test "EndpointConnectionLifecycle refreshes installed-key zero RTT timer lifecyc
     try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), server_lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle routes installed-key zero RTT receive and polls short ACK" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x14, 0x24, 0x34, 0x44 };
+    const server_dcid = [_]u8{ 0xa4, 0xb4, 0xc4, 0xd4 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    try client.installZeroRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+    });
+    try server.installZeroRttTrafficSecrets(.{
+        .peer = secrets.client.secret,
+    });
+    try server.acceptZeroRtt();
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_014);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 14;
+    const server_connection_id: u64 = 24;
+
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "installed early", true);
+    const early = (try client_lifecycle.pollProtectedZeroRttDatagramWithInstalledKeys(
+        client_connection_id,
+        &client,
+        10,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(early);
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram(
+        client_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        early,
+        &client_dcid,
+    ));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+
+    const result = try server_lifecycle.processRoutedProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        early,
+        &client_dcid,
+    );
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, result.route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+
+    const ack = result.datagram orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, ack.connection_id);
+    defer std.testing.allocator.free(ack.datagram);
+
+    var recv_buf: [16]u8 = undefined;
+    const recv_len = (try server.recvOnStream(stream_id, &recv_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("installed early", recv_buf[0..recv_len]);
+
+    const client_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        client_connection_id,
+        &client,
+        client_receive_path,
+        12,
+        ack.datagram,
+    );
+    try std.testing.expectEqual(client_connection_id, client_route.connection_id);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+}
+
+test "EndpointConnectionLifecycle installed-key zero RTT OrClose stops before short poll" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x15, 0x25, 0x35, 0x45 };
+    const server_dcid = [_]u8{ 0xa5, 0xb5, 0xc5, 0xd5 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    try server.installZeroRttTrafficSecrets(.{
+        .peer = secrets.client.secret,
+    });
+    try server.acceptZeroRtt();
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_015);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const server_connection_id: u64 = 25;
+    try lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    var plaintext: [16]u8 = undefined;
+    @memset(&plaintext, 0);
+    var plaintext_out = buffer.fixedWriter(&plaintext);
+    try frame.encodeFrame(plaintext_out.writer(), .{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } });
+
+    const invalid_zero_rtt = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &server_dcid,
+        .scid = &client_dcid,
+        .packet_type = .zero_rtt,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(invalid_zero_rtt);
+
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        invalid_zero_rtt,
+        &client_dcid,
+    ));
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 }
 
 test "EndpointConnectionLifecycle refreshes caller-keyed protected short timer lifecycle" {

@@ -143,6 +143,14 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams`、
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`、
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`、
+`processProtectedZeroRttDatagramAndPollShortDatagram`、
+`processProtectedZeroRttDatagramOrCloseAndPollShortDatagram`、
+`processRoutedProtectedZeroRttDatagramAndPollShortDatagram`、
+`processRoutedProtectedZeroRttDatagramOrCloseAndPollShortDatagram`、
+`processProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram`、
+`processProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram`、
+`processRoutedProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram`、
+`processRoutedProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram`、
 `feedDatagramWithInstalledKeysAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndDrainDatagrams`、
@@ -327,6 +335,20 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-18：新增 caller-keyed 和 installed-key 0-RTT
+  receive-to-short-output poll step：
+  `EndpointConnectionLifecycle.processProtectedZeroRttDatagramAndPollShortDatagram()`、
+  `processProtectedZeroRttDatagramOrCloseAndPollShortDatagram()`、
+  `processRoutedProtectedZeroRttDatagramAndPollShortDatagram()`、
+  `processRoutedProtectedZeroRttDatagramOrCloseAndPollShortDatagram()`、
+  `processProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram()`、
+  `processProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram()`、
+  `processRoutedProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram()` 和
+  `processRoutedProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram()`。
+  单元测试证明 route selection 会在 0-RTT processing 前拦截 connection handle
+  mismatch，成功 routed 0-RTT STREAM receive 会在 caller-keyed 与 installed-key
+  路径中 poll 一个 Application-space short ACK，close-propagating 的认证后 0-RTT
+  frame 错误会在普通 short-output polling 前停止。
 - 2026-06-18：新增
   `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndPollProtectedLongCryptoDatagram()`、
   其 `OrClose` 变体、
