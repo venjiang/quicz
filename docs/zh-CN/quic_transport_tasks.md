@@ -183,6 +183,10 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedShortDatagramWithKeyPhaseStateOrCloseAndDrainDatagrams`、
 `processRoutedProtectedShortDatagramWithKeyPhaseStateAndDrainDatagrams`、
 `processRoutedProtectedShortDatagramWithKeyPhaseStateOrCloseAndDrainDatagrams`、
+`processProtectedShortDatagramWithInstalledKeysAndPollDatagram`、
+`processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram`、
+`processProtectedShortDatagramWithInstalledKeysAndDrainDatagrams`、
+`processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndDrainDatagrams`、
@@ -297,6 +301,8 @@ explicit key-update 1-RTT receive-to-output loop step、
 explicit key-update 1-RTT receive-to-bounded-drain loop step、
 caller-owned key-phase 1-RTT receive-to-output loop step、
 caller-owned key-phase 1-RTT receive-to-bounded-drain loop step、
+single-connection installed-key 1-RTT receive-to-output loop step、
+single-connection installed-key 1-RTT receive-to-bounded-drain loop step、
 backend-drive-to-caller-keyed long-header drain step、
 close-propagating backend-drive-to-caller-keyed long-header drain step、
 caller-keyed receive-to-backend-to-bounded-drain loop step、
@@ -463,6 +469,16 @@ close 和 route cleanup 事件。
   成功 routed Handshake CRYPTO receive 会驱动 backend progress 并 poll 一个 protected
   Handshake response，close-propagating backend peer-parameter 错误会在 output
   polling 前停止。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndPollDatagram()`、
+  `processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram()`、
+  `processProtectedShortDatagramWithInstalledKeysAndDrainDatagrams()` 和
+  `processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams()`，
+  作为 single-connection installed-key 1-RTT receive-to-output 和
+  receive-to-bounded-drain loop step。单元测试证明 successful installed-key PING
+  receive 不需要 endpoint routing 也能 poll 和 drain Application-space ACK output，
+  close-propagating 的认证后 Application frame 错误会在普通 output polling 或
+  draining 前排队 close。
 - 2026-06-18：新增
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndPollDatagram()`
   及其 `OrClose` 变体，作为 routed installed-key 1-RTT

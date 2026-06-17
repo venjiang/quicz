@@ -297,6 +297,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramWithKeyPhaseStateOrCloseAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramWithKeyPhaseStateAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramWithKeyPhaseStateOrCloseAndDrainDatagrams`,
+`processProtectedShortDatagramWithInstalledKeysAndPollDatagram`,
+`processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram`,
+`processProtectedShortDatagramWithInstalledKeysAndDrainDatagrams`,
+`processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `nextDeadline`, and
@@ -320,6 +324,8 @@ explicit key-update 1-RTT receive-to-output loop steps,
 explicit key-update 1-RTT receive-to-bounded-drain loop steps,
 caller-owned key-phase 1-RTT receive-to-output loop steps,
 caller-owned key-phase 1-RTT receive-to-bounded-drain loop steps,
+single-connection installed-key 1-RTT receive-to-output loop steps,
+single-connection installed-key 1-RTT receive-to-bounded-drain loop steps,
 backend-drive-to-caller-keyed long-header drain steps,
 close-propagating backend-drive-to-caller-keyed long-header drain steps,
 caller-keyed receive-to-backend-to-bounded-drain loop steps,
@@ -498,6 +504,17 @@ QUIC unless the gap is named and the verification evidence is added here.
   before backend delivery, successful routed Handshake CRYPTO receive drives
   backend progress and polls one protected Handshake response, and
   close-propagating backend peer-parameter errors stop before output polling.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndPollDatagram()`,
+  `processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram()`,
+  `processProtectedShortDatagramWithInstalledKeysAndDrainDatagrams()`, and
+  `processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams()`
+  as single-connection installed-key 1-RTT receive-to-output and
+  receive-to-bounded-drain loop steps. Unit coverage proves successful
+  installed-key PING receive polls and drains Application-space ACK output
+  without requiring endpoint routing, and close-propagating authenticated
+  Application frame errors queue close before ordinary output polling or
+  draining.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndPollDatagram()`
   and its `OrClose` variant as routed installed-key 1-RTT
