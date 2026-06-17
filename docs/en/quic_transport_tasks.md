@@ -273,6 +273,14 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processRoutedProtectedZeroRttDatagramWithInstalledKeysAndDrainShortDatagrams`,
 `processRoutedProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram`,
 `processRoutedProtectedZeroRttDatagramWithInstalledKeysOrCloseAndDrainShortDatagrams`,
+`processProtectedShortDatagramAndPollDatagram`,
+`processProtectedShortDatagramOrCloseAndPollDatagram`,
+`processRoutedProtectedShortDatagramAndPollDatagram`,
+`processRoutedProtectedShortDatagramOrCloseAndPollDatagram`,
+`processProtectedShortDatagramAndDrainDatagrams`,
+`processProtectedShortDatagramOrCloseAndDrainDatagrams`,
+`processRoutedProtectedShortDatagramAndDrainDatagrams`,
+`processRoutedProtectedShortDatagramOrCloseAndDrainDatagrams`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `nextDeadline`, and
@@ -370,6 +378,20 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-18: Added caller-keyed 1-RTT short
+  receive-to-output poll and drain steps:
+  `EndpointConnectionLifecycle.processProtectedShortDatagramAndPollDatagram()`,
+  `processProtectedShortDatagramOrCloseAndPollDatagram()`,
+  `processRoutedProtectedShortDatagramAndPollDatagram()`,
+  `processRoutedProtectedShortDatagramOrCloseAndPollDatagram()`,
+  `processProtectedShortDatagramAndDrainDatagrams()`,
+  `processProtectedShortDatagramOrCloseAndDrainDatagrams()`,
+  `processRoutedProtectedShortDatagramAndDrainDatagrams()`,
+  and `processRoutedProtectedShortDatagramOrCloseAndDrainDatagrams()`.
+  Unit coverage proves route selection stops mismatched connection handles
+  before packet processing, successful routed caller-keyed PING receive polls
+  and drains Application-space ACK output, and close-propagating authenticated
+  Application frame errors stop before ordinary output polling or draining.
 - 2026-06-18: Added caller-keyed and installed-key 0-RTT
   receive-to-short-output drain steps:
   `EndpointConnectionLifecycle.processProtectedZeroRttDatagramAndDrainShortDatagrams()`,
