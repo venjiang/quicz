@@ -377,6 +377,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-18：把公开连接配置和固定存储 preferred-address transport-parameter
+  建模迁移到 `src/quic/connection_config.zig`，同时保持 `src/lib.zig`
+  作为稳定的 `quicz` module facade。这是 transport core 文件继续收窄的第一步模块边界整理；
+  `zig build test` 仍是验证门槛，因为拆出的文件仍必须被 root test build 发现。
 - 2026-06-18：新增 caller-owned key-phase-state 1-RTT short
   receive-to-output poll 和 drain step：
   `EndpointConnectionLifecycle.processProtectedShortDatagramWithKeyPhaseStateAndPollDatagram()`、

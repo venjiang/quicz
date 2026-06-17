@@ -404,6 +404,12 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-18: Moved public connection configuration and
+  fixed-storage preferred-address transport-parameter modeling into
+  `src/quic/connection_config.zig` while keeping `src/lib.zig` as the stable
+  `quicz` module facade. This is the first module-boundary cleanup toward
+  smaller transport-core files; `zig build test` remains the verification gate
+  because split files must still be discovered by the root test build.
 - 2026-06-18: Added caller-owned key-phase-state 1-RTT short
   receive-to-output poll and drain steps:
   `EndpointConnectionLifecycle.processProtectedShortDatagramWithKeyPhaseStateAndPollDatagram()`,

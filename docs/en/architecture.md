@@ -70,8 +70,16 @@ Implementation code moves under `src/quic/` by responsibility; for example,
 compatibility helpers, `src/quic/crypto_types.zig` owns shared TLS
 traffic-secret and backend-progress types, `src/quic/endpoint_types.zig` owns
 endpoint lifecycle result, deadline, drain, feed, and datagram option contracts,
+`src/quic/connection_config.zig` owns public connection configuration and
+fixed-storage transport-parameter values that do not need access to the
+connection state machine,
 and `src/quic/tls_backend.zig` owns the C-ABI TLS adapter while `lib.zig`
 re-exports the stable public surface.
+
+When moving implementation code out of `src/lib.zig`, keep the public module
+root stable and add explicit `test` imports for files whose tests must be
+discovered by `zig build test`. This preserves `@import("quicz")` call sites
+while letting implementation modules grow by transport responsibility.
 
 ### Packet Protection Layer
 

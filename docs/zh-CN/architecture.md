@@ -60,7 +60,13 @@ fixture 泄漏到核心 API。
 `src/quic/crypto_types.zig` 负责共享 TLS traffic-secret 和 backend-progress 类型，
 `src/quic/endpoint_types.zig` 负责 endpoint lifecycle 共享的结果、deadline、drain、feed 和
 datagram 选项契约，
+`src/quic/connection_config.zig` 负责公开连接配置和不需要访问连接状态机的固定存储
+transport-parameter 值，
 `src/quic/tls_backend.zig` 负责 C-ABI TLS adapter，`lib.zig` 继续 re-export 稳定公共表面。
+
+从 `src/lib.zig` 迁出实现代码时，应保持公开 module root 稳定，并为需要被 `zig build test`
+发现测试的文件增加显式 `test` import。这样既保留 `@import("quicz")` 调用方式，又能按
+transport 职责扩展内部模块。
 
 ### Packet protection layer
 
