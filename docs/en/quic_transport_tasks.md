@@ -258,13 +258,21 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram`,
 `processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams`,
 `processProtectedZeroRttDatagramAndPollShortDatagram`,
+`processProtectedZeroRttDatagramAndDrainShortDatagrams`,
 `processProtectedZeroRttDatagramOrCloseAndPollShortDatagram`,
+`processProtectedZeroRttDatagramOrCloseAndDrainShortDatagrams`,
 `processRoutedProtectedZeroRttDatagramAndPollShortDatagram`,
+`processRoutedProtectedZeroRttDatagramAndDrainShortDatagrams`,
 `processRoutedProtectedZeroRttDatagramOrCloseAndPollShortDatagram`,
+`processRoutedProtectedZeroRttDatagramOrCloseAndDrainShortDatagrams`,
 `processProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram`,
+`processProtectedZeroRttDatagramWithInstalledKeysAndDrainShortDatagrams`,
 `processProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram`,
+`processProtectedZeroRttDatagramWithInstalledKeysOrCloseAndDrainShortDatagrams`,
 `processRoutedProtectedZeroRttDatagramWithInstalledKeysAndPollShortDatagram`,
+`processRoutedProtectedZeroRttDatagramWithInstalledKeysAndDrainShortDatagrams`,
 `processRoutedProtectedZeroRttDatagramWithInstalledKeysOrCloseAndPollShortDatagram`,
+`processRoutedProtectedZeroRttDatagramWithInstalledKeysOrCloseAndDrainShortDatagrams`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `nextDeadline`, and
@@ -362,6 +370,22 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-18: Added caller-keyed and installed-key 0-RTT
+  receive-to-short-output drain steps:
+  `EndpointConnectionLifecycle.processProtectedZeroRttDatagramAndDrainShortDatagrams()`,
+  `processProtectedZeroRttDatagramOrCloseAndDrainShortDatagrams()`,
+  `processRoutedProtectedZeroRttDatagramAndDrainShortDatagrams()`,
+  `processRoutedProtectedZeroRttDatagramOrCloseAndDrainShortDatagrams()`,
+  `processProtectedZeroRttDatagramWithInstalledKeysAndDrainShortDatagrams()`,
+  `processProtectedZeroRttDatagramWithInstalledKeysOrCloseAndDrainShortDatagrams()`,
+  `processRoutedProtectedZeroRttDatagramWithInstalledKeysAndDrainShortDatagrams()`,
+  and
+  `processRoutedProtectedZeroRttDatagramWithInstalledKeysOrCloseAndDrainShortDatagrams()`.
+  Unit coverage proves route selection stops mismatched connection handles
+  before 0-RTT processing, successful routed 0-RTT STREAM receive drains one
+  Application-space short ACK for both caller-keyed and installed-key paths,
+  and close-propagating authenticated 0-RTT frame errors stop before ordinary
+  short-output draining.
 - 2026-06-18: Added caller-keyed and installed-key 0-RTT
   receive-to-short-output poll steps:
   `EndpointConnectionLifecycle.processProtectedZeroRttDatagramAndPollShortDatagram()`,
