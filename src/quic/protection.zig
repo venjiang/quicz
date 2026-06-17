@@ -1,11 +1,12 @@
 const std = @import("std");
 const buffer = @import("buffer.zig");
 const packet = @import("packet.zig");
+const protocol_limits = @import("protocol_limits.zig");
 
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 const Aes128Gcm = std.crypto.aead.aes_gcm.Aes128Gcm;
 
-const max_connection_id_len = 20;
+const max_connection_id_len = protocol_limits.max_connection_id_len;
 
 /// RFC 9001 QUIC v1 Initial salt.
 pub const initial_salt_v1 = [_]u8{

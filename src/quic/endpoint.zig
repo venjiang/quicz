@@ -2,9 +2,10 @@ const std = @import("std");
 const address_validation_token = @import("address_validation_token.zig");
 const buffer = @import("buffer.zig");
 const packet = @import("packet.zig");
+const protocol_limits = @import("protocol_limits.zig");
 
 /// Maximum QUIC connection ID length from RFC 9000.
-pub const max_connection_id_len: usize = 20;
+pub const max_connection_id_len = protocol_limits.max_connection_id_len;
 /// QUIC stateless reset token length.
 pub const stateless_reset_token_len: usize = packet.stateless_reset_token_len;
 /// Binary IPv4 peer address binding length used by address-validation tokens.

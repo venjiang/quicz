@@ -1,10 +1,11 @@
 const std = @import("std");
 const buffer = @import("buffer.zig");
 const packet = @import("packet.zig");
+const protocol_limits = @import("protocol_limits.zig");
 
-const max_connection_id_len = 20;
+const max_connection_id_len = protocol_limits.max_connection_id_len;
 const max_udp_payload_size_default = 65_527;
-const max_stream_count = @as(u64, 1) << 60;
+const max_stream_count = protocol_limits.max_stream_count;
 
 /// RFC 9000 transport parameter identifiers.
 pub const ParameterId = enum(u64) {

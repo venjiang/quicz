@@ -1,11 +1,12 @@
 const packet = @import("packet.zig");
+const protocol_limits = @import("protocol_limits.zig");
 const transport_parameters = @import("transport_parameters.zig");
 const transport_types = @import("transport_types.zig");
 
 const Error = transport_types.Error;
 
-const max_connection_id_len = 20;
-const min_active_connection_id_limit = 2;
+const max_connection_id_len = protocol_limits.max_connection_id_len;
+const min_active_connection_id_limit = protocol_limits.min_active_connection_id_limit;
 const default_max_stored_new_tokens: usize = 4;
 const default_max_crypto_buffer_size: u64 = 1 << 20;
 const default_available_versions = [_]packet.Version{.v1};

@@ -1,9 +1,10 @@
 const std = @import("std");
 const buffer = @import("buffer.zig");
 const packet = @import("packet.zig");
+const protocol_limits = @import("protocol_limits.zig");
 
-const max_quic_varint: u64 = (@as(u64, 1) << 62) - 1;
-const max_stream_count: u64 = @as(u64, 1) << 60;
+const max_quic_varint = protocol_limits.max_quic_varint;
+const max_stream_count = protocol_limits.max_stream_count;
 
 /// Basic subset of QUIC frames (RFC 9000 Section 19).
 pub const FrameType = enum(u8) {

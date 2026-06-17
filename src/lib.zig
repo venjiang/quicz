@@ -15,6 +15,7 @@ const endpoint_types = @import("quic/endpoint_types.zig");
 const connection_config = @import("quic/connection_config.zig");
 const connection_version = @import("quic/connection_version.zig");
 const packet_context = @import("quic/packet_context.zig");
+const protocol_limits = @import("quic/protocol_limits.zig");
 const buffer = @import("quic/buffer.zig");
 
 pub const Error = transport_types.Error;
@@ -128,16 +129,16 @@ test {
     _ = connection_version;
 }
 
-const max_quic_varint = 4611686018427387903;
-const max_stream_count = @as(u64, 1) << 60;
-const max_connection_id_len = 20;
-const min_initial_destination_connection_id_len = 8;
-const min_initial_udp_datagram_len = 1200;
-const min_active_connection_id_limit = 2;
-const close_state_pto_multiplier: u64 = 3;
-const max_path_challenge_transmissions: u8 = 3;
-const packet_threshold_loss_gap: u64 = 3;
-const anti_amplification_multiplier: usize = 3;
+const max_quic_varint = protocol_limits.max_quic_varint;
+const max_stream_count = protocol_limits.max_stream_count;
+const max_connection_id_len = protocol_limits.max_connection_id_len;
+const min_initial_destination_connection_id_len = protocol_limits.min_initial_destination_connection_id_len;
+const min_initial_udp_datagram_len = protocol_limits.min_initial_udp_datagram_len;
+const min_active_connection_id_limit = protocol_limits.min_active_connection_id_limit;
+const close_state_pto_multiplier = protocol_limits.close_state_pto_multiplier;
+const max_path_challenge_transmissions = protocol_limits.max_path_challenge_transmissions;
+const packet_threshold_loss_gap = protocol_limits.packet_threshold_loss_gap;
+const anti_amplification_multiplier = protocol_limits.anti_amplification_multiplier;
 
 const PeerTransportParameterValidationError = Error || error{
     VersionNegotiationError,
