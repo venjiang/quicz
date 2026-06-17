@@ -13182,6 +13182,43 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Process installed-key 1-RTT input through close propagation, drive a backend, and poll output.
+    ///
+    /// Authenticated Application frame errors or backend peer-parameter errors
+    /// queue CONNECTION_CLOSE and return before ordinary installed-key output
+    /// polling. Successful paths preserve the receive-to-backend-to-output
+    /// behavior of the non-close-propagating variant.
+    pub fn processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_now_millis: i64,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        try self.processProtectedShortDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            dcid_len,
+            datagram,
+        );
+        return self.driveCryptoBackendInSpaceOrCloseAndPollDatagram(
+            connection_id,
+            connection,
+            backend_space,
+            backend,
+            scratch,
+            poll_now_millis,
+            poll_options,
+        );
+    }
+
     /// Route installed-key 1-RTT input, drive a backend, and poll output.
     ///
     /// Route errors and connection-id mismatches fail before packet processing
@@ -13205,6 +13242,44 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .route = route,
             .backend = try self.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+                backend_space,
+                backend,
+                scratch,
+                poll_now_millis,
+                poll_options,
+            ),
+        };
+    }
+
+    /// Route installed-key 1-RTT input through close propagation, drive a backend, and poll output.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing
+    /// or backend callbacks. Authenticated frame errors or backend
+    /// peer-parameter errors queue CONNECTION_CLOSE and stop before ordinary
+    /// installed-key output polling.
+    pub fn processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_now_millis: i64,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .backend = try self.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
                 connection_id,
                 connection,
                 now_millis,
@@ -50972,6 +51047,211 @@ test "EndpointConnectionLifecycle routes installed-key short backend drive and p
     var recv_buf: [64]u8 = undefined;
     const recv_len = (try client.recvCryptoInSpace(.application, &recv_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("routed app response", recv_buf[0..recv_len]);
+}
+
+test "EndpointConnectionLifecycle installed-key short backend OrClose stops before poll on peer parameters" {
+    const BadBackend = struct {
+        received: [64]u8 = undefined,
+        received_len: usize = 0,
+        output_pulled: bool = false,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, bytes: []const u8) Error!void {
+            if (space != .application) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            @memcpy(self.received[self.received_len..][0..bytes.len], bytes);
+            self.received_len += bytes.len;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out.len == 0) return error.BufferTooSmall;
+            out[0] = 0;
+            return out[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out.len == 0) return error.BufferTooSmall;
+            out[0] = 0x04;
+            self.peer_sent = true;
+            return out[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x4d, 0x4e, 0x4f, 0x50 };
+    const server_dcid = [_]u8{ 0xdd, 0xde, 0xdf, 0xe0 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try client.sendCryptoInSpace(.application, "bad poll peer tp");
+    const request = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        58,
+        &client,
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(request);
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        68,
+        &server,
+        11,
+        server_dcid.len,
+        request,
+        .application,
+        backend.backend(),
+        &scratch,
+        12,
+        .{
+            .space = .application,
+            .destination_connection_id = &client_dcid,
+        },
+    ));
+    try std.testing.expectEqualStrings("bad poll peer tp", backend.received[0..backend.received_len]);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+}
+
+test "EndpointConnectionLifecycle routed installed-key short backend OrClose poll validates route before backend" {
+    const Backend = struct {
+        receive_calls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, _: []const u8) Error!void {
+            if (space != .application) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.receive_calls += 1;
+        }
+
+        fn pull(_: *anyopaque, space: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            if (space != .application) return error.InvalidPacket;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
+    const server_dcid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_051);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 71;
+    const server_connection_id: u64 = 81;
+
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendCryptoInSpace(.application, "route orclose poll");
+    const request = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_connection_id,
+        &client,
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(request);
+
+    var backend = Backend{};
+    var scratch: [64]u8 = undefined;
+    const poll_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .application,
+        .destination_connection_id = &client_dcid,
+    };
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        client_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        request,
+        .application,
+        backend.backend(),
+        &scratch,
+        12,
+        poll_options,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), backend.receive_calls);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(?i64, null), server.idleTimeoutDeadlineMillis());
 }
 
 test "EndpointConnectionLifecycle installed-key short OrClose receive stops before direct poll" {
