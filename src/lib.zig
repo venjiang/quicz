@@ -3392,6 +3392,57 @@ pub const EndpointConnectionLifecycle = struct {
         return result;
     }
 
+    /// Drive compatible-version backends, then select the next deadline.
+    ///
+    /// This is the no-output RFC 9368-compatible backend-drive step for socket
+    /// loops that want backend progress and timer recomputation without polling
+    /// installed-key output in the same iteration.
+    pub fn driveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections(
+            space,
+            drive_views,
+            compatibilities,
+        );
+        return .{
+            .backend = backend,
+            .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+        };
+    }
+
+    /// Drive one compatible-version backend, then select the next deadline.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const deadline_connections = [_]EndpointConnectionView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        return self.driveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline(
+            space,
+            &drive_views,
+            compatibilities,
+            &deadline_connections,
+        );
+    }
+
     /// Drive compatible-version backends, then poll installed-key output.
     ///
     /// This combines the RFC 9368-compatible backend sweep with the normal
@@ -3577,6 +3628,56 @@ pub const EndpointConnectionLifecycle = struct {
             accumulateCryptoBackendProgress(&result, progress);
         }
         return result;
+    }
+
+    /// Drive compatible-version close-propagating backends, then select a deadline.
+    ///
+    /// Peer Version Information errors queue CONNECTION_CLOSE and return before
+    /// deadline selection, matching the close-propagating sweep behavior.
+    pub fn driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections(
+            space,
+            drive_views,
+            compatibilities,
+        );
+        return .{
+            .backend = backend,
+            .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+        };
+    }
+
+    /// Drive one compatible-version close path, then select the next deadline.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const deadline_connections = [_]EndpointConnectionView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        return self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+            space,
+            &drive_views,
+            compatibilities,
+            &deadline_connections,
+        );
     }
 
     /// Drive compatible-version close-propagating backends, then poll output.
@@ -36806,6 +36907,128 @@ test "EndpointConnectionLifecycle drives compatible-version crypto backend and r
         @as(?packet.Version, packet.Version.v2),
         try server.selectPeerCompatibleVersion(&compatibilities),
     );
+}
+
+test "EndpointConnectionLifecycle compatible-version backend drive selects next deadline" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+    const peer_params = peer_params_out.getWritten();
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var connection = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+        .initial_rtt_ms = 100,
+    });
+    defer connection.deinit();
+    try connection.validatePeerAddress();
+    try connection.confirmHandshake();
+    _ = try connection.recordPacketSentInSpace(.application, 10, 100);
+
+    var backend = Backend{ .peer_transport_parameters = peer_params };
+    var scratch: [256]u8 = undefined;
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 161,
+        .connection = &connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const deadline_connections = [_]EndpointConnectionView{.{
+        .connection_id = 161,
+        .connection = &connection,
+    }};
+
+    const result = try lifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline(
+        .handshake,
+        &drive_views,
+        &compatibilities,
+        &deadline_connections,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(peer_params.len, result.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expect(result.backend.progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), result.backend.progress.peer_compatible_version_selected);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expectEqual(@as(u64, 4321), connection.peer_max_data);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    const next = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 161), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
+
+    var close_connection = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+        .initial_rtt_ms = 100,
+    });
+    defer close_connection.deinit();
+    try close_connection.validatePeerAddress();
+    try close_connection.confirmHandshake();
+    _ = try close_connection.recordPacketSentInSpace(.application, 20, 100);
+
+    var close_backend = Backend{ .peer_transport_parameters = peer_params };
+    const close_result = try lifecycle.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        162,
+        &close_connection,
+        .handshake,
+        close_backend.backend(),
+        &scratch,
+        &compatibilities,
+    );
+    try std.testing.expectEqual(@as(usize, 1), close_result.backend.connections_driven);
+    try std.testing.expectEqual(peer_params.len, close_result.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), close_result.backend.progress.peer_compatible_version_selected);
+    try std.testing.expect(close_backend.peer_sent);
+    const close_next = close_result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 162), close_next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, close_next.kind);
 }
 
 test "EndpointConnectionLifecycle drives compatible-version crypto backends across caller-owned connections" {

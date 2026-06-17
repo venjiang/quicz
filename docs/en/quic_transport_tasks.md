@@ -210,9 +210,13 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
 `driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`,
+`driveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections`,
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
+`driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams`,
@@ -749,6 +753,16 @@ QUIC unless the gap is named and the verification evidence is added here.
   close-propagating sweep stops at the first peer Version Information error and
   leaves later backends untouched. Unit coverage proves both the two-connection
   compatible-version success path and the first-error close path.
+- 2026-06-17: Added
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`,
+  and
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`
+  as RFC 9368-compatible no-output backend-drive-to-next-deadline socket-loop
+  steps. Unit coverage proves compatible Version Information application,
+  endpoint recovery scheduling refresh, and recovery deadline selection without
+  polling output.
 - 2026-06-10: Added `EndpointCryptoBackendDriveDatagramResult` and
   backend-drive-to-datagram loop steps:
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndPollDatagram()`,

@@ -203,9 +203,13 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `driveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
 `driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections`、
+`driveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`、
+`driveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections`、
+`driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
+`driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、`nextDeadline` 和
 `nextDeadlineAcrossConnections`，
@@ -649,6 +653,16 @@ close 和 route cleanup 事件。
   和 recovery-timer refresh；close-propagating 路径会在第一处 peer Version
   Information 错误处停止，并保持后续 backend 未驱动。单元测试覆盖两条连接的
   compatible-version 成功路径和 first-error close 路径。
+- 2026-06-17：新增
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline()`、
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`、
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`
+  和
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`，
+  作为 RFC 9368 compatible-version no-output backend-drive-to-next-deadline
+  socket-loop step。单元测试证明 compatible Version Information application、
+  endpoint recovery scheduling refresh 和 recovery deadline selection 可以在
+  不 poll output 的情况下完成。
 - 2026-06-10：新增 `EndpointCryptoBackendDriveDatagramResult`，以及
   backend-drive-to-datagram loop step：
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndPollDatagram()`、
