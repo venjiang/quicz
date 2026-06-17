@@ -368,6 +368,16 @@ pub const EndpointDueWorkDatagramDrainResult = struct {
     drain: EndpointDatagramDrainResult,
 };
 
+/// Result from servicing one due deadline and selecting the next wakeup.
+pub const EndpointDueWorkNextDeadlineResult = struct {
+    /// Deadline that was due when this pending-work pass started.
+    deadline: EndpointConnectionDeadline,
+    /// Pending-work actions applied for the due deadline.
+    pending_work: EndpointPendingWorkResult,
+    /// Next endpoint-visible deadline after due work has been applied.
+    next_deadline: ?EndpointConnectionDeadline = null,
+};
+
 /// Result from due-deadline work followed by optional backend/output processing.
 pub const EndpointDueWorkCryptoBackendDatagramResult = struct {
     /// Due deadline work applied before backend/output processing.

@@ -170,6 +170,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processPendingWorkAndDrainDatagrams`、
 `processDueDeadlineAndPollDatagram`、
 `processDueDeadlineAndDrainDatagrams`、
+`processDueDeadlineAcrossConnectionsAndSelectNextDeadline`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
@@ -208,7 +209,8 @@ installed-key packet receive、跨连接 receive dispatch、due-deadline service
 installed-key packet output、caller-owned output queue 的 bounded drain、跨连接
 output dispatch、cross-connection pending-work-to-output loop step、
 cross-connection pending-work-to-next-deadline loop step、
-cross-connection pending-work-to-bounded-drain loop step、receive-to-backend-to-output loop step、receive-to-backend-to-bounded-drain
+cross-connection pending-work-to-bounded-drain loop step、
+cross-connection due-deadline-to-next-deadline loop step、receive-to-backend-to-output loop step、receive-to-backend-to-bounded-drain
 loop step、receive-to-output loop step、receive-to-bounded-drain loop step、跨连接 TLS backend drive、
 backend-drive-to-datagram output step、backend-drive-to-bounded-drain output step、
 backend-drive-to-caller-keyed long-header drain step、
@@ -535,6 +537,11 @@ close 和 route cleanup 事件。
   作为 no-output pending-work-to-next-deadline socket-loop planning step。单元测试证明
   pending work 会在 wakeup selection 前退休 idle connection，较晚 recovery timer 保持
   armed，并为剩余 caller-owned connection map 返回 recovery deadline。
+- 2026-06-17：新增
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndSelectNextDeadline()`，
+  作为 no-output due-deadline-to-next-deadline socket-loop planning step。单元测试证明
+  最早 deadline 前调用无副作用，到期 idle deadline 会退休 endpoint route state，并为剩余
+  caller-owned connection map 返回下一条 recovery deadline。
 - 2026-06-10：新增 `EndpointConnectionPollView` 和
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndPollDatagram()`，
   让可嵌入 socket loop 在不把 connection storage 交给 lifecycle 的前提下，跨调用方持有的

@@ -177,6 +177,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWorkAndDrainDatagrams`,
 `processDueDeadlineAndPollDatagram`,
 `processDueDeadlineAndDrainDatagrams`,
+`processDueDeadlineAcrossConnectionsAndSelectNextDeadline`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
@@ -229,6 +230,7 @@ installed-key packet output, bounded caller-owned output draining,
 cross-connection output dispatch, cross-connection pending-work-to-output loop
 steps, cross-connection pending-work-to-next-deadline loop steps,
 cross-connection pending-work-to-bounded-drain loop steps,
+cross-connection due-deadline-to-next-deadline loop steps,
 receive-to-output loop steps,
 receive-to-bounded-drain loop steps,
 receive-to-backend-to-output loop steps,
@@ -615,6 +617,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   Unit coverage proves pending work retires an idle connection before wakeup
   selection, leaves a later recovery timer armed, and returns the recovery
   deadline for the remaining caller-owned connection map.
+- 2026-06-17: Added
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndSelectNextDeadline()`
+  as the no-output due-deadline-to-next-deadline socket-loop planning step.
+  Unit coverage proves calls before the earliest deadline are no-ops, a due
+  idle deadline retires endpoint route state, and the next recovery deadline is
+  returned for the remaining caller-owned connection map.
 - 2026-06-10: Added `EndpointConnectionPollView` and
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndPollDatagram()`
   so embeddable socket loops can dispatch the earliest already-due deadline
