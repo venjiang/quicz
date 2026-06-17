@@ -1142,6 +1142,11 @@ close 和 route cleanup 事件。
   新模块负责 pending STREAM/CRYPTO frame、sent-packet metadata、pending close/control
   frame、path-challenge 记录、RTT/PTO snapshot 和 connection-ID rollback snapshot。
   验证保持同一组 856 个 transport 测试通过，证明该拆分不改变行为。
+- 2026-06-18：把 packet-number-space 存储拆到
+  `src/quic/packet_number_space.zig`，同时保持 `src/lib.zig` 作为稳定 public module root
+  和内部兼容别名。新模块负责每个 space 的 packet-number、ACK、recovery、CRYPTO
+  buffer、sent-packet、PTO probe、congestion probe 和 ECN validation state，以及借用字段
+  view。验证保持 899 个测试通过，并保留现有公开 `@import("quicz")` 表面。
 - 2026-06-18：把 QUIC wire-length 预算 helper 拆到 `src/quic/wire_len.zig`，
   同时保持 `src/lib.zig` 的内部兼容别名。新模块负责 varint 长度、protected
   long/short datagram 长度、ACK/CRYPTO/STREAM/control frame 长度和 bounded frame data

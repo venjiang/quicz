@@ -81,6 +81,9 @@ rollback snapshots,
 RFC 9368 version-information validation policy,
 `src/quic/packet_context.zig` owns packet-type context, caller-supplied
 protected long-packet key bundles, and modeled ECN validation enums,
+`src/quic/packet_number_space.zig` owns per-space packet number, ACK, recovery,
+CRYPTO buffering, sent-packet, PTO-probe, congestion-probe, and ECN validation
+storage plus borrowed field views used by connection logic,
 `src/quic/frame_rules.zig` owns ACK range validation, ACK packet-number
 membership, ack-eliciting classification, and RFC 9000 packet-type/frame
 admission rules,
@@ -110,7 +113,8 @@ with it without changing the public `@import("quicz")` surface.
 Recommended split order:
 
 1. Move pure helpers and data contracts first, such as wire-length helpers,
-   stream bookkeeping types, recovery snapshots, and packet-context helpers.
+   stream bookkeeping types, recovery snapshots, packet-context helpers, and
+   packet-number-space storage contracts.
 2. Move stateful subdomains after their data contracts are isolated, such as
    stream send/receive state, connection ID state, path validation, ECN, and
    loss recovery.

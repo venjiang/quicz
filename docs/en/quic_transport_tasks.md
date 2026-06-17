@@ -1290,6 +1290,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   sent-packet metadata, pending close/control frames, path-challenge records,
   RTT/PTO snapshots, and connection-ID rollback snapshots. Validation keeps the
   same 856-test transport suite green, proving the split is behavior-preserving.
+- 2026-06-18: Split packet-number-space storage into
+  `src/quic/packet_number_space.zig` while keeping `src/lib.zig` as the stable
+  public module root and internal compatibility aliases. The new module owns
+  per-space packet-number, ACK, recovery, CRYPTO buffering, sent-packet,
+  PTO-probe, congestion-probe, and ECN validation state plus borrowed field
+  views. Validation keeps the 899-test suite green and preserves the existing
+  public `@import("quicz")` surface.
 - 2026-06-18: Split QUIC wire-length budgeting helpers into
   `src/quic/wire_len.zig` while keeping internal compatibility aliases in
   `src/lib.zig`. The new module owns varint length, protected long/short
