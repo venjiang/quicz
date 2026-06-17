@@ -305,6 +305,14 @@ pub const EndpointCryptoBackendDriveSweepResult = struct {
     progress: CryptoBackendProgress = .{},
 };
 
+/// Result from one TLS backend sweep followed by next wakeup selection.
+pub const EndpointCryptoBackendDriveNextDeadlineResult = struct {
+    /// Backend drive progress collected before selecting the next deadline.
+    backend: EndpointCryptoBackendDriveSweepResult,
+    /// Next endpoint-visible deadline after backend progress has been applied.
+    next_deadline: ?EndpointConnectionDeadline = null,
+};
+
 /// Result from one TLS backend sweep followed by installed-key datagram polling.
 pub const EndpointCryptoBackendDriveDatagramResult = struct {
     /// Backend drive progress collected before polling output.

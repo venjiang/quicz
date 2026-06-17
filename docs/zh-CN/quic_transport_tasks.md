@@ -193,6 +193,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `pollDatagram`、`drainDatagramsAcrossConnections`、
 `pollDatagramAcrossConnections`、`driveCryptoBackendsInSpaceAndArmConnections`、
+`driveCryptoBackendsInSpaceAndSelectNextDeadline`、
+`driveCryptoBackendInSpaceAndSelectNextDeadline`、
 `driveCryptoBackendsInSpaceAndPollDatagram`、
 `driveCryptoBackendsInSpaceAndDrainDatagrams`、
 `driveCryptoBackendsInSpaceOrCloseAndArmConnections`、
@@ -215,6 +217,7 @@ cross-connection pending-work-to-next-deadline loop step、
 cross-connection pending-work-to-bounded-drain loop step、
 cross-connection due-deadline-to-next-deadline loop step、receive-to-backend-to-output loop step、receive-to-backend-to-bounded-drain
 loop step、receive-to-output loop step、receive-to-bounded-drain loop step、跨连接 TLS backend drive、
+backend-drive-to-next-deadline loop step、
 backend-drive-to-datagram output step、backend-drive-to-bounded-drain output step、
 backend-drive-to-caller-keyed long-header drain step、
 close-propagating backend-drive-to-caller-keyed long-header drain step、
@@ -614,6 +617,12 @@ close 和 route cleanup 事件。
   endpoint recovery scheduling。单元测试证明两条 caller-owned backend 都会被驱动，
   outbound Handshake CRYPTO bytes 会聚合到 progress 计数，且每条连接各自收到排队的
   CRYPTO output。
+- 2026-06-17：新增 `EndpointCryptoBackendDriveNextDeadlineResult`、
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndSelectNextDeadline()` 和
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndSelectNextDeadline()`，
+  作为 no-output backend-drive-to-next-deadline socket-loop step。单元测试证明 backend
+  drive 会为已有 application in-flight data 的连接刷新 endpoint recovery scheduling，并在
+  不 poll output 的情况下返回对应 recovery deadline。
 - 2026-06-10：新增
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceOrCloseAndArmConnections()`，
   服务于 TLS-backed socket loop 中需要 close-propagating peer transport-parameter

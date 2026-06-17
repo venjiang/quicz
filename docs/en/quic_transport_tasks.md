@@ -200,6 +200,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `pollDatagram`, `drainDatagramsAcrossConnections`,
 `pollDatagramAcrossConnections`, `driveCryptoBackendsInSpaceAndArmConnections`,
+`driveCryptoBackendsInSpaceAndSelectNextDeadline`,
+`driveCryptoBackendInSpaceAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceAndPollDatagram`,
 `driveCryptoBackendsInSpaceAndDrainDatagrams`,
 `driveCryptoBackendsInSpaceOrCloseAndArmConnections`,
@@ -238,6 +240,7 @@ receive-to-output loop steps,
 receive-to-bounded-drain loop steps,
 receive-to-backend-to-output loop steps,
 receive-to-backend-to-bounded-drain loop steps, cross-connection TLS backend drive, backend-drive-to-datagram output steps,
+backend-drive-to-next-deadline loop steps,
 backend-drive-to-bounded-drain output steps,
 backend-drive-to-caller-keyed long-header drain steps,
 close-propagating backend-drive-to-caller-keyed long-header drain steps,
@@ -709,6 +712,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   Unit coverage proves two caller-owned backends are driven, their outbound
   Handshake CRYPTO bytes are aggregated in progress counters, and each
   connection receives its own queued CRYPTO output.
+- 2026-06-17: Added `EndpointCryptoBackendDriveNextDeadlineResult`,
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndSelectNextDeadline()`,
+  and `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndSelectNextDeadline()`
+  as no-output backend-drive-to-next-deadline socket-loop steps. Unit coverage
+  proves backend drive refreshes endpoint recovery scheduling for a connection
+  with in-flight application data and returns the resulting recovery deadline
+  without polling output.
 - 2026-06-10: Added
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceOrCloseAndArmConnections()`
   for TLS-backed socket loops that need close-propagating peer
