@@ -13045,6 +13045,39 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Process installed-key 1-RTT input through close propagation, drive a backend, and select a wakeup.
+    ///
+    /// Authenticated Application frame errors or backend peer
+    /// transport-parameter errors queue CONNECTION_CLOSE and return before
+    /// deadline selection. Backend output is not pulled after a peer-parameter
+    /// close path, leaving the close frame as the next observable output.
+    pub fn processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        try self.processProtectedShortDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            dcid_len,
+            datagram,
+        );
+        return self.driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+            connection_id,
+            connection,
+            backend_space,
+            backend,
+            scratch,
+        );
+    }
+
     /// Route installed-key 1-RTT input, drive a backend, and select a wakeup.
     ///
     /// Route errors and connection-id mismatches fail before packet processing
@@ -13066,6 +13099,40 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .route = route,
             .backend = try self.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+                connection_id,
+                connection,
+                now_millis,
+                route.destination_connection_id.asSlice().len,
+                datagram,
+                backend_space,
+                backend,
+                scratch,
+            ),
+        };
+    }
+
+    /// Route installed-key 1-RTT input through close propagation and backend drive.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing
+    /// or backend callbacks. Authenticated frame errors or backend
+    /// peer-parameter errors queue CONNECTION_CLOSE and stop before ordinary
+    /// deadline selection.
+    pub fn processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveNextDeadlineResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+        return .{
+            .route = route,
+            .backend = try self.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
                 connection_id,
                 connection,
                 now_millis,
@@ -50383,6 +50450,199 @@ test "EndpointConnectionLifecycle routes installed-key short receive then drives
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+}
+
+test "EndpointConnectionLifecycle installed-key short backend OrClose stops before deadline on peer parameters" {
+    const BadBackend = struct {
+        received: [64]u8 = undefined,
+        received_len: usize = 0,
+        output_pulled: bool = false,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, bytes: []const u8) Error!void {
+            if (space != .application) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            @memcpy(self.received[self.received_len..][0..bytes.len], bytes);
+            self.received_len += bytes.len;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out.len == 0) return error.BufferTooSmall;
+            out[0] = 0;
+            return out[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out.len == 0) return error.BufferTooSmall;
+            out[0] = 0x04;
+            self.peer_sent = true;
+            return out[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xcd, 0xce, 0xcf, 0xd0 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try client.sendCryptoInSpace(.application, "bad peer tp app");
+    const crypto_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        56,
+        &client,
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(crypto_datagram);
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+        66,
+        &server,
+        11,
+        server_dcid.len,
+        crypto_datagram,
+        .application,
+        backend.backend(),
+        &scratch,
+    ));
+    try std.testing.expectEqualStrings("bad peer tp app", backend.received[0..backend.received_len]);
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+}
+
+test "EndpointConnectionLifecycle routed installed-key short backend OrClose validates route before backend" {
+    const BadBackend = struct {
+        receive_calls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, _: []const u8) Error!void {
+            if (space != .application) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.receive_calls += 1;
+        }
+
+        fn pull(_: *anyopaque, space: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            if (space != .application) return error.InvalidPacket;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x3d, 0x3e, 0x3f, 0x40 };
+    const server_dcid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_041);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const client_receive_path = endpoint.Udp4Tuple{
+        .local = client_addr,
+        .remote = server_addr,
+    };
+    const client_connection_id: u64 = 41;
+    const server_connection_id: u64 = 51;
+
+    try client_lifecycle.registerConnectionId(client_connection_id, &client_dcid, client_receive_path, .{
+        .sequence_number = 0,
+    });
+    try server_lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendCryptoInSpace(.application, "route before backend");
+    const crypto_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_connection_id,
+        &client,
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(crypto_datagram);
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+        client_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        crypto_datagram,
+        .application,
+        backend.backend(),
+        &scratch,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), backend.receive_calls);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(?i64, null), server.idleTimeoutDeadlineMillis());
 }
 
 test "EndpointConnectionLifecycle installed-key short OrClose receive stops before direct poll" {

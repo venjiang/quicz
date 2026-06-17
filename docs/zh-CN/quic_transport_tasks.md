@@ -235,7 +235,9 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processRoutedProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline`、
 `processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`、
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `feedDatagramWithInstalledKeysAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndDrainDatagrams`、
@@ -686,6 +688,15 @@ close 和 route cleanup 事件。
   backend、保留 ACK/CRYPTO output 供后续 installed-key short-packet poll，并返回
   idle deadline；routed 变体会在 packet processing 和 backend callback 前拦截
   connection handle mismatch。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline()`
+  和
+  `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline()`，
+  作为 close-propagating installed-key 1-RTT
+  receive-to-Application-backend-to-next-deadline no-output loop step。单元测试证明
+  backend peer transport-parameter 错误会在 backend output pull 和 deadline
+  selection 前排队 close；routed 变体会在 packet processing 和 backend callback
+  前拦截 connection handle mismatch。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagram()`
   和 cross-connection

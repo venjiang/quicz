@@ -380,7 +380,9 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processRoutedProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline`,
 `processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams`,
@@ -747,6 +749,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   later installed-key short-packet poll, and the idle deadline is returned; the
   routed form rejects connection-handle mismatches before packet processing or
   backend callbacks.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline()`
+  and
+  `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline()`
+  as close-propagating installed-key 1-RTT
+  receive-to-Application-backend-to-next-deadline no-output loop steps. Unit
+  coverage proves backend peer transport-parameter errors queue close before
+  backend output pull or deadline selection, and the routed form rejects
+  connection-handle mismatches before packet processing or backend callbacks.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagram()`
   and the cross-connection
