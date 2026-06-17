@@ -178,6 +178,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processDueDeadlineAndDrainDatagrams`、
 `processDueDeadlineAndSelectNextDeadline`、
 `processDueDeadlineAcrossConnectionsAndSelectNextDeadline`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
@@ -652,6 +653,7 @@ close 和 route cleanup 事件。
   one-output ownership、close-propagating backend error、compatible Version Information
   应用，以及 compatible-version close propagation 都经过同一个 lifecycle-owned wakeup API。
 - 2026-06-18：新增 `EndpointDueWorkCryptoBackendNextDeadlineResult` 和
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`、
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`，
   作为 no-output due-deadline-to-backend-drive-to-next-deadline socket-loop step。
 - 2026-06-18：新增

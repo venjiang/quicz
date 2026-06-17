@@ -5073,6 +5073,44 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process one due deadline, drive one backend, then select the next deadline.
+    ///
+    /// This is the single-connection no-output due-deadline/backend planning
+    /// step for simple socket loops. Terminal idle/close deadlines stop before
+    /// backend progress because the caller-owned connection is no longer live.
+    /// Live due work continues into backend drive and returns the post-backend
+    /// endpoint-visible deadline.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!?EndpointDueWorkCryptoBackendNextDeadlineResult {
+        const due_work = (try self.processDueDeadlineAndSelectNextDeadline(
+            connection_id,
+            connection,
+            now_millis,
+        )) orelse return null;
+        if (due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendInSpaceAndSelectNextDeadline(
+                connection_id,
+                connection,
+                backend_space,
+                backend,
+                scratch,
+            ),
+        };
+    }
+
     /// Process the earliest due deadline, drive backends, then select the next deadline.
     ///
     /// This is the no-output timer/backend planning step for due wakeups. A
@@ -25783,6 +25821,90 @@ test "EndpointConnectionLifecycle due-deadline cleanup selects next deadline" {
     try std.testing.expectEqual(@as(u64, 82), next.connection_id);
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
     try std.testing.expectEqual(recovery_deadline.deadline_millis, next.deadline_millis);
+}
+
+test "EndpointConnectionLifecycle single due-deadline backend loop step selects next deadline" {
+    const NoopBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(200, &conn);
+    const due_deadline = lifecycle.nextDeadline(200, &conn) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due_deadline.kind);
+
+    var backend = NoopBackend{};
+    var scratch: [8]u8 = undefined;
+    const before = try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        200,
+        &conn,
+        due_deadline.deadline_millis - 1,
+        .handshake,
+        backend.backend(),
+        &scratch,
+    );
+    try std.testing.expect(before == null);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+    try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
+
+    const result = (try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        200,
+        &conn,
+        due_deadline.deadline_millis,
+        .handshake,
+        backend.backend(),
+        &scratch,
+    )) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(@as(u64, 200), result.due_work.deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, result.due_work.deadline.kind);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), result.due_work.pending_work.idle_retired);
+    try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), result.due_work.pending_work.close_retired);
+    const serviced = result.due_work.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 200), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    const next = backend_result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 200), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    try std.testing.expect(next.deadline_millis > result.due_work.deadline.deadline_millis);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
+    try std.testing.expectEqual(@as(?[]const u8, null), try conn.pollTxInSpace(.handshake, 30, &scratch));
 }
 
 test "EndpointConnectionLifecycle due-deadline backend loop step selects next deadline" {
