@@ -398,9 +398,11 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams`,
@@ -563,6 +565,16 @@ QUIC unless the gap is named and the verification evidence is added here.
   caller-provided bounded output slice; the OrClose variant queues close and
   stops before backend output pull or bounded draining when compatible-version
   validation fails.
+- 2026-06-18: Added the routed installed-key 1-RTT short
+  receive-to-compatible-backend-to-output bounded-drain forms
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams()`
+  and
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams()`.
+  Unit coverage proves route selection and connection-id mismatch checks happen
+  before packet processing or backend callbacks; successful paths use the
+  routed DCID length to process the short packet, apply peer Version
+  Information through the compatible-version backend, and write installed-key
+  output into the caller-provided bounded drain slice.
 - 2026-06-18: Added
   `EndpointFeedCryptoBackendDriveNextDeadlineResult`,
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`,
