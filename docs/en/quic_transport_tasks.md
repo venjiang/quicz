@@ -191,6 +191,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`,
+`processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
@@ -979,6 +981,14 @@ QUIC unless the gap is named and the verification evidence is added here.
   9368-compatible backend progress. Unit coverage proves compatible Version
   Information is applied and caller-selected 0-RTT `RESET_STREAM` output is
   emitted through both poll and bounded-drain forms.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions()`.
+  These carry explicit installed-key output through pending-work plus RFC
+  9368-compatible backend ticks. Unit coverage proves due accepted 0-RTT
+  recovery work is serviced, compatible Version Information is applied, and
+  caller-selected 0-RTT output is emitted through poll and bounded-drain forms.
 - 2026-06-11: Updated the single-connection due-deadline-to-backend poll and
   bounded-drain wrappers to preserve explicit installed-key recovery output
   choices. Initial recovery still services pending work without emitting an
