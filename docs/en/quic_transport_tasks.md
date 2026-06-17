@@ -196,6 +196,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processDueDeadlineAcrossConnectionsAndDrainDatagrams`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`,
+`processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
@@ -746,11 +747,14 @@ QUIC unless the gap is named and the verification evidence is added here.
   step.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline()`
-  as the close-propagating no-output due-deadline/backend/deadline step. Unit
-  coverage for both next-deadline due paths proves the earliest due recovery
-  deadline is serviced before backend drive, backend progress refreshes another
-  connection's recovery scheduling, and the resulting recovery deadline is
-  selected without polling output.
+  and
+  `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline()`
+  as the close-propagating and compatible-version no-output
+  due-deadline/backend/deadline steps. Unit coverage for the next-deadline due
+  paths proves the earliest due recovery deadline is serviced before backend
+  drive, backend progress refreshes another connection's recovery scheduling,
+  compatible Version Information is applied, and the resulting recovery
+  deadline is selected without polling output.
 - 2026-06-10: Added `EndpointCryptoBackendDriveView`,
   `EndpointCryptoBackendDriveSweepResult`, and
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndArmConnections()`
