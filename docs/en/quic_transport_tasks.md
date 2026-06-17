@@ -387,6 +387,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams`,
@@ -781,6 +783,16 @@ QUIC unless the gap is named and the verification evidence is added here.
   installed-key output polling, backend output is not pulled, and the routed
   form rejects connection-handle mismatches before packet processing or backend
   callbacks.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams()`
+  and
+  `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams()`
+  as installed-key 1-RTT receive-to-Application-backend-to-bounded-drain loop
+  steps. Unit coverage proves successful Application CRYPTO receive drives the
+  backend, backend-produced Application CRYPTO and ACK output can be written to
+  caller-owned output slots by the same bounded installed-key drain step, and
+  the routed form rejects connection-handle mismatches before packet processing
+  or backend callbacks.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagram()`
   and the cross-connection
