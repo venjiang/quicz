@@ -84,6 +84,14 @@ pub const EndpointRoutedCryptoBackendDriveDatagramDrainResult = struct {
     backend: EndpointCryptoBackendDriveDatagramDrainResult,
 };
 
+/// Endpoint result after routing input and polling installed-key output.
+pub const EndpointRoutedDatagramResult = struct {
+    /// Endpoint route selected for the triggering datagram.
+    route: endpoint.RouteResult,
+    /// Installed-key output emitted after receive processing, if any.
+    datagram: ?EndpointPolledDatagramResult = null,
+};
+
 /// Endpoint result after routing input and draining installed-key output.
 pub const EndpointRoutedDatagramDrainResult = struct {
     /// Endpoint route selected for the triggering datagram.

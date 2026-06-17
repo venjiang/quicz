@@ -251,6 +251,8 @@ routed caller-keyed receive-to-backend-to-bounded-drain loop step、
 routed caller-keyed receive-to-backend-close-to-bounded-drain loop step、
 installed-key Handshake receive-to-backend-to-bounded-drain loop step、
 close-propagating installed-key Handshake backend-drain loop step、
+routed installed-key 1-RTT receive-to-output loop step、
+routed installed-key 1-RTT receive-to-bounded-drain loop step、
 single-connection installed-key receive-to-backend-to-output loop step、
 single-connection installed-key receive-to-backend-to-bounded-drain loop step、
 single-connection installed-key receive-to-backend-close-to-output loop step、
@@ -315,6 +317,13 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndPollDatagram()`
+  及其 `OrClose` 变体，作为 routed installed-key 1-RTT
+  receive-to-output loop step。单元测试证明 endpoint route selection
+  发生在 packet processing 前，connection-id mismatch 会在 ACK generation 前停止，
+  成功 routed installed-key PING receive 会 poll 一个 ACK datagram 给 peer，认证后的
+  frame 错误会排队 close 并在 output polling 前停止。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagram()`
   和 cross-connection
