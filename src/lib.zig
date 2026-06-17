@@ -569,7 +569,10 @@ pub const EndpointConnectionLifecycle = struct {
         token: []const u8,
     ) EndpointAddressValidationError!EndpointAddressValidationResult {
         if (connection.side != .server) return error.InvalidPacket;
-        if (connection.connectionState() != .active) return error.ConnectionClosed;
+        if (connection.connectionState() != .active) {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return error.ConnectionClosed;
+        }
 
         const validation = try policy.validateTokenForPathForVersion(
             expected_kind,
@@ -605,7 +608,10 @@ pub const EndpointConnectionLifecycle = struct {
         token: []const u8,
     ) EndpointAddressValidationError!EndpointAddressValidationResult {
         if (connection.side != .server) return error.InvalidPacket;
-        if (connection.connectionState() != .active) return error.ConnectionClosed;
+        if (connection.connectionState() != .active) {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return error.ConnectionClosed;
+        }
         if (!connection.hasPendingRetryToken(token)) return error.InvalidPacket;
 
         _ = try policy.validateTokenForPathWithoutReplayForVersion(
@@ -25808,6 +25814,53 @@ test "EndpointConnectionLifecycle validates path token and arms unblocked server
     );
 }
 
+test "EndpointConnectionLifecycle refreshes recovery timer when address token validation rejects closed connection" {
+    const secret: address_validation_token.Secret = [_]u8{0xb4} ** address_validation_token.secret_len;
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 192, 0, 2, 49 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 198, 51, 100, 47 }, 50_000),
+    };
+
+    var policy = endpoint.AddressValidationPolicy.init(std.testing.allocator, secret, .{
+        .max_previous_secrets = 1,
+        .max_replay_entries = 4,
+    });
+    defer policy.deinit();
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.confirmHandshake();
+    try server.recordPeerAddressBytesReceived(1);
+    _ = try server.recordPacketSentInSpace(.application, 1_010, 1);
+    try lifecycle.armRecoveryTimerFromConnection(702, &server);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try server.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), server.lossDetectionTimerDeadlineMillis());
+
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        lifecycle.validateAddressTokenForPathAndArmConnection(
+            &policy,
+            702,
+            &server,
+            .new_token,
+            .v1,
+            1_020,
+            path,
+            &[_]u8{},
+        ),
+    );
+    try std.testing.expect(!server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 0), policy.replayFilterEntryCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+}
+
 test "EndpointConnectionLifecycle validates Retry token and consumes pending state" {
     const secret: address_validation_token.Secret = [_]u8{0xe1} ** address_validation_token.secret_len;
     const nonce: address_validation_token.Nonce = [_]u8{0x9b} ** address_validation_token.nonce_len;
@@ -25920,6 +25973,52 @@ test "EndpointConnectionLifecycle validates Retry token and consumes pending sta
     );
     try std.testing.expect(!replay_server.peerAddressValidated());
     try std.testing.expectEqual(@as(usize, 1), replay_server.pendingRetryTokenCount());
+}
+
+test "EndpointConnectionLifecycle refreshes recovery timer when Retry token validation rejects closed connection" {
+    const secret: address_validation_token.Secret = [_]u8{0xc7} ** address_validation_token.secret_len;
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 192, 0, 2, 59 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 198, 51, 100, 57 }, 50_000),
+    };
+
+    var policy = endpoint.AddressValidationPolicy.init(std.testing.allocator, secret, .{
+        .max_previous_secrets = 1,
+        .max_replay_entries = 4,
+    });
+    defer policy.deinit();
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.confirmHandshake();
+    try server.recordPeerAddressBytesReceived(1);
+    _ = try server.recordPacketSentInSpace(.application, 1_010, 1);
+    try lifecycle.armRecoveryTimerFromConnection(703, &server);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try server.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), server.lossDetectionTimerDeadlineMillis());
+
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        lifecycle.validateRetryTokenForPathAndArmConnection(
+            &policy,
+            703,
+            &server,
+            .v1,
+            1_020,
+            path,
+            &[_]u8{},
+        ),
+    );
+    try std.testing.expect(!server.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 0), policy.replayFilterEntryCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
 }
 
 test "EndpointConnectionLifecycle accepts Retry follow-up Initial through lifecycle helper" {
