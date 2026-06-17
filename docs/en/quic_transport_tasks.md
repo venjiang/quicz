@@ -173,6 +173,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
@@ -688,6 +689,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   proves pending idle retirement runs before compatible close-propagating backend
   drive, Version Information is applied, endpoint recovery scheduling is
   refreshed, and the resulting recovery deadline is selected without polling output.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`
+  as the single-connection close-propagating RFC 9368-compatible no-output
+  pending-work/backend/deadline step. Unit coverage proves successful compatible
+  OrClose backend progress selects the next recovery deadline, idle retirement
+  stops before backend progress, and incompatible Version Information stops
+  before output pull or deadline result delivery.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.processDueDeadlineAndSelectNextDeadline()` and
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndSelectNextDeadline()`

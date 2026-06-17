@@ -166,6 +166,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
@@ -610,6 +611,12 @@ close 和 route cleanup 事件。
   pending idle retirement 会先于 compatible close-propagating backend drive 执行，
   Version Information 会被应用，endpoint recovery scheduling 会被刷新，并在不 poll output
   的情况下选出对应 recovery deadline。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline()`，
+  作为 single-connection close-propagating RFC 9368 compatible-version no-output
+  pending-work/backend/deadline step。单元测试证明成功的 compatible OrClose backend
+  progress 会选出下一次 recovery deadline，idle retirement 会在 backend progress 前停止，
+  且 incompatible Version Information 会在 output pull 或 deadline result delivery 前停止。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.processDueDeadlineAndSelectNextDeadline()` 和
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndSelectNextDeadline()`，
