@@ -9412,7 +9412,10 @@ pub const EndpointConnectionLifecycle = struct {
         keys: protection.Aes128PacketProtectionKeys,
         datagram: []const u8,
     ) Error!void {
-        try connection.processProtectedZeroRttDatagram(now_millis, keys, datagram);
+        connection.processProtectedZeroRttDatagram(now_millis, keys, datagram) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         try self.armRecoveryTimerFromConnection(connection_id, connection);
     }
 
@@ -59163,6 +59166,55 @@ test "EndpointConnectionLifecycle refreshes recovery timer when installed-key ze
             41,
             &client,
             11,
+            &[_]u8{},
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle refreshes recovery timer when caller-keyed zero RTT receive rejects closed connection" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "bye", false);
+    const first = (try lifecycle.pollProtectedZeroRttDatagram(
+        41,
+        &client,
+        10,
+        &server_dcid,
+        &original_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    var close_buf: [64]u8 = undefined;
+    _ = (try client.pollTx(11, &close_buf)) orelse return error.TestUnexpectedResult;
+    const close_deadline = client.closeDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectError(error.ConnectionClosed, client.checkCloseTimeouts(close_deadline));
+    try std.testing.expectEqual(ConnectionState.closed, client.connectionState());
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadlineMillis());
+
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        lifecycle.processProtectedZeroRttDatagram(
+            41,
+            &client,
+            11,
+            secrets.server,
             &[_]u8{},
         ),
     );
