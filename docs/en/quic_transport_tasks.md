@@ -383,6 +383,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `drainProtectedLongCryptoDatagramsInSpace`,
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`,
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams`,
@@ -757,6 +759,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   receive-to-Application-backend-to-next-deadline no-output loop steps. Unit
   coverage proves backend peer transport-parameter errors queue close before
   backend output pull or deadline selection, and the routed form rejects
+  connection-handle mismatches before packet processing or backend callbacks.
+- 2026-06-18: Added
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram()`
+  and
+  `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram()`
+  as installed-key 1-RTT receive-to-Application-backend-to-output loop steps.
+  Unit coverage proves successful Application CRYPTO receive drives the
+  backend, backend-produced Application CRYPTO and ACK output can be emitted by
+  the same installed-key short-packet poll step, and the routed form rejects
   connection-handle mismatches before packet processing or backend callbacks.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagram()`

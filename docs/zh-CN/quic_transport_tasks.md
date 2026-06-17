@@ -238,6 +238,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
+`processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`、
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndDrainDatagrams`、
@@ -697,6 +699,15 @@ close 和 route cleanup 事件。
   backend peer transport-parameter 错误会在 backend output pull 和 deadline
   selection 前排队 close；routed 变体会在 packet processing 和 backend callback
   前拦截 connection handle mismatch。
+- 2026-06-18：新增
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram()`
+  和
+  `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram()`，
+  作为 installed-key 1-RTT receive-to-Application-backend-to-output
+  loop step。单元测试证明 successful Application CRYPTO receive 会驱动 backend，
+  backend 产出的 Application CRYPTO 与 ACK 可在同一步 installed-key short-packet
+  poll 中输出；routed 变体会在 packet processing 和 backend callback 前拦截
+  connection handle mismatch。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagram()`
   和 cross-connection
