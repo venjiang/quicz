@@ -13,6 +13,7 @@ const crypto_types = @import("quic/crypto_types.zig");
 const tls_backend_module = @import("quic/tls_backend.zig");
 const endpoint_types = @import("quic/endpoint_types.zig");
 const connection_config = @import("quic/connection_config.zig");
+const connection_version = @import("quic/connection_version.zig");
 const buffer = @import("quic/buffer.zig");
 
 pub const Error = transport_types.Error;
@@ -119,6 +120,7 @@ test {
     _ = tls_backend_module;
     _ = endpoint_types;
     _ = connection_config;
+    _ = connection_version;
 }
 
 const max_quic_varint = 4611686018427387903;
@@ -151,63 +153,11 @@ fn peerTransportParameterValidationErrorAsPublic(err: PeerTransportParameterVali
     };
 }
 
-fn isZeroVersion(version: packet.Version) bool {
-    return @intFromEnum(version) == 0;
-}
-
-fn versionListContains(versions: []const packet.Version, version: packet.Version) bool {
-    for (versions) |candidate| {
-        if (@intFromEnum(candidate) == @intFromEnum(version)) return true;
-    }
-    return false;
-}
-
 fn statelessResetTokensEqual(
     a: [packet.stateless_reset_token_len]u8,
     b: [packet.stateless_reset_token_len]u8,
 ) bool {
     return std.crypto.timing_safe.eql([packet.stateless_reset_token_len]u8, a, b);
-}
-
-fn selectMutualVersion(preferred_versions: []const packet.Version, offered_versions: []const packet.Version) ?packet.Version {
-    for (preferred_versions) |preferred| {
-        if (packet.isReservedVersion(preferred)) continue;
-        if (versionListContains(offered_versions, preferred)) return preferred;
-    }
-    return null;
-}
-
-fn selectMutualVersionWithExtra(
-    preferred_versions: []const packet.Version,
-    offered_versions: []const packet.Version,
-    extra_version: packet.Version,
-) ?packet.Version {
-    for (preferred_versions) |preferred| {
-        if (packet.isReservedVersion(preferred)) continue;
-        if (@intFromEnum(preferred) == @intFromEnum(extra_version) or versionListContains(offered_versions, preferred)) {
-            return preferred;
-        }
-    }
-    return null;
-}
-
-fn validateLocalVersionInformation(side: ConnectionSide, config: Config) Error!void {
-    if (isZeroVersion(config.chosen_version)) return error.InvalidPacket;
-    if (side == .server and packet.isReservedVersion(config.chosen_version)) return error.InvalidPacket;
-    for (config.available_versions) |available| {
-        if (isZeroVersion(available)) return error.InvalidPacket;
-    }
-    if (side == .client) {
-        if (config.available_versions.len == 0) return error.InvalidPacket;
-        if (!versionListContains(config.available_versions, config.chosen_version)) return error.InvalidPacket;
-    }
-    if (config.version_negotiation_selected_version) |selected| {
-        if (side != .client) return error.InvalidPacket;
-        if (isZeroVersion(selected)) return error.InvalidPacket;
-        if (packet.isReservedVersion(selected)) return error.InvalidPacket;
-        if (@intFromEnum(selected) != @intFromEnum(config.chosen_version)) return error.InvalidPacket;
-        if (!versionListContains(config.available_versions, selected)) return error.InvalidPacket;
-    }
 }
 
 fn validateInitialDestinationConnectionIdLength(dcid: []const u8) Error!void {
@@ -11768,7 +11718,7 @@ pub const Connection = struct {
         if (side == .client and config.preferred_address != null) {
             return error.InvalidPacket;
         }
-        try validateLocalVersionInformation(side, config);
+        try connection_version.validateLocalVersionInformation(side, config);
 
         return Connection{
             .allocator = allocator,
@@ -12799,9 +12749,9 @@ pub const Connection = struct {
 
         if (!std.mem.eql(u8, negotiation.dcid, local_initial_source_connection_id)) return null;
         if (!std.mem.eql(u8, negotiation.scid, original_destination_connection_id)) return null;
-        if (versionListContains(negotiation.versions, self.config.chosen_version)) return null;
+        if (connection_version.versionListContains(negotiation.versions, self.config.chosen_version)) return null;
 
-        const selected = selectMutualVersion(self.config.available_versions, negotiation.versions) orelse return error.InvalidPacket;
+        const selected = connection_version.selectMutualVersion(self.config.available_versions, negotiation.versions) orelse return error.InvalidPacket;
         self.version_negotiation_selected_version = selected;
         self.recordPacketActivity(now_millis);
         return selected;
@@ -13551,7 +13501,7 @@ pub const Connection = struct {
                 }
             },
             .client => {
-                if (!versionListContains(self.config.available_versions, version_information.chosen_version)) {
+                if (!connection_version.versionListContains(self.config.available_versions, version_information.chosen_version)) {
                     return error.VersionNegotiationError;
                 }
                 if (self.version_negotiation_selected_version) |selected| {
@@ -13561,7 +13511,7 @@ pub const Connection = struct {
                     if (version_information.available_versions.len == 0) {
                         return error.VersionNegotiationError;
                     }
-                    const preferred = selectMutualVersionWithExtra(
+                    const preferred = connection_version.selectMutualVersionWithExtra(
                         self.config.available_versions,
                         version_information.available_versions,
                         version_information.chosen_version,
@@ -13577,10 +13527,10 @@ pub const Connection = struct {
     fn validatePeerVersionInformationSyntax(
         version_information: transport_parameters.VersionInformation,
     ) PeerTransportParameterValidationError!void {
-        if (isZeroVersion(version_information.chosen_version)) return error.InvalidPacket;
+        if (connection_version.isZeroVersion(version_information.chosen_version)) return error.InvalidPacket;
         if (packet.isReservedVersion(version_information.chosen_version)) return error.VersionNegotiationError;
         for (version_information.available_versions) |available| {
-            if (isZeroVersion(available)) return error.InvalidPacket;
+            if (connection_version.isZeroVersion(available)) return error.InvalidPacket;
         }
     }
 

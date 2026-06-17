@@ -73,6 +73,8 @@ endpoint lifecycle result, deadline, drain, feed, and datagram option contracts,
 `src/quic/connection_config.zig` owns public connection configuration and
 fixed-storage transport-parameter values that do not need access to the
 connection state machine,
+`src/quic/connection_version.zig` owns version-list selection and local
+RFC 9368 version-information validation policy,
 and `src/quic/tls_backend.zig` owns the C-ABI TLS adapter while `lib.zig`
 re-exports the stable public surface.
 

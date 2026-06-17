@@ -377,6 +377,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-18：把 version-list matching 和本地 RFC 9368 version-information
+  validation policy 迁移到 `src/quic/connection_version.zig`。`src/lib.zig`
+  现在在 Version Negotiation follow-up 和 backend peer-version selection 中调用该聚焦模块，
+  同时保持公开 `quicz` facade 不变。拆出模块的单元测试覆盖 reserved-version skip、
+  authenticated extra-version selection，以及不一致 client follow-up config rejection。
 - 2026-06-18：把公开连接配置和固定存储 preferred-address transport-parameter
   建模迁移到 `src/quic/connection_config.zig`，同时保持 `src/lib.zig`
   作为稳定的 `quicz` module facade。这是 transport core 文件继续收窄的第一步模块边界整理；
