@@ -198,6 +198,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `driveCryptoBackendsInSpaceAndPollDatagram`、
 `driveCryptoBackendsInSpaceAndDrainDatagrams`、
 `driveCryptoBackendsInSpaceOrCloseAndArmConnections`、
+`driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`、
+`driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `driveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
 `driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections`、
@@ -629,6 +631,14 @@ close 和 route cleanup 事件。
   处理的 connection/backend 批量驱动。该 sweep 在第一条 backend 错误处停止，避免用后续
   backend work 遮蔽原始连接错误。单元测试证明前一条 backend 可以排队 CRYPTO output，
   失败 backend 进入 closing 且不会拉取 output，后续 backend 不会被驱动。
+- 2026-06-17：新增
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline()`
+  和
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline()`，
+  作为 close-propagating no-output backend-drive-to-next-deadline socket-loop
+  step。单元测试证明成功 backend drive 会刷新 endpoint recovery scheduling，并在
+  不 poll output 的情况下返回对应 recovery deadline；backend 错误继续沿用既有
+  close-propagating sweep 语义。
 - 2026-06-10：新增
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections()`
   和

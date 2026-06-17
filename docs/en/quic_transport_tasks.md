@@ -205,6 +205,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendsInSpaceAndPollDatagram`,
 `driveCryptoBackendsInSpaceAndDrainDatagrams`,
 `driveCryptoBackendsInSpaceOrCloseAndArmConnections`,
+`driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`,
+`driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
 `driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections`,
@@ -727,6 +729,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   error is not hidden by later backend work. Unit coverage proves an earlier
   backend can queue CRYPTO output, the failing backend enters closing state
   without pulling output, and later backends are not driven.
+- 2026-06-17: Added
+  `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline()`
+  and
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline()`
+  as close-propagating no-output backend-drive-to-next-deadline socket-loop
+  steps. Unit coverage proves successful backend drive refreshes endpoint
+  recovery scheduling and returns the resulting recovery deadline without
+  polling output; backend errors continue to use the existing close-propagating
+  sweep semantics.
 - 2026-06-10: Added
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections()`
   and

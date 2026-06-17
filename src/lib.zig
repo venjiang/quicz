@@ -3139,6 +3139,55 @@ pub const EndpointConnectionLifecycle = struct {
         return result;
     }
 
+    /// Drive close-propagating crypto backends, then select the next deadline.
+    ///
+    /// Peer transport-parameter errors queue CONNECTION_CLOSE and return before
+    /// deadline selection, matching the close-propagating sweep semantics.
+    pub fn driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
+            space,
+            drive_views,
+        );
+        return .{
+            .backend = backend,
+            .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+        };
+    }
+
+    /// Drive one close-propagating backend, then select the next deadline.
+    ///
+    /// This is the single-connection no-output form for socket loops that want
+    /// close propagation but do not need to poll output in the same step.
+    pub fn driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const deadline_connections = [_]EndpointConnectionView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        return self.driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline(
+            space,
+            &drive_views,
+            &deadline_connections,
+        );
+    }
+
     /// Drive close-propagating crypto backends, then poll installed-key output.
     ///
     /// If backend peer transport-parameter processing fails, this returns that
@@ -36019,6 +36068,81 @@ test "EndpointConnectionLifecycle backend drive selects next deadline" {
     try std.testing.expectEqual(@as(usize, 1), single.backend.connections_driven);
     const single_next = single.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 122), single_next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, single_next.kind);
+}
+
+test "EndpointConnectionLifecycle close-propagating backend drive selects next deadline" {
+    const NoopBackend = struct {
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var connection = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer connection.deinit();
+    try connection.confirmHandshake();
+    _ = try connection.recordPacketSentInSpace(.application, 10, 100);
+
+    var backend = NoopBackend{};
+    var scratch: [8]u8 = undefined;
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 131,
+        .connection = &connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const deadline_connections = [_]EndpointConnectionView{.{
+        .connection_id = 131,
+        .connection = &connection,
+    }};
+
+    const result = try lifecycle.driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline(
+        .handshake,
+        &drive_views,
+        &deadline_connections,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 0), result.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    const next = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 131), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
+
+    var single_connection = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer single_connection.deinit();
+    try single_connection.confirmHandshake();
+    _ = try single_connection.recordPacketSentInSpace(.application, 20, 100);
+
+    const single = try lifecycle.driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+        132,
+        &single_connection,
+        .handshake,
+        backend.backend(),
+        &scratch,
+    );
+    try std.testing.expectEqual(@as(usize, 1), single.backend.connections_driven);
+    const single_next = single.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 132), single_next.connection_id);
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, single_next.kind);
 }
 
