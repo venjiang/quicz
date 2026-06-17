@@ -117,6 +117,8 @@ loop，再推进可嵌入 socket API、最小互通入口和 TLS/互通可观测
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、
 `feedDatagramWithInstalledKeys`、`feedDatagramWithInstalledKeysAcrossConnections`、
+`feedDatagramWithInstalledKeysAndSelectNextDeadline`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndSelectNextDeadline`、
 `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`、
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`、
 `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams`、
@@ -208,6 +210,7 @@ installed-key packet receive、跨连接 receive dispatch、due-deadline service
 跨连接 pending-work sweep、跨连接 due-deadline dispatch、recovery-wakeup packet output、
 installed-key packet output、caller-owned output queue 的 bounded drain、跨连接
 output dispatch、cross-connection pending-work-to-output loop step、
+receive-to-next-deadline loop step、
 cross-connection pending-work-to-next-deadline loop step、
 cross-connection pending-work-to-bounded-drain loop step、
 cross-connection due-deadline-to-next-deadline loop step、receive-to-backend-to-output loop step、receive-to-backend-to-bounded-drain
@@ -553,6 +556,12 @@ close 和 route cleanup 事件。
   不需要重复实现 endpoint route lookup 和 close-propagating protected receive 逻辑。
   单元测试证明 routed 1-RTT packet 会投递到匹配 connection ID 的连接，另一条 live
   caller-owned connection 不被触碰。
+- 2026-06-17：新增
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndSelectNextDeadline()`
+  和 `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndSelectNextDeadline()`，
+  作为 no-output receive-to-next-deadline socket-loop step。单元测试证明 routed installed-key
+  1-RTT receive 会刷新被选中 connection 的 idle deadline，不触碰无关 caller-owned
+  connection，并在不 poll output 的情况下返回下一条 deadline。
 - 2026-06-10：新增
   `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` 和
   `EndpointPolledDatagramResult`，服务于调用方持有 connection map 的输出轮询。socket

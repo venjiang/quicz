@@ -135,6 +135,8 @@ After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first
 socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithInstalledKeys`,
 `feedDatagramWithInstalledKeysAcrossConnections`,
+`feedDatagramWithInstalledKeysAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDrainDatagrams`,
@@ -227,7 +229,8 @@ timers, route cleanup, close, installed-key packet receive, cross-connection
 receive dispatch, cross-connection pending-work sweep, due-deadline service,
 cross-connection due-deadline dispatch, recovery-wakeup packet output,
 installed-key packet output, bounded caller-owned output draining,
-cross-connection output dispatch, cross-connection pending-work-to-output loop
+cross-connection output dispatch, receive-to-next-deadline loop steps,
+cross-connection pending-work-to-output loop
 steps, cross-connection pending-work-to-next-deadline loop steps,
 cross-connection pending-work-to-bounded-drain loop steps,
 cross-connection due-deadline-to-next-deadline loop steps,
@@ -638,6 +641,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   close-propagating protected receive logic. Unit coverage proves a routed
   1-RTT packet is delivered to the matching connection ID while another live
   caller-owned connection remains untouched.
+- 2026-06-17: Added
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndSelectNextDeadline()`
+  and `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndSelectNextDeadline()`
+  as no-output receive-to-next-deadline socket-loop steps. Unit coverage proves
+  routed installed-key 1-RTT receive refreshes the selected connection's idle
+  deadline, leaves an unrelated caller-owned connection untouched, and returns
+  the next deadline without polling output.
 - 2026-06-10: Added
   `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` and
   `EndpointPolledDatagramResult` for caller-owned connection maps. Socket loops

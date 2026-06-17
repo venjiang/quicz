@@ -410,6 +410,14 @@ pub const EndpointFeedInstalledKeyDatagramResult = union(enum) {
     dropped,
 };
 
+/// Result from feeding one installed-key datagram, then selecting a wakeup.
+pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = struct {
+    /// Receive classification and processing result.
+    feed: EndpointFeedInstalledKeyDatagramResult,
+    /// Next endpoint-visible deadline after receive processing.
+    next_deadline: ?EndpointConnectionDeadline = null,
+};
+
 /// Result from feeding one installed-key datagram, then polling output.
 pub const EndpointFeedInstalledKeyDatagramPollResult = struct {
     /// Receive classification and processing result.
