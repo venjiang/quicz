@@ -234,6 +234,7 @@ routed caller-keyed receive-to-backend-to-bounded-drain loop steps,
 routed caller-keyed receive-to-backend-close-to-bounded-drain loop steps,
 installed-key Handshake receive-to-backend-to-bounded-drain loop steps,
 close-propagating installed-key Handshake backend-drain loop steps,
+routed installed-key 1-RTT receive-to-bounded-drain loop steps,
 single-connection installed-key receive-to-backend-to-output loop steps,
 single-connection installed-key receive-to-backend-to-bounded-drain loop steps,
 single-connection installed-key receive-to-backend-close-to-output loop steps,
@@ -302,6 +303,14 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-17: Added
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagrams()`
+  and its `OrClose` variant as routed installed-key 1-RTT
+  receive-to-bounded-drain steps. Unit coverage proves route selection happens
+  before packet processing, connection-id mismatches stop before ACK
+  generation, successful routed installed-key PING receive drains the ACK into
+  caller-owned output slots, and authenticated frame errors queue close while
+  stopping before output drain.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams()`
   and its `OrClose` variant as routed installed-key Handshake

@@ -84,6 +84,14 @@ pub const EndpointRoutedCryptoBackendDriveDatagramDrainResult = struct {
     backend: EndpointCryptoBackendDriveDatagramDrainResult,
 };
 
+/// Endpoint result after routing input and draining installed-key output.
+pub const EndpointRoutedDatagramDrainResult = struct {
+    /// Endpoint route selected for the triggering datagram.
+    route: endpoint.RouteResult,
+    /// Bounded installed-key output drain result after receive processing.
+    drain: EndpointDatagramDrainResult,
+};
+
 /// Endpoint result after processing a path-validation protected short datagram.
 pub const EndpointPathValidatedShortDatagramResult = struct {
     /// Endpoint route selected before packet protection was removed.

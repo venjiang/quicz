@@ -233,7 +233,8 @@ single-connection due-deadline-to-backend-to-bounded-drain loop step、
 single-connection due-deadline-to-backend-close-to-bounded-drain loop step、
 pending-work-to-bounded-drain loop step、pending-work-to-backend-to-output loop step、due-deadline-to-backend-to-output loop
 step、pending-work-to-backend-to-bounded-drain loop step、due-deadline-to-backend-to-bounded-drain
-loop step、due-deadline-to-bounded-drain loop step、
+loop step、due-deadline-to-bounded-drain loop step、routed installed-key 1-RTT
+receive-to-bounded-drain loop step、
 cross-connection due-deadline terminal-cleanup backend suppression、
 close-propagating TLS backend drive、RFC 9368 compatible-version backend sweep，
 以及 caller-owned connection map 上的 event-loop wakeup selection。
@@ -276,6 +277,13 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-17：新增
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagrams()`
+  及其 `OrClose` 变体，作为 routed installed-key 1-RTT
+  receive-to-bounded-drain 核心 step。单元测试证明 route selection 发生在 packet
+  processing 前，connection-id mismatch 会在 ACK generation 前停止，成功 routed
+  installed-key PING receive 会把 ACK drain 到 caller-owned output slots，认证后的
+  frame 错误会排队 close 并在 output drain 前停止。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams()`
   及其 `OrClose` 变体，作为 routed installed-key Handshake
