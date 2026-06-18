@@ -3507,13 +3507,14 @@ pub const EndpointConnectionLifecycle = struct {
         initial_token: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
     ) Error!EndpointCryptoBackendDriveProtectedLongDatagramResult {
-        const backend_progress = try self.driveCryptoBackendInSpaceAndArmConnection(
+        var backend_progress = try self.driveCryptoBackendInSpaceAndArmConnection(
             connection_id,
             connection,
             backend_space,
             backend,
             scratch,
         );
+        const handshake_discarded_before_poll = connection.packetNumberSpaceDiscarded(.handshake);
         const datagram = try self.pollProtectedLongCryptoDatagramInSpace(
             connection_id,
             connection,
@@ -3524,6 +3525,9 @@ pub const EndpointConnectionLifecycle = struct {
             initial_token,
             keys,
         );
+        if (!handshake_discarded_before_poll and connection.packetNumberSpaceDiscarded(.handshake)) {
+            backend_progress.handshake_space_discarded = true;
+        }
         return .{
             .backend = backend_progress,
             .datagram = if (datagram) |bytes| .{
@@ -56797,6 +56801,93 @@ test "EndpointConnectionLifecycle drives backend and drains caller-keyed long cr
         "server keyed drain oneserver keyed drain two",
         response_crypto[0..response_len],
     );
+}
+
+test "EndpointConnectionLifecycle reports Handshake discard after backend poll output" {
+    const ConfirmingBackend = struct {
+        secrets: HandshakeTrafficSecrets,
+        outbound: []const u8,
+        outbound_sent: bool = false,
+        secrets_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(_: *anyopaque, space: PacketNumberSpace, _: []const u8) Error!void {
+            if (space != .handshake) return error.InvalidPacket;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+
+        fn pullHandshakeTrafficSecrets(context: *anyopaque) Error!?HandshakeTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.secrets_sent) return null;
+            self.secrets_sent = true;
+            return self.secrets;
+        }
+
+        fn handshakeConfirmed(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = ConfirmingBackend{
+        .secrets = .{
+            .local = secrets.server.secret,
+            .peer = secrets.client.secret,
+        },
+        .outbound = "server finished",
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var scratch: [64]u8 = undefined;
+    const result = try lifecycle.driveCryptoBackendInSpaceAndPollProtectedLongCryptoDatagram(
+        63,
+        &server,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .handshake,
+        10,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        secrets.server,
+    );
+    defer if (result.datagram) |datagram| std.testing.allocator.free(datagram.datagram);
+
+    try std.testing.expect(result.backend.handshake_confirmed);
+    try std.testing.expect(result.backend.handshake_keys_installed);
+    try std.testing.expect(result.backend.handshake_space_discarded);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.outbound_chunks);
+    try std.testing.expect(result.datagram != null);
+    try std.testing.expect(server.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(!server.hasHandshakeProtectionKeys());
 }
 
 test "EndpointConnectionLifecycle caller-keyed long backend OrClose stops before output drain" {
