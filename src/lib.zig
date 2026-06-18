@@ -15403,6 +15403,15 @@ pub const Connection = struct {
         return self.availableCongestionWindow(space) == 0;
     }
 
+    /// Return whether `bytes` can be sent as ack-eliciting payload in one space.
+    ///
+    /// This mirrors the connection's send admission checks: PTO/congestion
+    /// probes may bypass the congestion window, but peer-address
+    /// anti-amplification limits still apply.
+    pub fn canSendAckEliciting(self: *Connection, space: PacketNumberSpace, bytes: usize) bool {
+        return self.canSendAckElicitingInSpace(space, bytes) and self.canSendToPeerAddress(bytes);
+    }
+
     /// Return the current smoothed RTT estimate for one packet number space.
     pub fn smoothedRttMillis(self: Connection, space: PacketNumberSpace) u64 {
         return switch (space) {
@@ -70889,6 +70898,28 @@ test "congestion window full query follows aggregate bytes in flight" {
         .first_ack_range = 0,
     });
     try std.testing.expect(!conn.congestionWindowFull(.application));
+}
+
+test "ack-eliciting send query combines congestion and anti-amplification limits" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    conn.recovery_state.congestion_window = 5000;
+    try conn.recordPeerAddressBytesReceived(1000);
+
+    try std.testing.expect(conn.canSendAckEliciting(.application, 3000));
+    try std.testing.expect(!conn.canSendAckEliciting(.application, 3001));
+
+    try conn.validatePeerAddress();
+    try std.testing.expect(conn.canSendAckEliciting(.application, 5000));
+    try std.testing.expect(!conn.canSendAckEliciting(.application, 5001));
+
+    _ = try conn.recordPacketSentInSpace(.initial, 0, 4000);
+    try std.testing.expect(conn.canSendAckEliciting(.application, 1000));
+    try std.testing.expect(!conn.canSendAckEliciting(.application, 1001));
 }
 
 test "pollTx checks congestion before writing output buffer" {

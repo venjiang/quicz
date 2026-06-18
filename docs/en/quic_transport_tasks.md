@@ -519,7 +519,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   connection-level budget using the same aggregate bytes-in-flight admission
   model as protected packet sends. `Connection.congestionWindowFull()` lets
   socket/event-loop owners detect congestion-window blocking without attempting
-  and rolling back an ack-eliciting send.
+  and rolling back an ack-eliciting send. `Connection.canSendAckEliciting()`
+  mirrors the send-admission checks for one candidate ack-eliciting payload,
+  including congestion/probe rules and peer-address anti-amplification limits.
 
 - 2026-06-18: Added the direct installed-key 1-RTT short
   receive-to-compatible-backend no-output forms

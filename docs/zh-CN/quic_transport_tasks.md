@@ -486,6 +486,9 @@ close 和 route cleanup 事件。
   bytes-in-flight 模型，向 socket/event-loop 调用方暴露连接级发送预算。
   `Connection.congestionWindowFull()` 让 socket/event-loop owner 不必尝试并回滚
   ack-eliciting send，也能判断当前是否因 congestion window 阻塞。
+  `Connection.canSendAckEliciting()` 会按一个候选 ack-eliciting payload
+  复用真实发送准入口径，包含 congestion/probe 规则和 peer-address
+  anti-amplification 限制。
 
 - 2026-06-18：新增 direct installed-key 1-RTT short receive-to-compatible-backend
   no-output 形态：
