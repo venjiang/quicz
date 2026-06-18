@@ -15403,13 +15403,37 @@ pub const Connection = struct {
         return self.availableCongestionWindow(space) == 0;
     }
 
+    /// Return the effective ack-eliciting send-admission budget for one space.
+    ///
+    /// A null result means the connection currently has no send-admission cap
+    /// for this space, for example when a PTO or congestion probe may bypass
+    /// the congestion window and the peer address is not anti-amplification
+    /// limited.
+    pub fn availableAckElicitingSendBudget(self: *Connection, space: PacketNumberSpace) ?usize {
+        const packet_space = self.packetNumberSpace(space);
+        const congestion_budget: ?usize = if (packet_space.pto_probe_count.* != 0 or
+            packet_space.congestion_probe_count.* != 0)
+            null
+        else
+            self.availableCongestionWindow(space);
+        const peer_budget = self.antiAmplificationLimitRemaining();
+
+        if (congestion_budget) |congestion_remaining| {
+            if (peer_budget) |peer_remaining| return @min(congestion_remaining, peer_remaining);
+            return congestion_remaining;
+        }
+
+        return peer_budget;
+    }
+
     /// Return whether `bytes` can be sent as ack-eliciting payload in one space.
     ///
     /// This mirrors the connection's send admission checks: PTO/congestion
     /// probes may bypass the congestion window, but peer-address
     /// anti-amplification limits still apply.
     pub fn canSendAckEliciting(self: *Connection, space: PacketNumberSpace, bytes: usize) bool {
-        return self.canSendAckElicitingInSpace(space, bytes) and self.canSendToPeerAddress(bytes);
+        const budget = self.availableAckElicitingSendBudget(space) orelse return true;
+        return bytes <= budget;
     }
 
     /// Return the current smoothed RTT estimate for one packet number space.
@@ -70920,6 +70944,31 @@ test "ack-eliciting send query combines congestion and anti-amplification limits
     _ = try conn.recordPacketSentInSpace(.initial, 0, 4000);
     try std.testing.expect(conn.canSendAckEliciting(.application, 1000));
     try std.testing.expect(!conn.canSendAckEliciting(.application, 1001));
+}
+
+test "ack-eliciting send budget reports effective send admission limit" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    conn.recovery_state.congestion_window = 5000;
+    try conn.recordPeerAddressBytesReceived(1000);
+
+    try std.testing.expectEqual(@as(?usize, 3000), conn.availableAckElicitingSendBudget(.application));
+
+    try conn.validatePeerAddress();
+    try std.testing.expectEqual(@as(?usize, 5000), conn.availableAckElicitingSendBudget(.application));
+
+    _ = try conn.recordPacketSentInSpace(.initial, 0, 4000);
+    try std.testing.expectEqual(@as(?usize, 1000), conn.availableAckElicitingSendBudget(.application));
+
+    _ = try conn.recordPacketSentInSpace(.application, 1, 1000);
+    try std.testing.expectEqual(@as(?usize, 0), conn.availableAckElicitingSendBudget(.application));
+
+    conn.pto_probe_count = 1;
+    try std.testing.expectEqual(@as(?usize, null), conn.availableAckElicitingSendBudget(.application));
 }
 
 test "pollTx checks congestion before writing output buffer" {

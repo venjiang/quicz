@@ -489,6 +489,8 @@ close 和 route cleanup 事件。
   `Connection.canSendAckEliciting()` 会按一个候选 ack-eliciting payload
   复用真实发送准入口径，包含 congestion/probe 规则和 peer-address
   anti-amplification 限制。
+  `Connection.availableAckElicitingSendBudget()` 暴露同一规则下的有效剩余
+  send-admission budget，并在当前没有 send-admission 上限时返回 `null`。
 
 - 2026-06-18：新增 direct installed-key 1-RTT short receive-to-compatible-backend
   no-output 形态：

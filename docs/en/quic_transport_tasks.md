@@ -522,6 +522,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   and rolling back an ack-eliciting send. `Connection.canSendAckEliciting()`
   mirrors the send-admission checks for one candidate ack-eliciting payload,
   including congestion/probe rules and peer-address anti-amplification limits.
+  `Connection.availableAckElicitingSendBudget()` exposes the effective
+  remaining send-admission budget for the same rules, using `null` when no
+  send-admission cap applies.
 
 - 2026-06-18: Added the direct installed-key 1-RTT short
   receive-to-compatible-backend no-output forms
