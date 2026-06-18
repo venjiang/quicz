@@ -524,7 +524,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   including congestion/probe rules and peer-address anti-amplification limits.
   `Connection.availableAckElicitingSendBudget()` exposes the effective
   remaining send-admission budget for the same rules, using `null` when no
-  send-admission cap applies.
+  send-admission cap applies. `Connection.ackElicitingSendAdmission()` reports
+  the first blocking reason as congestion-window or peer-address
+  anti-amplification, and low-level packet send recording now reuses that
+  shared admission result.
 
 - 2026-06-18: Added the direct installed-key 1-RTT short
   receive-to-compatible-backend no-output forms

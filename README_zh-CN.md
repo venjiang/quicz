@@ -15,7 +15,7 @@
 - [x] varint、packet header、packet number、frame、transport parameter、transport error（含 RFC 9368 version-negotiation close 分类）、Version Negotiation 和 compatible-version selection helper、Retry、stateless reset、QUIC v2 packet/key/token primitive 的核心 codec 覆盖。
 - [x] 面向 stream、CRYPTO byte stream、flow control、connection ID、Retry/token、path validation、close/idle timer、packet number space 和 invalid frame payload rollback 的实验性内存态 transport state。
 - [x] QUIC v1/v2 Initial key、Retry integrity、protected long/short packet、配置驱动 v2 protected long-packet/Retry wire version、installed-key mock TLS handoff 和 key update state helper。
-- [x] 简化 RFC 9002 风格 ACK、loss、PTO、NewReno congestion、congestion-window 与 ack-eliciting send-admission 预算查询、ECN、retransmission 和 endpoint recovery-timer 模型，并有 socket-backed UDP loopback 覆盖。
+- [x] 简化 RFC 9002 风格 ACK、loss、PTO、NewReno congestion、congestion-window 与 ack-eliciting send-admission 预算/原因查询、ECN、retransmission 和 endpoint recovery-timer 模型，并有 socket-backed UDP loopback 覆盖。
 - [x] 内存态 endpoint routing/lifecycle helper，覆盖 DCID 和 IPv4 UDP tuple routing、Version Negotiation、zero-length CID routing、preferred/replacement CID routing、route retirement、stateless reset emission 和 protected UDP loopback。
 - [ ] 完整 connection state machine 与 TLS-owned protected-packet packet number space routing。
 - [ ] Endpoint-owned TLS-backed socket client/server echo，由 live TLS handshake 驱动 UDP packet routing、自动 traffic-secret 安装和 1-RTT STREAM delivery。

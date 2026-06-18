@@ -128,6 +128,13 @@ pub const ProtectedLongDatagramKeys = packet_context.ProtectedLongDatagramKeys;
 pub const EcnCodepoint = packet_context.EcnCodepoint;
 pub const EcnValidationState = packet_context.EcnValidationState;
 
+/// Result of checking whether one ack-eliciting payload may be sent.
+pub const AckElicitingSendAdmission = enum {
+    allowed,
+    congestion_limited,
+    anti_amplification_limited,
+};
+
 test {
     _ = protection;
     _ = address_validation_token;
@@ -15426,14 +15433,27 @@ pub const Connection = struct {
         return peer_budget;
     }
 
+    /// Return the first send-admission result for one ack-eliciting payload.
+    ///
+    /// The ordering matches the commit path: congestion/probe admission is
+    /// checked before the peer-address anti-amplification budget.
+    pub fn ackElicitingSendAdmission(
+        self: *Connection,
+        space: PacketNumberSpace,
+        bytes: usize,
+    ) AckElicitingSendAdmission {
+        if (!self.canSendAckElicitingInSpace(space, bytes)) return .congestion_limited;
+        if (!self.canSendToPeerAddress(bytes)) return .anti_amplification_limited;
+        return .allowed;
+    }
+
     /// Return whether `bytes` can be sent as ack-eliciting payload in one space.
     ///
     /// This mirrors the connection's send admission checks: PTO/congestion
     /// probes may bypass the congestion window, but peer-address
     /// anti-amplification limits still apply.
     pub fn canSendAckEliciting(self: *Connection, space: PacketNumberSpace, bytes: usize) bool {
-        const budget = self.availableAckElicitingSendBudget(space) orelse return true;
-        return bytes <= budget;
+        return self.ackElicitingSendAdmission(space, bytes) == .allowed;
     }
 
     /// Return the current smoothed RTT estimate for one packet number space.
@@ -16423,8 +16443,7 @@ pub const Connection = struct {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
         if (packet_space.next_packet_number.* > max_quic_varint) return error.Internal;
-        if (!self.canSendAckElicitingInSpace(space, bytes)) return error.FlowControlBlocked;
-        if (!self.canSendToPeerAddress(bytes)) return error.FlowControlBlocked;
+        if (self.ackElicitingSendAdmission(space, bytes) != .allowed) return error.FlowControlBlocked;
 
         const packet_number = packet_space.next_packet_number.*;
         packet_space.sent_packets.append(self.allocator, .{
@@ -70969,6 +70988,39 @@ test "ack-eliciting send budget reports effective send admission limit" {
 
     conn.pto_probe_count = 1;
     try std.testing.expectEqual(@as(?usize, null), conn.availableAckElicitingSendBudget(.application));
+}
+
+test "ack-eliciting send admission reports first blocking reason" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    conn.recovery_state.congestion_window = 2000;
+    try conn.recordPeerAddressBytesReceived(1000);
+    _ = try conn.recordPacketSentInSpace(.initial, 0, 2000);
+
+    try std.testing.expectEqual(
+        AckElicitingSendAdmission.congestion_limited,
+        conn.ackElicitingSendAdmission(.application, 1501),
+    );
+
+    try conn.receiveAckInSpace(.initial, 20, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(
+        AckElicitingSendAdmission.anti_amplification_limited,
+        conn.ackElicitingSendAdmission(.application, 1501),
+    );
+
+    try conn.recordPeerAddressBytesReceived(167);
+    try std.testing.expectEqual(
+        AckElicitingSendAdmission.allowed,
+        conn.ackElicitingSendAdmission(.application, 1501),
+    );
 }
 
 test "pollTx checks congestion before writing output buffer" {
