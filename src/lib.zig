@@ -153,6 +153,18 @@ test "frame payload helper exposes raw frame type value" {
     try std.testing.expectEqual(@as(u64, 0x1c), frame_payload_module.rawFrameTypeValue(&.{0x1c}));
 }
 
+test "frame payload helper classifies packet type close error" {
+    const invalid_zero_rtt_ack = [_]u8{ 0x02, 0, 0, 0, 0 };
+    const close = (try frame_payload_module.classifyCloseError(
+        .zero_rtt,
+        &invalid_zero_rtt_ack,
+        std.testing.allocator,
+    )).?;
+    try std.testing.expectEqual(transport_error.TransportErrorCode.protocol_violation, close.code);
+    try std.testing.expectEqual(@as(u64, 0x02), close.frame_type);
+    try std.testing.expectEqualStrings("packet type", close.reason_phrase);
+}
+
 const max_quic_varint = protocol_limits.max_quic_varint;
 const max_stream_count = protocol_limits.max_stream_count;
 const max_connection_id_len = protocol_limits.max_connection_id_len;
@@ -14596,59 +14608,9 @@ pub fn framePacketTypeErrorCode(decoded: frame.Frame, packet_type: FramePacketTy
     return frame_rules.framePacketTypeErrorCode(decoded, packet_type);
 }
 
-const FramePayloadCloseError = struct {
-    code: transport_error.TransportErrorCode,
-    frame_type: u64,
-    reason_phrase: []const u8,
-};
-
+const FramePayloadCloseError = frame_payload_module.CloseError;
 const rawFrameTypeValue = frame_payload_module.rawFrameTypeValue;
-
-fn classifyFramePayloadCloseError(
-    packet_type: FramePacketType,
-    datagram: []const u8,
-    allocator: std.mem.Allocator,
-) Error!?FramePayloadCloseError {
-    var offset: usize = 0;
-    while (offset < datagram.len) {
-        const frame_type_value = rawFrameTypeValue(datagram[offset..]);
-        var decoded = frame.decodeFrameSlice(datagram[offset..], allocator) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {
-                if (transport_error.frameDecodeErrorCode(err)) |code| {
-                    return .{
-                        .code = code,
-                        .frame_type = frame_type_value,
-                        .reason_phrase = "frame encoding",
-                    };
-                }
-                return null;
-            },
-        };
-
-        if (decoded.len == 0) {
-            frame.deinitFrame(&decoded.frame, allocator);
-            return .{
-                .code = .frame_encoding_error,
-                .frame_type = frame_type_value,
-                .reason_phrase = "frame encoding",
-            };
-        }
-
-        const close_code = framePacketTypeErrorCode(decoded.frame, packet_type);
-        frame.deinitFrame(&decoded.frame, allocator);
-        if (close_code) |code| {
-            return .{
-                .code = code,
-                .frame_type = frame_type_value,
-                .reason_phrase = "packet type",
-            };
-        }
-
-        offset += decoded.len;
-    }
-    return null;
-}
+const classifyFramePayloadCloseError = frame_payload_module.classifyCloseError;
 
 const ProtectedLongPacketSpace = struct {
     packet_type: packet.PacketType,
