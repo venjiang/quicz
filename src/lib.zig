@@ -23,6 +23,7 @@ const protocol_limits = @import("quic/protocol_limits.zig");
 const buffer = @import("quic/buffer.zig");
 const wire_len = @import("quic/wire_len.zig");
 const frame_rules = @import("quic/frame_rules.zig");
+const frame_payload_module = @import("quic/frame_payload.zig");
 
 pub const Error = transport_types.Error;
 pub const ConnectionSide = transport_types.ConnectionSide;
@@ -145,6 +146,11 @@ test {
     _ = stream_id_rules;
     _ = wire_len;
     _ = frame_rules;
+    _ = frame_payload_module;
+}
+
+test "frame payload helper exposes raw frame type value" {
+    try std.testing.expectEqual(@as(u64, 0x1c), frame_payload_module.rawFrameTypeValue(&.{0x1c}));
 }
 
 const max_quic_varint = protocol_limits.max_quic_varint;
@@ -14596,10 +14602,7 @@ const FramePayloadCloseError = struct {
     reason_phrase: []const u8,
 };
 
-fn rawFrameTypeValue(data: []const u8) u64 {
-    var in = buffer.fixedReader(data);
-    return (packet.decodeVarInt(in.reader()) catch return 0).value;
-}
+const rawFrameTypeValue = frame_payload_module.rawFrameTypeValue;
 
 fn classifyFramePayloadCloseError(
     packet_type: FramePacketType,
