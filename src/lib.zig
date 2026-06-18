@@ -718,12 +718,18 @@ pub const EndpointConnectionLifecycle = struct {
             initial_accept.original_destination_connection_id,
         ) catch return error.InvalidPacket;
 
-        const processed_packets = try connection.processProtectedLongDatagram(
+        const processed_packets = connection.processProtectedLongDatagram(
             now_millis,
             .{ .initial = initial_secrets.client },
             datagram,
-        );
-        _ = try connection.recordPeerAddressDatagramReceived(now_millis, datagram.len);
+        ) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
+        _ = connection.recordPeerAddressDatagramReceived(now_millis, datagram.len) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         const accepted_routes = try self.registerAcceptedInitialConnectionIds(
             connection_id,
             initial_accept,
@@ -46589,6 +46595,79 @@ test "EndpointConnectionLifecycle rejects accepted Initial without installing ro
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.initial));
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
     try std.testing.expectEqual(@as(?[]const u8, null), server.originalDestinationConnectionId());
+}
+
+test "EndpointConnectionLifecycle refreshes recovery timer when accepted Initial rejects closed connection" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const reset_token = [_]u8{ 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f };
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const supported_versions = [_]packet.Version{ .v1, .v2 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.sendCryptoInSpace(.initial, "closed accepted initial");
+    const initial = (try client.pollInitialProtectedDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(initial);
+
+    var action_buf: [256]u8 = undefined;
+    const action = try lifecycle.handleDatagramWithVersionNegotiation(
+        &action_buf,
+        path,
+        initial,
+        &reset_prefix,
+        &supported_versions,
+    );
+    const accept = switch (action) {
+        .accept_initial => |initial_accept| initial_accept,
+        else => return error.TestUnexpectedResult,
+    };
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    _ = try server.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(203, &server);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try server.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), server.lossDetectionTimerDeadlineMillis());
+
+    try std.testing.expectError(error.ConnectionClosed, lifecycle.processAcceptedProtectedInitialDatagram(
+        203,
+        &server,
+        11,
+        accept,
+        &server_scid,
+        initial,
+        .{
+            .active_migration_disabled = true,
+            .stateless_reset_token = reset_token,
+        },
+    ));
+
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.statelessResetTokenCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
 }
 
 test "EndpointConnectionLifecycle does not hand off connection for ignored Version Negotiation" {
