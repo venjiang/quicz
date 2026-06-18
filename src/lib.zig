@@ -1187,11 +1187,14 @@ pub const EndpointConnectionLifecycle = struct {
     ) EndpointConnectionIdError!EndpointIssuedConnectionIdResult {
         const original_local_connection_id_count = connection.local_connection_ids.items.len;
         const original_next_sequence = connection.next_local_connection_id_sequence;
-        const sequence_number = try connection.issueConnectionId(
+        const sequence_number = connection.issueConnectionId(
             destination_connection_id,
             stateless_reset_token,
             retire_prior_to,
-        );
+        ) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         errdefer connection.rollbackIssuedConnectionIds(
             original_local_connection_id_count,
             original_next_sequence,
@@ -46959,6 +46962,40 @@ test "EndpointConnectionLifecycle rolls back issued connection ID route failures
     try std.testing.expectEqual(@as(usize, 1), conn.pendingNewConnectionIdCount());
     const route = try lifecycle.routeDatagram(path, &committed_datagram);
     try std.testing.expectEqual(@as(?u64, 0), route.sequence_number);
+}
+
+test "EndpointConnectionLifecycle refreshes recovery timer when issuing connection ID rejects closed connection" {
+    const cid = [_]u8{ 0xc0, 0xff, 0xee, 0x03 };
+    const token = [_]u8{0x33} ** packet.stateless_reset_token_len;
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var conn = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+    try conn.validatePeerAddress();
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(51, &conn);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try conn.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), conn.lossDetectionTimerDeadlineMillis());
+
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        lifecycle.issueConnectionIdRoute(51, &conn, &cid, path, token, 0, .{}),
+    );
+    try std.testing.expectEqual(@as(u64, 0), conn.localConnectionIdCount());
+    try std.testing.expectEqual(@as(usize, 0), conn.pendingNewConnectionIdCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
 }
 
 test "EndpointConnectionLifecycle mirrors ECN validation by UDP path" {
