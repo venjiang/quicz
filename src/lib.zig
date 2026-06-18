@@ -3345,6 +3345,7 @@ pub const EndpointConnectionLifecycle = struct {
             datagram,
             options,
         )) orelse return null;
+        errdefer _ = self.retireConnection(followup_connection_id);
         errdefer handoff.followup_connection.deinit();
 
         try handoff.followup_connection.sendCryptoInSpace(.initial, initial_crypto);
@@ -45650,6 +45651,67 @@ test "EndpointConnectionLifecycle emits protected Version Negotiation follow-up 
     try result.handoff.followup_connection.applyPeerTransportParameterBytes(server_tp);
     const peer_version_information = result.handoff.followup_connection.peerVersionInformation() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(packet.Version.v2, peer_version_information.chosen_version);
+}
+
+test "EndpointConnectionLifecycle cleans follow-up route when protected Version Negotiation Initial fails" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const old_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const followup_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const initial_token = [_]u8{ 0xa1, 0xa2 };
+    const client_versions = [_]packet.Version{ .v2, .v1 };
+    const server_versions = [_]packet.Version{.v2};
+    const old_short = [_]u8{ 0x40, 0x11, 0x22, 0x33, 0x44 };
+    const followup_short = [_]u8{ 0x40, 0x55, 0x66, 0x77, 0x88 };
+    const oversized_crypto: []const u8 = @as([*]const u8, @ptrFromInt(1))[0..@as(usize, max_quic_varint + 1)];
+
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try packet.encodeVersionNegotiationPacket(out.writer(), .{
+        .dcid = &old_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+
+    var old_client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+        .initial_rtt_ms = 100,
+    });
+    defer old_client.deinit();
+
+    _ = try lifecycle.registerClientInitialSourceConnectionId(113, &old_scid, path, .{});
+    _ = try old_client.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(113, &old_client);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try std.testing.expectError(error.CryptoError, lifecycle.processVersionNegotiationProtectedInitialDatagram(
+        113,
+        114,
+        &old_client,
+        10,
+        &original_dcid,
+        &old_scid,
+        &followup_scid,
+        path,
+        out.getWritten(),
+        .{},
+        &initial_token,
+        oversized_crypto,
+    ));
+
+    try std.testing.expectEqual(packet.Version.v2, old_client.versionNegotiationSelectedVersion().?);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectError(error.UnknownConnectionId, lifecycle.routeDatagram(path, &old_short));
+    try std.testing.expectError(error.UnknownConnectionId, lifecycle.routeDatagram(path, &followup_short));
 }
 
 test "EndpointConnectionLifecycle processes accepted protected Initial after authentication" {
