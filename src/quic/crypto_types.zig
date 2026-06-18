@@ -53,6 +53,8 @@ pub const CryptoBackendProgress = struct {
     peer_compatible_version_selected: ?packet.Version = null,
     /// Whether Handshake traffic secrets were installed during this drive step.
     handshake_keys_installed: bool = false,
+    /// Whether Handshake packet-space state and keys were discarded during this drive step.
+    handshake_space_discarded: bool = false,
     /// Whether any 0-RTT traffic secret was installed during this drive step.
     zero_rtt_keys_installed: bool = false,
     /// Whether 1-RTT traffic secrets were installed during this drive step.

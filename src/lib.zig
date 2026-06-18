@@ -3685,6 +3685,8 @@ pub const EndpointConnectionLifecycle = struct {
         }
         result.progress.handshake_keys_installed = result.progress.handshake_keys_installed or
             progress.handshake_keys_installed;
+        result.progress.handshake_space_discarded = result.progress.handshake_space_discarded or
+            progress.handshake_space_discarded;
         result.progress.zero_rtt_keys_installed = result.progress.zero_rtt_keys_installed or
             progress.zero_rtt_keys_installed;
         result.progress.one_rtt_keys_installed = result.progress.one_rtt_keys_installed or
@@ -21481,6 +21483,7 @@ pub const Connection = struct {
         }
         if (backend_confirmed and space == .handshake and progress.outbound_chunks == 0) {
             self.discardPacketNumberSpaceState(.handshake);
+            progress.handshake_space_discarded = true;
         }
         progress.handshake_confirmed = self.handshake_confirmed;
         return progress;
@@ -26815,6 +26818,7 @@ test "driveCryptoBackendInSpace discards Handshake space when backend confirms w
 
     try std.testing.expect(progress.handshake_confirmed);
     try std.testing.expect(progress.handshake_keys_installed);
+    try std.testing.expect(progress.handshake_space_discarded);
     try std.testing.expectEqual(@as(usize, 1), progress.inbound_chunks);
     try std.testing.expectEqual(@as(usize, 0), progress.outbound_chunks);
     try std.testing.expectEqual(HandshakeState.confirmed, conn.handshakeState());
