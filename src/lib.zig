@@ -3716,6 +3716,38 @@ pub const EndpointConnectionLifecycle = struct {
         result.progress.handshake_confirmed = result.progress.handshake_confirmed or progress.handshake_confirmed;
     }
 
+    fn countRetainedHandshakeSpaces(poll_views: []const EndpointConnectionPollView) usize {
+        var count: usize = 0;
+        for (poll_views) |view| {
+            if (!view.connection.packetNumberSpaceDiscarded(.handshake)) {
+                count += 1;
+            }
+        }
+        return count;
+    }
+
+    fn countRetainedHandshakeSpacesWithInstalledKeyOptions(
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) usize {
+        var count: usize = 0;
+        for (poll_views) |view| {
+            if (!view.connection.packetNumberSpaceDiscarded(.handshake)) {
+                count += 1;
+            }
+        }
+        return count;
+    }
+
+    fn markHandshakeSpaceDiscardedIfCountDrops(
+        progress: *CryptoBackendProgress,
+        before: usize,
+        after: usize,
+    ) void {
+        if (after < before) {
+            progress.handshake_space_discarded = true;
+        }
+    }
+
     /// Drive crypto backends across caller-owned connections.
     ///
     /// This is the socket-loop sweep form of
@@ -3806,17 +3838,24 @@ pub const EndpointConnectionLifecycle = struct {
         now_millis: i64,
         poll_space: EndpointInstalledKeyDatagramSpace,
     ) Error!EndpointCryptoBackendDriveDatagramResult {
-        const backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
+        var backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
             space,
             drive_views,
         );
+        const retained_handshake_spaces_before_poll = countRetainedHandshakeSpaces(poll_views);
+        const datagram = try self.pollDatagramAcrossConnections(
+            poll_views,
+            now_millis,
+            poll_space,
+        );
+        markHandshakeSpaceDiscardedIfCountDrops(
+            &backend.progress,
+            retained_handshake_spaces_before_poll,
+            countRetainedHandshakeSpaces(poll_views),
+        );
         return .{
             .backend = backend,
-            .datagram = try self.pollDatagramAcrossConnections(
-                poll_views,
-                now_millis,
-                poll_space,
-            ),
+            .datagram = datagram,
         };
     }
 
@@ -3831,16 +3870,24 @@ pub const EndpointConnectionLifecycle = struct {
         poll_views: []const EndpointConnectionInstalledKeyPollView,
         now_millis: i64,
     ) Error!EndpointCryptoBackendDriveDatagramResult {
-        const backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
+        var backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
             space,
             drive_views,
         );
+        const retained_handshake_spaces_before_poll =
+            countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
+        const datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+            poll_views,
+            now_millis,
+        );
+        markHandshakeSpaceDiscardedIfCountDrops(
+            &backend.progress,
+            retained_handshake_spaces_before_poll,
+            countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views),
+        );
         return .{
             .backend = backend,
-            .datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
-                poll_views,
-                now_millis,
-            ),
+            .datagram = datagram,
         };
     }
 
@@ -3894,18 +3941,25 @@ pub const EndpointConnectionLifecycle = struct {
         poll_space: EndpointInstalledKeyDatagramSpace,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
-        const backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
+        var backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
             space,
             drive_views,
         );
+        const retained_handshake_spaces_before_drain = countRetainedHandshakeSpaces(poll_views);
+        const drain = self.drainDatagramsAcrossConnections(
+            poll_views,
+            now_millis,
+            poll_space,
+            out,
+        );
+        markHandshakeSpaceDiscardedIfCountDrops(
+            &backend.progress,
+            retained_handshake_spaces_before_drain,
+            countRetainedHandshakeSpaces(poll_views),
+        );
         return .{
             .backend = backend,
-            .drain = self.drainDatagramsAcrossConnections(
-                poll_views,
-                now_millis,
-                poll_space,
-                out,
-            ),
+            .drain = drain,
         };
     }
 
@@ -3921,17 +3975,25 @@ pub const EndpointConnectionLifecycle = struct {
         now_millis: i64,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
-        const backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
+        var backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
             space,
             drive_views,
         );
+        const retained_handshake_spaces_before_drain =
+            countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
+        const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+            poll_views,
+            now_millis,
+            out,
+        );
+        markHandshakeSpaceDiscardedIfCountDrops(
+            &backend.progress,
+            retained_handshake_spaces_before_drain,
+            countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views),
+        );
         return .{
             .backend = backend,
-            .drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
-                poll_views,
-                now_millis,
-                out,
-            ),
+            .drain = drain,
         };
     }
 
@@ -4060,17 +4122,24 @@ pub const EndpointConnectionLifecycle = struct {
         now_millis: i64,
         poll_space: EndpointInstalledKeyDatagramSpace,
     ) Error!EndpointCryptoBackendDriveDatagramResult {
-        const backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
+        var backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
             space,
             drive_views,
         );
+        const retained_handshake_spaces_before_poll = countRetainedHandshakeSpaces(poll_views);
+        const datagram = try self.pollDatagramAcrossConnections(
+            poll_views,
+            now_millis,
+            poll_space,
+        );
+        markHandshakeSpaceDiscardedIfCountDrops(
+            &backend.progress,
+            retained_handshake_spaces_before_poll,
+            countRetainedHandshakeSpaces(poll_views),
+        );
         return .{
             .backend = backend,
-            .datagram = try self.pollDatagramAcrossConnections(
-                poll_views,
-                now_millis,
-                poll_space,
-            ),
+            .datagram = datagram,
         };
     }
 
@@ -4086,16 +4155,24 @@ pub const EndpointConnectionLifecycle = struct {
         poll_views: []const EndpointConnectionInstalledKeyPollView,
         now_millis: i64,
     ) Error!EndpointCryptoBackendDriveDatagramResult {
-        const backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
+        var backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
             space,
             drive_views,
         );
+        const retained_handshake_spaces_before_poll =
+            countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
+        const datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+            poll_views,
+            now_millis,
+        );
+        markHandshakeSpaceDiscardedIfCountDrops(
+            &backend.progress,
+            retained_handshake_spaces_before_poll,
+            countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views),
+        );
         return .{
             .backend = backend,
-            .datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
-                poll_views,
-                now_millis,
-            ),
+            .datagram = datagram,
         };
     }
 
@@ -4148,18 +4225,25 @@ pub const EndpointConnectionLifecycle = struct {
         poll_space: EndpointInstalledKeyDatagramSpace,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
-        const backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
+        var backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
             space,
             drive_views,
         );
+        const retained_handshake_spaces_before_drain = countRetainedHandshakeSpaces(poll_views);
+        const drain = self.drainDatagramsAcrossConnections(
+            poll_views,
+            now_millis,
+            poll_space,
+            out,
+        );
+        markHandshakeSpaceDiscardedIfCountDrops(
+            &backend.progress,
+            retained_handshake_spaces_before_drain,
+            countRetainedHandshakeSpaces(poll_views),
+        );
         return .{
             .backend = backend,
-            .drain = self.drainDatagramsAcrossConnections(
-                poll_views,
-                now_millis,
-                poll_space,
-                out,
-            ),
+            .drain = drain,
         };
     }
 
@@ -4175,17 +4259,25 @@ pub const EndpointConnectionLifecycle = struct {
         now_millis: i64,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
-        const backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
+        var backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
             space,
             drive_views,
         );
+        const retained_handshake_spaces_before_drain =
+            countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
+        const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+            poll_views,
+            now_millis,
+            out,
+        );
+        markHandshakeSpaceDiscardedIfCountDrops(
+            &backend.progress,
+            retained_handshake_spaces_before_drain,
+            countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views),
+        );
         return .{
             .backend = backend,
-            .drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
-                poll_views,
-                now_millis,
-                out,
-            ),
+            .drain = drain,
         };
     }
 
@@ -43436,6 +43528,185 @@ test "EndpointConnectionLifecycle single backend drive polls datagram" {
     var response_crypto: [64]u8 = undefined;
     const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("single backend poll output", response_crypto[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle reports Handshake discard after installed-key backend poll output" {
+    const ConfirmingBackend = struct {
+        secrets: HandshakeTrafficSecrets,
+        outbound: []const u8,
+        outbound_sent: bool = false,
+        secrets_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(_: *anyopaque, space: PacketNumberSpace, _: []const u8) Error!void {
+            if (space != .handshake) return error.InvalidPacket;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+
+        fn pullHandshakeTrafficSecrets(context: *anyopaque) Error!?HandshakeTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.secrets_sent) return null;
+            self.secrets_sent = true;
+            return self.secrets;
+        }
+
+        fn handshakeConfirmed(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x31, 0x41, 0x51, 0x67 };
+    const server_dcid = [_]u8{ 0xc1, 0xd1, 0xe1, 0xf7 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = ConfirmingBackend{
+        .secrets = .{
+            .local = secrets.server.secret,
+            .peer = secrets.client.secret,
+        },
+        .outbound = "installed-key poll output",
+    };
+    var scratch: [128]u8 = undefined;
+
+    const result = try lifecycle.driveCryptoBackendInSpaceAndPollDatagram(
+        116,
+        &server,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        10,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+    );
+    defer if (result.datagram) |datagram| std.testing.allocator.free(datagram.datagram);
+
+    try std.testing.expect(result.backend.progress.handshake_confirmed);
+    try std.testing.expect(result.backend.progress.handshake_keys_installed);
+    try std.testing.expect(result.backend.progress.handshake_space_discarded);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.progress.outbound_chunks);
+    try std.testing.expect(result.datagram != null);
+    try std.testing.expect(server.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(!server.hasHandshakeProtectionKeys());
+}
+
+test "EndpointConnectionLifecycle reports Handshake discard after installed-key backend drain output" {
+    const ConfirmingBackend = struct {
+        secrets: HandshakeTrafficSecrets,
+        outbound: []const u8,
+        outbound_sent: bool = false,
+        secrets_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(_: *anyopaque, space: PacketNumberSpace, _: []const u8) Error!void {
+            if (space != .handshake) return error.InvalidPacket;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+
+        fn pullHandshakeTrafficSecrets(context: *anyopaque) Error!?HandshakeTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.secrets_sent) return null;
+            self.secrets_sent = true;
+            return self.secrets;
+        }
+
+        fn handshakeConfirmed(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x31, 0x41, 0x51, 0x68 };
+    const server_dcid = [_]u8{ 0xc1, 0xd1, 0xe1, 0xf8 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = ConfirmingBackend{
+        .secrets = .{
+            .local = secrets.server.secret,
+            .peer = secrets.client.secret,
+        },
+        .outbound = "installed-key drain output",
+    };
+    var scratch: [128]u8 = undefined;
+    var out: [1]EndpointPolledDatagramResult = undefined;
+
+    const result = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
+        117,
+        &server,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        10,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+        &out,
+    );
+    defer for (out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expect(result.backend.progress.handshake_confirmed);
+    try std.testing.expect(result.backend.progress.handshake_keys_installed);
+    try std.testing.expect(result.backend.progress.handshake_space_discarded);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expect(server.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(!server.hasHandshakeProtectionKeys());
 }
 
 test "EndpointConnectionLifecycle single close backend drive stops before drain" {
