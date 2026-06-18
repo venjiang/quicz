@@ -527,7 +527,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   send-admission cap applies. `Connection.ackElicitingSendAdmission()` reports
   the first blocking reason as congestion-window or peer-address
   anti-amplification, and low-level packet send recording now reuses that
-  shared admission result.
+  shared admission result. Caller-keyed protected short-packet polling also
+  uses the shared admission result before consuming queued ack-eliciting
+  STREAM payloads.
 
 - 2026-06-18: Added the direct installed-key 1-RTT short
   receive-to-compatible-backend no-output forms

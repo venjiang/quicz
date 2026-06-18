@@ -18040,12 +18040,11 @@ pub const Connection = struct {
         }
 
         if (built.datagram.len > self.maxTxDatagramSize()) return error.BufferTooSmall;
-        if (!self.canSendToPeerAddress(built.datagram.len)) {
-            built.deinitSidecars(self.allocator);
-            self.allocator.free(built.datagram);
-            return null;
-        }
-        if (built.ack_eliciting and !self.canSendAckElicitingInSpace(.application, built.datagram.len)) {
+        if (if (built.ack_eliciting)
+            self.ackElicitingSendAdmission(.application, built.datagram.len) != .allowed
+        else
+            !self.canSendToPeerAddress(built.datagram.len))
+        {
             built.deinitSidecars(self.allocator);
             self.allocator.free(built.datagram);
             return null;
@@ -65535,6 +65534,39 @@ test "pollProtectedShortDatagram preserves STREAM when anti-amplification blocks
     var recv_buf: [32]u8 = undefined;
     const recv_len = (try client.recvOnStream(stream_id, &recv_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("blocked first", recv_buf[0..recv_len]);
+}
+
+test "pollProtectedShortDatagram preserves STREAM when congestion blocks" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+
+    const stream_id = try server.openStream();
+    try server.sendOnStream(stream_id, "congestion blocked", true);
+
+    server.recovery_state.congestion_window = 0;
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try server.pollProtectedShortDatagram(10, &client_dcid, secrets.server),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+
+    server.recovery_state.congestion_window = 1200;
+    const server_stream = (try server.pollProtectedShortDatagram(11, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_stream);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPacketNumber(.application));
+
+    try client.processProtectedShortDatagram(12, secrets.server, client_dcid.len, server_stream);
+    var recv_buf: [32]u8 = undefined;
+    const recv_len = (try client.recvOnStream(stream_id, &recv_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("congestion blocked", recv_buf[0..recv_len]);
 }
 
 test "pollProtectedShortDatagram preserves CRYPTO when anti-amplification blocks" {

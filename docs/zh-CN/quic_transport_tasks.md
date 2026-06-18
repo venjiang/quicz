@@ -493,7 +493,9 @@ close 和 route cleanup 事件。
   send-admission budget，并在当前没有 send-admission 上限时返回 `null`。
   `Connection.ackElicitingSendAdmission()` 会报告第一个阻塞原因是
   congestion-window 还是 peer-address anti-amplification，低层 packet send
-  记录路径也已复用这个共享准入结果。
+  记录路径也已复用这个共享准入结果。caller-keyed protected short packet
+  poll 路径也会先使用共享 admission 结果，再消费排队的 ack-eliciting
+  STREAM payload。
 
 - 2026-06-18：新增 direct installed-key 1-RTT short receive-to-compatible-backend
   no-output 形态：
