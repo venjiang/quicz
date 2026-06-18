@@ -517,7 +517,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   remaining ack-eliciting send budget for one recovery state, and
   `Connection.availableCongestionWindow()` exposes the socket-facing
   connection-level budget using the same aggregate bytes-in-flight admission
-  model as protected packet sends.
+  model as protected packet sends. `Connection.congestionWindowFull()` lets
+  socket/event-loop owners detect congestion-window blocking without attempting
+  and rolling back an ack-eliciting send.
 
 - 2026-06-18: Added the direct installed-key 1-RTT short
   receive-to-compatible-backend no-output forms

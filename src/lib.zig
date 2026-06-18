@@ -15398,6 +15398,11 @@ pub const Connection = struct {
         return window - in_flight;
     }
 
+    /// Return whether ack-eliciting sends are currently congestion-window limited.
+    pub fn congestionWindowFull(self: Connection, space: PacketNumberSpace) bool {
+        return self.availableCongestionWindow(space) == 0;
+    }
+
     /// Return the current smoothed RTT estimate for one packet number space.
     pub fn smoothedRttMillis(self: Connection, space: PacketNumberSpace) u64 {
         return switch (space) {
@@ -70862,6 +70867,28 @@ test "available congestion window uses aggregate bytes in flight" {
     conn.recovery_state.bytes_in_flight = 6000;
     try std.testing.expectEqual(@as(usize, 13_000), conn.totalBytesInFlight());
     try std.testing.expectEqual(@as(usize, 0), conn.availableCongestionWindow(.application));
+}
+
+test "congestion window full query follows aggregate bytes in flight" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    conn.recovery_state.congestion_window = 12_000;
+    _ = try conn.recordPacketSentInSpace(.initial, 0, 7000);
+    _ = try conn.recordPacketSentInSpace(.handshake, 1, 5000);
+
+    try std.testing.expect(conn.congestionWindowFull(.application));
+
+    try conn.receiveAckInSpace(.initial, 20, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expect(!conn.congestionWindowFull(.application));
 }
 
 test "pollTx checks congestion before writing output buffer" {
