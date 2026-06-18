@@ -1,4 +1,8 @@
 const protection = @import("protection.zig");
+const transport_types = @import("transport_types.zig");
+
+const Error = transport_types.Error;
+const PacketNumberSpace = transport_types.PacketNumberSpace;
 
 /// QUIC packet type context used for frame-payload validation.
 ///
@@ -30,6 +34,18 @@ pub const ProtectedLongDatagramKeys = struct {
     /// Keys used to open protected Handshake long packets.
     handshake: ?protection.Aes128PacketProtectionKeys = null,
 };
+
+/// Build caller-supplied protected long-packet keys for one packet number space.
+pub fn protectedLongDatagramKeysForSpace(
+    space: PacketNumberSpace,
+    keys: protection.Aes128PacketProtectionKeys,
+) Error!ProtectedLongDatagramKeys {
+    return switch (space) {
+        .initial => .{ .initial = keys },
+        .handshake => .{ .handshake = keys },
+        .application => error.InvalidPacket,
+    };
+}
 
 /// Modeled ECN codepoint used for packets recorded by the frame-payload API.
 pub const EcnCodepoint = enum {

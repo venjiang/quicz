@@ -217,6 +217,7 @@ const defaultFramePacketTypeForSpace = frame_rules.defaultFramePacketTypeForSpac
 const packetNumberSpaceForFramePacketType = frame_rules.packetNumberSpaceForFramePacketType;
 const frameAllowedInFramePacketType = frame_rules.frameAllowedInFramePacketType;
 const zeroEcnCounts = packet_number_space.zeroEcnCounts;
+const protectedLongDatagramKeysForSpace = packet_context.protectedLongDatagramKeysForSpace;
 const streamEndOffset = stream_id_rules.endOffset;
 const streamRangesOverlap = stream_id_rules.rangesOverlap;
 const isBidirectionalStream = stream_id_rules.isBidirectional;
@@ -255,17 +256,6 @@ fn validateInitialDestinationConnectionIdLength(dcid: []const u8) Error!void {
     if (dcid.len < min_initial_destination_connection_id_len or dcid.len > max_connection_id_len) {
         return error.InvalidPacket;
     }
-}
-
-fn protectedLongDatagramKeysForSpace(
-    space: PacketNumberSpace,
-    keys: protection.Aes128PacketProtectionKeys,
-) Error!ProtectedLongDatagramKeys {
-    return switch (space) {
-        .initial => .{ .initial = keys },
-        .handshake => .{ .handshake = keys },
-        .application => error.InvalidPacket,
-    };
 }
 
 /// Endpoint result after processing a client-side Version Negotiation response.
