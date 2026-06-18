@@ -3168,15 +3168,22 @@ pub const EndpointConnectionLifecycle = struct {
         local_initial_source_connection_id: []const u8,
         datagram: []const u8,
     ) Error!?EndpointVersionNegotiationResult {
-        const selected = (try connection.processVersionNegotiationDatagram(
+        const selected = (connection.processVersionNegotiationDatagram(
             now_millis,
             original_destination_connection_id,
             local_initial_source_connection_id,
             datagram,
-        )) orelse return null;
+        ) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        }) orelse return null;
+        const followup_config = connection.versionNegotiationFollowupConfig() catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         return .{
             .selected_version = selected,
-            .followup_config = try connection.versionNegotiationFollowupConfig(),
+            .followup_config = followup_config,
             .retired = self.retireConnection(connection_id),
         };
     }
@@ -3203,13 +3210,19 @@ pub const EndpointConnectionLifecycle = struct {
         datagram: []const u8,
         options: endpoint.ClientInitialRouteOptions,
     ) EndpointVersionNegotiationError!?EndpointVersionNegotiationFollowupResult {
-        const selected = (try connection.processVersionNegotiationDatagram(
+        const selected = (connection.processVersionNegotiationDatagram(
             now_millis,
             original_destination_connection_id,
             old_local_initial_source_connection_id,
             datagram,
-        )) orelse return null;
-        const followup_config = try connection.versionNegotiationFollowupConfig();
+        ) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(old_connection_id, connection);
+            return err;
+        }) orelse return null;
+        const followup_config = connection.versionNegotiationFollowupConfig() catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(old_connection_id, connection);
+            return err;
+        };
 
         const reuses_client_source_cid = std.mem.eql(
             u8,
@@ -45204,6 +45217,116 @@ test "EndpointConnectionLifecycle ignores Version Negotiation without retiring e
     try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
     try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle refreshes recovery timer when Version Negotiation rejects closed connection" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const client_versions = [_]packet.Version{ .v2, .v1 };
+    const server_versions = [_]packet.Version{.v2};
+
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try packet.encodeVersionNegotiationPacket(out.writer(), .{
+        .dcid = &client_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+    });
+    defer client.deinit();
+
+    _ = try lifecycle.registerClientInitialSourceConnectionId(93, &client_scid, path, .{});
+    _ = try client.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(93, &client);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadlineMillis());
+
+    try std.testing.expectError(error.ConnectionClosed, lifecycle.processVersionNegotiationDatagram(
+        93,
+        &client,
+        10,
+        &original_dcid,
+        &client_scid,
+        out.getWritten(),
+    ));
+    try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle refreshes recovery timer when Version Negotiation follow-up rejects closed connection" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const old_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const followup_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const client_versions = [_]packet.Version{ .v2, .v1 };
+    const server_versions = [_]packet.Version{.v2};
+    const old_short = [_]u8{ 0x40, 0x11, 0x22, 0x33, 0x44 };
+    const followup_short = [_]u8{ 0x40, 0x55, 0x66, 0x77, 0x88 };
+
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try packet.encodeVersionNegotiationPacket(out.writer(), .{
+        .dcid = &old_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+    });
+    defer client.deinit();
+
+    _ = try lifecycle.registerClientInitialSourceConnectionId(94, &old_scid, path, .{});
+    _ = try client.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(94, &client);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadlineMillis());
+
+    try std.testing.expectError(error.ConnectionClosed, lifecycle.processVersionNegotiationFollowupDatagram(
+        94,
+        95,
+        &client,
+        10,
+        &original_dcid,
+        &old_scid,
+        &followup_scid,
+        path,
+        out.getWritten(),
+        .{},
+    ));
+    try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+    const old_route = try lifecycle.routeDatagram(path, &old_short);
+    try std.testing.expectEqual(@as(u64, 94), old_route.connection_id);
+    try std.testing.expectError(error.UnknownConnectionId, lifecycle.routeDatagram(path, &followup_short));
 }
 
 test "EndpointConnectionLifecycle registers Version Negotiation follow-up route" {
