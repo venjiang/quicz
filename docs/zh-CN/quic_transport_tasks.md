@@ -479,6 +479,12 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-18：新增 recovery 和连接层 congestion-window 剩余发送预算查询。
+  `recovery.Recovery.availableCongestionWindow()` 返回单个 recovery state 的
+  ack-eliciting 可发送字节预算，`Connection.availableCongestionWindow()` 使用
+  与 protected packet 发送准入相同的跨 packet number space aggregate
+  bytes-in-flight 模型，向 socket/event-loop 调用方暴露连接级发送预算。
+
 - 2026-06-18：新增 direct installed-key 1-RTT short receive-to-compatible-backend
   no-output 形态：
   `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`

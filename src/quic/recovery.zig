@@ -71,6 +71,12 @@ pub const Recovery = struct {
         return after_send <= self.congestion_window;
     }
 
+    /// Return the remaining congestion-window budget for ack-eliciting bytes.
+    pub fn availableCongestionWindow(self: Recovery) usize {
+        if (self.bytes_in_flight >= self.congestion_window) return 0;
+        return self.congestion_window - self.bytes_in_flight;
+    }
+
     /// Record bytes for a sent ack-eliciting packet.
     pub fn onPacketSent(self: *Recovery, bytes: usize) void {
         self.bytes_in_flight = std.math.add(usize, self.bytes_in_flight, bytes) catch std.math.maxInt(usize);
@@ -348,6 +354,17 @@ test "sent acked and lost packets update bytes in flight and congestion window" 
     recovery.onPacketLost(2400, 100, 200);
     try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
     try std.testing.expect(recovery.congestion_window >= minimumCongestionWindow(1200));
+}
+
+test "available congestion window saturates at zero" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    recovery.congestion_window = 3600;
+
+    try std.testing.expectEqual(@as(usize, 3600), recovery.availableCongestionWindow());
+    recovery.onPacketSent(1200);
+    try std.testing.expectEqual(@as(usize, 2400), recovery.availableCongestionWindow());
+    recovery.onPacketSent(3000);
+    try std.testing.expectEqual(@as(usize, 0), recovery.availableCongestionWindow());
 }
 
 test "NewReno slow start grows congestion window by acked bytes" {

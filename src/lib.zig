@@ -15387,6 +15387,17 @@ pub const Connection = struct {
         };
     }
 
+    /// Return the remaining congestion-window budget for one packet number space.
+    ///
+    /// The current congestion admission model uses connection-level bytes in
+    /// flight against the selected packet number space's congestion window.
+    pub fn availableCongestionWindow(self: Connection, space: PacketNumberSpace) usize {
+        const window = self.congestionWindow(space);
+        const in_flight = self.totalBytesInFlight();
+        if (in_flight >= window) return 0;
+        return window - in_flight;
+    }
+
     /// Return the current smoothed RTT estimate for one packet number space.
     pub fn smoothedRttMillis(self: Connection, space: PacketNumberSpace) u64 {
         return switch (space) {
@@ -70831,6 +70842,26 @@ test "congestion admission accounts bytes in flight across packet spaces" {
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.application));
+}
+
+test "available congestion window uses aggregate bytes in flight" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    conn.recovery_state.congestion_window = 12_000;
+    _ = try conn.recordPacketSentInSpace(.initial, 0, 4000);
+    _ = try conn.recordPacketSentInSpace(.handshake, 1, 3000);
+
+    try std.testing.expectEqual(@as(usize, 7000), conn.totalBytesInFlight());
+    try std.testing.expectEqual(@as(usize, 5000), conn.availableCongestionWindow(.application));
+
+    conn.recovery_state.bytes_in_flight = 6000;
+    try std.testing.expectEqual(@as(usize, 13_000), conn.totalBytesInFlight());
+    try std.testing.expectEqual(@as(usize, 0), conn.availableCongestionWindow(.application));
 }
 
 test "pollTx checks congestion before writing output buffer" {
