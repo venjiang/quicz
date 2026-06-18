@@ -9811,7 +9811,10 @@ pub const EndpointConnectionLifecycle = struct {
         dcid: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
     ) Error!?[]u8 {
-        const datagram = try connection.pollProtectedShortDatagram(now_millis, dcid, keys);
+        const datagram = connection.pollProtectedShortDatagram(now_millis, dcid, keys) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
         errdefer if (datagram) |bytes| connection.allocator.free(bytes);
         try self.armRecoveryTimerFromConnection(connection_id, connection);
         return datagram;
@@ -59809,6 +59812,53 @@ test "EndpointConnectionLifecycle refreshes recovery timer when caller-keyed sho
             secrets.server,
             client_dcid.len,
             &[_]u8{},
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle refreshes recovery timer when caller-keyed short poll rejects closed connection" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.confirmHandshake();
+
+    try client.sendPing();
+    const first = (try lifecycle.pollProtectedShortDatagram(
+        41,
+        &client,
+        10,
+        &server_dcid,
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try client.closeConnection(0, @intFromEnum(frame.FrameType.crypto), "done");
+    var close_buf: [64]u8 = undefined;
+    _ = (try client.pollTx(11, &close_buf)) orelse return error.TestUnexpectedResult;
+    const close_deadline = client.closeDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectError(error.ConnectionClosed, client.checkCloseTimeouts(close_deadline));
+    try std.testing.expectEqual(ConnectionState.closed, client.connectionState());
+    try std.testing.expectEqual(@as(?LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadlineMillis());
+
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        lifecycle.pollProtectedShortDatagram(
+            41,
+            &client,
+            11,
+            &server_dcid,
+            secrets.client,
         ),
     );
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
