@@ -15968,6 +15968,24 @@ pub const Connection = struct {
         return null;
     }
 
+    /// Process a stateless reset datagram and enter draining when its trailing
+    /// token matches an active peer-issued connection ID.
+    ///
+    /// A matching reset has no peer close frame or error code. It stops any
+    /// pending CONNECTION_CLOSE output and starts the close/draining timeout.
+    /// Null means the datagram was too short, used an unknown token, matched
+    /// only a retired token, or the connection was already fully closed.
+    pub fn processStatelessResetDatagram(self: *Connection, now_millis: i64, datagram: []const u8) ?u64 {
+        self.expireCloseState(now_millis);
+        self.expireIdleState(now_millis);
+        if (self.state == .closed) return null;
+
+        const sequence_number = self.detectStatelessReset(datagram) orelse return null;
+        self.clearPendingCloseFrame();
+        self.enterDrainingState(now_millis);
+        return sequence_number;
+    }
+
     /// Return Retry tokens issued by this server and still accepted once.
     pub fn pendingRetryTokenCount(self: Connection) usize {
         return self.retry_tokens.items.len;
@@ -68529,6 +68547,87 @@ test "detectStatelessReset ignores retired peer-issued reset tokens" {
     reset_out = buffer.fixedWriter(&reset_buf);
     try packet.encodeStatelessReset(reset_out.writer(), &[_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd }, token1);
     try std.testing.expectEqual(@as(?u64, 1), conn.detectStatelessReset(reset_out.getWritten()));
+}
+
+test "processStatelessResetDatagram enters draining on active reset token" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const cid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    var frame_buf: [64]u8 = undefined;
+    var frame_out = buffer.fixedWriter(&frame_buf);
+    try frame.encodeFrame(frame_out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &cid,
+        .stateless_reset_token = token,
+    } });
+    try conn.processDatagram(0, frame_out.getWritten());
+
+    var reset_buf: [packet.min_stateless_reset_datagram_len]u8 = undefined;
+    var reset_out = buffer.fixedWriter(&reset_buf);
+    try packet.encodeStatelessReset(reset_out.writer(), &[_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd }, token);
+
+    try std.testing.expectEqual(@as(?u64, null), conn.processStatelessResetDatagram(9, reset_out.getWritten()[0..4]));
+
+    const other = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    reset_out = buffer.fixedWriter(&reset_buf);
+    try packet.encodeStatelessReset(reset_out.writer(), &[_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd }, other);
+    try std.testing.expectEqual(@as(?u64, null), conn.processStatelessResetDatagram(10, reset_out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+    try std.testing.expect(conn.closeDeadlineMillis() == null);
+
+    reset_out = buffer.fixedWriter(&reset_buf);
+    try packet.encodeStatelessReset(reset_out.writer(), &[_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd }, token);
+    try std.testing.expectEqual(@as(?u64, 0), conn.processStatelessResetDatagram(11, reset_out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.draining, conn.connectionState());
+    try std.testing.expect(conn.closeDeadlineMillis() != null);
+    try std.testing.expect(conn.peerClose() == null);
+    try std.testing.expect(conn.pending_close == null);
+}
+
+test "processStatelessResetDatagram ignores retired tokens and stops pending close output" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .active_connection_id_limit = 3 });
+    defer conn.deinit();
+
+    const cid0 = [_]u8{ 0xaa, 0xbb, 0xcc, 0x00 };
+    const cid1 = [_]u8{ 0xaa, 0xbb, 0xcc, 0x01 };
+    const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    var datagram: [96]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &cid0,
+        .stateless_reset_token = token0,
+    } });
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 1,
+        .connection_id = &cid1,
+        .stateless_reset_token = token1,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expect(conn.active_connection_ids.items[0].retired);
+
+    var reset_buf: [packet.min_stateless_reset_datagram_len]u8 = undefined;
+    var reset_out = buffer.fixedWriter(&reset_buf);
+    try packet.encodeStatelessReset(reset_out.writer(), &[_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd }, token0);
+    try std.testing.expectEqual(@as(?u64, null), conn.processStatelessResetDatagram(10, reset_out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+
+    try conn.closeConnection(0, @intFromEnum(frame.FrameType.stream), "closing");
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+
+    reset_out = buffer.fixedWriter(&reset_buf);
+    try packet.encodeStatelessReset(reset_out.writer(), &[_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd }, token1);
+    try std.testing.expectEqual(@as(?u64, 1), conn.processStatelessResetDatagram(11, reset_out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.draining, conn.connectionState());
+    try std.testing.expect(conn.pending_close == null);
+    try std.testing.expect(conn.closeDeadlineMillis() != null);
 }
 
 test "STOP_SENDING queues RESET_STREAM and drops unsent stream data" {
