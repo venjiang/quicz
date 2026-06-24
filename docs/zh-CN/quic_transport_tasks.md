@@ -881,6 +881,14 @@ close 和 route cleanup 事件。
   发生在 packet processing 前，connection-id mismatch 会在 backend delivery 前停止，
   成功 routed Handshake CRYPTO 会产出 protected response，backend peer
   transport-parameter 错误会在 output drain 前停止并留下 protected Handshake close 给 peer。
+- 2026-06-24：收紧 endpoint lifecycle backend-drive installed-key Handshake
+  输出边界。backend-drive-to-poll 和 backend-drive-to-bounded-drain helper
+  现在会在 backend 确认 Handshake 且连接可丢弃 Handshake space 时，把 Handshake
+  输出视为空结果，同时清理已安装 Handshake key 并刷新 lifecycle recovery timer。
+  该行为同样覆盖 close-propagating 与 compatible-version backend-drive 变体；
+  直接 installed-key polling 仍保留调用方负责的既有语义。单元测试证明普通和
+  compatible backend poll/drain 路径会报告 backend progress 与 Handshake discard，
+  但不再产出 datagram 或 drain error。
 - 2026-06-05：把当前 C TLS 示例边界迁移到 Zig 0.16 的 `addTranslateC`
   构建路径。C ABI 声明现在放在小 header 中，Zig 示例通过 `@import("c")`
   引入；当前示例中的手写 `extern fn` / `extern struct` 已移除。

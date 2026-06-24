@@ -963,6 +963,16 @@ QUIC unless the gap is named and the verification evidence is added here.
   before backend delivery, successful routed Handshake CRYPTO produces a
   protected response, and backend peer transport-parameter errors stop before
   output drain while leaving a protected Handshake close for the peer.
+- 2026-06-24: Tightened endpoint lifecycle backend-drive installed-key
+  Handshake output after backend confirmation. The backend-drive-to-poll and
+  backend-drive-to-bounded-drain helpers now treat confirmed Handshake output
+  as empty once the connection is ready to discard the Handshake space, clear
+  installed Handshake keys, and refresh lifecycle recovery timers. The same
+  behavior applies to close-propagating and compatible-version backend-drive
+  variants while direct installed-key polling keeps its existing caller-owned
+  semantics. Unit coverage proves ordinary and compatible backend poll/drain
+  paths report backend progress and Handshake discard without surfacing a
+  datagram or drain error.
 - 2026-06-05: Migrated the current C TLS example boundary to Zig 0.16's
   `addTranslateC` build path. The C ABI declarations now live in small header
   files and the Zig examples import them with `@import("c")`; handwritten

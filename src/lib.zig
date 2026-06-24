@@ -3742,6 +3742,120 @@ pub const EndpointConnectionLifecycle = struct {
         }
     }
 
+    fn skipBackendDriveOutputForDiscardedSpace(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: EndpointInstalledKeyDatagramSpace,
+    ) Error!bool {
+        if (space != .handshake) return false;
+        if (connection.packetNumberSpaceDiscarded(.handshake)) return true;
+        if (!connection.handshakeConfirmed()) return false;
+
+        try connection.discardPacketNumberSpace(.handshake);
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return true;
+    }
+
+    fn pollDatagramAcrossConnectionsAfterBackendDrive(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        space: EndpointInstalledKeyDatagramSpace,
+    ) Error!?EndpointPolledDatagramResult {
+        for (connections) |view| {
+            if (try self.skipBackendDriveOutputForDiscardedSpace(view.connection_id, view.connection, space)) continue;
+            const datagram = try self.pollDatagram(
+                view.connection_id,
+                view.connection,
+                now_millis,
+                .{
+                    .space = space,
+                    .destination_connection_id = view.destination_connection_id,
+                    .source_connection_id = view.source_connection_id,
+                },
+            );
+            if (datagram) |bytes| {
+                return .{
+                    .connection_id = view.connection_id,
+                    .datagram = bytes,
+                };
+            }
+        }
+        return null;
+    }
+
+    fn pollDatagramAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+    ) Error!?EndpointPolledDatagramResult {
+        for (connections) |view| {
+            if (try self.skipBackendDriveOutputForDiscardedSpace(
+                view.connection_id,
+                view.connection,
+                view.poll_options.space,
+            )) continue;
+            const datagram = try self.pollDatagram(
+                view.connection_id,
+                view.connection,
+                now_millis,
+                view.poll_options,
+            );
+            if (datagram) |bytes| {
+                return .{
+                    .connection_id = view.connection_id,
+                    .datagram = bytes,
+                };
+            }
+        }
+        return null;
+    }
+
+    fn drainDatagramsAcrossConnectionsAfterBackendDrive(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointDatagramDrainResult {
+        var result = EndpointDatagramDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const polled = self.pollDatagramAcrossConnectionsAfterBackendDrive(
+                connections,
+                now_millis,
+                space,
+            ) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = polled orelse return result;
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
+    fn drainDatagramsAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
+        self: *EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointDatagramDrainResult {
+        var result = EndpointDatagramDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const polled = self.pollDatagramAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
+                connections,
+                now_millis,
+            ) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = polled orelse return result;
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
     /// Drive crypto backends across caller-owned connections.
     ///
     /// This is the socket-loop sweep form of
@@ -3837,7 +3951,7 @@ pub const EndpointConnectionLifecycle = struct {
             drive_views,
         );
         const retained_handshake_spaces_before_poll = countRetainedHandshakeSpaces(poll_views);
-        const datagram = try self.pollDatagramAcrossConnections(
+        const datagram = try self.pollDatagramAcrossConnectionsAfterBackendDrive(
             poll_views,
             now_millis,
             poll_space,
@@ -3870,7 +3984,7 @@ pub const EndpointConnectionLifecycle = struct {
         );
         const retained_handshake_spaces_before_poll =
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
-        const datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+        const datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
             poll_views,
             now_millis,
         );
@@ -3940,7 +4054,7 @@ pub const EndpointConnectionLifecycle = struct {
             drive_views,
         );
         const retained_handshake_spaces_before_drain = countRetainedHandshakeSpaces(poll_views);
-        const drain = self.drainDatagramsAcrossConnections(
+        const drain = self.drainDatagramsAcrossConnectionsAfterBackendDrive(
             poll_views,
             now_millis,
             poll_space,
@@ -3975,7 +4089,7 @@ pub const EndpointConnectionLifecycle = struct {
         );
         const retained_handshake_spaces_before_drain =
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
-        const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+        const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
             poll_views,
             now_millis,
             out,
@@ -4121,7 +4235,7 @@ pub const EndpointConnectionLifecycle = struct {
             drive_views,
         );
         const retained_handshake_spaces_before_poll = countRetainedHandshakeSpaces(poll_views);
-        const datagram = try self.pollDatagramAcrossConnections(
+        const datagram = try self.pollDatagramAcrossConnectionsAfterBackendDrive(
             poll_views,
             now_millis,
             poll_space,
@@ -4155,7 +4269,7 @@ pub const EndpointConnectionLifecycle = struct {
         );
         const retained_handshake_spaces_before_poll =
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
-        const datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+        const datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
             poll_views,
             now_millis,
         );
@@ -4224,7 +4338,7 @@ pub const EndpointConnectionLifecycle = struct {
             drive_views,
         );
         const retained_handshake_spaces_before_drain = countRetainedHandshakeSpaces(poll_views);
-        const drain = self.drainDatagramsAcrossConnections(
+        const drain = self.drainDatagramsAcrossConnectionsAfterBackendDrive(
             poll_views,
             now_millis,
             poll_space,
@@ -4259,7 +4373,7 @@ pub const EndpointConnectionLifecycle = struct {
         );
         const retained_handshake_spaces_before_drain =
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
-        const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+        const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
             poll_views,
             now_millis,
             out,
@@ -4462,7 +4576,7 @@ pub const EndpointConnectionLifecycle = struct {
             compatibilities,
         );
         const retained_handshake_spaces_before_poll = countRetainedHandshakeSpaces(poll_views);
-        const datagram = try self.pollDatagramAcrossConnections(
+        const datagram = try self.pollDatagramAcrossConnectionsAfterBackendDrive(
             poll_views,
             now_millis,
             poll_space,
@@ -4498,7 +4612,7 @@ pub const EndpointConnectionLifecycle = struct {
         );
         const retained_handshake_spaces_before_poll =
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
-        const datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+        const datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
             poll_views,
             now_millis,
         );
@@ -4567,7 +4681,7 @@ pub const EndpointConnectionLifecycle = struct {
             compatibilities,
         );
         const retained_handshake_spaces_before_drain = countRetainedHandshakeSpaces(poll_views);
-        const drain = self.drainDatagramsAcrossConnections(
+        const drain = self.drainDatagramsAcrossConnectionsAfterBackendDrive(
             poll_views,
             now_millis,
             poll_space,
@@ -4604,7 +4718,7 @@ pub const EndpointConnectionLifecycle = struct {
         );
         const retained_handshake_spaces_before_drain =
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
-        const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+        const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
             poll_views,
             now_millis,
             out,
@@ -4783,7 +4897,7 @@ pub const EndpointConnectionLifecycle = struct {
             compatibilities,
         );
         const retained_handshake_spaces_before_poll = countRetainedHandshakeSpaces(poll_views);
-        const datagram = try self.pollDatagramAcrossConnections(
+        const datagram = try self.pollDatagramAcrossConnectionsAfterBackendDrive(
             poll_views,
             now_millis,
             poll_space,
@@ -4819,7 +4933,7 @@ pub const EndpointConnectionLifecycle = struct {
         );
         const retained_handshake_spaces_before_poll =
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
-        const datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+        const datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
             poll_views,
             now_millis,
         );
@@ -4891,7 +5005,7 @@ pub const EndpointConnectionLifecycle = struct {
             compatibilities,
         );
         const retained_handshake_spaces_before_drain = countRetainedHandshakeSpaces(poll_views);
-        const drain = self.drainDatagramsAcrossConnections(
+        const drain = self.drainDatagramsAcrossConnectionsAfterBackendDrive(
             poll_views,
             now_millis,
             poll_space,
@@ -4928,7 +5042,7 @@ pub const EndpointConnectionLifecycle = struct {
         );
         const retained_handshake_spaces_before_drain =
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
-        const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+        const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
             poll_views,
             now_millis,
             out,
@@ -43735,7 +43849,7 @@ test "EndpointConnectionLifecycle single backend drive polls datagram" {
     try std.testing.expectEqualStrings("single backend poll output", response_crypto[0..response_len]);
 }
 
-test "EndpointConnectionLifecycle reports Handshake discard after installed-key backend poll output" {
+test "EndpointConnectionLifecycle treats discarded installed-key backend Handshake poll output as empty" {
     const ConfirmingBackend = struct {
         secrets: HandshakeTrafficSecrets,
         outbound: []const u8,
@@ -43817,12 +43931,12 @@ test "EndpointConnectionLifecycle reports Handshake discard after installed-key 
     try std.testing.expect(result.backend.progress.handshake_keys_installed);
     try std.testing.expect(result.backend.progress.handshake_space_discarded);
     try std.testing.expectEqual(@as(usize, 1), result.backend.progress.outbound_chunks);
-    try std.testing.expect(result.datagram != null);
+    try std.testing.expectEqual(@as(?EndpointPolledDatagramResult, null), result.datagram);
     try std.testing.expect(server.packetNumberSpaceDiscarded(.handshake));
     try std.testing.expect(!server.hasHandshakeProtectionKeys());
 }
 
-test "EndpointConnectionLifecycle reports Handshake discard after installed-key backend drain output" {
+test "EndpointConnectionLifecycle treats discarded installed-key backend Handshake drain output as empty" {
     const ConfirmingBackend = struct {
         secrets: HandshakeTrafficSecrets,
         outbound: []const u8,
@@ -43908,7 +44022,7 @@ test "EndpointConnectionLifecycle reports Handshake discard after installed-key 
     try std.testing.expect(result.backend.progress.handshake_keys_installed);
     try std.testing.expect(result.backend.progress.handshake_space_discarded);
     try std.testing.expectEqual(@as(usize, 1), result.backend.progress.outbound_chunks);
-    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(usize, 0), result.drain.datagrams_written);
     try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
     try std.testing.expect(server.packetNumberSpaceDiscarded(.handshake));
     try std.testing.expect(!server.hasHandshakeProtectionKeys());
@@ -44300,7 +44414,7 @@ test "EndpointConnectionLifecycle single compatible backend drive polls after pe
     try std.testing.expectEqualStrings("single compatible backend poll output", response_crypto[0..response_len]);
 }
 
-test "EndpointConnectionLifecycle reports Handshake discard after compatible backend poll output" {
+test "EndpointConnectionLifecycle treats discarded compatible backend Handshake poll output as empty" {
     const ConfirmingBackend = struct {
         peer_transport_parameters: []const u8,
         secrets: HandshakeTrafficSecrets,
@@ -44417,12 +44531,12 @@ test "EndpointConnectionLifecycle reports Handshake discard after compatible bac
     try std.testing.expect(result.backend.progress.handshake_keys_installed);
     try std.testing.expect(result.backend.progress.handshake_space_discarded);
     try std.testing.expectEqual(@as(usize, 1), result.backend.progress.outbound_chunks);
-    try std.testing.expect(result.datagram != null);
+    try std.testing.expectEqual(@as(?EndpointPolledDatagramResult, null), result.datagram);
     try std.testing.expect(server.packetNumberSpaceDiscarded(.handshake));
     try std.testing.expect(!server.hasHandshakeProtectionKeys());
 }
 
-test "EndpointConnectionLifecycle reports Handshake discard after compatible backend drain output" {
+test "EndpointConnectionLifecycle treats discarded compatible backend Handshake drain output as empty" {
     const ConfirmingBackend = struct {
         peer_transport_parameters: []const u8,
         secrets: HandshakeTrafficSecrets,
@@ -44543,7 +44657,7 @@ test "EndpointConnectionLifecycle reports Handshake discard after compatible bac
     try std.testing.expect(result.backend.progress.handshake_keys_installed);
     try std.testing.expect(result.backend.progress.handshake_space_discarded);
     try std.testing.expectEqual(@as(usize, 1), result.backend.progress.outbound_chunks);
-    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(usize, 0), result.drain.datagrams_written);
     try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
     try std.testing.expect(server.packetNumberSpaceDiscarded(.handshake));
     try std.testing.expect(!server.hasHandshakeProtectionKeys());
