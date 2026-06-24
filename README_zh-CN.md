@@ -474,7 +474,7 @@ TLS-owned socket event loop 仍待实现。
 - [架构与术语](docs/zh-CN/architecture.md)：关键名词、模块边界、核心协议流程、开发扩展和排障入口。
 - [设计说明](docs/zh-CN/spec.md)：当前架构、协议范围和未支持区域。
 - 包保护：QUIC v1/v2 Initial key、Retry integrity、protected packet helper 和 key-update state。
-- 端点生命周期：DCID routing、route retirement、stateless reset lookup/emission 和 endpoint recovery timer。
+- 端点生命周期：DCID routing、route retirement、stateless reset lookup/emission、active-route reset receive-to-draining handling 和 endpoint recovery timer。
 - 恢复与拥塞：简化 RFC 9002 ACK/loss/PTO/NewReno/ECN 模型，并有确定性测试覆盖。
 - TLS 状态：已有 mock `CryptoBackend` handoff 和很小的 C-ABI `TlsBackend` adapter；
   `run-tls-openssl-probe` 已链接 OpenSSL 并验证 QUIC TLS callback API，

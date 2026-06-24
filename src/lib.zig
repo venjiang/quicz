@@ -1390,6 +1390,19 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    fn processRoutedStatelessResetDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+    ) Error!bool {
+        if (datagram.len == 0 or packet.parseHeaderForm(datagram[0]) != .short) return false;
+        if (connection.processStatelessResetDatagram(now_millis, datagram) == null) return false;
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return true;
+    }
+
     /// Socket-facing installed-key datagram receive entrypoint.
     ///
     /// This combines `feedDatagram()` classification with routed protected
@@ -1417,6 +1430,9 @@ pub const EndpointConnectionLifecycle = struct {
         return switch (action) {
             .routed => |route| routed: {
                 if (route.connection_id != connection_id) return error.InvalidPacket;
+                if (try self.processRoutedStatelessResetDatagram(connection_id, connection, now_millis, datagram)) {
+                    break :routed .dropped;
+                }
                 switch (options.space) {
                     .handshake => try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
                         connection_id,
@@ -1475,6 +1491,9 @@ pub const EndpointConnectionLifecycle = struct {
                 const view = for (connections) |candidate| {
                     if (candidate.connection_id == route.connection_id) break candidate;
                 } else return error.InvalidPacket;
+                if (try self.processRoutedStatelessResetDatagram(view.connection_id, view.connection, now_millis, datagram)) {
+                    break :routed .dropped;
+                }
                 switch (options.space) {
                     .handshake => try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
                         view.connection_id,
@@ -34820,6 +34839,206 @@ test "EndpointConnectionLifecycle dispatches installed-key receive across caller
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(?u64, null), decoy.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle installed-key feed drains routed stateless reset" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const dcid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
+    const reset_token = [_]u8{ 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f };
+    try lifecycle.registerConnectionId(95, &dcid, path, .{ .sequence_number = 0 });
+
+    var frame_buf: [64]u8 = undefined;
+    var frame_out = buffer.fixedWriter(&frame_buf);
+    try frame.encodeFrame(frame_out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &dcid,
+        .stateless_reset_token = reset_token,
+    } });
+    try conn.processDatagram(0, frame_out.getWritten());
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(95, &conn);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    var reset_buf: [packet.min_stateless_reset_datagram_len]u8 = undefined;
+    var reset_out = buffer.fixedWriter(&reset_buf);
+    try packet.encodeStatelessReset(reset_out.writer(), &[_]u8{ 0x40, 0x51, 0x52, 0x53, 0x54 }, reset_token);
+
+    var out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const result = try lifecycle.feedDatagramWithInstalledKeys(
+        95,
+        &conn,
+        path,
+        11,
+        reset_out.getWritten(),
+        .{
+            .space = .application,
+            .out = &out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+    );
+
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, result);
+    try std.testing.expectEqual(ConnectionState.draining, conn.connectionState());
+    try std.testing.expect(conn.closeDeadlineMillis() != null);
+    try std.testing.expect(conn.pending_close == null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle installed-key feed keeps long packets out of stateless reset" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const dcid = [_]u8{ 0x55, 0x56, 0x57, 0x58 };
+    const scid = [_]u8{ 0x65, 0x66, 0x67, 0x68 };
+    const reset_token = [_]u8{ 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f };
+    try lifecycle.registerConnectionId(98, &dcid, path, .{ .sequence_number = 0 });
+
+    var frame_buf: [64]u8 = undefined;
+    var frame_out = buffer.fixedWriter(&frame_buf);
+    try frame.encodeFrame(frame_out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &dcid,
+        .stateless_reset_token = reset_token,
+    } });
+    try conn.processDatagram(0, frame_out.getWritten());
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(98, &conn);
+
+    var long_buf: [96]u8 = undefined;
+    var long_out = buffer.fixedWriter(&long_buf);
+    try packet.encodeLongPacket(long_out.writer(), .{
+        .header = .{
+            .version = .v1,
+            .dcid = &dcid,
+            .scid = &scid,
+            .packet_type = .handshake,
+            .token = &[_]u8{},
+            .packet_number = 0,
+            .payload_length = 0,
+        },
+        .payload = &reset_token,
+    });
+
+    var out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const result: ?EndpointFeedInstalledKeyDatagramResult = lifecycle.feedDatagramWithInstalledKeys(
+        98,
+        &conn,
+        path,
+        11,
+        long_out.getWritten(),
+        .{
+            .space = .handshake,
+            .out = &out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+    ) catch null;
+    if (result) |feed| switch (feed) {
+        .dropped => return error.TestUnexpectedResult,
+        else => {},
+    };
+    try std.testing.expectEqual(ConnectionState.active, conn.connectionState());
+    try std.testing.expect(conn.closeDeadlineMillis() == null);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle across-connections feed drains routed stateless reset" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+
+    var decoy = try Connection.init(std.testing.allocator, .client, .{});
+    defer decoy.deinit();
+    try decoy.confirmHandshake();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const dcid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const decoy_dcid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const reset_token = [_]u8{ 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f };
+    try lifecycle.registerConnectionId(96, &dcid, path, .{ .sequence_number = 0 });
+    try lifecycle.registerConnectionId(97, &decoy_dcid, path, .{ .sequence_number = 1 });
+
+    var frame_buf: [64]u8 = undefined;
+    var frame_out = buffer.fixedWriter(&frame_buf);
+    try frame.encodeFrame(frame_out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &dcid,
+        .stateless_reset_token = reset_token,
+    } });
+    try conn.processDatagram(0, frame_out.getWritten());
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(96, &conn);
+
+    var reset_buf: [packet.min_stateless_reset_datagram_len]u8 = undefined;
+    var reset_out = buffer.fixedWriter(&reset_buf);
+    try packet.encodeStatelessReset(reset_out.writer(), &[_]u8{ 0x40, 0x61, 0x62, 0x63, 0x64 }, reset_token);
+
+    var out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 97, .connection = &decoy },
+        .{ .connection_id = 96, .connection = &conn },
+    };
+    const result = try lifecycle.feedDatagramWithInstalledKeysAcrossConnections(
+        &connections,
+        path,
+        11,
+        reset_out.getWritten(),
+        .{
+            .space = .application,
+            .out = &out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+    );
+
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, result);
+    try std.testing.expectEqual(ConnectionState.draining, conn.connectionState());
+    try std.testing.expectEqual(ConnectionState.active, decoy.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 }
 
 test "EndpointConnectionLifecycle installed-key feed selects next deadline" {

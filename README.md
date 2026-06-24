@@ -607,7 +607,7 @@ experimental.
 - [Architecture and terminology](docs/en/architecture.md): key terms, module boundaries, core protocol flows, extension points, and troubleshooting entry points.
 - [Design notes](docs/en/spec.md): current architecture, protocol scope, and unsupported areas.
 - Packet protection: QUIC v1/v2 Initial keys, Retry integrity, protected packet helpers, and key-update state.
-- Endpoint lifecycle: DCID routing, route retirement, stateless reset lookup/emission, and endpoint recovery timers.
+- Endpoint lifecycle: DCID routing, route retirement, stateless reset lookup/emission, active-route reset receive-to-draining handling, and endpoint recovery timers.
 - Recovery and congestion: simplified RFC 9002 ACK/loss/PTO/NewReno/ECN model with deterministic tests.
 - TLS status: mock `CryptoBackend` handoff and a narrow C-ABI `TlsBackend`
   adapter are present; `run-tls-openssl-probe` links OpenSSL and verifies its
