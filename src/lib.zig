@@ -18022,6 +18022,36 @@ pub const EndpointConnectionLifecycle = struct {
         destination_connection_id: []const u8,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointDatagramDrainResult {
+        return self.processProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions(
+            connection_id,
+            connection,
+            now_millis,
+            dcid_len,
+            datagram,
+            .{
+                .space = .application,
+                .destination_connection_id = destination_connection_id,
+            },
+            out,
+        );
+    }
+
+    /// Process one installed-key 1-RTT datagram, then drain explicit output.
+    ///
+    /// This is the bounded-output counterpart of
+    /// `processProtectedShortDatagramWithInstalledKeysAndPollDatagram()`,
+    /// preserving the caller-selected installed-key packetization options for
+    /// every drained datagram.
+    pub fn processProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointDatagramDrainResult {
         try self.processProtectedShortDatagramWithInstalledKeys(
             connection_id,
             connection,
@@ -18029,15 +18059,14 @@ pub const EndpointConnectionLifecycle = struct {
             dcid_len,
             datagram,
         );
-        const poll_views = [_]EndpointConnectionPollView{.{
+        const poll_views = [_]EndpointConnectionInstalledKeyPollView{.{
             .connection_id = connection_id,
             .connection = connection,
-            .destination_connection_id = destination_connection_id,
+            .poll_options = poll_options,
         }};
-        return self.drainDatagramsAcrossConnections(
+        return self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
             &poll_views,
             now_millis,
-            .application,
             out,
         );
     }
@@ -18057,6 +18086,34 @@ pub const EndpointConnectionLifecycle = struct {
         destination_connection_id: []const u8,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointDatagramDrainResult {
+        return self.processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+            connection_id,
+            connection,
+            now_millis,
+            dcid_len,
+            datagram,
+            .{
+                .space = .application,
+                .destination_connection_id = destination_connection_id,
+            },
+            out,
+        );
+    }
+
+    /// Process one installed-key 1-RTT datagram through close propagation, then drain explicit output.
+    ///
+    /// Authenticated frame-payload errors queue CONNECTION_CLOSE and return
+    /// before any caller-selected installed-key output is drained.
+    pub fn processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointDatagramDrainResult {
         try self.processProtectedShortDatagramWithInstalledKeysOrClose(
             connection_id,
             connection,
@@ -18064,15 +18121,14 @@ pub const EndpointConnectionLifecycle = struct {
             dcid_len,
             datagram,
         );
-        const poll_views = [_]EndpointConnectionPollView{.{
+        const poll_views = [_]EndpointConnectionInstalledKeyPollView{.{
             .connection_id = connection_id,
             .connection = connection,
-            .destination_connection_id = destination_connection_id,
+            .poll_options = poll_options,
         }};
-        return self.drainDatagramsAcrossConnections(
+        return self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
             &poll_views,
             now_millis,
-            .application,
             out,
         );
     }
@@ -18095,17 +18151,46 @@ pub const EndpointConnectionLifecycle = struct {
         destination_connection_id: []const u8,
         out: []EndpointPolledDatagramResult,
     ) EndpointProtectedDatagramError!EndpointRoutedDatagramDrainResult {
+        return self.processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            datagram,
+            .{
+                .space = .application,
+                .destination_connection_id = destination_connection_id,
+            },
+            out,
+        );
+    }
+
+    /// Route/process one installed-key 1-RTT datagram and drain explicit output.
+    ///
+    /// Route selection and packet processing match
+    /// `processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagrams()`,
+    /// while output packetization uses the full caller-provided options.
+    pub fn processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramDrainResult {
         const route = try self.routeDatagram(path, datagram);
         if (route.connection_id != connection_id) return error.InvalidPacket;
         return .{
             .route = route,
-            .drain = try self.processProtectedShortDatagramWithInstalledKeysAndDrainDatagrams(
+            .drain = try self.processProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions(
                 connection_id,
                 connection,
                 now_millis,
                 route.destination_connection_id.asSlice().len,
                 datagram,
-                destination_connection_id,
+                poll_options,
                 out,
             ),
         };
@@ -18126,17 +18211,45 @@ pub const EndpointConnectionLifecycle = struct {
         destination_connection_id: []const u8,
         out: []EndpointPolledDatagramResult,
     ) EndpointProtectedDatagramError!EndpointRoutedDatagramDrainResult {
+        return self.processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            datagram,
+            .{
+                .space = .application,
+                .destination_connection_id = destination_connection_id,
+            },
+            out,
+        );
+    }
+
+    /// Route/process one installed-key 1-RTT datagram through close propagation and drain explicit output.
+    ///
+    /// Route errors and connection-id mismatches fail before packet processing;
+    /// authenticated frame errors stop before any installed-key output drain.
+    pub fn processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointRoutedDatagramDrainResult {
         const route = try self.routeDatagram(path, datagram);
         if (route.connection_id != connection_id) return error.InvalidPacket;
         return .{
             .route = route,
-            .drain = try self.processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams(
+            .drain = try self.processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions(
                 connection_id,
                 connection,
                 now_millis,
                 route.destination_connection_id.asSlice().len,
                 datagram,
-                destination_connection_id,
+                poll_options,
                 out,
             ),
         };
@@ -63480,14 +63593,18 @@ test "EndpointConnectionLifecycle installed-key short receive drains ACK output"
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(ping);
 
+    const poll_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .application,
+        .destination_connection_id = &client_dcid,
+    };
     var out: [2]EndpointPolledDatagramResult = undefined;
-    const drain = try server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDrainDatagrams(
+    const drain = try server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions(
         63,
         &server,
         11,
         server_dcid.len,
         ping,
-        &client_dcid,
+        poll_options,
         &out,
     );
     defer for (out[0..drain.datagrams_written]) |entry| {
@@ -63538,13 +63655,16 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive stops befo
     defer std.testing.allocator.free(invalid_short);
 
     var out: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(error.InvalidPacket, lifecycle.processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams(
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions(
         64,
         &server,
         11,
         server_dcid.len,
         invalid_short,
-        &client_dcid,
+        .{
+            .space = .application,
+            .destination_connection_id = &client_dcid,
+        },
         &out,
     ));
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
@@ -63883,25 +64003,29 @@ test "EndpointConnectionLifecycle routes installed-key short receive and drains 
     defer std.testing.allocator.free(ping);
 
     var mismatch_out: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagrams(
+    const poll_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .application,
+        .destination_connection_id = &client_dcid,
+    };
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions(
         client_connection_id,
         &server,
         server_receive_path,
         11,
         ping,
-        &client_dcid,
+        poll_options,
         &mismatch_out,
     ));
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
 
     var out: [2]EndpointPolledDatagramResult = undefined;
-    const result = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagrams(
+    const result = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions(
         server_connection_id,
         &server,
         server_receive_path,
         11,
         ping,
-        &client_dcid,
+        poll_options,
         &out,
     );
     try std.testing.expectEqual(server_connection_id, result.route.connection_id);
@@ -63964,13 +64088,16 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive stops befo
     defer std.testing.allocator.free(invalid_short);
 
     var out: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams(
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions(
         server_connection_id,
         &server,
         server_receive_path,
         11,
         invalid_short,
-        &client_dcid,
+        .{
+            .space = .application,
+            .destination_connection_id = &client_dcid,
+        },
         &out,
     ));
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());

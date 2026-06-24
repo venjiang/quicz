@@ -466,11 +466,15 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processProtectedShortDatagramWithInstalledKeysAndPollDatagram`,
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram`,
 `processProtectedShortDatagramWithInstalledKeysAndDrainDatagrams`,
+`processProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions`,
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams`,
+`processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline`,
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`,
 `processRoutedProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline`,
 `processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`,
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions`,
+`processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`,
@@ -922,6 +926,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   without requiring endpoint routing, and close-propagating authenticated
   Application frame errors queue close before ordinary output polling or
   draining.
+- 2026-06-24: Added
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions()`
+  and
+  `processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions()`.
+  These single-connection bounded-drain forms preserve the same explicit
+  installed-key output options already used by the poll form while retaining
+  the older Application-only drain entrypoints as compatibility wrappers.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndPollDatagram()`
   and its `OrClose` variant as routed installed-key 1-RTT
@@ -1023,6 +1034,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   generation, successful routed installed-key PING receive drains the ACK into
   caller-owned output slots, and authenticated frame errors queue close while
   stopping before output drain.
+- 2026-06-24: Added
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions()`
+  and
+  `processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions()`
+  as routed bounded-drain forms that preserve caller-selected installed-key
+  output options after route selection.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams()`
   and its `OrClose` variant as routed installed-key Handshake

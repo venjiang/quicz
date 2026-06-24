@@ -263,11 +263,15 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processProtectedShortDatagramWithInstalledKeysAndPollDatagram`、
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram`、
 `processProtectedShortDatagramWithInstalledKeysAndDrainDatagrams`、
+`processProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions`、
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams`、
+`processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `processProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline`、
 `processProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`、
 `processRoutedProtectedShortDatagramWithInstalledKeysAndSelectNextDeadline`、
 `processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndSelectNextDeadline`、
+`processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions`、
+`processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline`、
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`、
@@ -853,6 +857,12 @@ close 和 route cleanup 事件。
   receive 不需要 endpoint routing 也能 poll 和 drain Application-space ACK output，
   close-propagating 的认证后 Application frame 错误会在普通 output polling 或
   draining 前排队 close。
+- 2026-06-24：新增
+  `EndpointConnectionLifecycle.processProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions()`
+  和
+  `processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions()`。
+  这两个 single-connection bounded-drain 入口保留和 poll 入口一致的显式 installed-key
+  output options；旧的 Application-only drain 入口继续作为兼容 wrapper。
 - 2026-06-18：新增
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndPollDatagram()`
   及其 `OrClose` 变体，作为 routed installed-key 1-RTT
@@ -945,6 +955,12 @@ close 和 route cleanup 事件。
   processing 前，connection-id mismatch 会在 ACK generation 前停止，成功 routed
   installed-key PING receive 会把 ACK drain 到 caller-owned output slots，认证后的
   frame 错误会排队 close 并在 output drain 前停止。
+- 2026-06-24：新增
+  `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions()`
+  和
+  `processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions()`。
+  这两个 routed bounded-drain 入口会在 route selection 后保留调用方选择的 installed-key
+  output options。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams()`
   及其 `OrClose` 变体，作为 routed installed-key Handshake
