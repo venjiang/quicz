@@ -189,8 +189,12 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagramWithInstalledKeyOptions`,
+`feedDatagramWithInstalledKeysAndPollDatagramWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions`,
+`feedDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions`,
 `processAcceptedProtectedInitialWithCryptoBackendAndSelectNextDeadline`,
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndSelectNextDeadline`,
 `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`,
@@ -1944,6 +1948,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   protected 1-RTT datagram can be processed, ACK output can be emitted through
   caller-selected poll and bounded-drain options, and decoy connections remain
   untouched.
+- 2026-06-24: Added
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagramWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions()`
+  as the single-connection forms of the direct receive-to-output explicit
+  output steps. Unit coverage proves simple socket loops can feed one routed
+  protected 1-RTT datagram and still poll or drain through caller-selected
+  installed-key output views while preserving the existing cross-connection
+  route and output behavior.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`
   and

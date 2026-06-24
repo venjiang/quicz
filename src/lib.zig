@@ -4055,6 +4055,34 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Feed one installed-key datagram, then poll explicit output.
+    ///
+    /// This is the single-connection form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn feedDatagramWithInstalledKeysAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramPollResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagramWithInstalledKeyOptions(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            poll_views,
+        );
+    }
+
     /// Feed an installed-key datagram, then drain installed-key output.
     ///
     /// This is the socket-facing receive-to-bounded-drain step for paths that
@@ -4164,6 +4192,36 @@ pub const EndpointConnectionLifecycle = struct {
             feed_options,
             &poll_views,
             poll_options.space,
+            out,
+        );
+    }
+
+    /// Feed one installed-key datagram, then drain explicit output.
+    ///
+    /// This is the bounded-output form of
+    /// `feedDatagramWithInstalledKeysAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn feedDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramDrainResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            poll_views,
             out,
         );
     }
@@ -41571,6 +41629,78 @@ test "EndpointConnectionLifecycle feeds installed-key datagrams with explicit ou
         15,
         client_dcid.len,
         drain_out[0].datagram,
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+
+    try client.sendPing();
+    const third_ping = (try client_lifecycle.pollDatagram(176, &client, 16, .{
+        .space = .application,
+        .destination_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(third_ping);
+
+    const third = try server_lifecycle.feedDatagramWithInstalledKeysAndPollDatagramWithInstalledKeyOptions(
+        177,
+        &server,
+        server_path,
+        17,
+        third_ping,
+        feed_options,
+        &poll_views,
+    );
+    switch (third.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 177), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    const third_ack = third.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(third_ack.datagram);
+    try std.testing.expectEqual(@as(u64, 177), third_ack.connection_id);
+
+    try client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
+        176,
+        &client,
+        18,
+        client_dcid.len,
+        third_ack.datagram,
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
+
+    try client.sendPing();
+    const fourth_ping = (try client_lifecycle.pollDatagram(176, &client, 19, .{
+        .space = .application,
+        .destination_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(fourth_ping);
+
+    var single_drain_out: [1]EndpointPolledDatagramResult = undefined;
+    const fourth = try server_lifecycle.feedDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions(
+        177,
+        &server,
+        server_path,
+        20,
+        fourth_ping,
+        feed_options,
+        &poll_views,
+        &single_drain_out,
+    );
+    switch (fourth.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 177), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    const fourth_drain = fourth.drain orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), fourth_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), fourth_drain.first_error);
+    try std.testing.expectEqual(@as(u64, 177), single_drain_out[0].connection_id);
+    defer std.testing.allocator.free(single_drain_out[0].datagram);
+
+    try client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
+        176,
+        &client,
+        21,
+        client_dcid.len,
+        single_drain_out[0].datagram,
     );
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));

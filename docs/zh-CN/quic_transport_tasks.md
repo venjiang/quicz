@@ -294,8 +294,12 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagramWithInstalledKeyOptions`、
+`feedDatagramWithInstalledKeysAndPollDatagramWithInstalledKeyOptions`、
 `feedDatagramWithInstalledKeysAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndDrainDatagrams`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions`、
+`feedDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions`、
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions`、
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
@@ -1719,6 +1723,13 @@ close 和 route cleanup 事件。
   routed receive-to-output socket-loop step。单元测试证明 routed protected
   1-RTT datagram 可以被处理，并通过调用方选择的 poll 和 bounded-drain options
   发出 ACK output，同时 decoy connection 不被影响。
+- 2026-06-24：新增
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndPollDatagramWithInstalledKeyOptions()` 和
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDrainDatagramsWithInstalledKeyOptions()`，
+  作为直接 receive-to-output explicit output step 的单连接形态。单元测试证明简单
+  socket loop 可以 feed 一条 routed protected 1-RTT datagram，并继续通过调用方选择的
+  installed-key output view poll 或 drain 输出，同时保持既有 cross-connection route 和
+  output 行为。
 - 2026-06-18：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()` 和
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions()`。
