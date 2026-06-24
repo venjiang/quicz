@@ -118,6 +118,7 @@ pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = endpoint_types.En
 pub const EndpointFeedPendingWorkNextDeadlineResult = endpoint_types.EndpointFeedPendingWorkNextDeadlineResult;
 pub const EndpointFeedPendingWorkDatagramDrainResult = endpoint_types.EndpointFeedPendingWorkDatagramDrainResult;
 pub const EndpointFeedPendingWorkCryptoBackendNextDeadlineResult = endpoint_types.EndpointFeedPendingWorkCryptoBackendNextDeadlineResult;
+pub const EndpointFeedPendingWorkCryptoBackendDatagramResult = endpoint_types.EndpointFeedPendingWorkCryptoBackendDatagramResult;
 pub const EndpointFeedInstalledKeyDatagramPollResult = endpoint_types.EndpointFeedInstalledKeyDatagramPollResult;
 pub const EndpointFeedInstalledKeyDatagramDrainResult = endpoint_types.EndpointFeedInstalledKeyDatagramDrainResult;
 pub const EndpointFeedCryptoBackendDriveNextDeadlineResult = endpoint_types.EndpointFeedCryptoBackendDriveNextDeadlineResult;
@@ -1687,6 +1688,100 @@ pub const EndpointConnectionLifecycle = struct {
             feed_options,
             backend_space,
             &drive_views,
+        );
+    }
+
+    /// Feed an installed-key datagram, process pending work, drive backends, then poll output.
+    ///
+    /// This is the receive/backend/output socket-loop step that also preserves
+    /// endpoint-owned idle, close, and recovery ordering between packet receive
+    /// and backend progress.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            receive_connections,
+            now_millis,
+        );
+        var backend: ?EndpointCryptoBackendDriveDatagramResult = null;
+        if (pending_work.idle_retired_count == 0 and pending_work.close_retired_count == 0) {
+            switch (feed) {
+                .routed => backend = try self.driveCryptoBackendsInSpaceAndPollDatagram(
+                    backend_space,
+                    drive_views,
+                    poll_views,
+                    now_millis,
+                    poll_space,
+                ),
+                else => {},
+            }
+        }
+        return .{
+            .feed = feed,
+            .pending_work = pending_work,
+            .backend = backend,
+        };
+    }
+
+    /// Feed one installed-key datagram, process pending work, drive one backend, then poll output.
+    ///
+    /// This is the single-connection form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagram()`.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagram(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            &poll_views,
+            poll_options.space,
         );
     }
 
@@ -35894,6 +35989,192 @@ test "EndpointConnectionLifecycle feed pending-work backend deadline step queues
     const single_next = single.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 186), single_next.connection_id);
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, single_next.kind);
+}
+
+test "EndpointConnectionLifecycle feed pending-work backend poll step returns output" {
+    const Backend = struct {
+        outbound: []const u8,
+        outbound_sent: bool = false,
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.outbound_sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.outbound_sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x14, 0x24, 0x34, 0x44 };
+    const server_dcid = [_]u8{ 0xa4, 0xb4, 0xc4, 0xd4 };
+    const decoy_dcid = [_]u8{ 0xa5, 0xb5, 0xc5, 0xd5 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var decoy = try Connection.init(std.testing.allocator, .server, .{});
+    defer decoy.deinit();
+    try decoy.validatePeerAddress();
+    try decoy.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(188, &server_dcid, server_path, .{ .sequence_number = 0 });
+    try server_lifecycle.registerConnectionId(189, &decoy_dcid, server_path, .{ .sequence_number = 1 });
+
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const feed_options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .handshake,
+        .out = &feed_out,
+        .unpredictable_prefix = &reset_prefix,
+        .supported_versions = &versions,
+    };
+
+    try client.sendCryptoInSpace(.handshake, "client feed backend poll");
+    const first_datagram = (try client_lifecycle.pollDatagram(190, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first_datagram);
+
+    var backend = Backend{ .outbound = "server feed poll response" };
+    var scratch: [128]u8 = undefined;
+    const receive_connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 189, .connection = &decoy },
+        .{ .connection_id = 188, .connection = &server },
+    };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 188,
+        .connection = &server,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 188,
+        .connection = &server,
+        .destination_connection_id = &client_dcid,
+        .source_connection_id = &server_dcid,
+    }};
+    const first = try server_lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagram(
+        &receive_connections,
+        server_path,
+        11,
+        first_datagram,
+        feed_options,
+        .handshake,
+        &drive_views,
+        &poll_views,
+        .handshake,
+    );
+    switch (first.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 188), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), first.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), first.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), first.pending_work.recovery_serviced_count);
+    const backend_result = first.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "client feed backend poll".len), backend_result.backend.progress.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "server feed poll response".len), backend_result.backend.progress.outbound_bytes);
+    try std.testing.expectEqualStrings("client feed backend poll", backend.received[0..backend.received_len]);
+    const response = backend_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response.datagram);
+    try std.testing.expectEqual(@as(u64, 188), response.connection_id);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, response.datagram);
+    var response_crypto: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server feed poll response", response_crypto[0..response_len]);
+
+    try client.sendCryptoInSpace(.handshake, "client single feed poll");
+    const second_datagram = (try client_lifecycle.pollDatagram(190, &client, 13, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_datagram);
+
+    var single_backend = Backend{ .outbound = "server single poll response" };
+    var single_scratch: [128]u8 = undefined;
+    const single = try server_lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram(
+        188,
+        &server,
+        server_path,
+        14,
+        second_datagram,
+        feed_options,
+        .handshake,
+        single_backend.backend(),
+        &single_scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+    );
+    switch (single.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 188), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), single.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), single.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), single.pending_work.recovery_serviced_count);
+    const single_backend_result = single.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), single_backend_result.backend.connections_driven);
+    try std.testing.expectEqualStrings("client single feed poll", single_backend.received[0..single_backend.received_len]);
+    const single_response = single_backend_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(single_response.datagram);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(15, single_response.datagram);
+    const single_response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server single poll response", response_crypto[0..single_response_len]);
 }
 
 test "EndpointConnectionLifecycle feeds installed-key datagram then polls ACK output" {

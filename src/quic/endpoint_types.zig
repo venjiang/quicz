@@ -543,6 +543,16 @@ pub const EndpointFeedPendingWorkCryptoBackendNextDeadlineResult = struct {
     next_deadline: ?EndpointConnectionDeadline = null,
 };
 
+/// Result from feeding one installed-key datagram, processing pending work, driving backend, then polling output.
+pub const EndpointFeedPendingWorkCryptoBackendDatagramResult = struct {
+    /// Receive classification and processing result.
+    feed: EndpointFeedInstalledKeyDatagramResult,
+    /// Pending-work actions applied after receive processing.
+    pending_work: EndpointPendingWorkSweepResult,
+    /// Backend drive and output result when `feed` routed and pending work kept connections live.
+    backend: ?EndpointCryptoBackendDriveDatagramResult = null,
+};
+
 /// Result from feeding one installed-key datagram, then polling output.
 pub const EndpointFeedInstalledKeyDatagramPollResult = struct {
     /// Receive classification and processing result.
