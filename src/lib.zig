@@ -116,6 +116,7 @@ pub const EndpointDueWorkCryptoBackendDatagramDrainResult = endpoint_types.Endpo
 pub const EndpointFeedInstalledKeyDatagramResult = endpoint_types.EndpointFeedInstalledKeyDatagramResult;
 pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = endpoint_types.EndpointFeedInstalledKeyDatagramNextDeadlineResult;
 pub const EndpointFeedPendingWorkNextDeadlineResult = endpoint_types.EndpointFeedPendingWorkNextDeadlineResult;
+pub const EndpointFeedPendingWorkDatagramPollResult = endpoint_types.EndpointFeedPendingWorkDatagramPollResult;
 pub const EndpointFeedPendingWorkDatagramDrainResult = endpoint_types.EndpointFeedPendingWorkDatagramDrainResult;
 pub const EndpointFeedPendingWorkCryptoBackendNextDeadlineResult = endpoint_types.EndpointFeedPendingWorkCryptoBackendNextDeadlineResult;
 pub const EndpointFeedPendingWorkCryptoBackendDatagramResult = endpoint_types.EndpointFeedPendingWorkCryptoBackendDatagramResult;
@@ -3112,6 +3113,132 @@ pub const EndpointConnectionLifecycle = struct {
             .feed = feed,
             .pending_work = pending_work,
             .backend = backend,
+        };
+    }
+
+    /// Feed an installed-key datagram, process pending work, then poll output.
+    ///
+    /// Unlike `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram()`,
+    /// this socket-loop step runs pending work and output polling even when the
+    /// received datagram is not routed to a live connection. That lets callers
+    /// keep timeout cleanup and queued output progress tied to a single receive
+    /// iteration.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkDatagramPollResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            receive_connections,
+            now_millis,
+        );
+        return .{
+            .feed = feed,
+            .pending_work = pending_work,
+            .datagram = try self.pollDatagramAcrossConnections(
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Feed an installed-key datagram, process pending work, then poll explicit output.
+    ///
+    /// This is the per-connection-output-options form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram()`.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkDatagramPollResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            receive_connections,
+            now_millis,
+        );
+        return .{
+            .feed = feed,
+            .pending_work = pending_work,
+            .datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptions(
+                poll_views,
+                now_millis,
+            ),
+        };
+    }
+
+    /// Feed one installed-key datagram, process pending work, then poll output.
+    ///
+    /// This is the single-connection form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram()`.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkDatagramPollResult {
+        const feed = try self.feedDatagramWithInstalledKeys(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        const pending_work = try self.processPendingWork(
+            connection_id,
+            connection,
+            now_millis,
+        );
+        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
+        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
+            return .{
+                .feed = feed,
+                .pending_work = pending_sweep,
+                .datagram = null,
+            };
+        }
+
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return .{
+            .feed = feed,
+            .pending_work = pending_sweep,
+            .datagram = try self.pollDatagramAcrossConnections(
+                &poll_views,
+                now_millis,
+                poll_options.space,
+            ),
         };
     }
 
@@ -36734,6 +36861,192 @@ test "EndpointConnectionLifecycle feed pending-work drain step emits queued outp
     try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
     try std.testing.expectEqual(@as(u64, 101), drain_out[0].connection_id);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle feed pending-work poll step emits queued output after dropped input" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const local_dcid = [_]u8{ 0x59, 0x6a, 0x5b, 0x6c };
+    const peer_dcid = [_]u8{ 0xa9, 0xba, 0xab, 0xbc };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+    try conn.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try lifecycle.registerConnectionId(104, &local_dcid, path, .{ .sequence_number = 0 });
+    try conn.sendPing();
+
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const dropped_datagram = [_]u8{ 0x40, 0x75, 0x76, 0x77, 0x78 };
+    const result = try lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram(
+        104,
+        &conn,
+        path,
+        11,
+        &dropped_datagram,
+        .{
+            .space = .application,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        .{
+            .space = .application,
+            .destination_connection_id = &peer_dcid,
+        },
+    );
+
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, result.feed);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    const polled = result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 104), polled.connection_id);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle feed pending-work poll step retires due close before poll" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const local_dcid = [_]u8{ 0x5d, 0x6e, 0x5f, 0x70 };
+    const peer_dcid = [_]u8{ 0xad, 0xbe, 0xaf, 0xc0 };
+    try lifecycle.registerConnectionId(105, &local_dcid, path, .{ .sequence_number = 0 });
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(105, &conn);
+    try conn.closeConnection(0, @intFromEnum(frame.FrameType.ping), "done");
+    var close_buf: [64]u8 = undefined;
+    _ = (try conn.pollTx(11, &close_buf)) orelse return error.TestUnexpectedResult;
+    const close_deadline = conn.closeDeadlineMillis() orelse return error.TestUnexpectedResult;
+
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const dropped_datagram = [_]u8{ 0x40, 0x85, 0x86, 0x87, 0x88 };
+    const result = try lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram(
+        105,
+        &conn,
+        path,
+        close_deadline,
+        &dropped_datagram,
+        .{
+            .space = .application,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        .{
+            .space = .application,
+            .destination_connection_id = &peer_dcid,
+        },
+    );
+
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, result.feed);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expect(result.datagram == null);
+    try std.testing.expectEqual(ConnectionState.closed, conn.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle feed pending-work explicit poll step keeps zero RTT output options" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x61, 0x72, 0x63, 0x74 };
+    const server_dcid = [_]u8{ 0xb1, 0xc2, 0xb3, 0xc4 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try client.confirmHandshake();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "bye", false);
+    try client.resetStream(stream_id, 82);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 82,
+        .final_size = 3,
+    };
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const receive_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 106,
+        .connection = &client,
+    }};
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{.{
+        .connection_id = 106,
+        .connection = &client,
+        .poll_options = .{
+            .space = .zero_rtt,
+            .destination_connection_id = &server_dcid,
+            .source_connection_id = &client_dcid,
+        },
+    }};
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const dropped_datagram = [_]u8{ 0x40, 0x95, 0x96, 0x97, 0x98 };
+    const result = try lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions(
+        &receive_connections,
+        path,
+        11,
+        &dropped_datagram,
+        .{
+            .space = .application,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        &poll_views,
+    );
+
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, result.feed);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    const polled = result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 106), polled.connection_id);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        polled.datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
 }
 
 test "EndpointConnectionLifecycle feed pending-work drain step retires due close before drain" {

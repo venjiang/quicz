@@ -171,6 +171,9 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions`,
@@ -1510,6 +1513,16 @@ QUIC unless the gap is named and the verification evidence is added here.
   so caller-owned socket loops can preserve per-connection installed-key output
   choices after receive processing and pending work. Unit coverage proves a
   dropped input can still drain caller-selected 0-RTT output.
+- 2026-06-24: Added
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram()`,
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions()`,
+  and `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram()`
+  as receive-to-pending-work-to-output socket-loop steps. Unit coverage proves
+  dropped input can still poll queued installed-key output after pending work,
+  the single-connection form retires due closing state before output polling,
+  and explicit installed-key options preserve caller-selected 0-RTT output.
+  The result contract lives in `src/quic/endpoint_types.zig` and is re-exported
+  from `src/lib.zig`.
 - 2026-06-24: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline()`,
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`,

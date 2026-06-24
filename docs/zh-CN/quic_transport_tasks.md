@@ -141,6 +141,9 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions`、
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions`、
@@ -1339,6 +1342,14 @@ close 和 route cleanup 事件。
   让调用方持有 connection map 的 socket loop 可以在 receive processing 和 pending work
   后继续保留每条连接自己的 installed-key output 选择。单元测试证明 dropped input 后仍能
   drain 调用方选择的 0-RTT output。
+- 2026-06-24：新增
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram()`、
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions()`
+  和 `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram()`，
+  作为 receive-to-pending-work-to-output socket-loop step。单元测试证明 dropped input
+  在 pending work 后仍能 poll 已排队的 installed-key output，单连接入口会在 due closing
+  state retire 后停止 output polling，显式 installed-key options 会保留调用方选择的 0-RTT
+  output。结果契约放在 `src/quic/endpoint_types.zig`，并从 `src/lib.zig` re-export。
 - 2026-06-24：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline()`、
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`、
