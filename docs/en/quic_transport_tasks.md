@@ -137,6 +137,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnections`,
 `feedDatagramWithInstalledKeysAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDrainDatagrams`,
@@ -1454,6 +1456,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   routed installed-key 1-RTT receive refreshes the selected connection's idle
   deadline, leaves an unrelated caller-owned connection untouched, and returns
   the next deadline without polling output.
+- 2026-06-24: Added
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndSelectNextDeadline()`
+  and `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadline()`
+  as receive-to-pending-work-to-next-deadline socket-loop steps. Unit coverage
+  proves active-route stateless reset receive reports the close timeout as the
+  next wakeup, and a receive step can also retire due closing endpoint state
+  before selecting the next deadline.
 - 2026-06-10: Added
   `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` and
   `EndpointPolledDatagramResult` for caller-owned connection maps. Socket loops

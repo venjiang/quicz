@@ -156,7 +156,10 @@ pub fn main() !void {
 packet helper、endpoint routing、recovery timer 和 mock TLS handoff 已可用于确定性协议测试；
 完整 TLS-owned UDP packetization 仍待实现。`EndpointConnectionLifecycle` 现在提供核心
 socket-loop 和 TLS-backend loop 入口 `feedDatagram`、`feedDatagramWithInstalledKeys`、
-`feedDatagramWithInstalledKeysAcrossConnections`、`processPendingWork`、
+`feedDatagramWithInstalledKeysAcrossConnections`、
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadline`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndSelectNextDeadline`、
+`processPendingWork`、
 `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`、
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`、
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`、

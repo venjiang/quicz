@@ -119,6 +119,8 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `feedDatagramWithInstalledKeys`、`feedDatagramWithInstalledKeysAcrossConnections`、
 `feedDatagramWithInstalledKeysAndSelectNextDeadline`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndSelectNextDeadline`、
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadline`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndSelectNextDeadline`、
 `processAcceptedProtectedInitialWithCryptoBackendAndSelectNextDeadline`、
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndSelectNextDeadline`、
 `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`、
@@ -1285,6 +1287,12 @@ close 和 route cleanup 事件。
   作为 no-output receive-to-next-deadline socket-loop step。单元测试证明 routed installed-key
   1-RTT receive 会刷新被选中 connection 的 idle deadline，不触碰无关 caller-owned
   connection，并在不 poll output 的情况下返回下一条 deadline。
+- 2026-06-24：新增
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndSelectNextDeadline()`
+  和 `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadline()`，
+  作为 receive-to-pending-work-to-next-deadline socket-loop step。单元测试证明
+  active-route stateless reset receive 会把 close timeout 作为下一次 wakeup 返回，
+  收包步骤也可以在选择下一条 deadline 前退休到期的 closing endpoint state。
 - 2026-06-10：新增
   `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` 和
   `EndpointPolledDatagramResult`，服务于调用方持有 connection map 的输出轮询。socket

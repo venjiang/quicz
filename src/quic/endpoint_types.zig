@@ -491,6 +491,16 @@ pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = struct {
     next_deadline: ?EndpointConnectionDeadline = null,
 };
 
+/// Result from feeding one installed-key datagram, processing pending work, then selecting a wakeup.
+pub const EndpointFeedPendingWorkNextDeadlineResult = struct {
+    /// Receive classification and processing result.
+    feed: EndpointFeedInstalledKeyDatagramResult,
+    /// Pending-work actions applied after receive processing.
+    pending_work: EndpointPendingWorkSweepResult,
+    /// Next endpoint-visible deadline after receive and pending work.
+    next_deadline: ?EndpointConnectionDeadline = null,
+};
+
 /// Result from feeding one installed-key datagram, then polling output.
 pub const EndpointFeedInstalledKeyDatagramPollResult = struct {
     /// Receive classification and processing result.

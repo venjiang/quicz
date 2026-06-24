@@ -174,7 +174,10 @@ mock TLS handoff are available for deterministic protocol tests; full TLS-owned
 UDP packetization is still pending.
 `EndpointConnectionLifecycle` now exposes the core socket-loop and TLS-backend
 loop entrypoints `feedDatagram`, `feedDatagramWithInstalledKeys`,
-`feedDatagramWithInstalledKeysAcrossConnections`, `processPendingWork`,
+`feedDatagramWithInstalledKeysAcrossConnections`,
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndSelectNextDeadline`,
+`processPendingWork`,
 `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`,
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndPollDatagram`,
