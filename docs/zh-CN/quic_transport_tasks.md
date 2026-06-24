@@ -144,9 +144,11 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions`、
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions`、
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions`、
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions`、
 `processAcceptedProtectedInitialWithCryptoBackendAndSelectNextDeadline`、
 `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndSelectNextDeadline`、
 `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram`、
@@ -1416,17 +1418,23 @@ close 和 route cleanup 事件。
   output drain 前先退休到期的 closing state。
 - 2026-06-24：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions()`，
-  让调用方持有 connection map 的 socket loop 可以在 receive processing 和 pending work
-  后继续保留每条连接自己的 installed-key output 选择。单元测试证明 dropped input 后仍能
-  drain 调用方选择的 0-RTT output。
+  以及
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions()`，
+  让调用方持有 connection map 的 socket loop 和简单单连接 socket loop 都可以在
+  receive processing 和 pending work 后继续保留显式 installed-key output 选择。单元测试证明
+  dropped input 后仍能 drain 调用方选择的 0-RTT output，且 single-connection
+  explicit 形态在 due close cleanup 退休连接后仍会停止在 output 前。
 - 2026-06-24：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram()`、
-  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions()`
-  和 `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram()`，
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram()`，
+  以及
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions()`，
   作为 receive-to-pending-work-to-output socket-loop step。单元测试证明 dropped input
   在 pending work 后仍能 poll 已排队的 installed-key output，单连接入口会在 due closing
   state retire 后停止 output polling，显式 installed-key options 会保留调用方选择的 0-RTT
-  output。结果契约放在 `src/quic/endpoint_types.zig`，并从 `src/lib.zig` re-export。
+  output，并覆盖 cross-connection 和 single-connection 两种形态。结果契约放在
+  `src/quic/endpoint_types.zig`，并从 `src/lib.zig` re-export。
 - 2026-06-24：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline()`、
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`、

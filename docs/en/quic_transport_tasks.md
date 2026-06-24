@@ -174,9 +174,11 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions`,
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions`,
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDrainDatagrams`,
@@ -1592,17 +1594,24 @@ QUIC unless the gap is named and the verification evidence is added here.
   any output drain.
 - 2026-06-24: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions()`
-  so caller-owned socket loops can preserve per-connection installed-key output
-  choices after receive processing and pending work. Unit coverage proves a
-  dropped input can still drain caller-selected 0-RTT output.
+  and
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions()`
+  so caller-owned socket loops and simple single-connection loops can preserve
+  explicit installed-key output choices after receive processing and pending
+  work. Unit coverage proves dropped input can still drain caller-selected
+  0-RTT output, while the single-connection explicit form still stops before
+  output when due close cleanup retires the connection.
 - 2026-06-24: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram()`,
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions()`,
-  and `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram()`
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagram()`,
+  and
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions()`
   as receive-to-pending-work-to-output socket-loop steps. Unit coverage proves
   dropped input can still poll queued installed-key output after pending work,
   the single-connection form retires due closing state before output polling,
-  and explicit installed-key options preserve caller-selected 0-RTT output.
+  and explicit installed-key options preserve caller-selected 0-RTT output in
+  both cross-connection and single-connection forms.
   The result contract lives in `src/quic/endpoint_types.zig` and is re-exported
   from `src/lib.zig`.
 - 2026-06-24: Added
