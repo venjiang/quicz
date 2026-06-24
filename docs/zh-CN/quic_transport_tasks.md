@@ -479,6 +479,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-06-24：caller-keyed long-header backend-drive poll/drain helper 现在会
+  在 backend 确认握手并已丢弃待 poll/drain 的 Handshake packet number space
+  时返回 no-output 结果。这样 socket loop 不会把 TLS backend 合法确认并清理
+  Handshake 状态后的输出轮询误报为 packet-processing 错误。
+
 - 2026-06-18：新增 recovery 和连接层 congestion-window 剩余发送预算查询。
   `recovery.Recovery.availableCongestionWindow()` 返回单个 recovery state 的
   ack-eliciting 可发送字节预算，`Connection.availableCongestionWindow()` 使用

@@ -512,6 +512,12 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-06-24: Caller-keyed long-header backend-drive poll/drain helpers now
+  treat backend-confirmed Handshake-space discard as a no-output result when
+  the selected poll/drain space has already been discarded. This keeps socket
+  loops from surfacing a spurious packet-processing error after TLS backend
+  confirmation has legitimately cleared Handshake packet-number-space state.
+
 - 2026-06-18: Added recovery and connection-level congestion-window
   send-budget queries. `recovery.Recovery.availableCongestionWindow()` reports
   remaining ack-eliciting send budget for one recovery state, and
