@@ -2106,6 +2106,47 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Feed one installed-key datagram, process pending work, drive one compatible-version backend, then poll explicit output.
+    ///
+    /// This is the single-connection form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            compatibilities,
+            poll_views,
+        );
+    }
+
     /// Feed an installed-key datagram, process pending work, drive compatible-version close path, then poll output.
     ///
     /// Peer Version Information errors queue CONNECTION_CLOSE and return before
@@ -2248,6 +2289,47 @@ pub const EndpointConnectionLifecycle = struct {
             .pending_work = pending_work,
             .backend = backend,
         };
+    }
+
+    /// Feed one installed-key datagram, process pending work, drive one compatible-version close path, then poll explicit output.
+    ///
+    /// Peer Version Information errors queue CONNECTION_CLOSE and return before
+    /// output polling.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            compatibilities,
+            poll_views,
+        );
     }
 
     /// Feed an installed-key datagram, process pending work, drive compatible-version backends, then drain output.
@@ -2398,6 +2480,49 @@ pub const EndpointConnectionLifecycle = struct {
             .pending_work = pending_work,
             .backend = backend,
         };
+    }
+
+    /// Feed one installed-key datagram, process pending work, drive one compatible-version backend, then drain explicit output.
+    ///
+    /// This is the bounded-output form of
+    /// `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramDrainResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            compatibilities,
+            poll_views,
+            out,
+        );
     }
 
     /// Feed an installed-key datagram, process pending work, drive compatible-version close path, then drain output.
@@ -2689,6 +2814,88 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Feed one installed-key datagram, process pending work, drive one backend, then poll explicit output.
+    ///
+    /// This is the single-connection form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            poll_views,
+        );
+    }
+
+    /// Feed one installed-key datagram, process pending work, drive one compatible-version close path, then drain explicit output.
+    ///
+    /// This is the bounded-output form of
+    /// `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramDrainResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            compatibilities,
+            poll_views,
+            out,
+        );
+    }
+
     /// Feed an installed-key datagram, process pending work, drive close-propagating backends, then poll output.
     ///
     /// Backend peer transport-parameter errors queue CONNECTION_CLOSE and
@@ -2826,6 +3033,45 @@ pub const EndpointConnectionLifecycle = struct {
             .pending_work = pending_work,
             .backend = backend,
         };
+    }
+
+    /// Feed one installed-key datagram, process pending work, drive one close-propagating backend, then poll explicit output.
+    ///
+    /// Backend peer transport-parameter errors queue CONNECTION_CLOSE and
+    /// return before output polling.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            poll_views,
+        );
     }
 
     /// Feed an installed-key datagram, process pending work, drive backends, then drain output.
@@ -3021,6 +3267,47 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Feed one installed-key datagram, process pending work, drive one close-propagating backend, then drain explicit output.
+    ///
+    /// This is the bounded-output form of
+    /// `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramDrainResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            poll_views,
+            out,
+        );
+    }
+
     /// Feed one installed-key datagram, process pending work, drive one backend, then drain output.
     ///
     /// This is the single-connection form of
@@ -3114,6 +3401,47 @@ pub const EndpointConnectionLifecycle = struct {
             .pending_work = pending_work,
             .backend = backend,
         };
+    }
+
+    /// Feed one installed-key datagram, process pending work, drive one backend, then drain explicit output.
+    ///
+    /// This is the bounded-output form of
+    /// `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramDrainResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
+            poll_views,
+            out,
+        );
     }
 
     /// Feed an installed-key datagram, process pending work, then poll output.
@@ -40439,6 +40767,376 @@ test "EndpointConnectionLifecycle feed pending-work backend explicit output opti
     try client.processProtectedHandshakeDatagramWithInstalledKeys(21, close_drain_out[0].datagram);
     const close_drain_response_len = (try client.recvCryptoInSpace(.handshake, &response_crypto)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("server explicit close drain response", response_crypto[0..close_drain_response_len]);
+}
+
+test "EndpointConnectionLifecycle single feed pending-work backend explicit output options" {
+    const Backend = struct {
+        received: [128]u8 = undefined,
+        received_len: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake) return error.InvalidPacket;
+            if (self.received_len + data.len > self.received.len) return error.BufferTooSmall;
+            @memcpy(self.received[self.received_len..][0..data.len], data);
+            self.received_len += data.len;
+        }
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x1a, 0x2a, 0x3a, 0x4a };
+    const server_dcid = [_]u8{ 0xaa, 0xba, 0xca, 0xda };
+    const zero_client_dcid = [_]u8{ 0x7a, 0x8a, 0x9a, 0xaa };
+    const zero_server_dcid = [_]u8{ 0x0a, 0x1a, 0x2a, 0x3a };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var zero_client = try Connection.init(std.testing.allocator, .client, .{});
+    defer zero_client.deinit();
+    try zero_client.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try zero_client.confirmHandshake();
+    const first_stream_id = try zero_client.openStream();
+    try zero_client.sendOnStream(first_stream_id, "one", false);
+    try zero_client.resetStream(first_stream_id, 166);
+    const first_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = first_stream_id,
+        .application_error_code = 166,
+        .final_size = 3,
+    };
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(340, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{.{
+        .connection_id = 341,
+        .connection = &zero_client,
+        .poll_options = .{
+            .space = .zero_rtt,
+            .destination_connection_id = &zero_server_dcid,
+            .source_connection_id = &zero_client_dcid,
+        },
+    }};
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const feed_options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .handshake,
+        .out = &feed_out,
+        .unpredictable_prefix = &reset_prefix,
+        .supported_versions = &versions,
+    };
+
+    try client.sendCryptoInSpace(.handshake, "client single explicit pending poll");
+    const first_datagram = (try client_lifecycle.pollDatagram(339, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first_datagram);
+
+    var backend = Backend{};
+    var scratch: [128]u8 = undefined;
+    const first = try server_lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions(
+        340,
+        &server,
+        server_path,
+        11,
+        first_datagram,
+        feed_options,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &poll_views,
+    );
+    switch (first.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 340), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), first.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), first.pending_work.close_retired_count);
+    const backend_result = first.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.inbound_chunks);
+    try std.testing.expectEqualStrings("client single explicit pending poll", backend.received[0..backend.received_len]);
+    const polled = backend_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 341), polled.connection_id);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        polled.datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = first_reset_frame },
+    ));
+
+    const second_stream_id = try zero_client.openStream();
+    try zero_client.sendOnStream(second_stream_id, "two", false);
+    try zero_client.resetStream(second_stream_id, 167);
+    const second_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = second_stream_id,
+        .application_error_code = 167,
+        .final_size = 3,
+    };
+
+    try client.sendCryptoInSpace(.handshake, "client single explicit pending drain");
+    const second_datagram = (try client_lifecycle.pollDatagram(339, &client, 12, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_datagram);
+
+    var drain_backend = Backend{};
+    var drain_scratch: [128]u8 = undefined;
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    const second = try server_lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+        340,
+        &server,
+        server_path,
+        13,
+        second_datagram,
+        feed_options,
+        .handshake,
+        drain_backend.backend(),
+        &drain_scratch,
+        &poll_views,
+        &drained,
+    );
+    defer for (drained[0..(if (second.backend) |drain_result| drain_result.drain.datagrams_written else 0)]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    switch (second.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 340), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), second.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), second.pending_work.close_retired_count);
+    const drain_result = second.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), drain_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), drain_result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), drain_result.drain.first_error);
+    try std.testing.expectEqualStrings("client single explicit pending drain", drain_backend.received[0..drain_backend.received_len]);
+    try std.testing.expectEqual(@as(u64, 341), drained[0].connection_id);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        drained[0].datagram,
+        secrets.client,
+        1,
+        .{ .reset_stream = second_reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle single feed pending-work explicit backend variants do not drive on dropped datagram" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 100;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer connection.deinit();
+    try connection.validatePeerAddress();
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{};
+    var out: [64]u8 = undefined;
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const compatibilities = [_]VersionCompatibility{};
+    const feed_options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .handshake,
+        .out = &out,
+        .unpredictable_prefix = &reset_prefix,
+        .supported_versions = &versions,
+    };
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const ignored_datagram = [_]u8{0};
+
+    const poll = try lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions(
+        342,
+        &connection,
+        path,
+        10,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &poll_views,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, poll.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramResult, null), poll.backend);
+
+    const drain = try lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+        342,
+        &connection,
+        path,
+        11,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &poll_views,
+        &drained,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, drain.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramDrainResult, null), drain.backend);
+
+    const close_poll = try lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions(
+        342,
+        &connection,
+        path,
+        12,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &poll_views,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, close_poll.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramResult, null), close_poll.backend);
+
+    const close_drain = try lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        342,
+        &connection,
+        path,
+        13,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &poll_views,
+        &drained,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, close_drain.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramDrainResult, null), close_drain.backend);
+
+    const compatible_poll = try lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions(
+        342,
+        &connection,
+        path,
+        14,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+        &poll_views,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, compatible_poll.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramResult, null), compatible_poll.backend);
+
+    const compatible_drain = try lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions(
+        342,
+        &connection,
+        path,
+        15,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+        &poll_views,
+        &drained,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, compatible_drain.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramDrainResult, null), compatible_drain.backend);
+
+    const compatible_close_poll = try lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions(
+        342,
+        &connection,
+        path,
+        16,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+        &poll_views,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, compatible_close_poll.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramResult, null), compatible_close_poll.backend);
+
+    const compatible_close_drain = try lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        342,
+        &connection,
+        path,
+        17,
+        &ignored_datagram,
+        feed_options,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+        &poll_views,
+        &drained,
+    );
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, compatible_close_drain.feed);
+    try std.testing.expectEqual(@as(?EndpointCryptoBackendDriveDatagramDrainResult, null), compatible_close_drain.backend);
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
 }
 
 test "EndpointConnectionLifecycle feeds installed-key datagram then polls ACK output" {
