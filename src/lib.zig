@@ -17175,6 +17175,10 @@ pub const Connection = struct {
         return @min(@as(usize, self.config.max_datagram_size), self.peer_max_udp_payload_size);
     }
 
+    fn validateReceivedUdpDatagramSize(self: Connection, datagram: []const u8) Error!void {
+        if (datagram.len == 0 or datagram.len > self.config.max_datagram_size) return error.InvalidPacket;
+    }
+
     fn syncRecoveryMaxDatagramSize(self: *Connection) void {
         const max_datagram_size = self.maxTxDatagramSize();
         self.initial_packet_space.recovery_state.updateMaxDatagramSize(max_datagram_size);
@@ -17592,6 +17596,7 @@ pub const Connection = struct {
     ) Error!usize {
         if (datagram.len == 0) return error.InvalidPacket;
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return 0;
+        try self.validateReceivedUdpDatagramSize(datagram);
 
         var offset: usize = 0;
         var packet_count: usize = 0;
@@ -17671,6 +17676,7 @@ pub const Connection = struct {
         close_on_frame_payload_error: bool,
     ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
+        try self.validateReceivedUdpDatagramSize(datagram);
 
         const long_space = protectedLongPacketSpaceFor(space) orelse return error.InvalidPacket;
         const packet_space = self.packetNumberSpace(space);
@@ -17818,6 +17824,7 @@ pub const Connection = struct {
         close_on_frame_payload_error: bool,
     ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
+        try self.validateReceivedUdpDatagramSize(datagram);
 
         try self.processProtectedLongDatagramWithRoute(.{
             .space = .application,
@@ -17920,6 +17927,7 @@ pub const Connection = struct {
         close_on_frame_payload_error: bool,
     ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
+        try self.validateReceivedUdpDatagramSize(datagram);
 
         const packet_space = self.packetNumberSpace(.application);
         if (packet_space.discarded.*) return error.InvalidPacket;
@@ -17984,6 +17992,7 @@ pub const Connection = struct {
         close_on_frame_payload_error: bool,
     ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
+        try self.validateReceivedUdpDatagramSize(datagram);
 
         const packet_space = self.packetNumberSpace(.application);
         if (packet_space.discarded.*) return error.InvalidPacket;
@@ -18047,6 +18056,7 @@ pub const Connection = struct {
         close_on_frame_payload_error: bool,
     ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
+        try self.validateReceivedUdpDatagramSize(datagram);
 
         const packet_space = self.packetNumberSpace(.application);
         if (packet_space.discarded.*) return error.InvalidPacket;
@@ -63987,6 +63997,41 @@ test "protected long datagram bridge emits Handshake CRYPTO packet" {
     try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.handshake));
 }
 
+test "processProtectedLongDatagramInSpace rejects oversized UDP datagram before mutation" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.sendCryptoInSpace(.handshake, "server handshake");
+    const protected = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        10,
+        &dcid,
+        &scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+    try std.testing.expect(protected.len > 1);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = @intCast(protected.len - 1),
+    });
+    defer client.deinit();
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        client.processProtectedLongDatagramInSpace(.handshake, 11, secrets.server, protected),
+    );
+    var crypto_buf: [32]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, null), try client.recvCryptoInSpace(.handshake, &crypto_buf));
+    try std.testing.expectEqual(@as(u64, 0), client.nextPeerPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.handshake));
+}
+
 test "processProtectedLongDatagram routes coalesced Initial and Handshake packets" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
@@ -64988,6 +65033,40 @@ test "processProtectedZeroRttDatagram rejects protected ACK frame" {
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
 }
 
+test "processProtectedZeroRttDatagram rejects oversized UDP datagram before mutation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    var plaintext: [16]u8 = undefined;
+    @memset(&plaintext, @intFromEnum(frame.FrameType.padding));
+    plaintext[0] = @intFromEnum(frame.FrameType.ping);
+
+    const protected = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &server_scid,
+        .scid = &client_scid,
+        .packet_type = .zero_rtt,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(protected);
+    try std.testing.expect(protected.len > 1);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .max_datagram_size = @intCast(protected.len - 1),
+    });
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedZeroRttDatagram(10, secrets.client, protected),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+}
+
 test "pollProtectedLongDatagram drops obsolete 0-RTT STOP_SENDING" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
@@ -65047,6 +65126,36 @@ test "processProtectedShortDatagram routes protected 1-RTT payload" {
     try server.processProtectedShortDatagram(10, secrets.client, server_dcid.len, protected);
     try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.application));
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+}
+
+test "processProtectedShortDatagram rejects oversized UDP datagram before mutation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    var plaintext: [16]u8 = undefined;
+    @memset(&plaintext, @intFromEnum(frame.FrameType.padding));
+    plaintext[0] = @intFromEnum(frame.FrameType.ping);
+
+    const protected = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(protected);
+    try std.testing.expect(protected.len > 1);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .max_datagram_size = @intCast(protected.len - 1),
+    });
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedShortDatagram(10, secrets.client, server_dcid.len, protected),
+    );
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
 }
 
 test "processProtectedShortDatagram discards packets while draining" {
