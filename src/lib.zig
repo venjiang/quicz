@@ -9747,17 +9747,28 @@ pub const EndpointConnectionLifecycle = struct {
             .pending_work = pending_work,
             .datagram = null,
         };
-        const expected_space: PacketNumberSpace = switch (options.space) {
-            .handshake => .handshake,
-            .zero_rtt => .application,
-            .application => .application,
-        };
-        if (serviced.timer.space != expected_space) return error.InvalidPacket;
+        if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
 
         return .{
             .pending_work = pending_work,
             .datagram = try self.pollDatagram(connection_id, connection, now_millis, options),
         };
+    }
+
+    /// Process pending work and poll with explicit installed-key output options.
+    ///
+    /// This is the single-connection counterpart of
+    /// `processPendingWorkAcrossConnectionsAndPollDatagramWithInstalledKeyOptions()`.
+    /// It keeps the existing pending-work ordering while making the
+    /// caller-selected Handshake, 0-RTT, or 1-RTT output path explicit.
+    pub fn processPendingWorkAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        options: EndpointPollInstalledKeyDatagramOptions,
+    ) Error!EndpointPendingWorkDatagramResult {
+        return self.processPendingWorkAndPollDatagram(connection_id, connection, now_millis, options);
     }
 
     /// Process pending work and drain installed-key datagrams caused by recovery.
@@ -9778,12 +9789,7 @@ pub const EndpointConnectionLifecycle = struct {
             .pending_work = pending_work,
             .drain = .{},
         };
-        const expected_space: PacketNumberSpace = switch (options.space) {
-            .handshake => .handshake,
-            .zero_rtt => .application,
-            .application => .application,
-        };
-        if (serviced.timer.space != expected_space) return error.InvalidPacket;
+        if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
 
         const poll_views = [_]EndpointConnectionPollView{.{
             .connection_id = connection_id,
@@ -9802,16 +9808,28 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process pending work and drain explicit installed-key output.
+    ///
+    /// This is the bounded-output form of
+    /// `processPendingWorkAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processPendingWorkAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkDatagramDrainResult {
+        return self.processPendingWorkAndDrainDatagrams(connection_id, connection, now_millis, options, out);
+    }
+
     fn installedKeyOptionsMatchRecoveryDeadline(
         deadline: EndpointConnectionDeadline,
         options: EndpointPollInstalledKeyDatagramOptions,
     ) bool {
         if (deadline.kind != .recovery) return false;
         const timer = deadline.recovery orelse return false;
-        return switch (options.space) {
-            .handshake => timer.space == .handshake,
-            .zero_rtt, .application => timer.space == .application,
-        };
+        return timer.space == options.recoveryPacketNumberSpace();
     }
 
     /// Process a due recovery deadline with caller-selected installed-key output.
@@ -46371,7 +46389,7 @@ test "EndpointConnectionLifecycle feed then close-propagating backend stops befo
     try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 }
 
-test "EndpointConnectionLifecycle processPendingWorkAndPollDatagram emits installed-key PTO probe" {
+test "EndpointConnectionLifecycle processPendingWorkAndPollDatagramWithInstalledKeyOptions emits PTO probe" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
@@ -46406,6 +46424,7 @@ test "EndpointConnectionLifecycle processPendingWorkAndPollDatagram emits instal
     try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
     const options = next.installedKeyPollOptions(&server_dcid, &[_]u8{}) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(EndpointInstalledKeyDatagramSpace.application, options.space);
+    try std.testing.expectEqual(PacketNumberSpace.application, options.recoveryPacketNumberSpace());
 
     const early = try lifecycle.processPendingWorkAndPollDatagram(63, &client, recovery_timer.deadline_millis - 1, options);
     try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), early.pending_work.idle_retired);
@@ -46415,7 +46434,12 @@ test "EndpointConnectionLifecycle processPendingWorkAndPollDatagram emits instal
     try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
-    const due = try lifecycle.processPendingWorkAndPollDatagram(63, &client, recovery_timer.deadline_millis, options);
+    const due = try lifecycle.processPendingWorkAndPollDatagramWithInstalledKeyOptions(
+        63,
+        &client,
+        recovery_timer.deadline_millis,
+        options,
+    );
     try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), due.pending_work.idle_retired);
     try std.testing.expectEqual(@as(?EndpointConnectionRetireResult, null), due.pending_work.close_retired);
     const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
@@ -46445,7 +46469,7 @@ test "EndpointConnectionLifecycle processPendingWorkAndPollDatagram emits instal
     }
 }
 
-test "EndpointConnectionLifecycle processPendingWorkAndDrainDatagrams drains installed-key PTO probe" {
+test "EndpointConnectionLifecycle processPendingWorkAndDrainDatagramsWithInstalledKeyOptions drains PTO probe" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xee };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
@@ -46473,6 +46497,7 @@ test "EndpointConnectionLifecycle processPendingWorkAndDrainDatagrams drains ins
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
     const recovery_timer = next.recovery orelse return error.TestUnexpectedResult;
     const options = next.installedKeyPollOptions(&server_dcid, &[_]u8{}) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, options.recoveryPacketNumberSpace());
 
     var early_out: [1]EndpointPolledDatagramResult = undefined;
     const early = try lifecycle.processPendingWorkAndDrainDatagrams(
@@ -46490,7 +46515,7 @@ test "EndpointConnectionLifecycle processPendingWorkAndDrainDatagrams drains ins
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
     var due_out: [1]EndpointPolledDatagramResult = undefined;
-    const due = try lifecycle.processPendingWorkAndDrainDatagrams(
+    const due = try lifecycle.processPendingWorkAndDrainDatagramsWithInstalledKeyOptions(
         65,
         &client,
         recovery_timer.deadline_millis,

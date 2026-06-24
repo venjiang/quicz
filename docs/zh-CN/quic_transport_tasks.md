@@ -355,6 +355,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processPendingWork`、`processPendingWorkAcrossConnections`、
 `processPendingWorkAndSelectNextDeadline`、
 `processPendingWorkAcrossConnectionsAndSelectNextDeadline`、`processPendingWorkAndPollDatagram`、
+`processPendingWorkAndPollDatagramWithInstalledKeyOptions`、
 `processPendingWorkAcrossConnectionsAndPollDatagram`、
 `processPendingWorkAcrossConnectionsAndDrainDatagrams`、
 `processPendingWorkAcrossConnectionsAndPollDatagramWithInstalledKeyOptions`、
@@ -400,6 +401,7 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `processPendingWorkAndDrainDatagrams`、
+`processPendingWorkAndDrainDatagramsWithInstalledKeyOptions`、
 `processDueDeadlineAndPollDatagram`、
 `processDueDeadlineAndDrainDatagrams`、
 `processDueDeadlineAndSelectNextDeadline`、
@@ -1179,6 +1181,12 @@ close 和 route cleanup 事件。
   这两个入口让跨连接 timer tick 可以先服务 pending recovery work，再按调用方选择的
   installed-key 输出选项发包。单元测试证明未到期 tick 仍无输出，到期 accepted 0-RTT
   recovery work 会在 poll 和 bounded-drain 形态中发出 protected 0-RTT `RESET_STREAM` probe。
+- 2026-06-24：新增
+  `EndpointConnectionLifecycle.processPendingWorkAndPollDatagramWithInstalledKeyOptions()` 和
+  `EndpointConnectionLifecycle.processPendingWorkAndDrainDatagramsWithInstalledKeyOptions()`。
+  这两个入口是单连接 pending-work 的显式输出命名，和跨连接 pending-work API 对齐。
+  `EndpointPollInstalledKeyDatagramOptions` 现在在 `endpoint_types.zig` 中暴露 recovery
+  packet-number-space 映射，使 pending-work 与 due-deadline 的校验复用同一条 options 规则。
 - 2026-06-18：新增
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()` 和
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions()`。

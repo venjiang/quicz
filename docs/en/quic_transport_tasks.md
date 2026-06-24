@@ -244,6 +244,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWork`,
 `processPendingWorkAcrossConnections`, `processPendingWorkAndSelectNextDeadline`,
 `processPendingWorkAndPollDatagram`,
+`processPendingWorkAndPollDatagramWithInstalledKeyOptions`,
 `processPendingWorkAcrossConnectionsAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndPollDatagram`,
 `processPendingWorkAcrossConnectionsAndDrainDatagrams`,
@@ -290,6 +291,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processPendingWorkAndDrainDatagrams`,
+`processPendingWorkAndDrainDatagramsWithInstalledKeyOptions`,
 `processDueDeadlineAndPollDatagram`,
 `processDueDeadlineAndDrainDatagrams`,
 `processDueDeadlineAndSelectNextDeadline`,
@@ -1307,6 +1309,14 @@ QUIC unless the gap is named and the verification evidence is added here.
   emit caller-selected installed-key output. Unit coverage proves before-due
   ticks remain no-output and due accepted 0-RTT recovery work emits protected
   0-RTT `RESET_STREAM` probes through both poll and bounded-drain forms.
+- 2026-06-24: Added
+  `EndpointConnectionLifecycle.processPendingWorkAndPollDatagramWithInstalledKeyOptions()`
+  and
+  `EndpointConnectionLifecycle.processPendingWorkAndDrainDatagramsWithInstalledKeyOptions()`.
+  These are the single-connection explicit-output names matching the
+  cross-connection pending-work API. `EndpointPollInstalledKeyDatagramOptions`
+  now exposes its recovery packet-number-space mapping from `endpoint_types.zig`,
+  so pending-work and due-deadline validation share one option-level rule.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`
   and

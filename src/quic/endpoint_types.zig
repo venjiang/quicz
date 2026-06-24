@@ -9,6 +9,7 @@ const Config = connection_config.Config;
 const CryptoBackendProgress = crypto_types.CryptoBackendProgress;
 const Error = transport_types.Error;
 const LossDetectionTimerDeadline = transport_types.LossDetectionTimerDeadline;
+const PacketNumberSpace = transport_types.PacketNumberSpace;
 
 /// Result of retiring one endpoint connection handle.
 pub const EndpointConnectionRetireResult = struct {
@@ -265,6 +266,17 @@ pub const EndpointPollInstalledKeyDatagramOptions = struct {
                 .space = .application,
                 .destination_connection_id = destination_connection_id,
             },
+        };
+    }
+
+    /// Packet-number-space whose recovery deadline can emit these options.
+    ///
+    /// 0-RTT and 1-RTT share Application recovery state even though they use
+    /// different installed-key packetization paths.
+    pub fn recoveryPacketNumberSpace(self: EndpointPollInstalledKeyDatagramOptions) PacketNumberSpace {
+        return switch (self.space) {
+            .handshake => .handshake,
+            .zero_rtt, .application => .application,
         };
     }
 };
