@@ -141,6 +141,7 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDrainDatagrams`,
@@ -1472,6 +1473,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   proves dropped input can still drain queued installed-key output after
   pending work, and the single-connection form retires due closing state before
   any output drain.
+- 2026-06-24: Added
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions()`
+  so caller-owned socket loops can preserve per-connection installed-key output
+  choices after receive processing and pending work. Unit coverage proves a
+  dropped input can still drain caller-selected 0-RTT output.
 - 2026-06-10: Added
   `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` and
   `EndpointPolledDatagramResult` for caller-owned connection maps. Socket loops

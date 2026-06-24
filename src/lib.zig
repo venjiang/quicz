@@ -1689,6 +1689,42 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Feed an installed-key datagram, process pending work, then drain explicit output.
+    ///
+    /// This is the per-connection-output-options form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagrams()`.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkDatagramDrainResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            receive_connections,
+            now_millis,
+        );
+        return .{
+            .feed = feed,
+            .pending_work = pending_work,
+            .drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptions(
+                poll_views,
+                now_millis,
+                out,
+            ),
+        };
+    }
+
     /// Feed one installed-key datagram, process pending work, then drain output.
     ///
     /// This is the single-connection form of
@@ -35297,6 +35333,85 @@ test "EndpointConnectionLifecycle feed pending-work drain step retires due close
     try std.testing.expectEqual(ConnectionState.closed, conn.connectionState());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionLifecycle feed pending-work explicit drain step keeps zero RTT output options" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const server_dcid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try client.confirmHandshake();
+
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "bye", false);
+    try client.resetStream(stream_id, 81);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 81,
+        .final_size = 3,
+    };
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const receive_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 103,
+        .connection = &client,
+    }};
+    const poll_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    };
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{.{
+        .connection_id = 103,
+        .connection = &client,
+        .poll_options = poll_options,
+    }};
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const dropped_datagram = [_]u8{ 0x40, 0x91, 0x92, 0x93, 0x94 };
+    var drain_out: [1]EndpointPolledDatagramResult = undefined;
+    const result = try lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions(
+        &receive_connections,
+        path,
+        11,
+        &dropped_datagram,
+        .{
+            .space = .application,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        &poll_views,
+        &drain_out,
+    );
+    defer for (drain_out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(EndpointFeedInstalledKeyDatagramResult.dropped, result.feed);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 103), drain_out[0].connection_id);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        drain_out[0].datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
 }
 
 test "EndpointConnectionLifecycle installed-key feed keeps long packets out of stateless reset" {
