@@ -139,6 +139,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions`,
@@ -1478,6 +1480,14 @@ QUIC unless the gap is named and the verification evidence is added here.
   so caller-owned socket loops can preserve per-connection installed-key output
   choices after receive processing and pending work. Unit coverage proves a
   dropped input can still drain caller-selected 0-RTT output.
+- 2026-06-24: Added
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`
+  and `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`
+  as receive-to-pending-work-to-backend-to-next-deadline socket-loop steps.
+  Unit coverage proves routed Handshake input can process pending work, drive a
+  caller-owned backend, queue protected output, and return the next endpoint
+  deadline without polling output. The result contract lives in
+  `src/quic/endpoint_types.zig` and is re-exported from `src/lib.zig`.
 - 2026-06-24: Split connection-level pure rules into
   `src/quic/connection_rules.zig` while keeping `src/lib.zig` as the public
   re-export surface. The moved rules cover ACK-eliciting send-admission

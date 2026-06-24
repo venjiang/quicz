@@ -117,6 +117,7 @@ pub const EndpointFeedInstalledKeyDatagramResult = endpoint_types.EndpointFeedIn
 pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = endpoint_types.EndpointFeedInstalledKeyDatagramNextDeadlineResult;
 pub const EndpointFeedPendingWorkNextDeadlineResult = endpoint_types.EndpointFeedPendingWorkNextDeadlineResult;
 pub const EndpointFeedPendingWorkDatagramDrainResult = endpoint_types.EndpointFeedPendingWorkDatagramDrainResult;
+pub const EndpointFeedPendingWorkCryptoBackendNextDeadlineResult = endpoint_types.EndpointFeedPendingWorkCryptoBackendNextDeadlineResult;
 pub const EndpointFeedInstalledKeyDatagramPollResult = endpoint_types.EndpointFeedInstalledKeyDatagramPollResult;
 pub const EndpointFeedInstalledKeyDatagramDrainResult = endpoint_types.EndpointFeedInstalledKeyDatagramDrainResult;
 pub const EndpointFeedCryptoBackendDriveNextDeadlineResult = endpoint_types.EndpointFeedCryptoBackendDriveNextDeadlineResult;
@@ -1599,6 +1600,93 @@ pub const EndpointConnectionLifecycle = struct {
             now_millis,
             datagram,
             feed_options,
+        );
+    }
+
+    /// Feed an installed-key datagram, process pending work, drive backends, then select a wakeup.
+    ///
+    /// This is the no-output receive/backend planning step for socket loops.
+    /// Backend progress runs only when the datagram routed to a connection and
+    /// pending idle/close cleanup did not retire any connection in this pass.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        deadline_connections: []const EndpointConnectionView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendNextDeadlineResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            receive_connections,
+            now_millis,
+        );
+        var backend: ?EndpointCryptoBackendDriveSweepResult = null;
+        if (pending_work.idle_retired_count == 0 and pending_work.close_retired_count == 0) {
+            switch (feed) {
+                .routed => backend = try self.driveCryptoBackendsInSpaceAndArmConnections(
+                    backend_space,
+                    drive_views,
+                ),
+                else => {},
+            }
+        }
+        return .{
+            .feed = feed,
+            .pending_work = pending_work,
+            .backend = backend,
+            .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+        };
+    }
+
+    /// Feed one installed-key datagram, process pending work, drive one backend, then select a wakeup.
+    ///
+    /// This is the single-connection form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendNextDeadlineResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const deadline_connections = [_]EndpointConnectionView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndSelectNextDeadline(
+            &receive_connections,
+            &deadline_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_space,
+            &drive_views,
         );
     }
 
@@ -35623,7 +35711,7 @@ test "EndpointConnectionLifecycle installed-key feed selects next deadline" {
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, single_next.kind);
 }
 
-test "EndpointConnectionLifecycle feed backend deadline step queues output without polling" {
+test "EndpointConnectionLifecycle feed pending-work backend deadline step queues output without polling" {
     const Backend = struct {
         outbound: []const u8,
         outbound_sent: bool = false,
@@ -35731,29 +35819,32 @@ test "EndpointConnectionLifecycle feed backend deadline step queues output witho
         .{ .connection_id = 187, .connection = &decoy },
         .{ .connection_id = 186, .connection = &server },
     };
-    const first = try server_lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline(
+    const first = try server_lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndSelectNextDeadline(
         &receive_connections,
+        &deadline_connections,
         server_path,
         11,
         first_datagram,
         feed_options,
         .handshake,
         &drive_views,
-        &deadline_connections,
     );
     switch (first.feed) {
         .routed => |route| try std.testing.expectEqual(@as(u64, 186), route.connection_id),
         else => return error.TestUnexpectedResult,
     }
+    try std.testing.expectEqual(@as(usize, 0), first.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), first.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), first.pending_work.recovery_serviced_count);
     const backend_result = first.backend orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
-    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.inbound_chunks);
-    try std.testing.expectEqual(@as(usize, "client feed backend deadline".len), backend_result.backend.progress.inbound_bytes);
-    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.progress.outbound_chunks);
-    try std.testing.expectEqual(@as(usize, "server feed deadline response".len), backend_result.backend.progress.outbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.progress.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, "client feed backend deadline".len), backend_result.progress.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.progress.outbound_chunks);
+    try std.testing.expectEqual(@as(usize, "server feed deadline response".len), backend_result.progress.outbound_bytes);
     try std.testing.expectEqualStrings("client feed backend deadline", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.outbound_sent);
-    const next = backend_result.next_deadline orelse return error.TestUnexpectedResult;
+    const next = first.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 186), next.connection_id);
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next.kind);
     try std.testing.expectEqual(server.idleTimeoutDeadlineMillis().?, next.deadline_millis);
@@ -35779,7 +35870,7 @@ test "EndpointConnectionLifecycle feed backend deadline step queues output witho
 
     var single_backend = Backend{ .outbound = "server single deadline response" };
     var single_scratch: [128]u8 = undefined;
-    const single = try server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
+    const single = try server_lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndSelectNextDeadline(
         186,
         &server,
         server_path,
@@ -35794,10 +35885,13 @@ test "EndpointConnectionLifecycle feed backend deadline step queues output witho
         .routed => |route| try std.testing.expectEqual(@as(u64, 186), route.connection_id),
         else => return error.TestUnexpectedResult,
     }
+    try std.testing.expectEqual(@as(usize, 0), single.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), single.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), single.pending_work.recovery_serviced_count);
     const single_backend_result = single.backend orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), single_backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), single_backend_result.connections_driven);
     try std.testing.expectEqualStrings("client single feed deadline", single_backend.received[0..single_backend.received_len]);
-    const single_next = single_backend_result.next_deadline orelse return error.TestUnexpectedResult;
+    const single_next = single.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 186), single_next.connection_id);
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, single_next.kind);
 }
