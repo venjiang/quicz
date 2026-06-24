@@ -139,6 +139,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndSelectNextDeadline`,
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagram`,
 `feedDatagramWithInstalledKeysAndDrainDatagrams`,
@@ -1463,6 +1465,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   proves active-route stateless reset receive reports the close timeout as the
   next wakeup, and a receive step can also retire due closing endpoint state
   before selecting the next deadline.
+- 2026-06-24: Added
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagrams()`
+  and `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagrams()`
+  as receive-to-pending-work-to-bounded-drain socket-loop steps. Unit coverage
+  proves dropped input can still drain queued installed-key output after
+  pending work, and the single-connection form retires due closing state before
+  any output drain.
 - 2026-06-10: Added
   `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` and
   `EndpointPolledDatagramResult` for caller-owned connection maps. Socket loops
