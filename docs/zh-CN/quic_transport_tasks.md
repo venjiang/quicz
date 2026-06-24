@@ -358,13 +358,21 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`、
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram`、
+`processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions`、
 `processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions`、
 `processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
+`processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions`、
 `processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`、
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`、
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`、
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `processPendingWorkAndDrainDatagrams`、
 `processDueDeadlineAndPollDatagram`、
 `processDueDeadlineAndDrainDatagrams`、
@@ -1196,6 +1204,17 @@ close 和 route cleanup 事件。
   output 实现，让简单 socket loop 可以 drive 一个 backend，同时 poll 或 drain 调用方选择的
   output views。单元测试证明分离的 backend/output connection 会发出 protected 0-RTT
   `RESET_STREAM` 输出，并覆盖 close/compatible 变体在空 output views 下的类型检查。
+- 2026-06-24：新增 single-connection pending-work/backend explicit-output
+  wrapper：
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions()`，
+  以及对应 compatible-version 形态。它们让简单 socket loop 可以先 service 单个
+  connection 的 pending timer，再 drive 一个 TLS backend，同时继续使用调用方选择的
+  installed-key output views。单元测试证明 accepted 0-RTT PTO wakeup 在 poll 和
+  bounded-drain 形态下都保留显式 `RESET_STREAM` 输出，并覆盖 close/compatible
+  变体在空 output views 下的可调用性。
 - 2026-06-11：更新 single-connection due-deadline-to-backend poll 和 bounded-drain
   wrapper，让它们保留显式 installed-key recovery output 选择。Initial recovery 仍只服务
   pending work、不发 installed-key datagram，并可继续进入 backend drive；Handshake 和

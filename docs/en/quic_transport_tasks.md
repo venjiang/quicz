@@ -248,13 +248,21 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram`,
+`processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
+`processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`,
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processPendingWorkAndDrainDatagrams`,
 `processDueDeadlineAndPollDatagram`,
 `processDueDeadlineAndDrainDatagrams`,
@@ -1341,6 +1349,18 @@ QUIC unless the gap is named and the verification evidence is added here.
   views. Unit coverage proves separated backend/output connections emit
   protected 0-RTT `RESET_STREAM` output and all close/compatible variants
   typecheck with empty output views.
+- 2026-06-24: Added the single-connection pending-work/backend explicit-output
+  wrappers:
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions()`,
+  and the matching compatible-version forms. These let a simple socket loop
+  service one connection's pending timers, drive one TLS backend, and still use
+  caller-selected installed-key output views. Unit coverage proves accepted
+  0-RTT PTO wakeups keep explicit `RESET_STREAM` output in poll and bounded
+  drain forms, while close/compatible variants remain callable with empty
+  output views.
 - 2026-06-11: Updated the single-connection due-deadline-to-backend poll and
   bounded-drain wrappers to preserve explicit installed-key recovery output
   choices. Initial recovery still services pending work without emitting an
