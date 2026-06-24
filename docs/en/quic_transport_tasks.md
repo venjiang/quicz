@@ -299,28 +299,36 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendsInSpaceAndSelectNextDeadline`,
 `driveCryptoBackendInSpaceAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceAndPollDatagram`,
+`driveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceAndDrainDatagrams`,
+`driveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceOrCloseAndArmConnections`,
 `driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`,
 `driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceOrCloseAndPollDatagram`,
+`driveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`,
+`driveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`,
 `driveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
+`driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`driveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
+`driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `driveCryptoBackendInSpaceAndPollProtectedLongCryptoDatagram`,
@@ -1322,6 +1330,17 @@ QUIC unless the gap is named and the verification evidence is added here.
   existing stop-before-output error behavior. Unit coverage proves compatible
   Version Information is applied and caller-selected 0-RTT output is emitted
   through poll and bounded-drain forms.
+- 2026-06-24: Added the single-backend explicit-output drive wrappers:
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions()`,
+  and the matching compatible-version forms. These reuse the cross-connection
+  explicit-output implementation with one backend drive view, so simple socket
+  loops can drive one backend while polling or draining caller-selected output
+  views. Unit coverage proves separated backend/output connections emit
+  protected 0-RTT `RESET_STREAM` output and all close/compatible variants
+  typecheck with empty output views.
 - 2026-06-11: Updated the single-connection due-deadline-to-backend poll and
   bounded-drain wrappers to preserve explicit installed-key recovery output
   choices. Initial recovery still services pending work without emitting an

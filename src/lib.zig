@@ -5845,6 +5845,36 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Drive one backend, then poll explicit installed-key output.
+    ///
+    /// This is the single-backend form of
+    /// `driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`.
+    /// It keeps backend ownership simple while allowing output to be selected
+    /// from caller-provided installed-key poll views.
+    pub fn driveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions(
+            space,
+            &drive_views,
+            poll_views,
+            now_millis,
+        );
+    }
+
     /// Drive crypto backends, then drain installed-key output across connections.
     ///
     /// This is the bounded-output form for embeddable socket loops that own the
@@ -5949,6 +5979,36 @@ pub const EndpointConnectionLifecycle = struct {
             &poll_views,
             now_millis,
             poll_options.space,
+            out,
+        );
+    }
+
+    /// Drive one backend, then drain explicit installed-key output.
+    ///
+    /// This is the bounded-output form of
+    /// `driveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn driveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.driveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+            space,
+            &drive_views,
+            poll_views,
+            now_millis,
             out,
         );
     }
@@ -6129,6 +6189,34 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Drive one close-propagating backend, then poll explicit installed-key output.
+    ///
+    /// This is the single-backend form of
+    /// `driveCryptoBackendsInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn driveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.driveCryptoBackendsInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions(
+            space,
+            &drive_views,
+            poll_views,
+            now_millis,
+        );
+    }
+
     /// Drive close-propagating backends, then drain installed-key output.
     ///
     /// Peer transport-parameter errors return before output draining. Successful
@@ -6232,6 +6320,36 @@ pub const EndpointConnectionLifecycle = struct {
             &poll_views,
             now_millis,
             poll_options.space,
+            out,
+        );
+    }
+
+    /// Drive one close-propagating backend, then drain explicit installed-key output.
+    ///
+    /// This is the bounded-output form of
+    /// `driveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn driveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+            space,
+            &drive_views,
+            poll_views,
+            now_millis,
             out,
         );
     }
@@ -6474,6 +6592,36 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Drive one compatible-version backend, then poll explicit installed-key output.
+    ///
+    /// This is the single-backend form of
+    /// `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions(
+            space,
+            &drive_views,
+            compatibilities,
+            poll_views,
+            now_millis,
+        );
+    }
+
     /// Drive compatible-version backends, then drain installed-key output.
     pub fn driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams(
         self: *EndpointConnectionLifecycle,
@@ -6579,6 +6727,38 @@ pub const EndpointConnectionLifecycle = struct {
             &poll_views,
             now_millis,
             poll_options.space,
+            out,
+        );
+    }
+
+    /// Drive one compatible-version backend, then drain explicit installed-key output.
+    ///
+    /// This is the bounded-output form of
+    /// `driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions(
+            space,
+            &drive_views,
+            compatibilities,
+            poll_views,
+            now_millis,
             out,
         );
     }
@@ -6795,6 +6975,36 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Drive one compatible-version close path, then poll explicit installed-key output.
+    ///
+    /// This is the single-backend form of
+    /// `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions(
+            space,
+            &drive_views,
+            compatibilities,
+            poll_views,
+            now_millis,
+        );
+    }
+
     /// Drive compatible-version close-propagating backends, then drain output.
     ///
     /// Backend errors stop the step before draining, preserving the
@@ -6903,6 +7113,38 @@ pub const EndpointConnectionLifecycle = struct {
             &poll_views,
             now_millis,
             poll_options.space,
+            out,
+        );
+    }
+
+    /// Drive one compatible-version close path, then drain explicit installed-key output.
+    ///
+    /// This is the bounded-output form of
+    /// `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+            space,
+            &drive_views,
+            compatibilities,
+            poll_views,
+            now_millis,
             out,
         );
     }
@@ -48310,6 +48552,319 @@ test "EndpointConnectionLifecycle backend drive drains explicit installed-key ou
         0,
         .{ .reset_stream = second_reset_frame },
     ));
+}
+
+test "EndpointConnectionLifecycle single backend drive polls separate explicit output" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const output_client_dcid = [_]u8{ 0x4e, 0x5e, 0x6e, 0x7e };
+    const output_server_dcid = [_]u8{ 0xd8, 0xe8, 0xf8, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+
+    var output_client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer output_client.deinit();
+    try output_client.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try output_client.confirmHandshake();
+    const stream_id = try output_client.openStream();
+    try output_client.sendOnStream(stream_id, "bye", false);
+    try output_client.resetStream(stream_id, 84);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 84,
+        .final_size = 3,
+    };
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{.{
+        .connection_id = 132,
+        .connection = &output_client,
+        .poll_options = .{
+            .space = .zero_rtt,
+            .destination_connection_id = &output_server_dcid,
+            .source_connection_id = &output_client_dcid,
+        },
+    }};
+
+    const result = try lifecycle.driveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions(
+        131,
+        &backend_connection,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &poll_views,
+        10,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+    const polled = result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 132), polled.connection_id);
+    try std.testing.expectEqual(@as(usize, 1), output_client.sentPacketCount(.application));
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        polled.datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle single backend drive drains separate explicit output" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const first_client_dcid = [_]u8{ 0x4f, 0x5f, 0x6f, 0x7f };
+    const first_server_dcid = [_]u8{ 0xd9, 0xe9, 0xf9, 0x09 };
+    const second_client_dcid = [_]u8{ 0x50, 0x60, 0x70, 0x80 };
+    const second_server_dcid = [_]u8{ 0xda, 0xea, 0xfa, 0x0a };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+
+    var first = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer first.deinit();
+    try first.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try first.confirmHandshake();
+    const first_stream_id = try first.openStream();
+    try first.sendOnStream(first_stream_id, "bye", false);
+    try first.resetStream(first_stream_id, 85);
+    const first_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = first_stream_id,
+        .application_error_code = 85,
+        .final_size = 3,
+    };
+
+    var second = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer second.deinit();
+    try second.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try second.confirmHandshake();
+    const second_stream_id = try second.openStream();
+    try second.sendOnStream(second_stream_id, "bye", false);
+    try second.resetStream(second_stream_id, 86);
+    const second_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = second_stream_id,
+        .application_error_code = 86,
+        .final_size = 3,
+    };
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{
+        .{
+            .connection_id = 134,
+            .connection = &first,
+            .poll_options = .{
+                .space = .zero_rtt,
+                .destination_connection_id = &first_server_dcid,
+                .source_connection_id = &first_client_dcid,
+            },
+        },
+        .{
+            .connection_id = 135,
+            .connection = &second,
+            .poll_options = .{
+                .space = .zero_rtt,
+                .destination_connection_id = &second_server_dcid,
+                .source_connection_id = &second_client_dcid,
+            },
+        },
+    };
+    var out: [2]EndpointPolledDatagramResult = undefined;
+
+    const result = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+        133,
+        &backend_connection,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &poll_views,
+        10,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+    try std.testing.expectEqual(@as(usize, 2), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    defer std.testing.allocator.free(out[1].datagram);
+    try std.testing.expectEqual(@as(u64, 134), out[0].connection_id);
+    try std.testing.expectEqual(@as(u64, 135), out[1].connection_id);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        out[0].datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = first_reset_frame },
+    ));
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        out[1].datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = second_reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle single backend explicit output variants typecheck no output" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{};
+    const versions = [_]VersionCompatibility{};
+    var out: [1]EndpointPolledDatagramResult = undefined;
+
+    const close_poll = try lifecycle.driveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions(
+        136,
+        &backend_connection,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &poll_views,
+        10,
+    );
+    try std.testing.expectEqual(@as(?EndpointPolledDatagramResult, null), close_poll.datagram);
+
+    const close_drain = try lifecycle.driveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        136,
+        &backend_connection,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &poll_views,
+        10,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), close_drain.drain.datagrams_written);
+
+    const compatible_poll = try lifecycle.driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions(
+        136,
+        &backend_connection,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &versions,
+        &poll_views,
+        10,
+    );
+    try std.testing.expectEqual(@as(?EndpointPolledDatagramResult, null), compatible_poll.datagram);
+
+    const compatible_drain = try lifecycle.driveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions(
+        136,
+        &backend_connection,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &versions,
+        &poll_views,
+        10,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), compatible_drain.drain.datagrams_written);
+
+    const compatible_close_poll = try lifecycle.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions(
+        136,
+        &backend_connection,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &versions,
+        &poll_views,
+        10,
+    );
+    try std.testing.expectEqual(@as(?EndpointPolledDatagramResult, null), compatible_close_poll.datagram);
+
+    const compatible_close_drain = try lifecycle.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        136,
+        &backend_connection,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &versions,
+        &poll_views,
+        10,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), compatible_close_drain.drain.datagrams_written);
+    try std.testing.expectEqual(@as(usize, 6), backend.pulls);
 }
 
 test "EndpointConnectionLifecycle single backend drive drains bounded output" {

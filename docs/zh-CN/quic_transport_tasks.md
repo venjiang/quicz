@@ -409,28 +409,36 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `driveCryptoBackendsInSpaceAndSelectNextDeadline`、
 `driveCryptoBackendInSpaceAndSelectNextDeadline`、
 `driveCryptoBackendsInSpaceAndPollDatagram`、
+`driveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceAndDrainDatagrams`、
+`driveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceOrCloseAndArmConnections`、
 `driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`、
 `driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `driveCryptoBackendsInSpaceOrCloseAndPollDatagram`、
+`driveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams`、
+`driveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`、
 `driveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`、
+`driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`driveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
+`driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `nextDeadline` 和
@@ -1179,6 +1187,15 @@ close 和 route cleanup 事件。
   这两个入口在成功的 close-propagating RFC 9368-compatible backend sweep 中保留显式
   installed-key 输出，同时维持现有出错时停止在输出前的语义。单元测试证明 compatible
   Version Information 会被应用，并通过 poll 和 bounded-drain 形态发出调用方选择的 0-RTT 输出。
+- 2026-06-24：新增 single-backend explicit-output drive wrapper：
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.driveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions()`，
+  以及对应 compatible-version 形态。这些入口用单个 backend drive view 复用跨连接显式
+  output 实现，让简单 socket loop 可以 drive 一个 backend，同时 poll 或 drain 调用方选择的
+  output views。单元测试证明分离的 backend/output connection 会发出 protected 0-RTT
+  `RESET_STREAM` 输出，并覆盖 close/compatible 变体在空 output views 下的类型检查。
 - 2026-06-11：更新 single-connection due-deadline-to-backend poll 和 bounded-drain
   wrapper，让它们保留显式 installed-key recovery output 选择。Initial recovery 仍只服务
   pending work、不发 installed-key datagram，并可继续进入 backend drive；Handshake 和
