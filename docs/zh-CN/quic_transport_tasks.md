@@ -1315,6 +1315,9 @@ close 和 route cleanup 事件。
   `EndpointVersionNegotiationResult` 和 `EndpointVersionNegotiationFollowupResult`
   迁到 `src/quic/endpoint_types.zig`，同时保持 `src/lib.zig` 作为公开 re-export surface。
   持有 `Connection` 的 Version Negotiation handoff result 会等 `Connection` 拆出独立模块后再迁。
+- 2026-06-24：将 `src/lib.zig` 中的 frame packet-type error wrapper 改成从
+  `src/quic/frame_rules.zig` 直接公开 re-export。公开 `framePacketTypeErrorCode()` API
+  保持稳定，RFC 9000 frame 许可和错误分类继续归属 frame-rule 模块。
 - 2026-06-10：新增
   `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` 和
   `EndpointPolledDatagramResult`，服务于调用方持有 connection map 的输出轮询。socket

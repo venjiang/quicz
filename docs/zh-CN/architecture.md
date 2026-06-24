@@ -78,7 +78,7 @@ connection logic 使用的借用字段 view，
 `src/quic/stream_id.zig` 负责 stream ID 方向/发起方分类、stream count 推导，以及
 QUIC varint stream offset/range helper，
 `src/quic/frame_rules.zig` 负责 ACK range 判断、ACK packet-number membership、
-ack-eliciting 分类和 RFC 9000 packet-type/frame 许可规则，
+ack-eliciting 分类，以及 RFC 9000 packet-type/frame 许可和错误分类规则，
 `src/quic/protocol_limits.zig` 负责共享的 QUIC 标量限制，例如 varint、stream-count、
 connection-ID、Initial datagram、path-validation 和 anti-amplification 边界，
 `src/quic/wire_len.zig` 负责 QUIC varint、protected datagram 和 frame wire-length

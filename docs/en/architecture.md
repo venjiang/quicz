@@ -93,7 +93,7 @@ storage plus borrowed field views used by connection logic,
 stream-count derivation, and QUIC-varint stream offset/range helpers,
 `src/quic/frame_rules.zig` owns ACK range validation, ACK packet-number
 membership, ack-eliciting classification, and RFC 9000 packet-type/frame
-admission rules,
+admission and error-classification rules,
 `src/quic/protocol_limits.zig` owns shared QUIC scalar limits such as varint,
 stream-count, connection-ID, Initial datagram, path-validation, and
 anti-amplification bounds,

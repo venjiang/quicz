@@ -14913,15 +14913,7 @@ fn elapsedMillis(sent_time_millis: i64, now_millis: i64) u64 {
     return @intCast(delta);
 }
 
-/// Classify a decoded frame that is not permitted in an RFC 9000 packet type.
-///
-/// The frame codec handles malformed or unknown frame types separately via
-/// `transport_error.frameDecodeErrorCode()`. This helper covers frames that are
-/// syntactically valid but appear in the wrong Initial, Handshake, 0-RTT, or
-/// 1-RTT packet context.
-pub fn framePacketTypeErrorCode(decoded: frame.Frame, packet_type: FramePacketType) ?transport_error.TransportErrorCode {
-    return frame_rules.framePacketTypeErrorCode(decoded, packet_type);
-}
+pub const framePacketTypeErrorCode = frame_rules.framePacketTypeErrorCode;
 
 const FramePayloadCloseError = frame_payload_module.CloseError;
 const rawFrameTypeValue = frame_payload_module.rawFrameTypeValue;

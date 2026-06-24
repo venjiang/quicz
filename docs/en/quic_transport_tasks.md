@@ -1489,6 +1489,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   while keeping `src/lib.zig` as the public re-export surface. The
   connection-owning Version Negotiation handoff results remain in `src/lib.zig`
   until `Connection` is split into its own module.
+- 2026-06-24: Replaced the `src/lib.zig` frame packet-type error wrapper with
+  a direct public re-export from `src/quic/frame_rules.zig`. This keeps the
+  public `framePacketTypeErrorCode()` API stable while leaving RFC 9000 frame
+  admission and error classification in the frame-rule module.
 - 2026-06-10: Added
   `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` and
   `EndpointPolledDatagramResult` for caller-owned connection maps. Socket loops
