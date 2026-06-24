@@ -374,14 +374,22 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`、
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `processDueDeadlineAcrossConnectionsAndPollDatagram`、
 `processDueDeadlineAcrossConnectionsAndDrainDatagrams`、
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`、
@@ -1208,6 +1216,16 @@ close 和 route cleanup 事件。
   `EndpointConnectionInstalledKeyPollView`。单元测试证明 Application loss-time deadline
   在 due 阶段没有 datagram 时，可以继续进入 backend work，并通过 poll 和 bounded-drain
   形态发出调用方选择的 0-RTT `RESET_STREAM` 输出。
+- 2026-06-24：新增 single-connection due-deadline backend explicit-output
+  变体：
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions()`，
+  以及对应 compatible-version 形态。这些入口把 due recovery options 与 backend output
+  views 分开，让 live Application loss-time deadline 可以先运行 backend work，再 poll 或
+  drain 调用方选择的 0-RTT output。单元测试证明 poll 和 bounded-drain 的输出选择、deadline
+  前不会 drive backend、以及 deadline 前 endpoint state 不变。
 - 2026-06-18：把内部 connection bookkeeping 记录拆到
   `src/quic/connection_state.zig`，同时保持 `src/lib.zig` 作为稳定 public module root。
   新模块负责 pending STREAM/CRYPTO frame、sent-packet metadata、pending close/control

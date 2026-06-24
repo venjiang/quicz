@@ -9083,6 +9083,100 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process a due deadline, drive one backend, then poll explicit installed-key output.
+    ///
+    /// This keeps the due-deadline recovery options separate from the backend
+    /// output selection. Use it when a live due deadline should unlock backend
+    /// progress, but the next datagram must come from caller-selected output
+    /// views such as accepted 0-RTT connections.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        due_options: EndpointPollInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagramForBackendOutput(
+            connection_id,
+            connection,
+            now_millis,
+            due_options,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions(
+                backend_space,
+                &drive_views,
+                poll_views,
+                now_millis,
+            ),
+        };
+    }
+
+    /// Process a due deadline, drive one backend, then drain explicit installed-key output.
+    ///
+    /// This is the bounded-output form of
+    /// `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        due_options: EndpointPollInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagramForBackendOutput(
+            connection_id,
+            connection,
+            now_millis,
+            due_options,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+                backend_space,
+                &drive_views,
+                poll_views,
+                now_millis,
+                out,
+            ),
+        };
+    }
+
     /// Process a due deadline, drive a close-propagating backend, then poll output.
     ///
     /// Due recovery datagrams and terminal idle/close cleanup stop before
@@ -9186,6 +9280,98 @@ pub const EndpointConnectionLifecycle = struct {
                 &poll_views,
                 now_millis,
                 poll_options.space,
+                out,
+            ),
+        };
+    }
+
+    /// Process a due deadline, drive a close-propagating backend, then poll explicit output.
+    ///
+    /// This is the OrClose form of
+    /// `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        due_options: EndpointPollInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagramForBackendOutput(
+            connection_id,
+            connection,
+            now_millis,
+            due_options,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions(
+                backend_space,
+                &drive_views,
+                poll_views,
+                now_millis,
+            ),
+        };
+    }
+
+    /// Process a due deadline, drive a close-propagating backend, then drain explicit output.
+    ///
+    /// This is the bounded-output form of
+    /// `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        due_options: EndpointPollInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagramForBackendOutput(
+            connection_id,
+            connection,
+            now_millis,
+            due_options,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+                backend_space,
+                &drive_views,
+                poll_views,
+                now_millis,
                 out,
             ),
         };
@@ -9301,6 +9487,102 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process a due deadline, drive one compatible-version backend, then poll explicit output.
+    ///
+    /// This is the RFC 9368-compatible form of
+    /// `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        due_options: EndpointPollInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagramForBackendOutput(
+            connection_id,
+            connection,
+            now_millis,
+            due_options,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions(
+                backend_space,
+                &drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+            ),
+        };
+    }
+
+    /// Process a due deadline, drive one compatible-version backend, then drain explicit output.
+    ///
+    /// This is the bounded-output form of
+    /// `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        due_options: EndpointPollInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagramForBackendOutput(
+            connection_id,
+            connection,
+            now_millis,
+            due_options,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions(
+                backend_space,
+                &drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+                out,
+            ),
+        };
+    }
+
     /// Process a due deadline, drive compatible-version close path, then poll output.
     ///
     /// Peer Version Information errors queue CONNECTION_CLOSE and return before
@@ -9406,6 +9688,102 @@ pub const EndpointConnectionLifecycle = struct {
                 &poll_views,
                 now_millis,
                 poll_options.space,
+                out,
+            ),
+        };
+    }
+
+    /// Process a due deadline, drive compatible-version close path, then poll explicit output.
+    ///
+    /// This is the OrClose form of
+    /// `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        due_options: EndpointPollInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagramForBackendOutput(
+            connection_id,
+            connection,
+            now_millis,
+            due_options,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions(
+                backend_space,
+                &drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
+            ),
+        };
+    }
+
+    /// Process a due deadline, drive compatible-version close path, then drain explicit output.
+    ///
+    /// This is the bounded-output form of
+    /// `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_space: PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+        due_options: EndpointPollInstalledKeyDatagramOptions,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) Error!?EndpointDueWorkCryptoBackendDatagramDrainResult {
+        const due_work = (try self.processDueDeadlineAndPollDatagramForBackendOutput(
+            connection_id,
+            connection,
+            now_millis,
+            due_options,
+        )) orelse return null;
+        if (due_work.datagram != null or
+            due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+                backend_space,
+                &drive_views,
+                compatibilities,
+                poll_views,
+                now_millis,
                 out,
             ),
         };
@@ -44005,6 +44383,344 @@ test "EndpointConnectionLifecycle due-deadline backend drain keeps explicit zero
         1,
         .{ .reset_stream = reset_frame },
     ));
+}
+
+test "EndpointConnectionLifecycle single due-deadline backend poll keeps separate explicit output" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const due_client_dcid = [_]u8{ 0x30, 0x40, 0x50, 0x60 };
+    const due_server_dcid = [_]u8{ 0xc0, 0xd0, 0xe0, 0xf0 };
+    const output_client_dcid = [_]u8{ 0x31, 0x41, 0x51, 0x61 };
+    const output_server_dcid = [_]u8{ 0xc1, 0xd1, 0xe1, 0xf1 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var due_connection = try Connection.init(std.testing.allocator, .client, .{});
+    defer due_connection.deinit();
+    try due_connection.confirmHandshake();
+    try due_connection.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    _ = try due_connection.recordPacketSentInSpace(.application, 1000, 100);
+    _ = try due_connection.recordPacketSentInSpace(.application, 1200, 100);
+    try due_connection.receiveAckInSpace(.application, 1300, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try lifecycle.armRecoveryTimerFromConnection(207, &due_connection);
+    const deadline = lifecycle.nextDeadline(207, &due_connection) orelse return error.TestUnexpectedResult;
+    const recovery_timer = deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.loss_time, recovery_timer.kind);
+
+    var output_client = try Connection.init(std.testing.allocator, .client, .{});
+    defer output_client.deinit();
+    try output_client.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try output_client.confirmHandshake();
+
+    const stream_id = try output_client.openStream();
+    try output_client.sendOnStream(stream_id, "bye", false);
+    try output_client.resetStream(stream_id, 93);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 93,
+        .final_size = 3,
+    };
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const due_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .application,
+        .destination_connection_id = &due_client_dcid,
+        .source_connection_id = &due_server_dcid,
+    };
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{.{
+        .connection_id = 208,
+        .connection = &output_client,
+        .poll_options = .{
+            .space = .zero_rtt,
+            .destination_connection_id = &output_server_dcid,
+            .source_connection_id = &output_client_dcid,
+        },
+    }};
+
+    const due = (try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions(
+        207,
+        &due_connection,
+        recovery_timer.deadline_millis,
+        .application,
+        backend.backend(),
+        &scratch,
+        due_options,
+        &poll_views,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 207), due.due_work.deadline.connection_id);
+    try std.testing.expectEqual(@as(?[]u8, null), due.due_work.datagram);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+
+    const driven = due.backend orelse return error.TestUnexpectedResult;
+    const polled = driven.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 208), polled.connection_id);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        polled.datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle single due-deadline backend drain keeps separate explicit output" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const due_client_dcid = [_]u8{ 0x32, 0x42, 0x52, 0x62 };
+    const due_server_dcid = [_]u8{ 0xc2, 0xd2, 0xe2, 0xf2 };
+    const output_client_dcid = [_]u8{ 0x33, 0x43, 0x53, 0x63 };
+    const output_server_dcid = [_]u8{ 0xc3, 0xd3, 0xe3, 0xf3 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var due_connection = try Connection.init(std.testing.allocator, .client, .{});
+    defer due_connection.deinit();
+    try due_connection.confirmHandshake();
+    try due_connection.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    _ = try due_connection.recordPacketSentInSpace(.application, 1000, 100);
+    _ = try due_connection.recordPacketSentInSpace(.application, 1200, 100);
+    try due_connection.receiveAckInSpace(.application, 1300, .{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try lifecycle.armRecoveryTimerFromConnection(209, &due_connection);
+    const deadline = lifecycle.nextDeadline(209, &due_connection) orelse return error.TestUnexpectedResult;
+    const recovery_timer = deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.loss_time, recovery_timer.kind);
+
+    var output_client = try Connection.init(std.testing.allocator, .client, .{});
+    defer output_client.deinit();
+    try output_client.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try output_client.confirmHandshake();
+
+    const stream_id = try output_client.openStream();
+    try output_client.sendOnStream(stream_id, "bye", false);
+    try output_client.resetStream(stream_id, 94);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 94,
+        .final_size = 3,
+    };
+
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+    const due_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .application,
+        .destination_connection_id = &due_client_dcid,
+        .source_connection_id = &due_server_dcid,
+    };
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{.{
+        .connection_id = 210,
+        .connection = &output_client,
+        .poll_options = .{
+            .space = .zero_rtt,
+            .destination_connection_id = &output_server_dcid,
+            .source_connection_id = &output_client_dcid,
+        },
+    }};
+    var out: [1]EndpointPolledDatagramResult = undefined;
+
+    const due = (try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions(
+        209,
+        &due_connection,
+        recovery_timer.deadline_millis,
+        .application,
+        backend.backend(),
+        &scratch,
+        due_options,
+        &poll_views,
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 209), due.due_work.deadline.connection_id);
+    try std.testing.expectEqual(@as(?[]u8, null), due.due_work.datagram);
+    try std.testing.expectEqual(@as(usize, 1), backend.pulls);
+
+    const driven = due.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), driven.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), driven.drain.first_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    try std.testing.expectEqual(@as(u64, 210), out[0].connection_id);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        out[0].datagram,
+        secrets.client,
+        0,
+        .{ .reset_stream = reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle single due-deadline explicit backend variants are no-op before deadline" {
+    const NoopBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const client_dcid = [_]u8{ 0x34, 0x44, 0x54, 0x64 };
+    const server_dcid = [_]u8{ 0xc4, 0xd4, 0xe4, 0xf4 };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    _ = try client.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(211, &client);
+    const deadline = lifecycle.nextDeadline(211, &client) orelse return error.TestUnexpectedResult;
+    const recovery_timer = deadline.recovery orelse return error.TestUnexpectedResult;
+
+    var backend = NoopBackend{};
+    var scratch: [16]u8 = undefined;
+    const versions = [_]VersionCompatibility{};
+    const due_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    };
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{};
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    const before_deadline = recovery_timer.deadline_millis - 1;
+
+    try std.testing.expect(try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions(
+        211,
+        &client,
+        before_deadline,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        due_options,
+        &poll_views,
+    ) == null);
+    try std.testing.expect(try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        211,
+        &client,
+        before_deadline,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        due_options,
+        &poll_views,
+        &out,
+    ) == null);
+    try std.testing.expect(try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions(
+        211,
+        &client,
+        before_deadline,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &versions,
+        due_options,
+        &poll_views,
+    ) == null);
+    try std.testing.expect(try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions(
+        211,
+        &client,
+        before_deadline,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &versions,
+        due_options,
+        &poll_views,
+        &out,
+    ) == null);
+    try std.testing.expect(try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions(
+        211,
+        &client,
+        before_deadline,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &versions,
+        due_options,
+        &poll_views,
+    ) == null);
+    try std.testing.expect(try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        211,
+        &client,
+        before_deadline,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &versions,
+        due_options,
+        &poll_views,
+        &out,
+    ) == null);
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 }
 
 test "EndpointConnectionLifecycle cross due-deadline backend poll keeps explicit zero RTT backend output" {

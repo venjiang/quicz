@@ -264,14 +264,22 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagram`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`,
+`processDueDeadlineAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processDueDeadlineAcrossConnectionsAndPollDatagram`,
 `processDueDeadlineAcrossConnectionsAndDrainDatagrams`,
 `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`,
@@ -1359,6 +1367,17 @@ QUIC unless the gap is named and the verification evidence is added here.
   Application loss-time deadline with no due datagram can continue into backend
   work and emit caller-selected 0-RTT `RESET_STREAM` output through both poll
   and bounded-drain forms.
+- 2026-06-24: Added single-connection due-deadline backend explicit-output
+  variants:
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagramsWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagramWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions()`,
+  and the matching compatible-version forms. These keep due recovery options
+  separate from backend output views, so a live Application loss-time deadline
+  can run backend work and then poll or drain caller-selected 0-RTT output.
+  Unit coverage proves poll and bounded-drain output selection, no backend
+  drive before the deadline, and unchanged before-deadline endpoint state.
 - 2026-06-18: Split internal connection bookkeeping records into
   `src/quic/connection_state.zig` while keeping `src/lib.zig` as the stable
   public module root. The new module owns pending STREAM/CRYPTO frames,
