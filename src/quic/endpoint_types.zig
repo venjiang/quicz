@@ -1,9 +1,11 @@
 const address_validation_token = @import("address_validation_token.zig");
+const connection_config = @import("connection_config.zig");
 const crypto_types = @import("crypto_types.zig");
 const endpoint = @import("endpoint.zig");
 const packet = @import("packet.zig");
 const transport_types = @import("transport_types.zig");
 
+const Config = connection_config.Config;
 const CryptoBackendProgress = crypto_types.CryptoBackendProgress;
 const Error = transport_types.Error;
 const LossDetectionTimerDeadline = transport_types.LossDetectionTimerDeadline;
@@ -14,6 +16,24 @@ pub const EndpointConnectionRetireResult = struct {
     routes_retired: usize,
     /// Whether an armed loss/PTO timer was removed for the connection.
     recovery_timer_disarmed: bool,
+};
+
+/// Endpoint result after processing a client-side Version Negotiation response.
+pub const EndpointVersionNegotiationResult = struct {
+    /// Version selected from the validated Version Negotiation packet.
+    selected_version: packet.Version,
+    /// Config for the follow-up client connection attempt using that version.
+    followup_config: Config,
+    /// Route and timer cleanup applied to the superseded connection attempt.
+    retired: EndpointConnectionRetireResult,
+};
+
+/// Endpoint result after accepting Version Negotiation and registering follow-up routing.
+pub const EndpointVersionNegotiationFollowupResult = struct {
+    /// Version Negotiation processing result, including selected version and old route cleanup.
+    version_negotiation: EndpointVersionNegotiationResult,
+    /// Route installed for the next client Initial Source CID.
+    followup_route: endpoint.RouteResult,
 };
 
 /// Errors returned while coordinating endpoint-owned Version Negotiation follow-up state.

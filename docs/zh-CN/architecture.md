@@ -58,8 +58,8 @@ fixture 泄漏到核心 API。
 聚合入口。实现代码按职责逐步放到 `src/quic/` 下；例如
 `src/quic/transport_types.zig` 负责共享 transport state enum 和 version compatibility helper，
 `src/quic/crypto_types.zig` 负责共享 TLS traffic-secret 和 backend-progress 类型，
-`src/quic/endpoint_types.zig` 负责 endpoint lifecycle 共享的结果、deadline、drain、feed 和
-datagram 选项契约，
+`src/quic/endpoint_types.zig` 负责 endpoint lifecycle 共享结果、Version Negotiation 结果、
+deadline、drain、feed 和 datagram 选项契约，
 `src/quic/connection_config.zig` 负责公开连接配置和不需要访问连接状态机的固定存储
 transport-parameter 值，
 `src/quic/connection_rules.zig` 负责连接级纯规则，例如 ACK-eliciting send-admission

@@ -69,7 +69,8 @@ Implementation code moves under `src/quic/` by responsibility; for example,
 `src/quic/transport_types.zig` owns shared transport state enums and version
 compatibility helpers, `src/quic/crypto_types.zig` owns shared TLS
 traffic-secret and backend-progress types, `src/quic/endpoint_types.zig` owns
-endpoint lifecycle result, deadline, drain, feed, and datagram option contracts,
+endpoint lifecycle result, Version Negotiation result, deadline, drain, feed,
+and datagram option contracts,
 `src/quic/connection_config.zig` owns public connection configuration and
 fixed-storage transport-parameter values that do not need access to the
 connection state machine,

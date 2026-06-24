@@ -1483,6 +1483,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   re-export surface. The moved rules cover ACK-eliciting send-admission
   classification, Initial DCID length validation, stateless reset token
   comparison, and transport-parameter validation error mapping.
+- 2026-06-24: Moved the pure Version Negotiation endpoint result contracts
+  `EndpointVersionNegotiationResult` and
+  `EndpointVersionNegotiationFollowupResult` into `src/quic/endpoint_types.zig`
+  while keeping `src/lib.zig` as the public re-export surface. The
+  connection-owning Version Negotiation handoff results remain in `src/lib.zig`
+  until `Connection` is split into its own module.
 - 2026-06-10: Added
   `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` and
   `EndpointPolledDatagramResult` for caller-owned connection maps. Socket loops

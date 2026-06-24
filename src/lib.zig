@@ -61,6 +61,8 @@ pub const Config = connection_config.Config;
 pub const EndpointLossDetectionTimerDeadline = endpoint_types.EndpointLossDetectionTimerDeadline;
 pub const EndpointLossDetectionTimers = endpoint_timers.EndpointLossDetectionTimers;
 pub const EndpointConnectionRetireResult = endpoint_types.EndpointConnectionRetireResult;
+pub const EndpointVersionNegotiationResult = endpoint_types.EndpointVersionNegotiationResult;
+pub const EndpointVersionNegotiationFollowupResult = endpoint_types.EndpointVersionNegotiationFollowupResult;
 pub const EndpointVersionNegotiationError = endpoint_types.EndpointVersionNegotiationError;
 pub const EndpointProtectedInitialError = endpoint_types.EndpointProtectedInitialError;
 pub const EndpointRetryProtectedInitialError = endpoint_types.EndpointRetryProtectedInitialError;
@@ -254,24 +256,6 @@ const PeerTransportParameterValidationError = connection_rules.PeerTransportPara
 const peerTransportParameterValidationErrorAsPublic = connection_rules.peerTransportParameterValidationErrorAsPublic;
 const statelessResetTokensEqual = connection_rules.statelessResetTokensEqual;
 const validateInitialDestinationConnectionIdLength = connection_rules.validateInitialDestinationConnectionIdLength;
-
-/// Endpoint result after processing a client-side Version Negotiation response.
-pub const EndpointVersionNegotiationResult = struct {
-    /// Version selected from the validated Version Negotiation packet.
-    selected_version: packet.Version,
-    /// Config for the follow-up client connection attempt using that version.
-    followup_config: Config,
-    /// Route and timer cleanup applied to the superseded connection attempt.
-    retired: EndpointConnectionRetireResult,
-};
-
-/// Endpoint result after accepting Version Negotiation and registering follow-up routing.
-pub const EndpointVersionNegotiationFollowupResult = struct {
-    /// Version Negotiation processing result, including selected version and old route cleanup.
-    version_negotiation: EndpointVersionNegotiationResult,
-    /// Route installed for the next client Initial Source CID.
-    followup_route: endpoint.RouteResult,
-};
 
 /// Endpoint result after accepting Version Negotiation and creating the follow-up connection.
 pub const EndpointVersionNegotiationHandoffResult = struct {

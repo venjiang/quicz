@@ -1311,6 +1311,10 @@ close 和 route cleanup 事件。
   `src/lib.zig` 作为公开 re-export surface。迁出的规则覆盖 ACK-eliciting send-admission
   分类、Initial DCID 长度校验、stateless reset token 比较，以及 transport-parameter
   validation error 映射。
+- 2026-06-24：将纯 Version Negotiation endpoint result 契约
+  `EndpointVersionNegotiationResult` 和 `EndpointVersionNegotiationFollowupResult`
+  迁到 `src/quic/endpoint_types.zig`，同时保持 `src/lib.zig` 作为公开 re-export surface。
+  持有 `Connection` 的 Version Negotiation handoff result 会等 `Connection` 拆出独立模块后再迁。
 - 2026-06-10：新增
   `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` 和
   `EndpointPolledDatagramResult`，服务于调用方持有 connection map 的输出轮询。socket
