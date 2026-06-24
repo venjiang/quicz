@@ -143,8 +143,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagram`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions`,
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions`,
@@ -1509,6 +1511,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   and preserve the endpoint pending-work ordering in the same lifecycle call.
   The result contract lives in `src/quic/endpoint_types.zig` and is
   re-exported from `src/lib.zig`.
+- 2026-06-24: Added
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`
+  and `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions()`
+  so caller-owned socket loops can preserve per-connection installed-key output
+  choices after receive processing, pending work, and backend progress. Unit
+  coverage proves explicit Handshake output options return and drain protected
+  backend responses from the same lifecycle call.
 - 2026-06-24: Split connection-level pure rules into
   `src/quic/connection_rules.zig` while keeping `src/lib.zig` as the public
   re-export surface. The moved rules cover ACK-eliciting send-admission

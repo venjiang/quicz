@@ -125,8 +125,10 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`、
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagram`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions`、
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndDrainDatagrams`、
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions`、
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagrams`、
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions`、
@@ -1334,6 +1336,12 @@ close 和 route cleanup 事件。
   routed Handshake input 可以驱动调用方持有的 backend，把一个 protected Handshake response
   drain 到调用方持有的 output slice，并在同一个 lifecycle call 中保持 endpoint pending-work
   顺序。结果契约放在 `src/quic/endpoint_types.zig`，并从 `src/lib.zig` re-export。
+- 2026-06-24：新增
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`
+  和 `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions()`，
+  让调用方持有 connection map 的 socket loop 可以在 receive processing、pending work 和
+  backend progress 后继续保留每条连接自己的 installed-key output 选择。单元测试证明 explicit
+  Handshake output options 可以在同一个 lifecycle call 中返回和 drain protected backend response。
 - 2026-06-24：将连接级纯规则拆到 `src/quic/connection_rules.zig`，同时保持
   `src/lib.zig` 作为公开 re-export surface。迁出的规则覆盖 ACK-eliciting send-admission
   分类、Initial DCID 长度校验、stateless reset token 比较，以及 transport-parameter
