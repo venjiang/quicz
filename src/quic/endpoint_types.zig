@@ -553,6 +553,16 @@ pub const EndpointFeedPendingWorkCryptoBackendDatagramResult = struct {
     backend: ?EndpointCryptoBackendDriveDatagramResult = null,
 };
 
+/// Result from feeding one installed-key datagram, processing pending work, driving backend, then draining output.
+pub const EndpointFeedPendingWorkCryptoBackendDatagramDrainResult = struct {
+    /// Receive classification and processing result.
+    feed: EndpointFeedInstalledKeyDatagramResult,
+    /// Pending-work actions applied after receive processing.
+    pending_work: EndpointPendingWorkSweepResult,
+    /// Backend drive and bounded output drain when `feed` routed and pending work kept connections live.
+    backend: ?EndpointCryptoBackendDriveDatagramDrainResult = null,
+};
+
 /// Result from feeding one installed-key datagram, then polling output.
 pub const EndpointFeedInstalledKeyDatagramPollResult = struct {
     /// Receive classification and processing result.

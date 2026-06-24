@@ -143,6 +143,8 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndSelectNextDeadline`,
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagram`,
+`feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
+`feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagrams`,
 `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions`,
@@ -1497,6 +1499,15 @@ QUIC unless the gap is named and the verification evidence is added here.
   coverage proves routed Handshake input can drive a caller-owned backend and
   return the protected Handshake response datagram from the same lifecycle
   call. The result contract lives in `src/quic/endpoint_types.zig` and is
+  re-exported from `src/lib.zig`.
+- 2026-06-24: Added
+  `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndDrainDatagrams()`
+  and `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndDrainDatagrams()`
+  as bounded receive-to-pending-work-to-backend-to-output socket-loop steps.
+  Unit coverage proves routed Handshake input can drive a caller-owned backend,
+  drain one protected Handshake response into the caller-owned output slice,
+  and preserve the endpoint pending-work ordering in the same lifecycle call.
+  The result contract lives in `src/quic/endpoint_types.zig` and is
   re-exported from `src/lib.zig`.
 - 2026-06-24: Split connection-level pure rules into
   `src/quic/connection_rules.zig` while keeping `src/lib.zig` as the public
