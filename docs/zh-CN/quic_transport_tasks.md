@@ -1307,6 +1307,10 @@ close 和 route cleanup 事件。
   让调用方持有 connection map 的 socket loop 可以在 receive processing 和 pending work
   后继续保留每条连接自己的 installed-key output 选择。单元测试证明 dropped input 后仍能
   drain 调用方选择的 0-RTT output。
+- 2026-06-24：将连接级纯规则拆到 `src/quic/connection_rules.zig`，同时保持
+  `src/lib.zig` 作为公开 re-export surface。迁出的规则覆盖 ACK-eliciting send-admission
+  分类、Initial DCID 长度校验、stateless reset token 比较，以及 transport-parameter
+  validation error 映射。
 - 2026-06-10：新增
   `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` 和
   `EndpointPolledDatagramResult`，服务于调用方持有 connection map 的输出轮询。socket

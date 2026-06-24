@@ -73,6 +73,10 @@ endpoint lifecycle result, deadline, drain, feed, and datagram option contracts,
 `src/quic/connection_config.zig` owns public connection configuration and
 fixed-storage transport-parameter values that do not need access to the
 connection state machine,
+`src/quic/connection_rules.zig` owns small connection-level pure rules such as
+ACK-eliciting send-admission classification, Initial DCID length validation,
+stateless reset token comparison, and transport-parameter validation error
+mapping,
 `src/quic/connection_state.zig` owns internal connection bookkeeping records
 such as pending STREAM/CRYPTO frames, sent-packet metadata, pending close and
 flow-control frames, path-challenge state, RTT/PTO snapshots, and connection-ID

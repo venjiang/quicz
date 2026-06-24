@@ -1478,6 +1478,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   so caller-owned socket loops can preserve per-connection installed-key output
   choices after receive processing and pending work. Unit coverage proves a
   dropped input can still drain caller-selected 0-RTT output.
+- 2026-06-24: Split connection-level pure rules into
+  `src/quic/connection_rules.zig` while keeping `src/lib.zig` as the public
+  re-export surface. The moved rules cover ACK-eliciting send-admission
+  classification, Initial DCID length validation, stateless reset token
+  comparison, and transport-parameter validation error mapping.
 - 2026-06-10: Added
   `EndpointConnectionLifecycle.pollDatagramAcrossConnections()` and
   `EndpointPolledDatagramResult` for caller-owned connection maps. Socket loops

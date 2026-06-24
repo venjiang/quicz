@@ -14,6 +14,7 @@ const tls_backend_module = @import("quic/tls_backend.zig");
 const endpoint_types = @import("quic/endpoint_types.zig");
 const endpoint_timers = @import("quic/endpoint_timers.zig");
 const connection_config = @import("quic/connection_config.zig");
+const connection_rules = @import("quic/connection_rules.zig");
 const connection_version = @import("quic/connection_version.zig");
 const connection_state = @import("quic/connection_state.zig");
 const packet_number_space = @import("quic/packet_number_space.zig");
@@ -130,12 +131,7 @@ pub const ProtectedLongDatagramKeys = packet_context.ProtectedLongDatagramKeys;
 pub const EcnCodepoint = packet_context.EcnCodepoint;
 pub const EcnValidationState = packet_context.EcnValidationState;
 
-/// Result of checking whether one ack-eliciting payload may be sent.
-pub const AckElicitingSendAdmission = enum {
-    allowed,
-    congestion_limited,
-    anti_amplification_limited,
-};
+pub const AckElicitingSendAdmission = connection_rules.AckElicitingSendAdmission;
 
 test {
     _ = protection;
@@ -149,6 +145,7 @@ test {
     _ = endpoint_types;
     _ = endpoint_timers;
     _ = connection_config;
+    _ = connection_rules;
     _ = connection_version;
     _ = connection_state;
     _ = packet_number_space;
@@ -253,37 +250,10 @@ const isLocalBidirectionalStream = stream_id_rules.isLocalBidirectional;
 const isLocalUnidirectionalStream = stream_id_rules.isLocalUnidirectional;
 const streamCountForId = stream_id_rules.countForId;
 
-const PeerTransportParameterValidationError = Error || error{
-    VersionNegotiationError,
-};
-
-fn peerTransportParameterValidationErrorAsPublic(err: PeerTransportParameterValidationError) Error {
-    return switch (err) {
-        error.VersionNegotiationError => error.InvalidPacket,
-        error.ConnectionClosed => error.ConnectionClosed,
-        error.InvalidPacket => error.InvalidPacket,
-        error.CryptoError => error.CryptoError,
-        error.Internal => error.Internal,
-        error.OutOfMemory => error.OutOfMemory,
-        error.BufferTooSmall => error.BufferTooSmall,
-        error.FlowControlBlocked => error.FlowControlBlocked,
-        error.StreamClosed => error.StreamClosed,
-        error.InvalidStream => error.InvalidStream,
-    };
-}
-
-fn statelessResetTokensEqual(
-    a: [packet.stateless_reset_token_len]u8,
-    b: [packet.stateless_reset_token_len]u8,
-) bool {
-    return std.crypto.timing_safe.eql([packet.stateless_reset_token_len]u8, a, b);
-}
-
-fn validateInitialDestinationConnectionIdLength(dcid: []const u8) Error!void {
-    if (dcid.len < min_initial_destination_connection_id_len or dcid.len > max_connection_id_len) {
-        return error.InvalidPacket;
-    }
-}
+const PeerTransportParameterValidationError = connection_rules.PeerTransportParameterValidationError;
+const peerTransportParameterValidationErrorAsPublic = connection_rules.peerTransportParameterValidationErrorAsPublic;
+const statelessResetTokensEqual = connection_rules.statelessResetTokensEqual;
+const validateInitialDestinationConnectionIdLength = connection_rules.validateInitialDestinationConnectionIdLength;
 
 /// Endpoint result after processing a client-side Version Negotiation response.
 pub const EndpointVersionNegotiationResult = struct {

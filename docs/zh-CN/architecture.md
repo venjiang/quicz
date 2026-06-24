@@ -62,6 +62,9 @@ fixture 泄漏到核心 API。
 datagram 选项契约，
 `src/quic/connection_config.zig` 负责公开连接配置和不需要访问连接状态机的固定存储
 transport-parameter 值，
+`src/quic/connection_rules.zig` 负责连接级纯规则，例如 ACK-eliciting send-admission
+分类、Initial DCID 长度校验、stateless reset token 比较，以及 transport-parameter
+validation error 映射，
 `src/quic/connection_state.zig` 负责内部 connection bookkeeping 记录，例如 pending
 STREAM/CRYPTO frame、sent-packet metadata、pending close 和 flow-control frame、
 path-challenge state、RTT/PTO snapshot 以及 connection-ID rollback snapshot，
