@@ -506,6 +506,10 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`、
 `driveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`、
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndArmConnections`、
+`driveCryptoBackendAcrossSpacesWithCompatibleVersionAndArmConnection`、
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndSelectNextDeadline`、
+`driveCryptoBackendAcrossSpacesWithCompatibleVersionAndSelectNextDeadline`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`、
 `driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`、
@@ -515,6 +519,10 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`、
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndArmConnections`、
+`driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndArmConnection`、
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndSelectNextDeadline`、
+`driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndSelectNextDeadline`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`、
 `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`、
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`、
@@ -1908,6 +1916,17 @@ close 和 route cleanup 事件。
   backend error 会在 output draining 前停止。单连接 output-polling 形态证明
   one-datagram polling、close-before-poll suppression、compatible peer Version
   Information 处理，以及 compatible-version close-before-poll suppression。
+- 2026-07-02：新增 cross-space RFC 9368-compatible backend-drive primitive：
+  `Connection.driveCryptoBackendAcrossSpacesWithCompatibleVersion()`、
+  `Connection.driveCryptoBackendAcrossSpacesWithCompatibleVersionOrClose()`、
+  `EndpointConnectionLifecycle.driveCryptoBackendAcrossSpacesWithCompatibleVersionAndArmConnection()`、
+  `EndpointConnectionLifecycle.driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndArmConnections()`、
+  `EndpointConnectionLifecycle.driveCryptoBackendAcrossSpacesWithCompatibleVersionAndSelectNextDeadline()`、
+  `EndpointConnectionLifecycle.driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndSelectNextDeadline()`，
+  以及对应 OrClose 形态。它们复用现有 ordered-space backend drive 和 compatible
+  peer-parameter policy，让 socket loop 可以在一个 lifecycle step 中处理 Initial/Handshake
+  backend work 与 compatible Version Information。单元测试证明跨 space 的 compatible
+  Version Information application、deadline selection、close-before-output 行为和首错停止 sweep。
 - 2026-06-10：新增 due-deadline-to-backend-to-output 和
   due-deadline-to-backend-to-bounded-drain loop step：
   `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram()`、

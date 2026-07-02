@@ -392,6 +392,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`,
 `driveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`,
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndArmConnections`,
+`driveCryptoBackendAcrossSpacesWithCompatibleVersionAndArmConnection`,
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndSelectNextDeadline`,
+`driveCryptoBackendAcrossSpacesWithCompatibleVersionAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
 `driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
@@ -401,6 +405,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline`,
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndArmConnections`,
+`driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndArmConnection`,
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndSelectNextDeadline`,
+`driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
@@ -1977,6 +1985,19 @@ QUIC unless the gap is named and the verification evidence is added here.
   steps. Unit coverage proves compatible Version Information application,
   endpoint recovery scheduling refresh, and recovery deadline selection without
   polling output.
+- 2026-07-02: Added cross-space RFC 9368-compatible backend-drive primitives:
+  `Connection.driveCryptoBackendAcrossSpacesWithCompatibleVersion()`,
+  `Connection.driveCryptoBackendAcrossSpacesWithCompatibleVersionOrClose()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendAcrossSpacesWithCompatibleVersionAndArmConnection()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndArmConnections()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendAcrossSpacesWithCompatibleVersionAndSelectNextDeadline()`,
+  `EndpointConnectionLifecycle.driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndSelectNextDeadline()`,
+  and the matching OrClose forms. They reuse the existing ordered-space backend
+  drive and compatible peer-parameter policy, so a socket loop can service
+  Initial/Handshake backend work with compatible Version Information in one
+  lifecycle step. Unit coverage proves compatible Version Information
+  application across spaces, deadline selection, close-before-output behavior,
+  and first-error sweep stopping.
 - 2026-06-10: Added `EndpointCryptoBackendDriveDatagramResult` and
   backend-drive-to-datagram loop steps:
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndPollDatagram()`,

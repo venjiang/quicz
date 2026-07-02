@@ -8561,6 +8561,36 @@ pub const EndpointConnectionLifecycle = struct {
         return progress;
     }
 
+    /// Drive a compatible-version backend across ordered packet number spaces
+    /// under endpoint lifecycle ownership.
+    ///
+    /// This is the cross-space form of
+    /// `driveCryptoBackendInSpaceWithCompatibleVersionAndArmConnection()`. It
+    /// lets a socket loop service ordered Initial/Handshake backend progress
+    /// while still applying peer Version Information with RFC 9368-compatible
+    /// selection rules.
+    pub fn driveCryptoBackendAcrossSpacesWithCompatibleVersionAndArmConnection(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!CryptoBackendProgress {
+        const progress = connection.driveCryptoBackendAcrossSpacesWithCompatibleVersion(
+            spaces,
+            backend,
+            scratch,
+            compatibilities,
+        ) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return progress;
+    }
+
     /// Drive compatible-version crypto backends across caller-owned connections.
     ///
     /// This is the sweep form of
@@ -8586,6 +8616,81 @@ pub const EndpointConnectionLifecycle = struct {
             accumulateCryptoBackendProgress(&result, progress);
         }
         return result;
+    }
+
+    /// Drive compatible-version backends across ordered packet number spaces
+    /// for caller-owned connections.
+    ///
+    /// This is the cross-space sweep form of
+    /// `driveCryptoBackendsInSpaceWithCompatibleVersionAndArmConnections()`.
+    pub fn driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndArmConnections(
+        self: *EndpointConnectionLifecycle,
+        spaces: []const PacketNumberSpace,
+        views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+    ) Error!EndpointCryptoBackendDriveSweepResult {
+        var result = EndpointCryptoBackendDriveSweepResult{};
+        for (views) |view| {
+            const progress = try self.driveCryptoBackendAcrossSpacesWithCompatibleVersionAndArmConnection(
+                view.connection_id,
+                view.connection,
+                spaces,
+                view.backend,
+                view.scratch,
+                compatibilities,
+            );
+            accumulateCryptoBackendProgress(&result, progress);
+        }
+        return result;
+    }
+
+    /// Drive compatible-version backends across ordered packet number spaces,
+    /// then select the next deadline.
+    pub fn driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const backend = try self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndArmConnections(
+            spaces,
+            drive_views,
+            compatibilities,
+        );
+        return .{
+            .backend = backend,
+            .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+        };
+    }
+
+    /// Drive one compatible-version backend across ordered packet number
+    /// spaces, then select the next deadline.
+    pub fn driveCryptoBackendAcrossSpacesWithCompatibleVersionAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const deadline_connections = [_]EndpointConnectionView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        return self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndSelectNextDeadline(
+            spaces,
+            &drive_views,
+            compatibilities,
+            &deadline_connections,
+        );
     }
 
     /// Drive compatible-version backends, then select the next deadline.
@@ -8945,6 +9050,34 @@ pub const EndpointConnectionLifecycle = struct {
         return progress;
     }
 
+    /// Drive a compatible-version backend across ordered packet number spaces
+    /// and queue transport close on negotiation errors.
+    ///
+    /// This wraps `Connection.driveCryptoBackendAcrossSpacesWithCompatibleVersionOrClose()`
+    /// and refreshes endpoint recovery scheduling after both success and
+    /// close-propagating peer Version Information errors.
+    pub fn driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndArmConnection(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!CryptoBackendProgress {
+        const progress = connection.driveCryptoBackendAcrossSpacesWithCompatibleVersionOrClose(
+            spaces,
+            backend,
+            scratch,
+            compatibilities,
+        ) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return progress;
+    }
+
     /// Drive compatible-version crypto backends with close propagation.
     ///
     /// This is the sweep form of
@@ -8971,6 +9104,81 @@ pub const EndpointConnectionLifecycle = struct {
             accumulateCryptoBackendProgress(&result, progress);
         }
         return result;
+    }
+
+    /// Drive compatible-version crypto backends across ordered packet number
+    /// spaces with close propagation.
+    ///
+    /// This is the cross-space form of
+    /// `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections()`.
+    pub fn driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndArmConnections(
+        self: *EndpointConnectionLifecycle,
+        spaces: []const PacketNumberSpace,
+        views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+    ) Error!EndpointCryptoBackendDriveSweepResult {
+        var result = EndpointCryptoBackendDriveSweepResult{};
+        for (views) |view| {
+            const progress = try self.driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndArmConnection(
+                view.connection_id,
+                view.connection,
+                spaces,
+                view.backend,
+                view.scratch,
+                compatibilities,
+            );
+            accumulateCryptoBackendProgress(&result, progress);
+        }
+        return result;
+    }
+
+    /// Drive compatible-version close-propagating backends across ordered
+    /// packet number spaces, then select the next deadline.
+    pub fn driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        compatibilities: []const VersionCompatibility,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const backend = try self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndArmConnections(
+            spaces,
+            drive_views,
+            compatibilities,
+        );
+        return .{
+            .backend = backend,
+            .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+        };
+    }
+
+    /// Drive one compatible-version close-propagating backend across ordered
+    /// packet number spaces, then select the next deadline.
+    pub fn driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const deadline_connections = [_]EndpointConnectionView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        return self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndSelectNextDeadline(
+            spaces,
+            &drive_views,
+            compatibilities,
+            &deadline_connections,
+        );
     }
 
     /// Drive compatible-version close-propagating backends, then select a deadline.
@@ -28379,6 +28587,51 @@ pub const Connection = struct {
         return self.driveCryptoBackendOverSpacesWithPeerParameterPolicy(spaces, backend, scratch, .close_on_error);
     }
 
+    /// Drive a backend across ordered packet number spaces while accepting
+    /// explicit compatible version negotiation.
+    ///
+    /// This is the cross-space form of
+    /// `driveCryptoBackendInSpaceWithCompatibleVersion()`. It preserves the
+    /// same ordered-space backend input/output behavior as
+    /// `driveCryptoBackendAcrossSpaces()` while applying peer Version
+    /// Information with the caller-provided compatibility table.
+    pub fn driveCryptoBackendAcrossSpacesWithCompatibleVersion(
+        self: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!CryptoBackendProgress {
+        return self.driveCryptoBackendOverSpacesWithPeerParameterPolicy(
+            spaces,
+            backend,
+            scratch,
+            .{ .compatible = compatibilities },
+        );
+    }
+
+    /// Drive a compatible-version backend across ordered packet number spaces
+    /// and queue CONNECTION_CLOSE on negotiation errors.
+    ///
+    /// This is the cross-space form of
+    /// `driveCryptoBackendInSpaceWithCompatibleVersionOrClose()`. Parsed RFC
+    /// 9368 negotiation failures use `VERSION_NEGOTIATION_ERROR`, and backend
+    /// output is not pulled after a peer transport-parameter error.
+    pub fn driveCryptoBackendAcrossSpacesWithCompatibleVersionOrClose(
+        self: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        compatibilities: []const VersionCompatibility,
+    ) Error!CryptoBackendProgress {
+        return self.driveCryptoBackendOverSpacesWithPeerParameterPolicy(
+            spaces,
+            backend,
+            scratch,
+            .{ .compatible_close_on_error = compatibilities },
+        );
+    }
+
     fn driveCryptoBackendInSpaceWithPeerParameterPolicy(
         self: *Connection,
         space: PacketNumberSpace,
@@ -34533,6 +34786,81 @@ test "driveCryptoBackendInSpaceWithCompatibleVersion applies backend peer Versio
         @as(?packet.Version, packet.Version.v2),
         try server.selectPeerCompatibleVersion(&compatibilities),
     );
+}
+
+test "driveCryptoBackendAcrossSpacesWithCompatibleVersion applies backend peer Version Information" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer server.deinit();
+
+    var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var scratch: [256]u8 = undefined;
+    const spaces = [_]PacketNumberSpace{ .initial, .handshake };
+    const progress = try server.driveCryptoBackendAcrossSpacesWithCompatibleVersion(
+        &spaces,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+    );
+
+    try std.testing.expectEqual(peer_params_out.getWritten().len, progress.peer_transport_parameters_bytes);
+    try std.testing.expect(progress.peer_transport_parameters_applied);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(usize, 2), backend.pulls);
+    try std.testing.expectEqual(@as(u64, 4321), server.peer_max_data);
+    const peer_version_information = server.peerVersionInformation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(packet.Version.v1, peer_version_information.chosen_version);
+    try std.testing.expectEqualSlices(packet.Version, &client_versions, peer_version_information.available_versions);
 }
 
 test "driveCryptoBackendInSpaceWithCompatibleVersionOrClose queues version negotiation close before output" {
@@ -73871,6 +74199,127 @@ test "EndpointConnectionLifecycle drives compatible-version crypto backends acro
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
 }
 
+test "EndpointConnectionLifecycle drives compatible-version crypto backends across spaces" {
+    const Backend = struct {
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+
+        fn handshakeConfirmed(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const client_versions = [_]packet.Version{ .v1, .v2 };
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+    const peer_params = peer_params_out.getWritten();
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var connection = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+        .initial_rtt_ms = 100,
+    });
+    defer connection.deinit();
+    try connection.validatePeerAddress();
+    try connection.confirmHandshake();
+    _ = try connection.recordPacketSentInSpace(.application, 10, 100);
+
+    var backend = Backend{ .peer_transport_parameters = peer_params };
+    var scratch: [256]u8 = undefined;
+    const spaces = [_]PacketNumberSpace{ .initial, .handshake };
+    const result = try lifecycle.driveCryptoBackendAcrossSpacesWithCompatibleVersionAndSelectNextDeadline(
+        164,
+        &connection,
+        &spaces,
+        backend.backend(),
+        &scratch,
+        &compatibilities,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.backend.connections_driven);
+    try std.testing.expectEqual(peer_params.len, result.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expect(result.backend.progress.peer_transport_parameters_applied);
+    try std.testing.expect(result.backend.progress.handshake_confirmed);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), result.backend.progress.peer_compatible_version_selected);
+    try std.testing.expectEqual(@as(usize, 2), backend.pulls);
+    try std.testing.expect(backend.peer_sent);
+    try std.testing.expectEqual(@as(u64, 4321), connection.peer_max_data);
+    const next = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 164), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+
+    var sweep_connection = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer sweep_connection.deinit();
+    try sweep_connection.validatePeerAddress();
+    var sweep_backend = Backend{ .peer_transport_parameters = peer_params };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 165,
+        .connection = &sweep_connection,
+        .backend = sweep_backend.backend(),
+        .scratch = &scratch,
+    }};
+    const deadline_connections = [_]EndpointConnectionView{.{
+        .connection_id = 165,
+        .connection = &sweep_connection,
+    }};
+    const sweep = try lifecycle.driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndSelectNextDeadline(
+        &spaces,
+        &drive_views,
+        &compatibilities,
+        &deadline_connections,
+    );
+    try std.testing.expectEqual(@as(usize, 1), sweep.backend.connections_driven);
+    try std.testing.expectEqual(peer_params.len, sweep.backend.progress.peer_transport_parameters_bytes);
+    try std.testing.expectEqual(@as(?packet.Version, packet.Version.v2), sweep.backend.progress.peer_compatible_version_selected);
+    try std.testing.expect(sweep_backend.peer_sent);
+}
+
 test "EndpointConnectionLifecycle drives compatible-version close path and refreshes state" {
     const Backend = struct {
         output_pulled: bool = false,
@@ -74147,6 +74596,164 @@ test "EndpointConnectionLifecycle drives compatible-version close-propagating cr
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqual(@as(?[]const u8, null), try third.pollTxInSpace(.handshake, 10, &payload_buf));
+}
+
+test "EndpointConnectionLifecycle drives compatible-version cross-space close sweep until first error" {
+    const OutputBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const VersionBackend = struct {
+        output_pulled: bool = false,
+        peer_transport_parameters: []const u8,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len < self.peer_transport_parameters.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.peer_transport_parameters.len], self.peer_transport_parameters);
+            self.peer_sent = true;
+            return out_buf[0..self.peer_transport_parameters.len];
+        }
+    };
+
+    const client_versions = [_]packet.Version{.v1};
+    const server_versions = [_]packet.Version{ .v2, .v1 };
+    const compatibilities = [_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = .v2,
+    }};
+
+    var peer_params_buf: [128]u8 = undefined;
+    var peer_params_out = buffer.fixedWriter(&peer_params_buf);
+    try transport_parameters.encode(peer_params_out.writer(), .{
+        .initial_max_data = 4321,
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        },
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var first = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer first.deinit();
+    try first.validatePeerAddress();
+
+    var second = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer second.deinit();
+    try second.validatePeerAddress();
+
+    var third = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer third.deinit();
+    try third.validatePeerAddress();
+
+    var first_backend = OutputBackend{};
+    var second_backend = VersionBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var third_backend = OutputBackend{};
+    var first_scratch: [8]u8 = undefined;
+    var second_scratch: [256]u8 = undefined;
+    var third_scratch: [8]u8 = undefined;
+    const views = [_]EndpointCryptoBackendDriveView{
+        .{ .connection_id = 166, .connection = &first, .backend = first_backend.backend(), .scratch = &first_scratch },
+        .{ .connection_id = 167, .connection = &second, .backend = second_backend.backend(), .scratch = &second_scratch },
+        .{ .connection_id = 168, .connection = &third, .backend = third_backend.backend(), .scratch = &third_scratch },
+    };
+    const spaces = [_]PacketNumberSpace{ .initial, .handshake };
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndArmConnections(
+            &spaces,
+            &views,
+            &compatibilities,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), first_backend.pulls);
+    try std.testing.expect(second_backend.peer_sent);
+    try std.testing.expect(!second_backend.output_pulled);
+    try std.testing.expectEqual(@as(usize, 0), third_backend.pulls);
+    try std.testing.expectEqual(ConnectionState.active, first.connectionState());
+    try std.testing.expectEqual(ConnectionState.closing, second.connectionState());
+    try std.testing.expectEqual(ConnectionState.active, third.connectionState());
+    try std.testing.expect(second.pending_close != null);
+    switch (second.pending_close orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.version_negotiation_error), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("version negotiation", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var single = try Connection.init(std.testing.allocator, .server, .{
+        .chosen_version = .v2,
+        .available_versions = &server_versions,
+    });
+    defer single.deinit();
+    try single.validatePeerAddress();
+    var single_backend = VersionBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
+    var single_scratch: [256]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndSelectNextDeadline(
+            169,
+            &single,
+            &spaces,
+            single_backend.backend(),
+            &single_scratch,
+            &compatibilities,
+        ),
+    );
+    try std.testing.expect(single_backend.peer_sent);
+    try std.testing.expect(!single_backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, single.connectionState());
 }
 
 test "EndpointConnectionLifecycle refreshes installed-key Handshake OrClose error state" {
