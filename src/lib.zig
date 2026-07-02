@@ -11841,6 +11841,78 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process one due deadline, drive one backend across ordered packet number
+    /// spaces, then select a deadline.
+    ///
+    /// This is the cross-space form of
+    /// `processDueDeadlineAndDriveCryptoBackendInSpaceAndSelectNextDeadline()`.
+    pub fn processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!?EndpointDueWorkCryptoBackendNextDeadlineResult {
+        const due_work = (try self.processDueDeadlineAndSelectNextDeadline(
+            connection_id,
+            connection,
+            now_millis,
+        )) orelse return null;
+        if (due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendAcrossSpacesAndSelectNextDeadline(
+                connection_id,
+                connection,
+                backend_spaces,
+                backend,
+                scratch,
+            ),
+        };
+    }
+
+    /// Process one due deadline, drive one close-propagating backend across
+    /// ordered packet number spaces, then select a deadline.
+    ///
+    /// This is the close-on-error cross-space form of
+    /// `processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndSelectNextDeadline()`.
+    pub fn processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!?EndpointDueWorkCryptoBackendNextDeadlineResult {
+        const due_work = (try self.processDueDeadlineAndSelectNextDeadline(
+            connection_id,
+            connection,
+            now_millis,
+        )) orelse return null;
+        if (due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendAcrossSpacesOrCloseAndSelectNextDeadline(
+                connection_id,
+                connection,
+                backend_spaces,
+                backend,
+                scratch,
+            ),
+        };
+    }
+
     /// Process one due deadline, drive one compatible-version backend, then select a deadline.
     ///
     /// This is the RFC 9368-compatible single-connection no-output form of the
@@ -11984,6 +12056,72 @@ pub const EndpointConnectionLifecycle = struct {
             .due_work = due_work,
             .backend = try self.driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline(
                 backend_space,
+                drive_views,
+                deadline_connections,
+            ),
+        };
+    }
+
+    /// Process the earliest due deadline, drive backends across ordered packet
+    /// number spaces, then select the next deadline.
+    ///
+    /// This is the cross-space form of
+    /// `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        due_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!?EndpointDueWorkCryptoBackendNextDeadlineResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndSelectNextDeadline(
+            due_connections,
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsAcrossSpacesAndSelectNextDeadline(
+                backend_spaces,
+                drive_views,
+                deadline_connections,
+            ),
+        };
+    }
+
+    /// Process the earliest due deadline, drive close-propagating backends
+    /// across ordered packet number spaces, then select the next deadline.
+    ///
+    /// This is the close-on-error cross-space form of
+    /// `processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndSelectNextDeadline()`.
+    pub fn processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        due_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!?EndpointDueWorkCryptoBackendNextDeadlineResult {
+        const due_work = (try self.processDueDeadlineAcrossConnectionsAndSelectNextDeadline(
+            due_connections,
+            deadline_connections,
+            now_millis,
+        )) orelse return null;
+        if (due_work.pending_work.idle_retired != null or
+            due_work.pending_work.close_retired != null)
+        {
+            return .{ .due_work = due_work };
+        }
+        return .{
+            .due_work = due_work,
+            .backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
+                backend_spaces,
                 drive_views,
                 deadline_connections,
             ),
@@ -40633,6 +40771,207 @@ test "EndpointConnectionLifecycle due-deadline close backend loop step selects n
     try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
     try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
     try std.testing.expectEqual(@as(?[]const u8, null), try backend_connection.pollTxInSpace(.handshake, 30, &scratch));
+}
+
+test "EndpointConnectionLifecycle due-deadline cross-space backend loop step selects next deadline" {
+    const Backend = struct {
+        pulls: usize = 0,
+        handshake_sent: bool = false,
+        application_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            const payload = switch (space) {
+                .handshake => blk: {
+                    if (self.handshake_sent) return null;
+                    self.handshake_sent = true;
+                    break :blk "due handshake";
+                },
+                .application => blk: {
+                    if (self.application_sent) return null;
+                    self.application_sent = true;
+                    break :blk "due application";
+                },
+                else => return null,
+            };
+            if (out_buf.len < payload.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..payload.len], payload);
+            return out_buf[0..payload.len];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var due_connection = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer due_connection.deinit();
+    try due_connection.confirmHandshake();
+    _ = try due_connection.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(309, &due_connection);
+    const due_deadline = lifecycle.nextDeadline(309, &due_connection) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due_deadline.kind);
+
+    var backend_connection = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer backend_connection.deinit();
+    try backend_connection.confirmHandshake();
+
+    var backend = Backend{};
+    var scratch: [64]u8 = undefined;
+    const due_connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 309, .connection = &due_connection },
+        .{ .connection_id = 310, .connection = &backend_connection },
+    };
+    const backend_spaces = [_]PacketNumberSpace{ .handshake, .application };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 310,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const deadline_connections = [_]EndpointConnectionView{
+        .{ .connection_id = 309, .connection = &due_connection },
+        .{ .connection_id = 310, .connection = &backend_connection },
+    };
+
+    const before = try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndSelectNextDeadline(
+        &due_connections,
+        due_deadline.deadline_millis - 1,
+        &backend_spaces,
+        &drive_views,
+        &deadline_connections,
+    );
+    try std.testing.expect(before == null);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+
+    const result = (try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndSelectNextDeadline(
+        &due_connections,
+        due_deadline.deadline_millis,
+        &backend_spaces,
+        &drive_views,
+        &deadline_connections,
+    )) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(@as(u64, 309), result.due_work.deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, result.due_work.deadline.kind);
+    const serviced = result.due_work.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 309), serviced.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced.timer.kind);
+
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 4), backend.pulls);
+    var tx_buf: [128]u8 = undefined;
+    const handshake_payload = (try backend_connection.pollTxInSpace(.handshake, 30, &tx_buf)) orelse return error.TestUnexpectedResult;
+    var handshake_decoded = try frame.decodeFrameSlice(handshake_payload, std.testing.allocator);
+    defer frame.deinitFrame(&handshake_decoded.frame, std.testing.allocator);
+    switch (handshake_decoded.frame) {
+        .crypto => |crypto| try std.testing.expectEqualStrings("due handshake", crypto.data),
+        else => return error.TestUnexpectedResult,
+    }
+    const application_payload = (try backend_connection.pollTxInSpace(.application, 31, &tx_buf)) orelse return error.TestUnexpectedResult;
+    var application_decoded = try frame.decodeFrameSlice(application_payload, std.testing.allocator);
+    defer frame.deinitFrame(&application_decoded.frame, std.testing.allocator);
+    switch (application_decoded.frame) {
+        .crypto => |crypto| try std.testing.expectEqualStrings("due application", crypto.data),
+        else => return error.TestUnexpectedResult,
+    }
+    const next = backend_result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 309), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+}
+
+test "EndpointConnectionLifecycle due-deadline cross-space close backend loop stops before deadline on peer error" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var due_connection = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer due_connection.deinit();
+    try due_connection.validatePeerAddress();
+    try due_connection.confirmHandshake();
+    _ = try due_connection.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(311, &due_connection);
+    const due_deadline = lifecycle.nextDeadline(311, &due_connection) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due_deadline.kind);
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    const due_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 311,
+        .connection = &due_connection,
+    }};
+    const backend_spaces = [_]PacketNumberSpace{ .handshake, .application };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 311,
+        .connection = &due_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const deadline_connections = [_]EndpointConnectionView{.{
+        .connection_id = 311,
+        .connection = &due_connection,
+    }};
+
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
+        &due_connections,
+        due_deadline.deadline_millis,
+        &backend_spaces,
+        &drive_views,
+        &deadline_connections,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+    try std.testing.expectEqual(ConnectionState.closing, due_connection.connectionState());
 }
 
 test "EndpointConnectionLifecycle due-deadline compatible backend loop step selects next deadline" {
