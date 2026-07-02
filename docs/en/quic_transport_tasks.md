@@ -396,6 +396,12 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendAcrossSpacesWithCompatibleVersionAndArmConnection`,
 `driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndSelectNextDeadline`,
 `driveCryptoBackendAcrossSpacesWithCompatibleVersionAndSelectNextDeadline`,
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndPollDatagram`,
+`driveCryptoBackendAcrossSpacesWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`,
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndDrainDatagrams`,
+`driveCryptoBackendAcrossSpacesWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`,
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`,
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionAndDrainDatagramsWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
 `driveCryptoBackendInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionAndDrainDatagrams`,
@@ -409,6 +415,12 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndArmConnection`,
 `driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndSelectNextDeadline`,
 `driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndSelectNextDeadline`,
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndPollDatagram`,
+`driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`,
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndDrainDatagrams`,
+`driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`,
+`driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndPollDatagram`,
 `driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagramWithInstalledKeyOptions`,
 `driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams`,
@@ -1998,6 +2010,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   lifecycle step. Unit coverage proves compatible Version Information
   application across spaces, deadline selection, close-before-output behavior,
   and first-error sweep stopping.
+- 2026-07-02: Added cross-space RFC 9368-compatible backend-drive output
+  variants for poll, explicit poll, bounded drain, explicit bounded drain, and
+  matching OrClose forms. The new helpers reuse the cross-space compatible
+  backend-drive primitive and the existing installed-key output poll/drain
+  path. Unit coverage proves explicit 0-RTT output after compatible cross-space
+  backend progress and confirms OrClose errors return before output is pulled.
 - 2026-06-10: Added `EndpointCryptoBackendDriveDatagramResult` and
   backend-drive-to-datagram loop steps:
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndPollDatagram()`,
