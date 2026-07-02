@@ -6073,6 +6073,56 @@ pub const EndpointConnectionLifecycle = struct {
         return progress;
     }
 
+    /// Drive one TLS backend across ordered packet number spaces, then refresh
+    /// the endpoint's aggregate recovery timer snapshot.
+    ///
+    /// This is the cross-space form of `driveCryptoBackendInSpaceAndArmConnection()`.
+    /// A live TLS handshake emits CRYPTO for more than one encryption level from
+    /// a single inbound flight, so a socket loop can service Initial and
+    /// Handshake output in one pass instead of one call per space. `spaces` must
+    /// be ordered from the lowest to the highest encryption level. On backend
+    /// failure the recovery timer snapshot is still refreshed before the error
+    /// propagates.
+    pub fn driveCryptoBackendAcrossSpacesAndArmConnection(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!CryptoBackendProgress {
+        const progress = connection.driveCryptoBackendAcrossSpaces(spaces, backend, scratch) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return progress;
+    }
+
+    /// Drive one TLS backend across ordered packet number spaces and queue
+    /// CONNECTION_CLOSE on peer transport-parameter errors, then refresh the
+    /// endpoint's aggregate recovery timer snapshot.
+    ///
+    /// This preserves the success behavior of
+    /// `driveCryptoBackendAcrossSpacesAndArmConnection()` while routing malformed
+    /// or semantically invalid peer transport-parameter extension bytes through
+    /// the connection's close-on-error policy.
+    pub fn driveCryptoBackendAcrossSpacesOrCloseAndArmConnection(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!CryptoBackendProgress {
+        const progress = connection.driveCryptoBackendAcrossSpacesOrClose(spaces, backend, scratch) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return progress;
+    }
+
     /// Drive one TLS backend, then poll one caller-keyed long-header output.
     ///
     /// This single-connection form is for socket loops that already hold
@@ -65453,6 +65503,128 @@ test "EndpointConnectionLifecycle drives crypto backend and refreshes recovery t
     try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
+}
+
+test "EndpointConnectionLifecycle drives crypto backend across ordered spaces in one call" {
+    const FlightBackend = struct {
+        initial_inbound: std.ArrayList(u8) = .empty,
+        initial_outbound: []const u8,
+        initial_offset: usize = 0,
+        handshake_outbound: []const u8,
+        handshake_offset: usize = 0,
+        secrets: HandshakeTrafficSecrets,
+        secrets_sent: bool = false,
+
+        fn deinit(self: *@This()) void {
+            self.initial_inbound.deinit(std.testing.allocator);
+        }
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .initial) return error.Internal;
+            self.initial_inbound.appendSlice(std.testing.allocator, data) catch return error.OutOfMemory;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (space) {
+                .initial => {
+                    if (self.initial_offset >= self.initial_outbound.len) return null;
+                    const n = @min(out_buf.len, self.initial_outbound.len - self.initial_offset);
+                    @memcpy(out_buf[0..n], self.initial_outbound[self.initial_offset..][0..n]);
+                    self.initial_offset += n;
+                    return out_buf[0..n];
+                },
+                .handshake => {
+                    if (self.handshake_offset >= self.handshake_outbound.len) return null;
+                    const n = @min(out_buf.len, self.handshake_outbound.len - self.handshake_offset);
+                    @memcpy(out_buf[0..n], self.handshake_outbound[self.handshake_offset..][0..n]);
+                    self.handshake_offset += n;
+                    return out_buf[0..n];
+                },
+                else => return null,
+            }
+        }
+
+        fn pullHandshakeTrafficSecrets(context: *anyopaque) Error!?HandshakeTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.secrets_sent) return null;
+            self.secrets_sent = true;
+            return self.secrets;
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_rtt_ms = 100,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var request: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&request);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "client hello",
+    } });
+    try server.processDatagramInSpace(.initial, 0, out.getWritten());
+
+    var backend = FlightBackend{
+        .initial_outbound = "server hello",
+        .handshake_outbound = "encrypted extensions",
+        .secrets = .{
+            .local = [_]u8{0x33} ** protection.traffic_secret_len,
+            .peer = [_]u8{0x44} ** protection.traffic_secret_len,
+        },
+    };
+    defer backend.deinit();
+
+    var scratch: [8]u8 = undefined;
+    const spaces = [_]PacketNumberSpace{ .initial, .handshake };
+    const progress = try lifecycle.driveCryptoBackendAcrossSpacesAndArmConnection(
+        73,
+        &server,
+        &spaces,
+        backend.backend(),
+        &scratch,
+    );
+
+    try std.testing.expectEqualStrings("client hello", backend.initial_inbound.items);
+    try std.testing.expect(progress.handshake_keys_installed);
+    try std.testing.expect(server.hasHandshakeProtectionKeys());
+    try std.testing.expectEqual(
+        backend.initial_outbound.len + backend.handshake_outbound.len,
+        progress.outbound_bytes,
+    );
+    try std.testing.expect(!server.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(server.sentPacketCount(.initial) == 0);
+
+    var initial_crypto: [64]u8 = undefined;
+    var initial_len: usize = 0;
+    for (server.initial_packet_space.crypto_send_queue.items) |pending| {
+        @memcpy(initial_crypto[initial_len..][0..pending.data.len], pending.data);
+        initial_len += pending.data.len;
+    }
+    try std.testing.expectEqualStrings("server hello", initial_crypto[0..initial_len]);
+
+    var handshake_crypto: [64]u8 = undefined;
+    var handshake_len: usize = 0;
+    for (server.handshake_packet_space.crypto_send_queue.items) |pending| {
+        @memcpy(handshake_crypto[handshake_len..][0..pending.data.len], pending.data);
+        handshake_len += pending.data.len;
+    }
+    try std.testing.expectEqualStrings("encrypted extensions", handshake_crypto[0..handshake_len]);
 }
 
 test "EndpointConnectionLifecycle refreshes recovery timer after strict backend drive rejects closing connection" {
