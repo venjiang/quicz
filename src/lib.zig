@@ -7827,6 +7827,40 @@ pub const EndpointConnectionLifecycle = struct {
     }
 
     /// Drive close-propagating crypto backends across ordered packet number
+    /// spaces, then poll output.
+    ///
+    /// This is the close-on-error form of
+    /// `driveCryptoBackendsAcrossSpacesAndPollDatagram()`.
+    pub fn driveCryptoBackendsAcrossSpacesOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        now_millis: i64,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!EndpointCryptoBackendDriveDatagramResult {
+        var backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndArmConnections(
+            spaces,
+            drive_views,
+        );
+        const retained_handshake_spaces_before_poll = countRetainedHandshakeSpaces(poll_views);
+        const datagram = try self.pollDatagramAcrossConnectionsAfterBackendDrive(
+            poll_views,
+            now_millis,
+            poll_space,
+        );
+        markHandshakeSpaceDiscardedIfCountDrops(
+            &backend.progress,
+            retained_handshake_spaces_before_poll,
+            countRetainedHandshakeSpaces(poll_views),
+        );
+        return .{
+            .backend = backend,
+            .datagram = datagram,
+        };
+    }
+
+    /// Drive close-propagating crypto backends across ordered packet number
     /// spaces, then drain installed-key output with per-connection options.
     ///
     /// This is the close-on-error bounded-output form of
@@ -9765,6 +9799,64 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process pending work, drive crypto backends across ordered packet number
+    /// spaces, then poll output.
+    ///
+    /// This is the cross-space form of
+    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram()`.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsAcrossSpacesAndPollDatagram(
+                backend_spaces,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Process pending work, drive crypto backends across ordered packet number
+    /// spaces, then poll explicit output.
+    ///
+    /// This is the per-connection-output-options form of
+    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndPollDatagram()`.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsAcrossSpacesAndPollDatagramWithInstalledKeyOptions(
+                backend_spaces,
+                drive_views,
+                poll_views,
+                now_millis,
+            ),
+        };
+    }
+
     /// Process pending work, drive crypto backends, then drain installed-key output.
     ///
     /// This is the bounded-output form for no-new-datagram socket-loop ticks.
@@ -9818,6 +9910,68 @@ pub const EndpointConnectionLifecycle = struct {
             .pending_work = pending_work,
             .backend = try self.driveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions(
                 backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                out,
+            ),
+        };
+    }
+
+    /// Process pending work, drive crypto backends across ordered packet number
+    /// spaces, then drain output.
+    ///
+    /// This is the bounded-output cross-space form of
+    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndPollDatagram()`.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsAcrossSpacesAndDrainDatagrams(
+                backend_spaces,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Process pending work, drive crypto backends across ordered packet number
+    /// spaces, then drain explicit output.
+    ///
+    /// This is the bounded-output form of
+    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsAcrossSpacesAndDrainDatagramsWithInstalledKeyOptions(
+                backend_spaces,
                 drive_views,
                 poll_views,
                 now_millis,
@@ -9884,6 +10038,64 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Process pending work, drive close-propagating crypto backends across
+    /// ordered packet number spaces, then poll output.
+    ///
+    /// This is the cross-space form of
+    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram()`.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndPollDatagram(
+                backend_spaces,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+            ),
+        };
+    }
+
+    /// Process pending work, drive close-propagating crypto backends across
+    /// ordered packet number spaces, then poll explicit output.
+    ///
+    /// This is the close-on-error form of
+    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions(
+                backend_spaces,
+                drive_views,
+                poll_views,
+                now_millis,
+            ),
+        };
+    }
+
     /// Process pending work, drive close-propagating backends, then drain output.
     ///
     /// Backend peer transport-parameter errors return before output draining.
@@ -9935,6 +10147,68 @@ pub const EndpointConnectionLifecycle = struct {
             .pending_work = pending_work,
             .backend = try self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagramsWithInstalledKeyOptions(
                 backend_space,
+                drive_views,
+                poll_views,
+                now_millis,
+                out,
+            ),
+        };
+    }
+
+    /// Process pending work, drive close-propagating crypto backends across
+    /// ordered packet number spaces, then drain output.
+    ///
+    /// This is the bounded-output form of
+    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndPollDatagram()`.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagrams(
+                backend_spaces,
+                drive_views,
+                poll_views,
+                now_millis,
+                poll_space,
+                out,
+            ),
+        };
+    }
+
+    /// Process pending work, drive close-propagating crypto backends across
+    /// ordered packet number spaces, then drain explicit output.
+    ///
+    /// This is the bounded-output form of
+    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions()`.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionInstalledKeyPollView,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointPendingWorkCryptoBackendDatagramDrainResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+                backend_spaces,
                 drive_views,
                 poll_views,
                 now_millis,
@@ -36151,6 +36425,106 @@ test "EndpointConnectionLifecycle pending-work backend poll keeps explicit zero 
     ));
 }
 
+test "EndpointConnectionLifecycle pending-work cross-space backend poll keeps explicit zero RTT output" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x6d, 0x7d, 0x8d, 0x9d };
+    const server_dcid = [_]u8{ 0xd6, 0xe6, 0xf6, 0x06 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer client.deinit();
+    try client.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try client.confirmHandshake();
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "bye", false);
+    try client.resetStream(stream_id, 141);
+    const reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = stream_id,
+        .application_error_code = 141,
+        .final_size = 3,
+    };
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+
+    const options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    };
+    const first = (try lifecycle.pollDatagram(304, &client, 10, options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    const deadline = lifecycle.nextDeadline(304, &client) orelse return error.TestUnexpectedResult;
+    const timer = deadline.recovery orelse return error.TestUnexpectedResult;
+
+    const pending_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 304,
+        .connection = &client,
+    }};
+    const backend_spaces = [_]PacketNumberSpace{ .handshake, .application };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 305,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{.{
+        .connection_id = 304,
+        .connection = &client,
+        .poll_options = options,
+    }};
+
+    const result = try lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndPollDatagramWithInstalledKeyOptions(
+        &pending_connections,
+        timer.deadline_millis,
+        &backend_spaces,
+        &drive_views,
+        &poll_views,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 2), backend.pulls);
+    const probe = result.backend.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(probe.datagram);
+    try std.testing.expectEqual(@as(u64, 304), probe.connection_id);
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        probe.datagram,
+        secrets.client,
+        1,
+        .{ .reset_stream = reset_frame },
+    ));
+}
+
 test "EndpointConnectionLifecycle pending-work backend drain keeps explicit zero RTT output" {
     const CountingBackend = struct {
         pulls: usize = 0,
@@ -36277,6 +36651,147 @@ test "EndpointConnectionLifecycle pending-work backend drain keeps explicit zero
     defer std.testing.allocator.free(out[1].datagram);
     try std.testing.expectEqual(@as(u64, 216), out[0].connection_id);
     try std.testing.expectEqual(@as(u64, 217), out[1].connection_id);
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        out[0].datagram,
+        secrets.client,
+        1,
+        .{ .reset_stream = first_reset_frame },
+    ));
+    try std.testing.expect(try protectedZeroRttContainsControlFrame(
+        out[1].datagram,
+        secrets.client,
+        1,
+        .{ .reset_stream = second_reset_frame },
+    ));
+}
+
+test "EndpointConnectionLifecycle pending-work cross-space backend drain keeps explicit zero RTT output" {
+    const CountingBackend = struct {
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const first_client_dcid = [_]u8{ 0x6e, 0x7e, 0x8e, 0x9e };
+    const first_server_dcid = [_]u8{ 0xd7, 0xe7, 0xf7, 0x07 };
+    const second_client_dcid = [_]u8{ 0x6f, 0x7f, 0x8f, 0x9f };
+    const second_server_dcid = [_]u8{ 0xd8, 0xe8, 0xf8, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var first = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer first.deinit();
+    try first.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try first.confirmHandshake();
+    const first_stream_id = try first.openStream();
+    try first.sendOnStream(first_stream_id, "bye", false);
+    try first.resetStream(first_stream_id, 142);
+    const first_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = first_stream_id,
+        .application_error_code = 142,
+        .final_size = 3,
+    };
+
+    var second = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer second.deinit();
+    try second.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try second.confirmHandshake();
+    const second_stream_id = try second.openStream();
+    try second.sendOnStream(second_stream_id, "bye", false);
+    try second.resetStream(second_stream_id, 143);
+    const second_reset_frame: frame.ResetStreamFrame = .{
+        .stream_id = second_stream_id,
+        .application_error_code = 143,
+        .final_size = 3,
+    };
+
+    const first_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &first_server_dcid,
+        .source_connection_id = &first_client_dcid,
+    };
+    const second_options: EndpointPollInstalledKeyDatagramOptions = .{
+        .space = .zero_rtt,
+        .destination_connection_id = &second_server_dcid,
+        .source_connection_id = &second_client_dcid,
+    };
+    const first_sent = (try lifecycle.pollDatagram(306, &first, 20, first_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first_sent);
+    const second_sent = (try lifecycle.pollDatagram(307, &second, 20, second_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second_sent);
+    const first_deadline = lifecycle.nextDeadline(306, &first) orelse return error.TestUnexpectedResult;
+    const second_deadline = lifecycle.nextDeadline(307, &second) orelse return error.TestUnexpectedResult;
+    const now_millis = @max(first_deadline.deadline_millis, second_deadline.deadline_millis);
+
+    var backend_connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer backend_connection.deinit();
+    try backend_connection.validatePeerAddress();
+    var backend = CountingBackend{};
+    var scratch: [16]u8 = undefined;
+
+    const pending_connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 306, .connection = &first },
+        .{ .connection_id = 307, .connection = &second },
+    };
+    const backend_spaces = [_]PacketNumberSpace{ .handshake, .application };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 308,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const poll_views = [_]EndpointConnectionInstalledKeyPollView{
+        .{
+            .connection_id = 306,
+            .connection = &first,
+            .poll_options = first_options,
+        },
+        .{
+            .connection_id = 307,
+            .connection = &second,
+            .poll_options = second_options,
+        },
+    };
+    var out: [2]EndpointPolledDatagramResult = undefined;
+
+    const result = try lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndDrainDatagramsWithInstalledKeyOptions(
+        &pending_connections,
+        now_millis,
+        &backend_spaces,
+        &drive_views,
+        &poll_views,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 2), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 2), backend.pulls);
+    try std.testing.expectEqual(@as(usize, 2), result.backend.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.backend.drain.first_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    defer std.testing.allocator.free(out[1].datagram);
+    try std.testing.expectEqual(@as(u64, 306), out[0].connection_id);
+    try std.testing.expectEqual(@as(u64, 307), out[1].connection_id);
     try std.testing.expect(try protectedZeroRttContainsControlFrame(
         out[0].datagram,
         secrets.client,
