@@ -3360,6 +3360,105 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Feed an installed-key datagram, process pending work, drive backends
+    /// across ordered packet number spaces, then drain output.
+    ///
+    /// This is the bounded-output form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsAcrossSpacesAndPollDatagram()`.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsAcrossSpacesAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramDrainResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            receive_connections,
+            now_millis,
+        );
+        var backend: ?EndpointCryptoBackendDriveDatagramDrainResult = null;
+        if (pending_work.idle_retired_count == 0 and pending_work.close_retired_count == 0) {
+            switch (feed) {
+                .routed => backend = try self.driveCryptoBackendsAcrossSpacesAndDrainDatagrams(
+                    backend_spaces,
+                    drive_views,
+                    poll_views,
+                    now_millis,
+                    poll_space,
+                    out,
+                ),
+                else => {},
+            }
+        }
+        return .{
+            .feed = feed,
+            .pending_work = pending_work,
+            .backend = backend,
+        };
+    }
+
+    /// Feed one installed-key datagram, process pending work, drive one backend
+    /// across ordered packet number spaces, then drain output.
+    ///
+    /// This is the single-connection form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsAcrossSpacesAndDrainDatagrams()`.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendAcrossSpacesAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramDrainResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsAcrossSpacesAndDrainDatagrams(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_spaces,
+            &drive_views,
+            &poll_views,
+            poll_options.space,
+            out,
+        );
+    }
+
     /// Feed an installed-key datagram, process pending work, drive backends, then drain output.
     ///
     /// This is the bounded-output form of
@@ -7004,6 +7103,43 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+        };
+    }
+
+    /// Drive crypto backends across ordered packet number spaces, then drain output.
+    ///
+    /// This is the bounded-output form of
+    /// `driveCryptoBackendsAcrossSpacesAndPollDatagram()`. Backend progress is
+    /// applied across the ordered spaces before draining, and the caller-provided
+    /// output slice limits work for the current socket-loop iteration.
+    pub fn driveCryptoBackendsAcrossSpacesAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        now_millis: i64,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        var backend = try self.driveCryptoBackendsAcrossSpacesAndArmConnections(
+            spaces,
+            drive_views,
+        );
+        const retained_handshake_spaces_before_drain = countRetainedHandshakeSpaces(poll_views);
+        const drain = self.drainDatagramsAcrossConnectionsAfterBackendDrive(
+            poll_views,
+            now_millis,
+            poll_space,
+            out,
+        );
+        markHandshakeSpaceDiscardedIfCountDrops(
+            &backend.progress,
+            retained_handshake_spaces_before_drain,
+            countRetainedHandshakeSpaces(poll_views),
+        );
+        return .{
+            .backend = backend,
+            .drain = drain,
         };
     }
 
@@ -40865,6 +41001,102 @@ test "EndpointConnectionLifecycle feed pending-work cross-space backend poll ste
     var response: [64]u8 = undefined;
     const response_len = (try client.recvCryptoInSpace(.handshake, &response)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("server cross-space poll response", response[0..response_len]);
+}
+
+test "EndpointConnectionLifecycle feed pending-work cross-space backend drain step returns output" {
+    const Backend = struct {
+        handshake_outbound: []const u8,
+        handshake_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{ .context = self, .receive = receive, .pull = pull };
+        }
+
+        fn receive(_: *anyopaque, space: PacketNumberSpace, _: []const u8) Error!void {
+            if (space != .handshake) return error.InvalidPacket;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.handshake_sent) return null;
+            if (out_buf.len < self.handshake_outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.handshake_outbound.len], self.handshake_outbound);
+            self.handshake_sent = true;
+            return out_buf[0..self.handshake_outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x1d, 0x2d, 0x3d, 0x4d };
+    const server_dcid = [_]u8{ 0xad, 0xbd, 0xcd, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{ .local = secrets.client.secret, .peer = secrets.server.secret });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(260, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const feed_options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .handshake,
+        .out = &feed_out,
+        .unpredictable_prefix = &reset_prefix,
+        .supported_versions = &versions,
+    };
+
+    try client.sendCryptoInSpace(.handshake, "client cross-space drain feed");
+    const datagram = (try client_lifecycle.pollDatagram(259, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+
+    var backend = Backend{ .handshake_outbound = "server cross-space drain response" };
+    var scratch: [128]u8 = undefined;
+    const backend_spaces = [_]PacketNumberSpace{ .handshake, .application };
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendAcrossSpacesAndDrainDatagrams(
+        260,
+        &server,
+        server_path,
+        11,
+        datagram,
+        feed_options,
+        &backend_spaces,
+        backend.backend(),
+        &scratch,
+        .{ .space = .handshake, .destination_connection_id = &client_dcid, .source_connection_id = &server_dcid },
+        &drained,
+    );
+
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), backend_result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(usize, 260), drained[0].connection_id);
+    defer std.testing.allocator.free(drained[0].datagram);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, drained[0].datagram);
+    var response: [64]u8 = undefined;
+    const response_len = (try client.recvCryptoInSpace(.handshake, &response)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server cross-space drain response", response[0..response_len]);
 }
 test "EndpointConnectionLifecycle feed pending-work close backend deadline step queues close before result" {
     const BadBackend = struct {
