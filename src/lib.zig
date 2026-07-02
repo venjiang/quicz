@@ -3459,6 +3459,107 @@ pub const EndpointConnectionLifecycle = struct {
         );
     }
 
+    /// Feed an installed-key datagram, process pending work, drive
+    /// close-propagating backends across ordered packet number spaces, then
+    /// drain output.
+    ///
+    /// This is the close-on-error bounded-output form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsAcrossSpacesAndDrainDatagrams()`.
+    pub fn feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        receive_connections: []const EndpointConnectionReceiveView,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramDrainResult {
+        const feed = try self.feedDatagramWithInstalledKeysAcrossConnections(
+            receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            receive_connections,
+            now_millis,
+        );
+        var backend: ?EndpointCryptoBackendDriveDatagramDrainResult = null;
+        if (pending_work.idle_retired_count == 0 and pending_work.close_retired_count == 0) {
+            switch (feed) {
+                .routed => backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagrams(
+                    backend_spaces,
+                    drive_views,
+                    poll_views,
+                    now_millis,
+                    poll_space,
+                    out,
+                ),
+                else => {},
+            }
+        }
+        return .{
+            .feed = feed,
+            .pending_work = pending_work,
+            .backend = backend,
+        };
+    }
+
+    /// Feed one installed-key datagram, process pending work, drive one
+    /// close-propagating backend across ordered packet number spaces, then drain
+    /// output.
+    ///
+    /// This is the single-connection form of
+    /// `feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagrams()`.
+    pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        backend_spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointProtectedDatagramError!EndpointFeedPendingWorkCryptoBackendDatagramDrainResult {
+        const receive_connections = [_]EndpointConnectionReceiveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const poll_views = [_]EndpointConnectionPollView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .destination_connection_id = poll_options.destination_connection_id,
+            .source_connection_id = poll_options.source_connection_id,
+        }};
+        return self.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagrams(
+            &receive_connections,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+            backend_spaces,
+            &drive_views,
+            &poll_views,
+            poll_options.space,
+            out,
+        );
+    }
+
     /// Feed an installed-key datagram, process pending work, drive backends, then drain output.
     ///
     /// This is the bounded-output form of
@@ -7122,6 +7223,43 @@ pub const EndpointConnectionLifecycle = struct {
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
         var backend = try self.driveCryptoBackendsAcrossSpacesAndArmConnections(
+            spaces,
+            drive_views,
+        );
+        const retained_handshake_spaces_before_drain = countRetainedHandshakeSpaces(poll_views);
+        const drain = self.drainDatagramsAcrossConnectionsAfterBackendDrive(
+            poll_views,
+            now_millis,
+            poll_space,
+            out,
+        );
+        markHandshakeSpaceDiscardedIfCountDrops(
+            &backend.progress,
+            retained_handshake_spaces_before_drain,
+            countRetainedHandshakeSpaces(poll_views),
+        );
+        return .{
+            .backend = backend,
+            .drain = drain,
+        };
+    }
+
+    /// Drive close-propagating crypto backends across ordered packet number
+    /// spaces, then drain output.
+    ///
+    /// This is the close-on-error form of
+    /// `driveCryptoBackendsAcrossSpacesAndDrainDatagrams()`. Peer transport
+    /// parameter errors queue CONNECTION_CLOSE before bounded output draining.
+    pub fn driveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagrams(
+        self: *EndpointConnectionLifecycle,
+        spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        poll_views: []const EndpointConnectionPollView,
+        now_millis: i64,
+        poll_space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
+        var backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndArmConnections(
             spaces,
             drive_views,
         );
@@ -41341,6 +41479,98 @@ test "EndpointConnectionLifecycle feed pending-work cross-space close backend de
     }
 }
 
+test "EndpointConnectionLifecycle feed pending-work cross-space close backend drain step queues close before output" {
+    const BadBackend = struct {
+        output_pulled: bool = false,
+        peer_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{ .context = self, .receive = receive, .pull = pull, .pull_peer_transport_parameters = pullPeerTransportParameters };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x1e, 0x2e, 0x3e, 0x4e };
+    const server_dcid = [_]u8{ 0xae, 0xbe, 0xce, 0xde };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{ .local = secrets.client.secret, .peer = secrets.server.secret });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{ .local = secrets.server.secret, .peer = secrets.client.secret });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    try server_lifecycle.registerConnectionId(270, &server_dcid, server_path, .{ .sequence_number = 0 });
+
+    var feed_out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]packet.Version{.v1};
+    const feed_options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .handshake,
+        .out = &feed_out,
+        .unpredictable_prefix = &reset_prefix,
+        .supported_versions = &versions,
+    };
+
+    try client.sendCryptoInSpace(.handshake, "client cross-space close drain");
+    const datagram = (try client_lifecycle.pollDatagram(269, &client, 10, .{
+        .space = .handshake,
+        .destination_connection_id = &server_dcid,
+        .source_connection_id = &client_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    const backend_spaces = [_]PacketNumberSpace{ .handshake, .application };
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(error.InvalidPacket, server_lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagrams(
+        270,
+        &server,
+        server_path,
+        11,
+        datagram,
+        feed_options,
+        &backend_spaces,
+        backend.backend(),
+        &scratch,
+        .{ .space = .handshake, .destination_connection_id = &client_dcid, .source_connection_id = &server_dcid },
+        &drained,
+    ));
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+}
 test "EndpointConnectionLifecycle feed pending-work close backend poll queues close before output" {
     const BadBackend = struct {
         output_pulled: bool = false,
