@@ -4,6 +4,7 @@ const transport_types = @import("transport_types.zig");
 
 const Error = transport_types.Error;
 const PacketNumberSpace = transport_types.PacketNumberSpace;
+const VersionCompatibility = transport_types.VersionCompatibility;
 
 /// TLS-produced Handshake traffic secrets for one QUIC connection.
 ///
@@ -149,4 +150,19 @@ pub const CryptoBackend = struct {
         const pull_secrets = self.pull_1rtt_traffic_secrets orelse return null;
         return try pull_secrets(self.context);
     }
+};
+
+/// Peer transport-parameter handling policy for a crypto-backend drive step.
+///
+/// `Connection` uses this to decide how peer transport-parameter extension
+/// bytes returned by a backend are applied: `strict` and `close_on_error`
+/// enforce QUIC v1 parameters, while the compatible variants accept RFC 9368
+/// compatible version negotiation using the caller-provided first-flight
+/// conversions. The `*_close_on_error` variants queue CONNECTION_CLOSE instead
+/// of returning the parameter error to the caller.
+pub const PeerTransportParameterDrivePolicy = union(enum) {
+    strict,
+    close_on_error,
+    compatible: []const VersionCompatibility,
+    compatible_close_on_error: []const VersionCompatibility,
 };

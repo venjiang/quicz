@@ -45,6 +45,7 @@ pub const ZeroRttTrafficSecrets = crypto_types.ZeroRttTrafficSecrets;
 pub const OneRttTrafficSecrets = crypto_types.OneRttTrafficSecrets;
 pub const CryptoBackend = crypto_types.CryptoBackend;
 pub const CryptoBackendProgress = crypto_types.CryptoBackendProgress;
+const PeerTransportParameterDrivePolicy = crypto_types.PeerTransportParameterDrivePolicy;
 pub const TlsBackendStatus = tls_backend_module.TlsBackendStatus;
 pub const TlsBackendPacketSpace = tls_backend_module.TlsBackendPacketSpace;
 pub const TlsBackendReceiveFn = tls_backend_module.TlsBackendReceiveFn;
@@ -18637,13 +18638,6 @@ const PeerStreamDataBlockedState = struct {
     maximum_stream_data: u64,
 };
 
-const PeerTransportParameterDrivePolicy = union(enum) {
-    strict,
-    close_on_error,
-    compatible: []const VersionCompatibility,
-    compatible_close_on_error: []const VersionCompatibility,
-};
-
 /// Experimental QUIC connection handle.
 ///
 /// The current implementation only moves unencrypted frame payload bytes through
@@ -25410,6 +25404,42 @@ pub const Connection = struct {
         return self.driveCryptoBackendInSpaceWithPeerParameterPolicy(space, backend, scratch, .{ .compatible_close_on_error = compatibilities });
     }
 
+    /// Drive a pluggable TLS/crypto backend across an ordered set of packet
+    /// number spaces in one call.
+    ///
+    /// A live TLS handshake produces CRYPTO output for more than one encryption
+    /// level from a single inbound flight: consuming an Initial ClientHello can
+    /// emit both Initial and Handshake CRYPTO. `driveCryptoBackendInSpace()`
+    /// only pulls one space, so a socket loop had to call it once per level.
+    /// This helper feeds inbound CRYPTO for each listed space in order, applies
+    /// connection-level peer transport parameters and traffic secrets once, then
+    /// pulls backend-produced CRYPTO for each listed space in order. `spaces`
+    /// must be ordered from the lowest to the highest encryption level the
+    /// caller wants serviced, and `scratch` must be non-empty.
+    pub fn driveCryptoBackendAcrossSpaces(
+        self: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!CryptoBackendProgress {
+        return self.driveCryptoBackendOverSpacesWithPeerParameterPolicy(spaces, backend, scratch, .strict);
+    }
+
+    /// Drive a backend across ordered packet number spaces and queue
+    /// CONNECTION_CLOSE on peer transport-parameter errors.
+    ///
+    /// This preserves the success behavior of `driveCryptoBackendAcrossSpaces()`
+    /// while routing malformed or semantically invalid peer transport-parameter
+    /// extension bytes through `applyPeerTransportParameterBytesOrClose()`.
+    pub fn driveCryptoBackendAcrossSpacesOrClose(
+        self: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!CryptoBackendProgress {
+        return self.driveCryptoBackendOverSpacesWithPeerParameterPolicy(spaces, backend, scratch, .close_on_error);
+    }
+
     fn driveCryptoBackendInSpaceWithPeerParameterPolicy(
         self: *Connection,
         space: PacketNumberSpace,
@@ -25417,9 +25447,27 @@ pub const Connection = struct {
         scratch: []u8,
         peer_transport_parameter_policy: PeerTransportParameterDrivePolicy,
     ) Error!CryptoBackendProgress {
+        const spaces = [_]PacketNumberSpace{space};
+        return self.driveCryptoBackendOverSpacesWithPeerParameterPolicy(
+            &spaces,
+            backend,
+            scratch,
+            peer_transport_parameter_policy,
+        );
+    }
+
+    fn driveCryptoBackendOverSpacesWithPeerParameterPolicy(
+        self: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+        peer_transport_parameter_policy: PeerTransportParameterDrivePolicy,
+    ) Error!CryptoBackendProgress {
         if (scratch.len == 0) return error.BufferTooSmall;
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
-        if (self.packetNumberSpace(space).discarded.*) return error.InvalidPacket;
+        for (spaces) |space| {
+            if (self.packetNumberSpace(space).discarded.*) return error.InvalidPacket;
+        }
 
         var progress = CryptoBackendProgress{};
 
@@ -25430,17 +25478,19 @@ pub const Connection = struct {
             }
         }
 
-        while (true) {
-            const packet_space = self.packetNumberSpace(space);
-            const crypto_read_offset_snapshot = packet_space.crypto_read_offset.*;
-            const n = (try self.recvCryptoInSpace(space, scratch)) orelse break;
-            if (n == 0) return error.BufferTooSmall;
-            backend.receive(backend.context, space, scratch[0..n]) catch |err| {
-                packet_space.crypto_read_offset.* = crypto_read_offset_snapshot;
-                return err;
-            };
-            progress.inbound_chunks += 1;
-            progress.inbound_bytes += n;
+        for (spaces) |space| {
+            while (true) {
+                const packet_space = self.packetNumberSpace(space);
+                const crypto_read_offset_snapshot = packet_space.crypto_read_offset.*;
+                const n = (try self.recvCryptoInSpace(space, scratch)) orelse break;
+                if (n == 0) return error.BufferTooSmall;
+                backend.receive(backend.context, space, scratch[0..n]) catch |err| {
+                    packet_space.crypto_read_offset.* = crypto_read_offset_snapshot;
+                    return err;
+                };
+                progress.inbound_chunks += 1;
+                progress.inbound_bytes += n;
+            }
         }
 
         if (try backend.pullPeerTransportParameters(scratch)) |peer_transport_parameters| {
@@ -25475,18 +25525,24 @@ pub const Connection = struct {
             progress.one_rtt_keys_installed = true;
         }
 
-        while (try backend.pull(backend.context, space, scratch)) |outbound| {
-            if (outbound.len == 0) break;
-            try self.sendCryptoInSpace(space, outbound);
-            progress.outbound_chunks += 1;
-            progress.outbound_bytes += outbound.len;
+        var handshake_space_driven = false;
+        var handshake_outbound_chunks: usize = 0;
+        for (spaces) |space| {
+            if (space == .handshake) handshake_space_driven = true;
+            while (try backend.pull(backend.context, space, scratch)) |outbound| {
+                if (outbound.len == 0) break;
+                try self.sendCryptoInSpace(space, outbound);
+                progress.outbound_chunks += 1;
+                progress.outbound_bytes += outbound.len;
+                if (space == .handshake) handshake_outbound_chunks += 1;
+            }
         }
 
         const backend_confirmed = backend.isHandshakeConfirmed();
         if (backend_confirmed and !self.handshake_confirmed) {
             try self.confirmHandshake();
         }
-        if (backend_confirmed and space == .handshake and progress.outbound_chunks == 0) {
+        if (backend_confirmed and handshake_space_driven and handshake_outbound_chunks == 0) {
             self.discardPacketNumberSpaceState(.handshake);
             progress.handshake_space_discarded = true;
         }
@@ -31119,6 +31175,113 @@ test "driveCryptoBackendInSpace preserves crypto input when backend receive fail
     var read_buf: [8]u8 = undefined;
     const n = (try conn.recvCryptoInSpace(.handshake, &read_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("client", read_buf[0..n]);
+}
+
+test "driveCryptoBackendAcrossSpaces pulls Initial and Handshake output in one call" {
+    const FlightBackend = struct {
+        initial_inbound: std.ArrayList(u8) = .empty,
+        initial_outbound: []const u8,
+        initial_offset: usize = 0,
+        handshake_outbound: []const u8,
+        handshake_offset: usize = 0,
+        secrets: HandshakeTrafficSecrets,
+        secrets_sent: bool = false,
+
+        fn deinit(self: *@This()) void {
+            self.initial_inbound.deinit(std.testing.allocator);
+        }
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .initial) return error.Internal;
+            self.initial_inbound.appendSlice(std.testing.allocator, data) catch return error.OutOfMemory;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (space) {
+                .initial => {
+                    if (self.initial_offset >= self.initial_outbound.len) return null;
+                    const n = @min(out_buf.len, self.initial_outbound.len - self.initial_offset);
+                    @memcpy(out_buf[0..n], self.initial_outbound[self.initial_offset..][0..n]);
+                    self.initial_offset += n;
+                    return out_buf[0..n];
+                },
+                .handshake => {
+                    if (self.handshake_offset >= self.handshake_outbound.len) return null;
+                    const n = @min(out_buf.len, self.handshake_outbound.len - self.handshake_offset);
+                    @memcpy(out_buf[0..n], self.handshake_outbound[self.handshake_offset..][0..n]);
+                    self.handshake_offset += n;
+                    return out_buf[0..n];
+                },
+                else => return null,
+            }
+        }
+
+        fn pullHandshakeTrafficSecrets(context: *anyopaque) Error!?HandshakeTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.secrets_sent) return null;
+            self.secrets_sent = true;
+            return self.secrets;
+        }
+    };
+
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "client hello",
+    } });
+    try conn.processDatagramInSpace(.initial, 0, out.getWritten());
+
+    var backend = FlightBackend{
+        .initial_outbound = "server hello",
+        .handshake_outbound = "encrypted extensions",
+        .secrets = .{
+            .local = [_]u8{0x11} ** protection.traffic_secret_len,
+            .peer = [_]u8{0x22} ** protection.traffic_secret_len,
+        },
+    };
+    defer backend.deinit();
+
+    var scratch: [8]u8 = undefined;
+    const spaces = [_]PacketNumberSpace{ .initial, .handshake };
+    const progress = try conn.driveCryptoBackendAcrossSpaces(&spaces, backend.backend(), &scratch);
+
+    try std.testing.expectEqualStrings("client hello", backend.initial_inbound.items);
+    try std.testing.expect(progress.handshake_keys_installed);
+    try std.testing.expect(conn.hasHandshakeProtectionKeys());
+    try std.testing.expectEqual(backend.initial_outbound.len, backend.initial_offset);
+    try std.testing.expectEqual(backend.handshake_outbound.len, backend.handshake_offset);
+    try std.testing.expectEqual(backend.initial_outbound.len + backend.handshake_outbound.len, progress.outbound_bytes);
+
+    var initial_crypto: [64]u8 = undefined;
+    var initial_len: usize = 0;
+    for (conn.initial_packet_space.crypto_send_queue.items) |pending| {
+        @memcpy(initial_crypto[initial_len..][0..pending.data.len], pending.data);
+        initial_len += pending.data.len;
+    }
+    try std.testing.expectEqualStrings("server hello", initial_crypto[0..initial_len]);
+
+    var handshake_crypto: [64]u8 = undefined;
+    var handshake_len: usize = 0;
+    for (conn.handshake_packet_space.crypto_send_queue.items) |pending| {
+        @memcpy(handshake_crypto[handshake_len..][0..pending.data.len], pending.data);
+        handshake_len += pending.data.len;
+    }
+    try std.testing.expectEqualStrings("encrypted extensions", handshake_crypto[0..handshake_len]);
 }
 
 test "driveCryptoBackendInSpace exchanges transport parameter bytes with backend" {
