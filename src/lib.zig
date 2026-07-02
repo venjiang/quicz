@@ -6547,6 +6547,60 @@ pub const EndpointConnectionLifecycle = struct {
         return result;
     }
 
+    /// Drive TLS backends across ordered packet number spaces for each view.
+    ///
+    /// This is the multi-connection form of
+    /// `driveCryptoBackendAcrossSpacesAndArmConnection()`. Each caller-provided
+    /// view is driven across the same ordered `spaces` in one pass, so a socket
+    /// loop can advance Initial and Handshake output for several handshaking
+    /// connections after a single receive. Progress is aggregated across every
+    /// successfully driven view. `spaces` must be ordered from the lowest to the
+    /// highest encryption level.
+    pub fn driveCryptoBackendsAcrossSpacesAndArmConnections(
+        self: *EndpointConnectionLifecycle,
+        spaces: []const PacketNumberSpace,
+        views: []const EndpointCryptoBackendDriveView,
+    ) Error!EndpointCryptoBackendDriveSweepResult {
+        var result = EndpointCryptoBackendDriveSweepResult{};
+        for (views) |view| {
+            const progress = try self.driveCryptoBackendAcrossSpacesAndArmConnection(
+                view.connection_id,
+                view.connection,
+                spaces,
+                view.backend,
+                view.scratch,
+            );
+            accumulateCryptoBackendProgress(&result, progress);
+        }
+        return result;
+    }
+
+    /// Drive backends across ordered packet number spaces and queue
+    /// CONNECTION_CLOSE on peer transport-parameter errors for each view.
+    ///
+    /// This preserves the success behavior of
+    /// `driveCryptoBackendsAcrossSpacesAndArmConnections()` while routing
+    /// malformed or semantically invalid peer transport-parameter extension
+    /// bytes through the close-on-error policy.
+    pub fn driveCryptoBackendsAcrossSpacesOrCloseAndArmConnections(
+        self: *EndpointConnectionLifecycle,
+        spaces: []const PacketNumberSpace,
+        views: []const EndpointCryptoBackendDriveView,
+    ) Error!EndpointCryptoBackendDriveSweepResult {
+        var result = EndpointCryptoBackendDriveSweepResult{};
+        for (views) |view| {
+            const progress = try self.driveCryptoBackendAcrossSpacesOrCloseAndArmConnection(
+                view.connection_id,
+                view.connection,
+                spaces,
+                view.backend,
+                view.scratch,
+            );
+            accumulateCryptoBackendProgress(&result, progress);
+        }
+        return result;
+    }
+
     /// Drive crypto backends, then select the next endpoint-visible deadline.
     ///
     /// This is the no-output backend-drive step for socket loops. Backend
@@ -65625,6 +65679,129 @@ test "EndpointConnectionLifecycle drives crypto backend across ordered spaces in
         handshake_len += pending.data.len;
     }
     try std.testing.expectEqualStrings("encrypted extensions", handshake_crypto[0..handshake_len]);
+}
+
+test "EndpointConnectionLifecycle drives backends across ordered spaces for multiple connections" {
+    const FlightBackend = struct {
+        initial_inbound: std.ArrayList(u8) = .empty,
+        initial_outbound: []const u8,
+        initial_offset: usize = 0,
+        handshake_outbound: []const u8,
+        handshake_offset: usize = 0,
+        secrets: HandshakeTrafficSecrets,
+        secrets_sent: bool = false,
+
+        fn deinit(self: *@This()) void {
+            self.initial_inbound.deinit(std.testing.allocator);
+        }
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .initial) return error.Internal;
+            self.initial_inbound.appendSlice(std.testing.allocator, data) catch return error.OutOfMemory;
+        }
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            switch (space) {
+                .initial => {
+                    if (self.initial_offset >= self.initial_outbound.len) return null;
+                    const n = @min(out_buf.len, self.initial_outbound.len - self.initial_offset);
+                    @memcpy(out_buf[0..n], self.initial_outbound[self.initial_offset..][0..n]);
+                    self.initial_offset += n;
+                    return out_buf[0..n];
+                },
+                .handshake => {
+                    if (self.handshake_offset >= self.handshake_outbound.len) return null;
+                    const n = @min(out_buf.len, self.handshake_outbound.len - self.handshake_offset);
+                    @memcpy(out_buf[0..n], self.handshake_outbound[self.handshake_offset..][0..n]);
+                    self.handshake_offset += n;
+                    return out_buf[0..n];
+                },
+                else => return null,
+            }
+        }
+
+        fn pullHandshakeTrafficSecrets(context: *anyopaque) Error!?HandshakeTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.secrets_sent) return null;
+            self.secrets_sent = true;
+            return self.secrets;
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var first = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    defer first.deinit();
+    try first.validatePeerAddress();
+    var second = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    defer second.deinit();
+    try second.validatePeerAddress();
+
+    inline for (.{ &first, &second }) |conn| {
+        var request: [64]u8 = undefined;
+        var out = buffer.fixedWriter(&request);
+        try frame.encodeFrame(out.writer(), .{ .crypto = .{
+            .offset = 0,
+            .data = "client hello",
+        } });
+        try conn.processDatagramInSpace(.initial, 0, out.getWritten());
+    }
+
+    var first_backend = FlightBackend{
+        .initial_outbound = "server hello",
+        .handshake_outbound = "encrypted extensions",
+        .secrets = .{
+            .local = [_]u8{0x51} ** protection.traffic_secret_len,
+            .peer = [_]u8{0x52} ** protection.traffic_secret_len,
+        },
+    };
+    defer first_backend.deinit();
+    var second_backend = FlightBackend{
+        .initial_outbound = "server hi",
+        .handshake_outbound = "cert",
+        .secrets = .{
+            .local = [_]u8{0x61} ** protection.traffic_secret_len,
+            .peer = [_]u8{0x62} ** protection.traffic_secret_len,
+        },
+    };
+    defer second_backend.deinit();
+
+    var first_scratch: [8]u8 = undefined;
+    var second_scratch: [8]u8 = undefined;
+    const views = [_]EndpointCryptoBackendDriveView{
+        .{ .connection_id = 81, .connection = &first, .backend = first_backend.backend(), .scratch = &first_scratch },
+        .{ .connection_id = 82, .connection = &second, .backend = second_backend.backend(), .scratch = &second_scratch },
+    };
+    const spaces = [_]PacketNumberSpace{ .initial, .handshake };
+    const sweep = try lifecycle.driveCryptoBackendsAcrossSpacesAndArmConnections(&spaces, &views);
+
+    try std.testing.expectEqual(@as(usize, 2), sweep.connections_driven);
+    try std.testing.expect(sweep.progress.handshake_keys_installed);
+    try std.testing.expectEqual(
+        first_backend.initial_outbound.len + first_backend.handshake_outbound.len +
+            second_backend.initial_outbound.len + second_backend.handshake_outbound.len,
+        sweep.progress.outbound_bytes,
+    );
+    try std.testing.expect(first.hasHandshakeProtectionKeys());
+    try std.testing.expect(second.hasHandshakeProtectionKeys());
+    try std.testing.expectEqualStrings("client hello", first_backend.initial_inbound.items);
+    try std.testing.expectEqualStrings("client hello", second_backend.initial_inbound.items);
+    try std.testing.expect(first.initial_packet_space.crypto_send_queue.items.len > 0);
+    try std.testing.expect(first.handshake_packet_space.crypto_send_queue.items.len > 0);
+    try std.testing.expect(second.initial_packet_space.crypto_send_queue.items.len > 0);
+    try std.testing.expect(second.handshake_packet_space.crypto_send_queue.items.len > 0);
 }
 
 test "EndpointConnectionLifecycle refreshes recovery timer after strict backend drive rejects closing connection" {
