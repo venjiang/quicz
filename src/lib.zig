@@ -7484,6 +7484,110 @@ pub const EndpointConnectionLifecycle = struct {
         };
     }
 
+    /// Drive crypto backends across ordered packet number spaces, then select
+    /// the next endpoint-visible deadline.
+    ///
+    /// This is the cross-space form of
+    /// `driveCryptoBackendsInSpaceAndSelectNextDeadline()`. It lets a timer
+    /// tick pull all TLS-produced CRYPTO for the ordered spaces before
+    /// recomputing the caller-owned wakeup schedule.
+    pub fn driveCryptoBackendsAcrossSpacesAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const backend = try self.driveCryptoBackendsAcrossSpacesAndArmConnections(
+            spaces,
+            drive_views,
+        );
+        return .{
+            .backend = backend,
+            .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+        };
+    }
+
+    /// Drive one backend across ordered packet number spaces, then select the
+    /// next endpoint-visible deadline.
+    ///
+    /// This is the single-connection form of
+    /// `driveCryptoBackendsAcrossSpacesAndSelectNextDeadline()`.
+    pub fn driveCryptoBackendAcrossSpacesAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const deadline_connections = [_]EndpointConnectionView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        return self.driveCryptoBackendsAcrossSpacesAndSelectNextDeadline(
+            spaces,
+            &drive_views,
+            &deadline_connections,
+        );
+    }
+
+    /// Drive close-propagating crypto backends across ordered packet number
+    /// spaces, then select the next endpoint-visible deadline.
+    ///
+    /// This is the close-on-error cross-space form of
+    /// `driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline()`.
+    pub fn driveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndArmConnections(
+            spaces,
+            drive_views,
+        );
+        return .{
+            .backend = backend,
+            .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+        };
+    }
+
+    /// Drive one close-propagating backend across ordered packet number spaces,
+    /// then select the next endpoint-visible deadline.
+    ///
+    /// This is the single-connection form of
+    /// `driveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline()`.
+    pub fn driveCryptoBackendAcrossSpacesOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
+        const drive_views = [_]EndpointCryptoBackendDriveView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+            .backend = backend,
+            .scratch = scratch,
+        }};
+        const deadline_connections = [_]EndpointConnectionView{.{
+            .connection_id = connection_id,
+            .connection = connection,
+        }};
+        return self.driveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
+            spaces,
+            &drive_views,
+            &deadline_connections,
+        );
+    }
+
     /// Drive one backend, then select the next endpoint-visible deadline.
     ///
     /// This is the single-connection no-output backend-drive step for simple
@@ -9462,6 +9566,141 @@ pub const EndpointConnectionLifecycle = struct {
                 backend_space,
                 drive_views,
                 deadline_connections,
+            ),
+        };
+    }
+
+    /// Process pending work, drive crypto backends across ordered packet number
+    /// spaces, then select the next endpoint-visible deadline.
+    ///
+    /// This is the cross-space form of
+    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceAndSelectNextDeadline()`.
+    /// It lets no-new-datagram socket-loop ticks service pending timers and
+    /// then pull TLS output from each ordered packet number space before the
+    /// next wakeup is selected.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!EndpointPendingWorkCryptoBackendNextDeadlineResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsAcrossSpacesAndSelectNextDeadline(
+                backend_spaces,
+                drive_views,
+                deadline_connections,
+            ),
+        };
+    }
+
+    /// Process pending work, drive close-propagating crypto backends across
+    /// ordered packet number spaces, then select the next endpoint-visible
+    /// deadline.
+    ///
+    /// Peer transport-parameter errors queue CONNECTION_CLOSE and return before
+    /// deadline selection. Successful backend progress uses the same
+    /// cross-space no-output wakeup planning contract as the strict path.
+    pub fn processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        pending_connections: []const EndpointConnectionReceiveView,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        drive_views: []const EndpointCryptoBackendDriveView,
+        deadline_connections: []const EndpointConnectionView,
+    ) Error!EndpointPendingWorkCryptoBackendNextDeadlineResult {
+        const pending_work = try self.processPendingWorkAcrossConnections(
+            pending_connections,
+            now_millis,
+        );
+        return .{
+            .pending_work = pending_work,
+            .backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
+                backend_spaces,
+                drive_views,
+                deadline_connections,
+            ),
+        };
+    }
+
+    /// Process pending work, drive one backend across ordered packet number
+    /// spaces, then select the next endpoint-visible deadline.
+    ///
+    /// This is the single-connection form of
+    /// `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndSelectNextDeadline()`.
+    pub fn processPendingWorkAndDriveCryptoBackendAcrossSpacesAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!EndpointPendingWorkCryptoBackendNextDeadlineResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
+        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
+            return .{
+                .pending_work = pending_sweep,
+                .backend = .{
+                    .backend = .{},
+                    .next_deadline = self.nextDeadline(connection_id, connection),
+                },
+            };
+        }
+
+        return .{
+            .pending_work = pending_sweep,
+            .backend = try self.driveCryptoBackendAcrossSpacesAndSelectNextDeadline(
+                connection_id,
+                connection,
+                backend_spaces,
+                backend,
+                scratch,
+            ),
+        };
+    }
+
+    /// Process pending work, drive one close-propagating backend across ordered
+    /// packet number spaces, then select the next endpoint-visible deadline.
+    ///
+    /// This is the single-connection close-on-error form of
+    /// `processPendingWorkAndDriveCryptoBackendAcrossSpacesAndSelectNextDeadline()`.
+    pub fn processPendingWorkAndDriveCryptoBackendAcrossSpacesOrCloseAndSelectNextDeadline(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        backend_spaces: []const PacketNumberSpace,
+        backend: CryptoBackend,
+        scratch: []u8,
+    ) Error!EndpointPendingWorkCryptoBackendNextDeadlineResult {
+        const pending_work = try self.processPendingWork(connection_id, connection, now_millis);
+        const pending_sweep = pendingWorkSweepFromSingle(pending_work);
+        if (pending_work.idle_retired != null or pending_work.close_retired != null) {
+            return .{
+                .pending_work = pending_sweep,
+                .backend = .{
+                    .backend = .{},
+                    .next_deadline = self.nextDeadline(connection_id, connection),
+                },
+            };
+        }
+
+        return .{
+            .pending_work = pending_sweep,
+            .backend = try self.driveCryptoBackendAcrossSpacesOrCloseAndSelectNextDeadline(
+                connection_id,
+                connection,
+                backend_spaces,
+                backend,
+                scratch,
             ),
         };
     }
@@ -36143,6 +36382,185 @@ test "EndpointConnectionLifecycle pending-work backend loop step selects next de
     try std.testing.expectEqual(PacketNumberSpace.application, recovery_timer.space);
     try std.testing.expectEqual(LossDetectionTimerKind.pto, recovery_timer.kind);
     try std.testing.expectEqual(@as(?[]const u8, null), try backend_connection.pollTxInSpace(.handshake, 30, &scratch));
+}
+
+test "EndpointConnectionLifecycle pending-work cross-space backend loop step selects next deadline" {
+    const Backend = struct {
+        pulls: usize = 0,
+        handshake_sent: bool = false,
+        application_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            const payload = switch (space) {
+                .handshake => blk: {
+                    if (self.handshake_sent) return null;
+                    self.handshake_sent = true;
+                    break :blk "timer handshake";
+                },
+                .application => blk: {
+                    if (self.application_sent) return null;
+                    self.application_sent = true;
+                    break :blk "timer application";
+                },
+                else => return null,
+            };
+            if (out_buf.len < payload.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..payload.len], payload);
+            return out_buf[0..payload.len];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var timer_connection = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer timer_connection.deinit();
+    try timer_connection.confirmHandshake();
+    _ = try timer_connection.recordPacketSentInSpace(.application, 20, 100);
+    try lifecycle.armRecoveryTimerFromConnection(301, &timer_connection);
+    const recovery_before = lifecycle.nextDeadline(301, &timer_connection) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, recovery_before.kind);
+
+    var backend_connection = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer backend_connection.deinit();
+    try backend_connection.confirmHandshake();
+
+    var backend = Backend{};
+    var scratch: [64]u8 = undefined;
+    const pending_connections = [_]EndpointConnectionReceiveView{
+        .{ .connection_id = 301, .connection = &timer_connection },
+        .{ .connection_id = 302, .connection = &backend_connection },
+    };
+    const backend_spaces = [_]PacketNumberSpace{ .handshake, .application };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 302,
+        .connection = &backend_connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const deadline_connections = [_]EndpointConnectionView{
+        .{ .connection_id = 301, .connection = &timer_connection },
+        .{ .connection_id = 302, .connection = &backend_connection },
+    };
+
+    const result = try lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndSelectNextDeadline(
+        &pending_connections,
+        recovery_before.deadline_millis,
+        &backend_spaces,
+        &drive_views,
+        &deadline_connections,
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 4), backend.pulls);
+    var tx_buf: [128]u8 = undefined;
+    const handshake_payload = (try backend_connection.pollTxInSpace(.handshake, 30, &tx_buf)) orelse return error.TestUnexpectedResult;
+    var handshake_decoded = try frame.decodeFrameSlice(handshake_payload, std.testing.allocator);
+    defer frame.deinitFrame(&handshake_decoded.frame, std.testing.allocator);
+    switch (handshake_decoded.frame) {
+        .crypto => |crypto| try std.testing.expectEqualStrings("timer handshake", crypto.data),
+        else => return error.TestUnexpectedResult,
+    }
+    const application_payload = (try backend_connection.pollTxInSpace(.application, 31, &tx_buf)) orelse return error.TestUnexpectedResult;
+    var application_decoded = try frame.decodeFrameSlice(application_payload, std.testing.allocator);
+    defer frame.deinitFrame(&application_decoded.frame, std.testing.allocator);
+    switch (application_decoded.frame) {
+        .crypto => |crypto| try std.testing.expectEqualStrings("timer application", crypto.data),
+        else => return error.TestUnexpectedResult,
+    }
+    const next = result.backend.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 301), next.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
+    try std.testing.expect(next.deadline_millis > recovery_before.deadline_millis);
+}
+
+test "EndpointConnectionLifecycle pending-work cross-space close backend loop stops before deadline on peer error" {
+    const BadBackend = struct {
+        peer_sent: bool = false,
+        pulls: usize = 0,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_peer_transport_parameters = pullPeerTransportParameters,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pulls += 1;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0;
+            return out_buf[0..1];
+        }
+
+        fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.peer_sent) return null;
+            if (out_buf.len == 0) return error.BufferTooSmall;
+            out_buf[0] = 0x04;
+            self.peer_sent = true;
+            return out_buf[0..1];
+        }
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer connection.deinit();
+    try connection.validatePeerAddress();
+
+    var backend = BadBackend{};
+    var scratch: [64]u8 = undefined;
+    const pending_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 303,
+        .connection = &connection,
+    }};
+    const backend_spaces = [_]PacketNumberSpace{ .handshake, .application };
+    const drive_views = [_]EndpointCryptoBackendDriveView{.{
+        .connection_id = 303,
+        .connection = &connection,
+        .backend = backend.backend(),
+        .scratch = &scratch,
+    }};
+    const deadline_connections = [_]EndpointConnectionView{.{
+        .connection_id = 303,
+        .connection = &connection,
+    }};
+
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
+        &pending_connections,
+        10,
+        &backend_spaces,
+        &drive_views,
+        &deadline_connections,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), backend.pulls);
+    try std.testing.expectEqual(ConnectionState.closing, connection.connectionState());
 }
 
 test "EndpointConnectionLifecycle pending-work close backend loop step selects next deadline" {
