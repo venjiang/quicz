@@ -262,6 +262,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndDrainDatagrams`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndPollDatagramWithInstalledKeyOptions`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesAndDrainDatagramsWithInstalledKeyOptions`,
+`processPendingWorkAndDriveCryptoBackendAcrossSpacesAndPollDatagram`,
+`processPendingWorkAndDriveCryptoBackendAcrossSpacesAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendAcrossSpacesAndPollDatagramWithInstalledKeyOptions`,
+`processPendingWorkAndDriveCryptoBackendAcrossSpacesAndDrainDatagramsWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline`,
@@ -274,6 +278,10 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagrams`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
+`processPendingWorkAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagram`,
+`processPendingWorkAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagrams`,
+`processPendingWorkAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions`,
+`processPendingWorkAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline`,
 `processPendingWorkAcrossConnectionsAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram`,
@@ -1458,6 +1466,23 @@ QUIC unless the gap is named and the verification evidence is added here.
   0-RTT PTO wakeups keep explicit `RESET_STREAM` output in poll and bounded
   drain forms, while close/compatible variants remain callable with empty
   output views.
+- 2026-07-02: Added the single-connection cross-space pending-work backend
+  output wrappers:
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendAcrossSpacesAndPollDatagram()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendAcrossSpacesAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendAcrossSpacesAndPollDatagramWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendAcrossSpacesAndDrainDatagramsWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagram()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions()`,
+  and
+  `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagramsWithInstalledKeyOptions()`.
+  They reuse the single-connection pending-work gate and existing cross-space
+  backend/output helpers, so simple no-new-datagram socket-loop ticks can
+  service one connection, drive ordered backend spaces, and poll or drain
+  caller-selected output without constructing multi-connection view arrays.
+  Unit coverage proves cross-space explicit 0-RTT poll/drain output and keeps
+  the new OrClose explicit-output forms callable with empty output views.
 - 2026-06-11: Updated the single-connection due-deadline-to-backend poll and
   bounded-drain wrappers to preserve explicit installed-key recovery output
   choices. Initial recovery still services pending work without emitting an
