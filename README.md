@@ -304,6 +304,14 @@ loop entrypoints `feedDatagram`, `feedDatagramWithInstalledKeys`,
 `processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions`,
 `processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndSelectNextDeadline`,
 `processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndSelectNextDeadline`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndPollDatagram`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndPollDatagramWithInstalledKeyOptions`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndDrainDatagramsWithInstalledKeyOptions`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagram`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions`,
@@ -451,9 +459,10 @@ service due recovery wakeups with explicit installed-key output choices, such
 as accepted 0-RTT; the cross-connection `WithInstalledKeyOptions` variants
 preserve the same explicit choice while selecting the earliest due connection
 from a caller-owned map. Single-connection due-deadline-to-backend poll and
-drain wrappers also preserve explicit 0-RTT recovery output before any backend
-drive; cross-connection due-deadline-to-backend poll/drain `WithInstalledKeyOptions`
-variants do the same before backend sweeps. The direct receive-to-output
+drain wrappers, including cross-space backend-drive forms, also preserve
+explicit 0-RTT recovery output before any backend drive; cross-connection
+due-deadline-to-backend poll/drain `WithInstalledKeyOptions` variants do the
+same before backend sweeps. The direct receive-to-output
 cross-connection `WithInstalledKeyOptions` feed helpers preserve per-connection
 installed-key output choices after routed datagram processing. A production
 TLS-owned socket event loop is still pending.

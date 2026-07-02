@@ -285,6 +285,14 @@ socket-loop 和 TLS-backend loop 入口 `feedDatagram`、`feedDatagramWithInstal
 `processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions`、
 `processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndSelectNextDeadline`、
 `processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndSelectNextDeadline`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndPollDatagram`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndPollDatagramWithInstalledKeyOptions`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndDrainDatagramsWithInstalledKeyOptions`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagram`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions`、
@@ -425,9 +433,10 @@ installed-key poll options；`processDueDeadlineAndPollDatagramWithInstalledKeyO
 `processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions()` 允许调用方用显式
 installed-key 输出选择服务到期 recovery wakeup，例如 accepted 0-RTT；跨连接
 `WithInstalledKeyOptions` 变体会在调用方持有的 connection map 中选择最早到期连接，同时保留
-相同的显式输出选择；single-connection due-deadline-to-backend poll 和 drain wrapper 也会在
-backend drive 前保留显式 0-RTT recovery output；cross-connection due-deadline-to-backend
-poll/drain 的 `WithInstalledKeyOptions` 变体会在 backend sweep 前保留同样的显式选择；生产级
+相同的显式输出选择；single-connection due-deadline-to-backend poll 和 drain wrapper，
+包括 cross-space backend-drive 形态，也会在 backend drive 前保留显式 0-RTT recovery output；
+cross-connection due-deadline-to-backend poll/drain 的 `WithInstalledKeyOptions` 变体会在
+backend sweep 前保留同样的显式选择；生产级
 TLS-owned socket event loop 仍待实现。
 
 `Connection` 是当前推荐的公开连接句柄；`QuicConnection` 作为兼容别名保留，便于旧调用方在实验性 API 继续演进期间平滑迁移。

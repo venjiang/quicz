@@ -312,6 +312,14 @@ socket-facing and TLS-backend loop API shape: `feedDatagram`, `feedDatagramWithI
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`,
 `processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndSelectNextDeadline`,
 `processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndSelectNextDeadline`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndPollDatagram`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndPollDatagramWithInstalledKeyOptions`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndDrainDatagramsWithInstalledKeyOptions`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagram`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagrams`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions`,
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagramsWithInstalledKeyOptions`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`,
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions`,
@@ -1506,6 +1514,23 @@ QUIC unless the gap is named and the verification evidence is added here.
   can run backend work and then poll or drain caller-selected 0-RTT output.
   Unit coverage proves poll and bounded-drain output selection, no backend
   drive before the deadline, and unchanged before-deadline endpoint state.
+- 2026-07-02: Added the single-connection cross-space due-deadline backend
+  output variants:
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndPollDatagram()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndPollDatagramWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndDrainDatagramsWithInstalledKeyOptions()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagram()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagrams()`,
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions()`,
+  and
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagramsWithInstalledKeyOptions()`.
+  They reuse the single-connection due-deadline ownership gate and existing
+  cross-space backend/output helpers, so live no-output deadlines can drive
+  ordered backend spaces and then poll or drain caller-selected output without
+  introducing another backend path. Unit coverage proves cross-space poll and
+  bounded-drain explicit 0-RTT output selection plus no backend drive before
+  the due deadline.
 - 2026-06-18: Split internal connection bookkeeping records into
   `src/quic/connection_state.zig` while keeping `src/lib.zig` as the stable
   public module root. The new module owns pending STREAM/CRYPTO frames,

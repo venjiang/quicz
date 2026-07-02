@@ -426,6 +426,14 @@ lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的
 `processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline`、
 `processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndSelectNextDeadline`、
 `processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndSelectNextDeadline`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndPollDatagram`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndPollDatagramWithInstalledKeyOptions`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndDrainDatagramsWithInstalledKeyOptions`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagram`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagrams`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions`、
+`processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagramsWithInstalledKeyOptions`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndDrainDatagrams`、
 `processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagramWithInstalledKeyOptions`、
@@ -1347,6 +1355,21 @@ close 和 route cleanup 事件。
   views 分开，让 live Application loss-time deadline 可以先运行 backend work，再 poll 或
   drain 调用方选择的 0-RTT output。单元测试证明 poll 和 bounded-drain 的输出选择、deadline
   前不会 drive backend、以及 deadline 前 endpoint state 不变。
+- 2026-07-02：新增 single-connection cross-space due-deadline backend output
+  变体：
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndPollDatagram()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndDrainDatagrams()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndPollDatagramWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesAndDrainDatagramsWithInstalledKeyOptions()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagram()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagrams()`、
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndPollDatagramWithInstalledKeyOptions()`，
+  以及
+  `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendAcrossSpacesOrCloseAndDrainDatagramsWithInstalledKeyOptions()`。
+  这些入口复用 single-connection due-deadline ownership gate 和现有 cross-space
+  backend/output helper，让没有 due datagram 的 live deadline 可以按有序 space drive backend，
+  再 poll 或 drain 调用方选择的输出，而不引入另一套 backend 路径。单元测试证明 cross-space
+  poll 和 bounded-drain 的显式 0-RTT output 选择，以及 deadline 前不会 drive backend。
 - 2026-06-18：把内部 connection bookkeeping 记录拆到
   `src/quic/connection_state.zig`，同时保持 `src/lib.zig` 作为稳定 public module root。
   新模块负责 pending STREAM/CRYPTO frame、sent-packet metadata、pending close/control
