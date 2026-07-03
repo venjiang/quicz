@@ -53,6 +53,34 @@ static const unsigned char quicz_openssl_backend_demo_psk[] = {
     0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
 };
 
+static const unsigned char quicz_alpn_protos[] = {
+    11, 'h', 'q', '-', 'i', 'n', 't', 'e', 'r', 'o', 'p',
+};
+
+static int alpn_select_cb(
+    SSL *ssl,
+    const unsigned char **out,
+    unsigned char *outlen,
+    const unsigned char *client_protos,
+    unsigned int client_protos_len,
+    void *arg
+) {
+    (void)ssl;
+    (void)arg;
+    int status = SSL_select_next_proto(
+        (unsigned char **)out,
+        outlen,
+        quicz_alpn_protos,
+        sizeof(quicz_alpn_protos),
+        client_protos,
+        client_protos_len
+    );
+    if (status == OPENSSL_NPN_NEGOTIATED) {
+        return SSL_TLSEXT_ERR_OK;
+    }
+    return SSL_TLSEXT_ERR_NOACK;
+}
+
 static int crypto_send_cb(SSL *ssl, const unsigned char *buf, size_t buf_len, size_t *consumed, void *arg) {
     (void)ssl;
     struct quicz_openssl_tls_backend *backend = arg;
@@ -275,6 +303,9 @@ static void *quicz_openssl_tls_backend_new_for_role(int is_client) {
     }
     SSL_CTX_set_psk_client_callback(backend->ctx, psk_client_cb);
     SSL_CTX_set_psk_server_callback(backend->ctx, psk_server_cb);
+    if (!is_client) {
+        SSL_CTX_set_alpn_select_cb(backend->ctx, alpn_select_cb, NULL);
+    }
 
     backend->ssl = SSL_new(backend->ctx);
     if (backend->ssl == NULL) {
@@ -284,6 +315,9 @@ static void *quicz_openssl_tls_backend_new_for_role(int is_client) {
     }
 
     SSL_set_app_data(backend->ssl, backend);
+    if (is_client) {
+        SSL_set_alpn_protos(backend->ssl, quicz_alpn_protos, sizeof(quicz_alpn_protos));
+    }
     SSL_CTX_set_keylog_callback(backend->ctx, keylog_cb);
     backend->callbacks_set = SSL_set_quic_tls_cbs(backend->ssl, quicz_openssl_tls_dispatch, backend);
     backend->ssl_is_quic_after_callbacks = SSL_is_quic(backend->ssl);
@@ -511,6 +545,30 @@ bool quicz_openssl_tls_backend_handshake_confirmed(void *context) {
         backend->one_rtt_peer_secret_available &&
         backend->received_crypto_len != 0 &&
         backend->inbound_crypto_released_len == backend->received_crypto_len;
+}
+
+enum quicz_tls_backend_status quicz_openssl_tls_backend_pull_negotiated_alpn(
+    void *context,
+    uint8_t *out,
+    size_t out_len,
+    size_t *written_len
+) {
+    const struct quicz_openssl_tls_backend *backend = context;
+    if (backend == NULL || backend->ssl == NULL) {
+        return QUICZ_TLS_BACKEND_INTERNAL;
+    }
+    const unsigned char *alpn = NULL;
+    unsigned int alpn_len = 0;
+    SSL_get0_alpn_selected(backend->ssl, &alpn, &alpn_len);
+    if (alpn == NULL || alpn_len == 0) {
+        return QUICZ_TLS_BACKEND_PENDING;
+    }
+    if (out_len < alpn_len) {
+        return QUICZ_TLS_BACKEND_BUFFER_TOO_SMALL;
+    }
+    memcpy(out, alpn, alpn_len);
+    *written_len = alpn_len;
+    return QUICZ_TLS_BACKEND_OK;
 }
 
 int quicz_openssl_tls_backend_callbacks_set(void *context) {

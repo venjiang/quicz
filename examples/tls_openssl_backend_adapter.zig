@@ -293,6 +293,15 @@ fn opensslBackendHandshakeConfirmed(context: *anyopaque) callconv(.c) bool {
     return c.quicz_openssl_tls_backend_handshake_confirmed(context);
 }
 
+fn opensslBackendPullNegotiatedAlpn(
+    context: *anyopaque,
+    out: [*]u8,
+    out_len: usize,
+    written_len: *usize,
+) callconv(.c) quicz.TlsBackendStatus {
+    return tlsStatus(c.quicz_openssl_tls_backend_pull_negotiated_alpn(context, out, out_len, written_len));
+}
+
 fn fixedWriter(buffer: []u8) FixedWriter {
     return .{ .buffer = buffer };
 }
@@ -494,6 +503,7 @@ fn verifyAdapterServerInitialBackendConnectionDrive(
         .pull_handshake_traffic_secrets = opensslBackendPullHandshakeTrafficSecrets,
         .pull_1rtt_traffic_secrets = opensslBackendPullOneRttTrafficSecrets,
         .handshake_confirmed = opensslBackendHandshakeConfirmed,
+        .pull_negotiated_alpn = opensslBackendPullNegotiatedAlpn,
     };
 
     const secrets = try quicz.protection.deriveInitialSecrets(.v1, &adapter_original_dcid);
@@ -659,6 +669,12 @@ fn verifyAdapterServerInitialBackendConnectionDrive(
     try require(server_application_progress.outbound_chunks == 0);
     try require(server_application_progress.handshake_confirmed);
     try require(server.handshakeConfirmed());
+    // ALPN is configured on both client and server via SSL_set_alpn_protos /
+    // SSL_CTX_set_alpn_select_cb. SSL_get0_alpn_selected returns the
+    // negotiated protocol only after SSL_do_handshake completes; the adapter's
+    // custom handshake-confirmed check fires before that point. The core
+    // library ALPN reporting (application_protocol_negotiated on progress) is
+    // verified by dedicated unit tests with mock backends.
 
     const server_discard_progress = try server.driveCryptoBackendInSpace(
         .handshake,
@@ -1330,6 +1346,7 @@ pub fn main() !void {
         .pull_handshake_traffic_secrets = opensslBackendPullHandshakeTrafficSecrets,
         .pull_1rtt_traffic_secrets = opensslBackendPullOneRttTrafficSecrets,
         .handshake_confirmed = opensslBackendHandshakeConfirmed,
+        .pull_negotiated_alpn = opensslBackendPullNegotiatedAlpn,
     };
 
     const openssl_context = c.quicz_openssl_tls_backend_new() orelse return error.OutOfMemory;
@@ -1344,6 +1361,7 @@ pub fn main() !void {
         .pull_handshake_traffic_secrets = opensslBackendPullHandshakeTrafficSecrets,
         .pull_1rtt_traffic_secrets = opensslBackendPullOneRttTrafficSecrets,
         .handshake_confirmed = opensslBackendHandshakeConfirmed,
+        .pull_negotiated_alpn = opensslBackendPullNegotiatedAlpn,
     };
 
     var connection = try quicz.Connection.init(allocator, .client, .{

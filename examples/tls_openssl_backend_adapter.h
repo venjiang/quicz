@@ -40,6 +40,12 @@ enum quicz_tls_backend_status quicz_openssl_tls_backend_pull_1rtt_traffic_secret
     struct quicz_one_rtt_traffic_secrets *out
 );
 bool quicz_openssl_tls_backend_handshake_confirmed(void *context);
+enum quicz_tls_backend_status quicz_openssl_tls_backend_pull_negotiated_alpn(
+    void *context,
+    uint8_t *out,
+    size_t out_len,
+    size_t *written_len
+);
 int quicz_openssl_tls_backend_callbacks_set(void *context);
 int quicz_openssl_tls_backend_local_transport_parameters_set(void *context);
 int quicz_openssl_tls_backend_ssl_is_quic_after_callbacks(void *context);
