@@ -82321,6 +82321,124 @@ test "driveCryptoBackendInSpace installs one RTT traffic secrets for short packe
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
 }
 
+test "EndpointConnectionLifecycle cross-space backend drive installs one RTT traffic secrets for short packet exchange" {
+    const SecretBackend = struct {
+        secrets: OneRttTrafficSecrets,
+        sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_1rtt_traffic_secrets = pullOneRttTrafficSecrets,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullOneRttTrafficSecrets(context: *anyopaque) Error!?OneRttTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.sent) return null;
+            self.sent = true;
+            return self.secrets;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer client_lifecycle.deinit();
+    var server_lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer server_lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const client_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    try server_lifecycle.registerConnectionId(191, &server_dcid, server_path, .{ .sequence_number = 0 });
+    try client_lifecycle.registerConnectionId(190, &client_dcid, client_path, .{ .sequence_number = 0 });
+
+    var client_backend = SecretBackend{ .secrets = .{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    } };
+    var server_backend = SecretBackend{ .secrets = .{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    } };
+    var scratch: [8]u8 = undefined;
+    const backend_spaces = [_]PacketNumberSpace{ .handshake, .application };
+
+    const client_progress = try client_lifecycle.driveCryptoBackendAcrossSpacesAndArmConnection(
+        190,
+        &client,
+        &backend_spaces,
+        client_backend.backend(),
+        &scratch,
+    );
+    try std.testing.expect(client_progress.one_rtt_keys_installed);
+    try std.testing.expect(client.hasOneRttProtectionKeys());
+
+    const server_progress = try server_lifecycle.driveCryptoBackendAcrossSpacesAndArmConnection(
+        191,
+        &server,
+        &backend_spaces,
+        server_backend.backend(),
+        &scratch,
+    );
+    try std.testing.expect(server_progress.one_rtt_keys_installed);
+    try std.testing.expect(server.hasOneRttProtectionKeys());
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttKeyPhase());
+
+    try server.sendPing();
+    const server_ping = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        191,
+        &server,
+        12,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_ping);
+    try client.processProtectedShortDatagramWithInstalledKeys(13, client_dcid.len, server_ping);
+    try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.application));
+
+    const client_ack = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        190,
+        &client,
+        14,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_ack);
+    try server.processProtectedShortDatagramWithInstalledKeys(15, server_dcid.len, client_ack);
+    try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.application));
+}
+
 test "installed one RTT key phase state advances only after successful receive" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
