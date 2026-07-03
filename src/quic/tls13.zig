@@ -7,6 +7,10 @@ const Sha256 = crypto.hash.sha2.Sha256;
 const HmacSha256 = crypto.auth.hmac.sha2.HmacSha256;
 const Aes128Gcm = crypto.aead.aes_gcm.Aes128Gcm;
 const X25519 = crypto.dh.X25519;
+const Certificate = crypto.Certificate;
+const EcdsaP256Sha256 = crypto.sign.ecdsa.EcdsaP256Sha256;
+const Ed25519 = crypto.sign.Ed25519;
+const SignatureScheme = crypto.tls.SignatureScheme;
 
 const secret_len: usize = 32;
 const key_len: usize = 16;
@@ -191,7 +195,60 @@ pub const HandshakeError = error{
     MissingExtension,
 };
 
-// ─── Internal helpers ───────────────────────────────────────────────
+// ─── CertificateVerify signature verification ───────────────────────
+
+/// Verify a TLS 1.3 CertificateVerify signature against a public key
+/// (RFC 8446 §4.4.3). `signed_content` is the already-assembled buffer of
+/// 64 space bytes + "TLS 1.3, server CertificateVerify" + 0x00 + transcript
+/// hash. The signature scheme must match the certificate's public-key
+/// algorithm category; a mismatch is rejected as `BadCertificateVerify`.
+fn verifyCertificateVerifySignature(
+    pub_key: []const u8,
+    pub_key_algo: Certificate.AlgorithmCategory,
+    scheme: u16,
+    sig: []const u8,
+    signed_content: []const u8,
+) HandshakeError!void {
+    const s: SignatureScheme = @enumFromInt(scheme);
+    switch (s) {
+        .ecdsa_secp256r1_sha256 => {
+            if (pub_key_algo != .X9_62_id_ecPublicKey) return error.BadCertificateVerify;
+            const esig = EcdsaP256Sha256.Signature.fromDer(sig) catch return error.BadCertificateVerify;
+            const pk = EcdsaP256Sha256.PublicKey.fromSec1(pub_key) catch return error.BadCertificateVerify;
+            esig.verify(signed_content, pk) catch return error.BadCertificateVerify;
+        },
+        .ed25519 => {
+            if (pub_key_algo != .curveEd25519) return error.BadCertificateVerify;
+            if (sig.len != Ed25519.Signature.encoded_length) return error.BadCertificateVerify;
+            if (pub_key.len != Ed25519.PublicKey.encoded_length) return error.BadCertificateVerify;
+            const esig = Ed25519.Signature.fromBytes(sig[0..Ed25519.Signature.encoded_length].*);
+            const pk = Ed25519.PublicKey.fromBytes(pub_key[0..Ed25519.PublicKey.encoded_length].*) catch return error.BadCertificateVerify;
+            esig.verify(signed_content, pk) catch return error.BadCertificateVerify;
+        },
+        .rsa_pss_rsae_sha256 => {
+            if (pub_key_algo != .rsaEncryption) return error.BadCertificateVerify;
+            verifyRsaPssSha256(pub_key, sig, signed_content) catch return error.BadCertificateVerify;
+        },
+        else => return error.BadCertificateVerify,
+    }
+}
+
+/// Verify an RSA-PSS-SHA256 signature (RFC 8017) over `msg` with a DER-encoded
+/// RSA public key. The modulus length must be one of the supported TLS sizes.
+fn verifyRsaPssSha256(pub_key_der: []const u8, sig: []const u8, msg: []const u8) HandshakeError!void {
+    const rsa = Certificate.rsa;
+    const comp = rsa.PublicKey.parseDer(pub_key_der) catch return error.BadCertificateVerify;
+    switch (comp.modulus.len) {
+        inline 128, 256, 384, 512 => |ml| {
+            if (sig.len != ml) return error.BadCertificateVerify;
+            const key = rsa.PublicKey.fromBytes(comp.exponent, comp.modulus) catch return error.BadCertificateVerify;
+            const s = rsa.PSSSignature.fromBytes(ml, sig[0..ml]);
+            rsa.PSSSignature.verify(ml, s, msg, key, Sha256) catch return error.BadCertificateVerify;
+        },
+        else => return error.BadCertificateVerify,
+    }
+}
+
 
 /// Fill `buf` with cryptographically secure random bytes from the OS.
 fn secureRandomBytes(buf: []u8) void {
@@ -831,13 +888,36 @@ pub const Tls13Handshake = struct {
         self.server_cert_len = @min(cert_len, self.server_cert.len);
         @memcpy(self.server_cert[0..self.server_cert_len], msg[pos .. pos + self.server_cert_len]);
 
+        // When verification is enabled, parse the leaf certificate and check
+        // the hostname (RFC 6125). Validity-period and chain-to-anchor
+        // checks require a wall-clock timestamp and a trust bundle, which are
+        // deferred until the TLS backend is wired into the endpoint I/O loop.
+        if (!self.config.skip_cert_verify) {
+            try self.verifyServerCertificate();
+        }
+
         self.transcript.update(msg);
         self.state = .client_wait_certificate_verify;
         return ._continue;
     }
 
-    /// Parse CertificateVerify and store the signature for later verification
-    /// (RFC 8446 §4.4.3).
+    /// Parse the stored server certificate and verify the SNI hostname against
+    /// its SAN/CN (RFC 8446 §4.4.2 + RFC 6125).
+    fn verifyServerCertificate(self: *Tls13Handshake) HandshakeError!void {
+        const cert: Certificate = .{
+            .buffer = self.server_cert[0..self.server_cert_len],
+            .index = 0,
+        };
+        const parsed = cert.parse() catch return error.BadCertificate;
+
+        if (self.config.server_name) |host| {
+            parsed.verifyHostName(host) catch return error.BadCertificate;
+        }
+    }
+
+    /// Parse CertificateVerify and store the signature, then (when
+    /// verification is enabled) verify it against the server certificate's
+    /// public key (RFC 8446 §4.4.3).
     fn clientProcessCertificateVerify(self: *Tls13Handshake) HandshakeError!Action {
         const msg = self.readHandshakeMsg() orelse return .wait_for_data;
         if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.certificate_verify)) return error.UnexpectedMessage;
@@ -855,9 +935,44 @@ pub const Tls13Handshake = struct {
         self.cert_verify_sig_len = @min(sig_len, self.cert_verify_sig.len);
         @memcpy(self.cert_verify_sig[0..self.cert_verify_sig_len], msg[pos .. pos + self.cert_verify_sig_len]);
 
+        // The signature covers the transcript up to (not including) this
+        // message, so snapshot before updating the transcript.
+        if (!self.config.skip_cert_verify) {
+            try self.verifyCertificateVerify(self.transcript.current());
+        }
+
         self.transcript.update(msg);
         self.state = .client_wait_finished;
         return ._continue;
+    }
+
+    /// Verify the stored CertificateVerify signature against the server
+    /// certificate's public key, using the transcript hash up to the
+    /// Certificate message (RFC 8446 §4.4.3).
+    fn verifyCertificateVerify(self: *Tls13Handshake, transcript_hash: [32]u8) HandshakeError!void {
+        const cert: Certificate = .{
+            .buffer = self.server_cert[0..self.server_cert_len],
+            .index = 0,
+        };
+        const parsed = cert.parse() catch return error.BadCertificate;
+        const pub_key = parsed.pubKey();
+        const pub_key_algo: Certificate.AlgorithmCategory = parsed.pub_key_algo;
+
+        // Signed content: 0x20 × 64 + context string + 0x00 + transcript hash.
+        const label = "TLS 1.3, server CertificateVerify";
+        var signed: [64 + label.len + 1 + 32]u8 = undefined;
+        @memset(signed[0..64], 0x20);
+        @memcpy(signed[64..][0..label.len], label);
+        signed[64 + label.len] = 0x00;
+        @memcpy(signed[64 + label.len + 1 ..][0..32], &transcript_hash);
+
+        try verifyCertificateVerifySignature(
+            pub_key,
+            pub_key_algo,
+            self.cert_verify_scheme,
+            self.cert_verify_sig[0..self.cert_verify_sig_len],
+            &signed,
+        );
     }
 
     /// Verify the server Finished message against the transcript hash and
@@ -1391,4 +1506,108 @@ test "Tls13Handshake client rejects server Finished with wrong verify_data" {
     var fin_buf: [64]u8 = undefined;
     hs.provideData(fin_buf[0..buildFinished(&fin_buf, bad)]);
     try std.testing.expectError(error.BadFinished, hs.step());
+}
+
+// ─── Tests for CertificateVerify signature verification ─────────────
+
+/// Build the TLS 1.3 server CertificateVerify signed content over a fixed
+/// transcript hash for use in signature tests.
+fn certVerifySignedContent(transcript_hash: [32]u8) [130]u8 {
+    const label = "TLS 1.3, server CertificateVerify";
+    var signed: [64 + label.len + 1 + 32]u8 = undefined;
+    @memset(signed[0..64], 0x20);
+    @memcpy(signed[64..][0..label.len], label);
+    signed[64 + label.len] = 0x00;
+    @memcpy(signed[64 + label.len + 1 ..][0..32], &transcript_hash);
+    return signed;
+}
+
+test "verifyCertificateVerifySignature accepts a valid ECDSA P-256 signature" {
+    const seed = [_]u8{0x11} ** 32;
+    const kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const pub_key = kp.public_key.toUncompressedSec1();
+
+    const th: [32]u8 = [_]u8{0xAB} ** 32;
+    const signed = certVerifySignedContent(th);
+
+    const sig = try kp.sign(&signed, null);
+    var der_buf: [EcdsaP256Sha256.Signature.der_encoded_length_max]u8 = undefined;
+    const der = sig.toDer(&der_buf);
+
+    try verifyCertificateVerifySignature(&pub_key, .X9_62_id_ecPublicKey, 0x0403, der, &signed);
+}
+
+test "verifyCertificateVerifySignature rejects a tampered ECDSA P-256 signature" {
+    const seed = [_]u8{0x11} ** 32;
+    const kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const pub_key = kp.public_key.toUncompressedSec1();
+
+    const th: [32]u8 = [_]u8{0xAB} ** 32;
+    const signed = certVerifySignedContent(th);
+
+    const sig = try kp.sign(&signed, null);
+    var der_buf: [EcdsaP256Sha256.Signature.der_encoded_length_max]u8 = undefined;
+    const der = sig.toDer(&der_buf);
+    // Flip a byte in the DER signature.
+    var tampered = der_buf;
+    tampered[0] ^= 0xFF;
+    const tampered_der = tampered[0..der.len];
+
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        verifyCertificateVerifySignature(&pub_key, .X9_62_id_ecPublicKey, 0x0403, tampered_der, &signed),
+    );
+}
+
+test "verifyCertificateVerifySignature accepts a valid Ed25519 signature" {
+    const seed = [_]u8{0x22} ** 32;
+    const kp = try Ed25519.KeyPair.generateDeterministic(seed);
+    const pub_key = kp.public_key.toBytes();
+
+    const th: [32]u8 = [_]u8{0xCD} ** 32;
+    const signed = certVerifySignedContent(th);
+
+    const sig = try kp.sign(&signed, null);
+    const sig_bytes = sig.toBytes();
+
+    try verifyCertificateVerifySignature(&pub_key, .curveEd25519, 0x0807, &sig_bytes, &signed);
+}
+
+test "verifyCertificateVerifySignature rejects a tampered Ed25519 signature" {
+    const seed = [_]u8{0x22} ** 32;
+    const kp = try Ed25519.KeyPair.generateDeterministic(seed);
+    const pub_key = kp.public_key.toBytes();
+
+    const th: [32]u8 = [_]u8{0xCD} ** 32;
+    const signed = certVerifySignedContent(th);
+
+    const sig = try kp.sign(&signed, null);
+    var sig_bytes = sig.toBytes();
+    sig_bytes[0] ^= 0xFF;
+
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        verifyCertificateVerifySignature(&pub_key, .curveEd25519, 0x0807, &sig_bytes, &signed),
+    );
+}
+
+test "verifyCertificateVerifySignature rejects a scheme/key-algorithm mismatch" {
+    // Ed25519 public key + signature, but the scheme claims ECDSA P-256.
+    const seed = [_]u8{0x22} ** 32;
+    const kp = try Ed25519.KeyPair.generateDeterministic(seed);
+    const pub_key = kp.public_key.toBytes();
+    const sig = try kp.sign("any message", null);
+    const sig_bytes = sig.toBytes();
+
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        verifyCertificateVerifySignature(&pub_key, .curveEd25519, 0x0403, &sig_bytes, "any message"),
+    );
+}
+
+test "verifyCertificateVerifySignature rejects an unsupported scheme" {
+    try std.testing.expectError(
+        error.BadCertificateVerify,
+        verifyCertificateVerifySignature(&[_]u8{}, .curveEd25519, 0x0000, &[_]u8{}, "msg"),
+    );
 }
