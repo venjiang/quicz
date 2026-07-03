@@ -70,6 +70,11 @@ pub const CryptoBackendProgress = struct {
     outbound_bytes: usize = 0,
     /// Whether the connection is handshake-confirmed after the drive step.
     handshake_confirmed: bool = false,
+    /// Whether a TLS-negotiated application protocol (ALPN) was confirmed
+    /// during this drive step. Only set when the backend exposes an ALPN hook
+    /// and the handshake is confirmed. A confirmed handshake with this field
+    /// false indicates an RFC 9001 §8.1 no_application_protocol condition.
+    application_protocol_negotiated: bool = false,
 };
 
 /// Pluggable TLS/crypto backend hook driven by QUIC CRYPTO byte streams.
@@ -116,6 +121,13 @@ pub const CryptoBackend = struct {
     /// protection keys and installs endpoint-owned key-phase state from the
     /// returned secrets.
     pull_1rtt_traffic_secrets: ?*const fn (context: *anyopaque) Error!?OneRttTrafficSecrets = null,
+    /// Optional hook returning the TLS-negotiated ALPN protocol bytes.
+    ///
+    /// Return null when negotiation has not completed or the backend does not
+    /// expose ALPN. Non-empty slices indicate successful negotiation. The
+    /// connection checks this after handshake confirmation to satisfy
+    /// RFC 9001 §8.1.
+    pull_negotiated_alpn: ?*const fn (context: *anyopaque, out_buf: []u8) Error!?[]const u8 = null,
     /// Optional handshake-complete probe. When true, the connection marks the
     /// modeled handshake confirmed after CRYPTO input/output has been driven.
     handshake_confirmed: ?*const fn (context: *anyopaque) bool = null,
@@ -149,6 +161,11 @@ pub const CryptoBackend = struct {
     pub fn pullOneRttTrafficSecrets(self: CryptoBackend) Error!?OneRttTrafficSecrets {
         const pull_secrets = self.pull_1rtt_traffic_secrets orelse return null;
         return try pull_secrets(self.context);
+    }
+
+    pub fn pullNegotiatedAlpn(self: CryptoBackend, out_buf: []u8) Error!?[]const u8 {
+        const pull_alpn = self.pull_negotiated_alpn orelse return null;
+        return try pull_alpn(self.context, out_buf);
     }
 };
 

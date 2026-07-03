@@ -128,6 +128,8 @@ pub const TlsBackend = struct {
     pull_zero_rtt_traffic_secrets: ?TlsBackendPullZeroRttSecretsFn = null,
     /// Optional hook returning TLS-produced 1-RTT traffic secrets.
     pull_1rtt_traffic_secrets: ?TlsBackendPullOneRttSecretsFn = null,
+    /// Optional hook returning the TLS-negotiated ALPN protocol.
+    pull_negotiated_alpn: ?TlsBackendPullBytesFn = null,
     /// Optional handshake-complete probe.
     handshake_confirmed: ?TlsBackendHandshakeConfirmedFn = null,
 
@@ -142,6 +144,7 @@ pub const TlsBackend = struct {
             .pull_handshake_traffic_secrets = pullHandshakeTrafficSecretsAdapter,
             .pull_zero_rtt_traffic_secrets = pullZeroRttTrafficSecretsAdapter,
             .pull_1rtt_traffic_secrets = pullOneRttTrafficSecretsAdapter,
+            .pull_negotiated_alpn = pullNegotiatedAlpnAdapter,
             .handshake_confirmed = handshakeConfirmedAdapter,
         };
     }
@@ -219,6 +222,17 @@ pub const TlsBackend = struct {
         if (status == .pending) return null;
         try tlsBackendStatusError(status);
         return secrets;
+    }
+
+    fn pullNegotiatedAlpnAdapter(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+        const self: *TlsBackend = @ptrCast(@alignCast(context));
+        const pull_alpn = self.pull_negotiated_alpn orelse return null;
+        var written_len: usize = 0;
+        const status = pull_alpn(self.context, out_buf.ptr, out_buf.len, &written_len);
+        if (status == .pending and written_len == 0) return null;
+        try tlsBackendPendingOutputStatusError(status, written_len);
+        if (written_len > out_buf.len) return error.BufferTooSmall;
+        return out_buf[0..written_len];
     }
 
     fn handshakeConfirmedAdapter(context: *anyopaque) bool {

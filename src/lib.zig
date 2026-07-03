@@ -7418,6 +7418,8 @@ pub const EndpointConnectionLifecycle = struct {
         result.progress.outbound_chunks += progress.outbound_chunks;
         result.progress.outbound_bytes += progress.outbound_bytes;
         result.progress.handshake_confirmed = result.progress.handshake_confirmed or progress.handshake_confirmed;
+        result.progress.application_protocol_negotiated = result.progress.application_protocol_negotiated or
+            progress.application_protocol_negotiated;
     }
 
     fn countRetainedHandshakeSpaces(poll_views: []const EndpointConnectionPollView) usize {
@@ -30222,6 +30224,11 @@ pub const Connection = struct {
         if (backend_confirmed and handshake_space_driven and handshake_outbound_chunks == 0) {
             self.discardPacketNumberSpaceState(.handshake);
             progress.handshake_space_discarded = true;
+        }
+        if (self.handshake_confirmed and backend.pull_negotiated_alpn != null) {
+            if (try backend.pullNegotiatedAlpn(scratch)) |alpn| {
+                if (alpn.len > 0) progress.application_protocol_negotiated = true;
+            }
         }
         progress.handshake_confirmed = self.handshake_confirmed;
         return progress;
@@ -82437,6 +82444,148 @@ test "EndpointConnectionLifecycle cross-space backend drive installs one RTT tra
     defer std.testing.allocator.free(client_ack);
     try server.processProtectedShortDatagramWithInstalledKeys(15, server_dcid.len, client_ack);
     try std.testing.expectEqual(@as(usize, 0), server.bytesInFlight(.application));
+}
+
+test "driveCryptoBackendAcrossSpaces reports negotiated ALPN after handshake confirmation" {
+    const AlpnBackend = struct {
+        secrets: OneRttTrafficSecrets,
+        alpn: []const u8,
+        secrets_sent: bool = false,
+        alpn_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_1rtt_traffic_secrets = pullOneRttTrafficSecrets,
+                .pull_negotiated_alpn = pullNegotiatedAlpn,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullOneRttTrafficSecrets(context: *anyopaque) Error!?OneRttTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.secrets_sent) return null;
+            self.secrets_sent = true;
+            return self.secrets;
+        }
+
+        fn pullNegotiatedAlpn(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.alpn_sent) return null;
+            if (out_buf.len < self.alpn.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.alpn.len], self.alpn);
+            self.alpn_sent = true;
+            return out_buf[0..self.alpn.len];
+        }
+
+        fn handshakeConfirmed(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var backend = AlpnBackend{
+        .secrets = .{
+            .local = secrets.server.secret,
+            .peer = secrets.client.secret,
+        },
+        .alpn = "hq-interop",
+    };
+    var scratch: [256]u8 = undefined;
+    const spaces = [_]PacketNumberSpace{ .handshake, .application };
+    const progress = try server.driveCryptoBackendAcrossSpaces(
+        &spaces,
+        backend.backend(),
+        &scratch,
+    );
+    try std.testing.expect(progress.one_rtt_keys_installed);
+    try std.testing.expect(progress.handshake_confirmed);
+    try std.testing.expect(progress.application_protocol_negotiated);
+    try std.testing.expect(backend.alpn_sent);
+}
+
+test "driveCryptoBackendAcrossSpaces reports missing ALPN after handshake confirmation" {
+    const NoAlpnBackend = struct {
+        secrets: OneRttTrafficSecrets,
+        secrets_sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_1rtt_traffic_secrets = pullOneRttTrafficSecrets,
+                .pull_negotiated_alpn = pullNegotiatedAlpn,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn pullOneRttTrafficSecrets(context: *anyopaque) Error!?OneRttTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.secrets_sent) return null;
+            self.secrets_sent = true;
+            return self.secrets;
+        }
+
+        fn pullNegotiatedAlpn(_: *anyopaque, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn handshakeConfirmed(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var backend = NoAlpnBackend{
+        .secrets = .{
+            .local = secrets.server.secret,
+            .peer = secrets.client.secret,
+        },
+    };
+    var scratch: [256]u8 = undefined;
+    const spaces = [_]PacketNumberSpace{ .handshake, .application };
+    const progress = try server.driveCryptoBackendAcrossSpaces(
+        &spaces,
+        backend.backend(),
+        &scratch,
+    );
+    try std.testing.expect(progress.handshake_confirmed);
+    try std.testing.expect(!progress.application_protocol_negotiated);
 }
 
 test "installed one RTT key phase state advances only after successful receive" {
