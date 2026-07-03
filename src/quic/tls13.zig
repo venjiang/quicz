@@ -251,7 +251,7 @@ fn verifyRsaPssSha256(pub_key_der: []const u8, sig: []const u8, msg: []const u8)
 
 
 /// Fill `buf` with cryptographically secure random bytes from the OS.
-fn secureRandomBytes(buf: []u8) void {
+pub fn secureRandomBytes(buf: []u8) void {
     switch (builtin.os.tag) {
         .macos,
         .ios,
@@ -1119,7 +1119,7 @@ test "Tls13Handshake isComplete is false before handshake" {
 /// Build a minimal ServerHello into `buf`. `cipher`, `include_version`, and
 /// `include_key_share` let failure-injection tests omit or corrupt fields.
 /// Returns the total number of bytes written.
-fn buildServerHello(
+pub fn buildServerHello(
     buf: []u8,
     server_public: [32]u8,
     cipher: u16,
@@ -1272,7 +1272,7 @@ test "Tls13Handshake client rejects ServerHello missing key_share" {
 
 /// Build a minimal EncryptedExtensions carrying an optional ALPN protocol
 /// and an optional opaque QUIC transport parameters blob.
-fn buildEncryptedExtensions(buf: []u8, alpn: []const u8, peer_tp: []const u8) usize {
+pub fn buildEncryptedExtensions(buf: []u8, alpn: []const u8, peer_tp: []const u8) usize {
     var p: usize = 0;
     buf[p] = @intFromEnum(HandshakeType.encrypted_extensions);
     p += 1;
@@ -1304,7 +1304,7 @@ fn buildEncryptedExtensions(buf: []u8, alpn: []const u8, peer_tp: []const u8) us
 }
 
 /// Build a Certificate message carrying a single DER certificate.
-fn buildCertificate(buf: []u8, cert_der: []const u8) usize {
+pub fn buildCertificate(buf: []u8, cert_der: []const u8) usize {
     var p: usize = 0;
     buf[p] = @intFromEnum(HandshakeType.certificate);
     p += 1;
@@ -1336,7 +1336,7 @@ fn buildCertificate(buf: []u8, cert_der: []const u8) usize {
 }
 
 /// Build a CertificateVerify message with a signature scheme and signature.
-fn buildCertificateVerify(buf: []u8, scheme: u16, sig: []const u8) usize {
+pub fn buildCertificateVerify(buf: []u8, scheme: u16, sig: []const u8) usize {
     var p: usize = 0;
     buf[p] = @intFromEnum(HandshakeType.certificate_verify);
     p += 1;
@@ -1355,7 +1355,7 @@ fn buildCertificateVerify(buf: []u8, scheme: u16, sig: []const u8) usize {
 }
 
 /// Build a Finished message carrying 32 bytes of verify_data.
-fn buildFinished(buf: []u8, verify_data: [32]u8) usize {
+pub fn buildFinished(buf: []u8, verify_data: [32]u8) usize {
     buf[0] = @intFromEnum(HandshakeType.finished);
     const msg_len: usize = 32;
     buf[1] = @intCast((msg_len >> 16) & 0xFF);
@@ -1512,7 +1512,7 @@ test "Tls13Handshake client rejects server Finished with wrong verify_data" {
 
 /// Build the TLS 1.3 server CertificateVerify signed content over a fixed
 /// transcript hash for use in signature tests.
-fn certVerifySignedContent(transcript_hash: [32]u8) [130]u8 {
+pub fn certVerifySignedContent(transcript_hash: [32]u8) [130]u8 {
     const label = "TLS 1.3, server CertificateVerify";
     var signed: [64 + label.len + 1 + 32]u8 = undefined;
     @memset(signed[0..64], 0x20);
