@@ -12,6 +12,10 @@ const transport_types = @import("quic/transport_types.zig");
 const crypto_types = @import("quic/crypto_types.zig");
 const tls_backend_module = @import("quic/tls_backend.zig");
 pub const tls13 = @import("quic/tls13.zig");
+comptime {
+    // Keep tls13 reachable so its tests run under `zig build test`.
+    _ = tls13;
+}
 const endpoint_types = @import("quic/endpoint_types.zig");
 const endpoint_timers = @import("quic/endpoint_timers.zig");
 const connection_config = @import("quic/connection_config.zig");

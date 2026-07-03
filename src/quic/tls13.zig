@@ -1,5 +1,6 @@
 const std = @import("std");
 const crypto = std.crypto;
+const builtin = @import("builtin");
 
 const HkdfSha256 = crypto.kdf.hkdf.HkdfSha256;
 const Sha256 = crypto.hash.sha2.Sha256;
@@ -191,6 +192,27 @@ pub const HandshakeError = error{
 };
 
 // ─── Internal helpers ───────────────────────────────────────────────
+
+/// Fill `buf` with cryptographically secure random bytes from the OS.
+fn secureRandomBytes(buf: []u8) void {
+    switch (builtin.os.tag) {
+        .macos,
+        .ios,
+        .maccatalyst,
+        .tvos,
+        .watchos,
+        .visionos,
+        .freebsd,
+        .netbsd,
+        .openbsd,
+        .dragonfly,
+        .illumos,
+        .serenity,
+        => std.c.arc4random_buf(buf.ptr, buf.len),
+        .linux => _ = std.c.getrandom(buf.ptr, buf.len, 0),
+        else => @compileError("secureRandomBytes: unsupported OS"),
+    }
+}
 
 fn expandLabel(
     secret: [secret_len]u8,
@@ -416,9 +438,9 @@ pub const Tls13Handshake = struct {
         self.tp_encoded_len = tp_len;
 
         // Generate X25519 key pair
-        std.crypto.random.bytes(&self.x25519_secret);
+        secureRandomBytes(&self.x25519_secret);
         self.x25519_public = X25519.recoverPublicKey(self.x25519_secret) catch blk: {
-            std.crypto.random.bytes(&self.x25519_secret);
+            secureRandomBytes(&self.x25519_secret);
             break :blk X25519.recoverPublicKey(self.x25519_secret) catch unreachable;
         };
 
@@ -480,7 +502,7 @@ pub const Tls13Handshake = struct {
 
         switch (self.state) {
             .client_start => return self.clientBuildHello(),
-            .client_wait_server_hello,
+            .client_wait_server_hello => return self.clientProcessServerHello(),
             .client_wait_encrypted_extensions,
             .client_wait_certificate,
             .client_wait_certificate_verify,
@@ -505,7 +527,7 @@ pub const Tls13Handshake = struct {
     /// Build a ClientHello message with ALPN, SNI, key_share, and QUIC
     /// transport parameters extensions (RFC 8446 §4.1.2 + RFC 9001 §8).
     fn clientBuildHello(self: *Tls13Handshake) HandshakeError!Action {
-        std.crypto.random.bytes(&self.client_random);
+        secureRandomBytes(&self.client_random);
 
         const buf = &self.out_buf;
         var pos: usize = 4; // reserve type + 3-byte length
@@ -639,6 +661,83 @@ pub const Tls13Handshake = struct {
             .data = self.out_buf[0..self.out_len],
         } };
     }
+
+    /// Parse a ServerHello, complete the X25519 key exchange, and derive
+    /// handshake traffic secrets (RFC 8446 §4.1.3 + §7.1).
+    fn clientProcessServerHello(self: *Tls13Handshake) HandshakeError!Action {
+        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.server_hello)) return error.UnexpectedMessage;
+
+        var pos: usize = 4;
+        // legacy_version (0x0303)
+        if (pos + 2 > msg.len) return error.DecodeError;
+        pos += 2;
+        // random (32 bytes; HelloRetryRequest sentinel is not handled yet)
+        if (pos + 32 > msg.len) return error.DecodeError;
+        pos += 32;
+        // legacy_session_id_echo
+        if (pos + 1 > msg.len) return error.DecodeError;
+        const sid_len = msg[pos];
+        pos += 1;
+        if (pos + sid_len > msg.len) return error.DecodeError;
+        pos += sid_len;
+        // cipher_suite (must be TLS_AES_128_GCM_SHA256)
+        if (pos + 2 > msg.len) return error.DecodeError;
+        if (readU16(msg[pos..]) != cipher_aes_128_gcm_sha256) return error.DecodeError;
+        pos += 2;
+        // legacy_compression_method (null)
+        if (pos + 1 > msg.len) return error.DecodeError;
+        pos += 1;
+        // extensions
+        if (pos + 2 > msg.len) return error.DecodeError;
+        const ext_total = readU16(msg[pos..]);
+        pos += 2;
+        if (pos + ext_total > msg.len) return error.DecodeError;
+        const ext_end = pos + ext_total;
+
+        var have_version = false;
+        var have_key_share = false;
+        while (pos < ext_end) {
+            if (pos + 4 > ext_end) return error.DecodeError;
+            const et = readU16(msg[pos..]);
+            const el = readU16(msg[pos + 2 ..]);
+            pos += 4;
+            if (pos + el > ext_end) return error.DecodeError;
+            const ext = msg[pos .. pos + el];
+            pos += el;
+            switch (et) {
+                @intFromEnum(ExtType.supported_versions) => {
+                    if (el < 2) return error.DecodeError;
+                    if (readU16(ext[0..2]) != version_tls_1_3) return error.UnsupportedVersion;
+                    have_version = true;
+                },
+                @intFromEnum(ExtType.key_share) => {
+                    // ServerHello key_share: 2-byte group + 2-byte key length + key
+                    if (el < 4) return error.DecodeError;
+                    if (readU16(ext[0..2]) != group_x25519) return error.NoKeyShare;
+                    const klen = readU16(ext[2..4]);
+                    if (klen != 32 or el != 4 + 32) return error.DecodeError;
+                    @memcpy(&self.peer_x25519_public, ext[4..36]);
+                    have_key_share = true;
+                },
+                else => {}, // ignore unrecognized extensions
+            }
+        }
+
+        if (!have_version) return error.MissingExtension;
+        if (!have_key_share) return error.NoKeyShare;
+
+        // ECDHE shared secret: client secret × server public.
+        const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.InternalError;
+
+        // The transcript includes ServerHello before deriving handshake secrets.
+        self.transcript.update(msg);
+        self.key_schedule.deriveHandshakeSecrets(&shared, self.transcript.current());
+
+        self.pending_install_handshake = true;
+        self.state = .client_wait_encrypted_extensions;
+        return ._continue;
+    }
 };
 
 // ─── Tests for ClientHello ───────────────────────────────────────────
@@ -654,7 +753,6 @@ test "Tls13Handshake client builds ClientHello with ALPN and key_share" {
     const action = try hs.step();
     try std.testing.expect(action == .send_data);
     const data = action.send_data.data;
-    try std.testing.expectEqual(@as(usize, 0), data.len != 0 and data.len or 0); // dummy check
     try std.testing.expect(data.len > 100);
     try std.testing.expectEqual(@as(u8, 1), data[0]); // ClientHello type
 
@@ -709,4 +807,158 @@ test "Tls13Handshake isComplete is false before handshake" {
     try std.testing.expect(!hs.isComplete());
     _ = try hs.step();
     try std.testing.expect(!hs.isComplete());
+}
+
+// ─── Tests for ServerHello processing ────────────────────────────────
+
+/// Build a minimal ServerHello into `buf`. `cipher`, `include_version`, and
+/// `include_key_share` let failure-injection tests omit or corrupt fields.
+/// Returns the total number of bytes written.
+fn buildServerHello(
+    buf: []u8,
+    server_public: [32]u8,
+    cipher: u16,
+    include_version: bool,
+    include_key_share: bool,
+) usize {
+    var p: usize = 0;
+    buf[p] = @intFromEnum(HandshakeType.server_hello);
+    p += 1;
+    p += 3; // length placeholder
+    // legacy_version 0x0303
+    buf[p] = 0x03;
+    buf[p + 1] = 0x03;
+    p += 2;
+    // random (fixed value for deterministic tests)
+    @memset(buf[p..][0..32], 0xAA);
+    p += 32;
+    // legacy_session_id_echo: empty
+    buf[p] = 0;
+    p += 1;
+    // cipher_suite
+    writeU16(buf[p..], cipher);
+    p += 2;
+    // legacy_compression_method: null
+    buf[p] = 0;
+    p += 1;
+    // extensions
+    const ext_start = p;
+    p += 2;
+    if (include_version) {
+        p = writeExtHeader(buf, p, @intFromEnum(ExtType.supported_versions), 2);
+        writeU16(buf[p..], version_tls_1_3);
+        p += 2;
+    }
+    if (include_key_share) {
+        p = writeExtHeader(buf, p, @intFromEnum(ExtType.key_share), 2 + 2 + 32);
+        writeU16(buf[p..], group_x25519);
+        p += 2;
+        writeU16(buf[p..], 32);
+        p += 2;
+        @memcpy(buf[p..][0..32], &server_public);
+        p += 32;
+    }
+    const ext_len = p - ext_start - 2;
+    writeU16(buf[ext_start..], @intCast(ext_len));
+    const msg_len = p - 4;
+    buf[1] = @intCast((msg_len >> 16) & 0xFF);
+    buf[2] = @intCast((msg_len >> 8) & 0xFF);
+    buf[3] = @intCast(msg_len & 0xFF);
+    return p;
+}
+
+test "Tls13Handshake client processes ServerHello and installs handshake keys" {
+    const alpn = [_][]const u8{"hq-interop"};
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &[_]u8{ 0x01, 0x02 });
+
+    // Produce the ClientHello first so the transcript matches.
+    const ch_action = try hs.step();
+    try std.testing.expect(std.meta.activeTag(ch_action) == .send_data);
+    const client_hello = ch_action.send_data.data;
+
+    // Server X25519 key pair.
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    const server_hello = sh_buf[0..sh_len];
+
+    hs.provideData(server_hello);
+
+    // First step parses ServerHello and derives handshake secrets.
+    const cont = try hs.step();
+    try std.testing.expect(std.meta.activeTag(cont) == ._continue);
+
+    // Next step emits the pending install_keys(handshake) action.
+    const install = try hs.step();
+    try std.testing.expect(std.meta.activeTag(install) == .install_keys);
+    try std.testing.expectEqual(EncryptionLevel.handshake, install.install_keys.level);
+
+    // Rebuild the keys manually from the same transcript and shared secret.
+    var th = TranscriptHash.init();
+    th.update(client_hello);
+    th.update(server_hello);
+    const shared = try X25519.scalarmult(hs.x25519_secret, server_public);
+    var ks = KeySchedule.init();
+    ks.deriveHandshakeSecrets(&shared, th.current());
+    const expected_seal = KeySchedule.deriveQuicKeys(ks.client_handshake_traffic_secret);
+    const expected_open = KeySchedule.deriveQuicKeys(ks.server_handshake_traffic_secret);
+
+    // Client seals with the client handshake secret, opens with the server's.
+    try std.testing.expectEqualSlices(u8, &expected_seal.key, &install.install_keys.seal.key);
+    try std.testing.expectEqualSlices(u8, &expected_seal.iv, &install.install_keys.seal.iv);
+    try std.testing.expectEqualSlices(u8, &expected_seal.hp, &install.install_keys.seal.hp);
+    try std.testing.expectEqualSlices(u8, &expected_open.key, &install.install_keys.open.key);
+    try std.testing.expectEqualSlices(u8, &expected_open.iv, &install.install_keys.open.iv);
+    try std.testing.expectEqualSlices(u8, &expected_open.hp, &install.install_keys.open.hp);
+}
+
+test "Tls13Handshake client rejects ServerHello with wrong cipher suite" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, server_public, 0x1302, true, true);
+    hs.provideData(sh_buf[0..sh_len]);
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects ServerHello missing supported_versions" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, false, true);
+    hs.provideData(sh_buf[0..sh_len]);
+
+    try std.testing.expectError(error.MissingExtension, hs.step());
+}
+
+test "Tls13Handshake client rejects ServerHello missing key_share" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, false);
+    hs.provideData(sh_buf[0..sh_len]);
+
+    try std.testing.expectError(error.NoKeyShare, hs.step());
 }
