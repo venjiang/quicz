@@ -170,6 +170,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_tls_backend_adapter);
 
+    // Pure-Zig TLS 1.3 backend loopback executable
+    const exe_tls13_backend_loopback = b.addExecutable(.{
+        .name = "quicz-tls13-backend-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tls13_backend_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_tls13_backend_loopback);
+
     // TLS C ABI adapter executable
     const exe_tls_c_abi_adapter = b.addExecutable(.{
         .name = "quicz-tls-c-abi-adapter",

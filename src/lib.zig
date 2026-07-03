@@ -24338,6 +24338,18 @@ pub const Connection = struct {
         return self.local_initial_source_connection_id[0..len];
     }
 
+    /// Set this endpoint's Initial Source Connection ID before the first
+    /// crypto-backend drive so that `encodeLocalTransportParameters` includes
+    /// it in the local transport parameters. Callers that drive a TLS-owned
+    /// handshake from the `client_start` state (where the backend produces the
+    /// ClientHello) must set this before the first `driveCryptoBackendInSpace`,
+    /// since packet polling that would otherwise record it happens after drive.
+    pub fn setLocalInitialSourceConnectionId(self: *Connection, scid: []const u8) Error!void {
+        if (scid.len > max_connection_id_len) return error.InvalidPacket;
+        @memcpy(self.local_initial_source_connection_id[0..scid.len], scid);
+        self.local_initial_source_connection_id_len = @intCast(scid.len);
+    }
+
     /// Return the peer's Initial Source Connection ID observed on its first Initial.
     ///
     /// The value is captured from a successfully opened protected Initial packet

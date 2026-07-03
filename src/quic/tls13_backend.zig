@@ -87,6 +87,13 @@ pub const Tls13Backend = struct {
         return .{ .hs = Tls13Handshake.initClient(config, &[_]u8{}) };
     }
 
+    /// Initialize as a TLS 1.3 server. Transport parameters are supplied by
+    /// the connection via `set_local_transport_parameters` before the
+    /// ServerHello flight is pulled.
+    pub fn initServer(config: TlsConfig) Tls13Backend {
+        return .{ .hs = Tls13Handshake.initServer(config, &[_]u8{}) };
+    }
+
     /// Return a `CryptoBackend` value whose callbacks drive this backend.
     /// The value is only valid while `self` is stable.
     pub fn cryptoBackend(self: *Tls13Backend) CryptoBackend {
