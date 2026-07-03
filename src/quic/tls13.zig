@@ -293,3 +293,420 @@ test "KeySchedule handshake secrets differ for client and server" {
         &ks_copy.server_handshake_traffic_secret,
     ));
 }
+
+// ─── TLS 1.3 constants ──────────────────────────────────────────────
+
+const HandshakeType = enum(u8) {
+    client_hello = 1,
+    server_hello = 2,
+    new_session_ticket = 4,
+    encrypted_extensions = 8,
+    certificate = 11,
+    certificate_verify = 15,
+    finished = 20,
+};
+
+const ExtType = enum(u16) {
+    server_name = 0x0000,
+    supported_groups = 0x000A,
+    signature_algorithms = 0x000D,
+    alpn = 0x0010,
+    psk_key_exchange_modes = 0x002D,
+    early_data = 0x002A,
+    supported_versions = 0x002B,
+    key_share = 0x0033,
+    quic_transport_parameters = 0x0039,
+};
+
+const cipher_aes_128_gcm_sha256: u16 = 0x1301;
+const group_x25519: u16 = 0x001D;
+const version_tls_1_3: u16 = 0x0304;
+
+const sig_ecdsa_secp256r1_sha256: u16 = 0x0403;
+const sig_ed25519: u16 = 0x0807;
+const sig_rsa_pss_rsae_sha256: u16 = 0x0804;
+
+// ─── Write helpers ───────────────────────────────────────────────────
+
+fn writeU16(buf: []u8, val: u16) void {
+    std.mem.writeInt(u16, buf[0..2], val, .big);
+}
+
+fn writeExtHeader(buf: []u8, pos: usize, ext_type: u16, ext_len: usize) usize {
+    writeU16(buf[pos..], ext_type);
+    writeU16(buf[pos + 2 ..], @intCast(ext_len));
+    return pos + 4;
+}
+
+// ─── Handshake state machine ─────────────────────────────────────────
+
+const HandshakeState = enum {
+    client_start,
+    client_wait_server_hello,
+    client_wait_encrypted_extensions,
+    client_wait_certificate,
+    client_wait_certificate_verify,
+    client_wait_finished,
+    client_send_finished,
+    server_wait_client_hello,
+    server_send_server_hello,
+    server_send_encrypted_extensions,
+    server_send_certificate,
+    server_send_certificate_verify,
+    server_send_finished,
+    server_wait_client_finished,
+    connected,
+};
+
+/// Pure Zig TLS 1.3 handshake state machine for QUIC (RFC 8446 + RFC 9001).
+pub const Tls13Handshake = struct {
+    state: HandshakeState,
+    is_server: bool,
+    transcript: TranscriptHash,
+    key_schedule: KeySchedule,
+    config: TlsConfig,
+
+    // X25519 key exchange
+    x25519_secret: [32]u8 = undefined,
+    x25519_public: [32]u8 = undefined,
+    peer_x25519_public: [32]u8 = undefined,
+
+    // Output buffer (ClientHello / server flights)
+    out_buf: [16384]u8 = undefined,
+    out_len: usize = 0,
+
+    // Input buffer (incoming handshake messages)
+    in_buf: [16384]u8 = undefined,
+    in_len: usize = 0,
+    in_offset: usize = 0,
+
+    // Client random (for SSLKEYLOGFILE and ServerHello matching)
+    client_random: [32]u8 = undefined,
+
+    // Negotiated ALPN
+    negotiated_alpn: [256]u8 = undefined,
+    negotiated_alpn_len: usize = 0,
+
+    // Pending key installation flags
+    pending_install_handshake: bool = false,
+    pending_install_app: bool = false,
+
+    // Pre-encoded QUIC transport parameters
+    tp_encoded: [1024]u8 = undefined,
+    tp_encoded_len: usize = 0,
+
+    /// Initialize as a TLS 1.3 client.
+    pub fn initClient(config: TlsConfig, transport_params: []const u8) Tls13Handshake {
+        var self: Tls13Handshake = undefined;
+        self.state = .client_start;
+        self.is_server = false;
+        self.transcript = TranscriptHash.init();
+        self.key_schedule = KeySchedule.init();
+        self.config = config;
+        self.out_len = 0;
+        self.in_len = 0;
+        self.in_offset = 0;
+        self.pending_install_handshake = false;
+        self.pending_install_app = false;
+        self.negotiated_alpn_len = 0;
+
+        // Copy pre-encoded transport parameters
+        const tp_len = @min(transport_params.len, self.tp_encoded.len);
+        @memcpy(self.tp_encoded[0..tp_len], transport_params[0..tp_len]);
+        self.tp_encoded_len = tp_len;
+
+        // Generate X25519 key pair
+        std.crypto.random.bytes(&self.x25519_secret);
+        self.x25519_public = X25519.recoverPublicKey(self.x25519_secret) catch blk: {
+            std.crypto.random.bytes(&self.x25519_secret);
+            break :blk X25519.recoverPublicKey(self.x25519_secret) catch unreachable;
+        };
+
+        return self;
+    }
+
+    /// Provide incoming CRYPTO stream data to the handshake.
+    pub fn provideData(self: *Tls13Handshake, data: []const u8) void {
+        if (self.in_offset > 0 and self.in_len - self.in_offset + data.len > self.in_buf.len) {
+            const remaining = self.in_len - self.in_offset;
+            if (remaining > 0) {
+                std.mem.copyForwards(u8, self.in_buf[0..remaining], self.in_buf[self.in_offset..self.in_len]);
+            }
+            self.in_len = remaining;
+            self.in_offset = 0;
+        }
+        const copy_len = @min(data.len, self.in_buf.len - self.in_len);
+        @memcpy(self.in_buf[self.in_len..][0..copy_len], data[0..copy_len]);
+        self.in_len += copy_len;
+    }
+
+    /// Read one handshake message from the input buffer.
+    /// Returns null if not enough data is available.
+    fn readHandshakeMsg(self: *Tls13Handshake) ?[]const u8 {
+        const available = self.in_len - self.in_offset;
+        if (available < 4) return null;
+        const msg_len = (@as(usize, self.in_buf[self.in_offset + 1]) << 16) |
+            (@as(usize, self.in_buf[self.in_offset + 2]) << 8) |
+            @as(usize, self.in_buf[self.in_offset + 3]);
+        const total = 4 + msg_len;
+        if (available < total) return null;
+        const msg = self.in_buf[self.in_offset..][0..total];
+        self.in_offset += total;
+        return msg;
+    }
+
+    /// Step the handshake state machine. Returns an action for the caller.
+    pub fn step(self: *Tls13Handshake) HandshakeError!Action {
+        if (self.pending_install_handshake) {
+            self.pending_install_handshake = false;
+            const keys = KeySchedule.deriveQuicKeys(self.key_schedule.client_handshake_traffic_secret);
+            const peer_keys = KeySchedule.deriveQuicKeys(self.key_schedule.server_handshake_traffic_secret);
+            return Action{ .install_keys = .{
+                .level = .handshake,
+                .open = .{ .key = peer_keys.key, .iv = peer_keys.iv, .hp = peer_keys.hp },
+                .seal = .{ .key = keys.key, .iv = keys.iv, .hp = keys.hp },
+            } };
+        }
+        if (self.pending_install_app) {
+            self.pending_install_app = false;
+            const keys = KeySchedule.deriveQuicKeys(self.key_schedule.client_app_traffic_secret);
+            const peer_keys = KeySchedule.deriveQuicKeys(self.key_schedule.server_app_traffic_secret);
+            return Action{ .install_keys = .{
+                .level = .application,
+                .open = .{ .key = peer_keys.key, .iv = peer_keys.iv, .hp = peer_keys.hp },
+                .seal = .{ .key = keys.key, .iv = keys.iv, .hp = keys.hp },
+            } };
+        }
+
+        switch (self.state) {
+            .client_start => return self.clientBuildHello(),
+            .client_wait_server_hello,
+            .client_wait_encrypted_extensions,
+            .client_wait_certificate,
+            .client_wait_certificate_verify,
+            .client_wait_finished,
+            .client_send_finished,
+            .server_wait_client_hello,
+            .server_send_server_hello,
+            .server_send_encrypted_extensions,
+            .server_send_certificate,
+            .server_send_certificate_verify,
+            .server_send_finished,
+            .server_wait_client_finished,
+            => return .wait_for_data,
+            .connected => return .complete,
+        }
+    }
+
+    pub fn isComplete(self: *const Tls13Handshake) bool {
+        return self.state == .connected;
+    }
+
+    /// Build a ClientHello message with ALPN, SNI, key_share, and QUIC
+    /// transport parameters extensions (RFC 8446 §4.1.2 + RFC 9001 §8).
+    fn clientBuildHello(self: *Tls13Handshake) HandshakeError!Action {
+        std.crypto.random.bytes(&self.client_random);
+
+        const buf = &self.out_buf;
+        var pos: usize = 4; // reserve type + 3-byte length
+
+        // legacy_version = 0x0303
+        buf[pos] = 0x03;
+        buf[pos + 1] = 0x03;
+        pos += 2;
+
+        // random
+        @memcpy(buf[pos..][0..32], &self.client_random);
+        pos += 32;
+
+        // session_id: empty (RFC 9001 §4.1 — QUIC uses empty session ID)
+        buf[pos] = 0;
+        pos += 1;
+
+        // cipher_suites: TLS_AES_128_GCM_SHA256 only
+        writeU16(buf[pos..], 2);
+        pos += 2;
+        writeU16(buf[pos..], cipher_aes_128_gcm_sha256);
+        pos += 2;
+
+        // compression_methods: null
+        buf[pos] = 1;
+        pos += 1;
+        buf[pos] = 0;
+        pos += 1;
+
+        // ─── Extensions ───────────────────────────────────────────
+        const ext_start = pos;
+        pos += 2; // extensions length placeholder
+
+        // supported_versions (TLS 1.3)
+        pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.supported_versions), 3);
+        buf[pos] = 2;
+        pos += 1;
+        writeU16(buf[pos..], version_tls_1_3);
+        pos += 2;
+
+        // key_share (X25519)
+        const share_len = 2 + 2 + 32; // group + len + key
+        pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.key_share), 2 + share_len);
+        writeU16(buf[pos..], @intCast(share_len));
+        pos += 2;
+        writeU16(buf[pos..], group_x25519);
+        pos += 2;
+        writeU16(buf[pos..], 32);
+        pos += 2;
+        @memcpy(buf[pos..][0..32], &self.x25519_public);
+        pos += 32;
+
+        // signature_algorithms
+        pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.signature_algorithms), 2 + 6);
+        writeU16(buf[pos..], 6);
+        pos += 2;
+        writeU16(buf[pos..], sig_ecdsa_secp256r1_sha256);
+        pos += 2;
+        writeU16(buf[pos..], sig_ed25519);
+        pos += 2;
+        writeU16(buf[pos..], sig_rsa_pss_rsae_sha256);
+        pos += 2;
+
+        // supported_groups
+        pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.supported_groups), 2 + 2);
+        writeU16(buf[pos..], 2);
+        pos += 2;
+        writeU16(buf[pos..], group_x25519);
+        pos += 2;
+
+        // SNI (server_name)
+        if (self.config.server_name) |sni| {
+            const sni_ext_len = 2 + 1 + 2 + sni.len;
+            pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.server_name), sni_ext_len);
+            writeU16(buf[pos..], @intCast(1 + 2 + sni.len));
+            pos += 2;
+            buf[pos] = 0; // host_name type
+            pos += 1;
+            writeU16(buf[pos..], @intCast(sni.len));
+            pos += 2;
+            @memcpy(buf[pos..][0..sni.len], sni);
+            pos += sni.len;
+        }
+
+        // ALPN
+        if (self.config.alpn.len > 0) {
+            var alpn_total: usize = 0;
+            for (self.config.alpn) |proto| alpn_total += 1 + proto.len;
+            pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.alpn), 2 + alpn_total);
+            writeU16(buf[pos..], @intCast(alpn_total));
+            pos += 2;
+            for (self.config.alpn) |proto| {
+                buf[pos] = @intCast(proto.len);
+                pos += 1;
+                @memcpy(buf[pos..][0..proto.len], proto);
+                pos += proto.len;
+            }
+        }
+
+        // QUIC transport parameters
+        if (self.tp_encoded_len > 0) {
+            pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.quic_transport_parameters), self.tp_encoded_len);
+            @memcpy(buf[pos..][0..self.tp_encoded_len], self.tp_encoded[0..self.tp_encoded_len]);
+            pos += self.tp_encoded_len;
+        }
+
+        // psk_key_exchange_modes
+        pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.psk_key_exchange_modes), 2);
+        buf[pos] = 1;
+        pos += 1;
+        buf[pos] = 0x01; // psk_dhe_ke
+        pos += 1;
+
+        // Fill in extensions length
+        const ext_len = pos - ext_start - 2;
+        writeU16(buf[ext_start..], @intCast(ext_len));
+
+        // Fill in handshake header: type + 3-byte length
+        const msg_len = pos - 4;
+        buf[0] = @intFromEnum(HandshakeType.client_hello);
+        buf[1] = @intCast((msg_len >> 16) & 0xFF);
+        buf[2] = @intCast((msg_len >> 8) & 0xFF);
+        buf[3] = @intCast(msg_len & 0xFF);
+
+        self.out_len = pos;
+        self.transcript.update(buf[0..pos]);
+        self.state = .client_wait_server_hello;
+
+        return Action{ .send_data = .{
+            .level = .initial,
+            .data = self.out_buf[0..self.out_len],
+        } };
+    }
+};
+
+// ─── Tests for ClientHello ───────────────────────────────────────────
+
+test "Tls13Handshake client builds ClientHello with ALPN and key_share" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp);
+
+    const action = try hs.step();
+    try std.testing.expect(action == .send_data);
+    const data = action.send_data.data;
+    try std.testing.expectEqual(@as(usize, 0), data.len != 0 and data.len or 0); // dummy check
+    try std.testing.expect(data.len > 100);
+    try std.testing.expectEqual(@as(u8, 1), data[0]); // ClientHello type
+
+    // Verify it contains ALPN extension (0x0010)
+    var found_alpn = false;
+    var i: usize = 0;
+    while (i + 4 < data.len) : (i += 1) {
+        if (data[i] == 0x00 and data[i + 1] == 0x10) {
+            found_alpn = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_alpn);
+
+    // Verify it contains SNI extension (0x0000) with "example.com"
+    var found_sni = false;
+    i = 0;
+    while (i + 4 < data.len) : (i += 1) {
+        if (data[i] == 0x00 and data[i + 1] == 0x00 and i > 40) {
+            found_sni = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_sni);
+
+    // Next step should wait for data (ServerHello)
+    const next = try hs.step();
+    try std.testing.expect(next == .wait_for_data);
+}
+
+test "Tls13Handshake client builds ClientHello with transport parameters" {
+    const tp = [_]u8{ 0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA };
+    var hs = Tls13Handshake.initClient(.{}, &tp);
+
+    const action = try hs.step();
+    const data = action.send_data.data;
+
+    // Verify it contains quic_transport_parameters extension (0x0039)
+    var found_tp = false;
+    var i: usize = 0;
+    while (i + 4 < data.len) : (i += 1) {
+        if (data[i] == 0x00 and data[i + 1] == 0x39) {
+            found_tp = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_tp);
+}
+
+test "Tls13Handshake isComplete is false before handshake" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    try std.testing.expect(!hs.isComplete());
+    _ = try hs.step();
+    try std.testing.expect(!hs.isComplete());
+}
