@@ -57,7 +57,12 @@ pub fn main() !void {
     const alpn = [_][]const u8{"hq-interop"};
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
 
-    var client = try Connection.init(allocator, .client, .{ .max_datagram_size = 8192 });
+    var client = try Connection.init(allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
     defer client.deinit();
     var server = try Connection.init(allocator, .server, .{
         .initial_max_data = 8192,
@@ -137,5 +142,41 @@ pub fn main() !void {
     try require(server_hs_drive.handshake_confirmed);
     try require(server.handshakeConfirmed());
 
-    std.debug.print("tls13_udp_loopback: TLS-owned handshake over UDP OK, confirmed={}\n", .{server.handshakeConfirmed()});
+    // 7. Client opens a bidirectional stream and sends "hello" over 1-RTT.
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", false);
+    const req_dgram = (try client.pollProtectedShortDatagramWithInstalledKeys(48, &server_scid)) orelse return error.UnexpectedState;
+    defer allocator.free(req_dgram);
+    try client_socket.send(io, &server_socket.address, req_dgram);
+
+    // 8. Server receives, reads the stream, echoes back.
+    const recv5 = try server_socket.receiveTimeout(io, &recv_buf, recvTimeout());
+    try server.processProtectedShortDatagramWithInstalledKeys(49, server_scid.len, recv5.data);
+    var stream_buf: [128]u8 = undefined;
+    const n = (try server.recvOnStream(stream_id, &stream_buf)) orelse return error.UnexpectedState;
+    try require(std.mem.eql(u8, stream_buf[0..n], "hello"));
+    try server.sendOnStream(stream_id, "hello", false);
+    // Server may emit an ACK-only datagram first, then the STREAM datagram.
+    var i: usize = 0;
+    while (i < 4) : (i += 1) {
+        const dgram = (try server.pollProtectedShortDatagramWithInstalledKeys(50 + @as(i64, @intCast(i)), &client_scid)) orelse break;
+        defer allocator.free(dgram);
+        try server_socket.send(io, &client_socket.address, dgram);
+    }
+
+    // 9. Client receives the echo (consume up to two datagrams).
+    var got_echo = false;
+    var j: usize = 0;
+    while (j < 4) : (j += 1) {
+        const r = client_socket.receiveTimeout(io, &recv_buf, recvTimeout()) catch break;
+        try client.processProtectedShortDatagramWithInstalledKeys(51 + @as(i64, @intCast(j)), client_scid.len, r.data);
+        if ((try client.recvOnStream(stream_id, &stream_buf)) != null) {
+            got_echo = true;
+            break;
+        }
+    }
+    try require(got_echo);
+    try require(std.mem.eql(u8, stream_buf[0..5], "hello"));
+
+    std.debug.print("tls13_udp_loopback: handshake + STREAM echo over UDP OK, confirmed={}\n", .{server.handshakeConfirmed()});
 }
