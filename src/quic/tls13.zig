@@ -171,12 +171,21 @@ pub const InstallKeys = struct {
     seal: QuicKeys,
 };
 
+/// Signature algorithm used by the server's CertificateVerify (matches the
+/// private key in `TlsConfig.private_key_bytes`).
+pub const PrivateKeyAlgorithm = enum {
+    ecdsa_p256_sha256,
+    ed25519,
+};
+
 /// Configuration for a TLS 1.3 handshake.
 pub const TlsConfig = struct {
     alpn: []const []const u8 = &.{},
     server_name: ?[]const u8 = null,
     cert_chain_der: []const []const u8 = &.{},
+    /// Raw private key (32 bytes): P-256 scalar or Ed25519 seed.
     private_key_bytes: ?[]const u8 = null,
+    private_key_algorithm: PrivateKeyAlgorithm = .ecdsa_p256_sha256,
     skip_cert_verify: bool = true,
 };
 
@@ -461,6 +470,8 @@ pub const Tls13Handshake = struct {
 
     // Client random (for SSLKEYLOGFILE and ServerHello matching)
     client_random: [32]u8 = undefined,
+    // Server random (server side only; written into ServerHello)
+    server_random: [32]u8 = undefined,
 
     // Negotiated ALPN
     negotiated_alpn: [256]u8 = undefined,
@@ -521,7 +532,42 @@ pub const Tls13Handshake = struct {
         return self;
     }
 
-    /// Provide incoming CRYPTO stream data to the handshake.
+    /// Initialize as a TLS 1.3 server. `transport_params` is the server's
+    /// pre-encoded QUIC transport parameters to carry in EncryptedExtensions.
+    pub fn initServer(config: TlsConfig, transport_params: []const u8) Tls13Handshake {
+        var self: Tls13Handshake = undefined;
+        self.state = .server_wait_client_hello;
+        self.is_server = true;
+        self.transcript = TranscriptHash.init();
+        self.key_schedule = KeySchedule.init();
+        self.config = config;
+        self.out_len = 0;
+        self.in_len = 0;
+        self.in_offset = 0;
+        self.pending_install_handshake = false;
+        self.pending_install_app = false;
+        self.negotiated_alpn_len = 0;
+        self.peer_tp_len = 0;
+        self.server_cert_len = 0;
+        self.cert_verify_scheme = 0;
+        self.cert_verify_sig_len = 0;
+
+        // Copy pre-encoded transport parameters (sent in EncryptedExtensions).
+        const tp_len = @min(transport_params.len, self.tp_encoded.len);
+        @memcpy(self.tp_encoded[0..tp_len], transport_params[0..tp_len]);
+        self.tp_encoded_len = tp_len;
+
+        // Generate X25519 key pair
+        secureRandomBytes(&self.x25519_secret);
+        self.x25519_public = X25519.recoverPublicKey(self.x25519_secret) catch blk: {
+            secureRandomBytes(&self.x25519_secret);
+            break :blk X25519.recoverPublicKey(self.x25519_secret) catch unreachable;
+        };
+
+        return self;
+    }
+
+
     pub fn provideData(self: *Tls13Handshake, data: []const u8) void {
         if (self.in_offset > 0 and self.in_len - self.in_offset + data.len > self.in_buf.len) {
             const remaining = self.in_len - self.in_offset;
@@ -555,22 +601,35 @@ pub const Tls13Handshake = struct {
     pub fn step(self: *Tls13Handshake) HandshakeError!Action {
         if (self.pending_install_handshake) {
             self.pending_install_handshake = false;
-            const keys = KeySchedule.deriveQuicKeys(self.key_schedule.client_handshake_traffic_secret);
-            const peer_keys = KeySchedule.deriveQuicKeys(self.key_schedule.server_handshake_traffic_secret);
+            // Local = this endpoint's write secret; peer = remote's write secret.
+            const local = KeySchedule.deriveQuicKeys(if (self.is_server)
+                self.key_schedule.server_handshake_traffic_secret
+            else
+                self.key_schedule.client_handshake_traffic_secret);
+            const peer = KeySchedule.deriveQuicKeys(if (self.is_server)
+                self.key_schedule.client_handshake_traffic_secret
+            else
+                self.key_schedule.server_handshake_traffic_secret);
             return Action{ .install_keys = .{
                 .level = .handshake,
-                .open = .{ .key = peer_keys.key, .iv = peer_keys.iv, .hp = peer_keys.hp },
-                .seal = .{ .key = keys.key, .iv = keys.iv, .hp = keys.hp },
+                .open = .{ .key = peer.key, .iv = peer.iv, .hp = peer.hp },
+                .seal = .{ .key = local.key, .iv = local.iv, .hp = local.hp },
             } };
         }
         if (self.pending_install_app) {
             self.pending_install_app = false;
-            const keys = KeySchedule.deriveQuicKeys(self.key_schedule.client_app_traffic_secret);
-            const peer_keys = KeySchedule.deriveQuicKeys(self.key_schedule.server_app_traffic_secret);
+            const local = KeySchedule.deriveQuicKeys(if (self.is_server)
+                self.key_schedule.server_app_traffic_secret
+            else
+                self.key_schedule.client_app_traffic_secret);
+            const peer = KeySchedule.deriveQuicKeys(if (self.is_server)
+                self.key_schedule.client_app_traffic_secret
+            else
+                self.key_schedule.server_app_traffic_secret);
             return Action{ .install_keys = .{
                 .level = .application,
-                .open = .{ .key = peer_keys.key, .iv = peer_keys.iv, .hp = peer_keys.hp },
-                .seal = .{ .key = keys.key, .iv = keys.iv, .hp = keys.hp },
+                .open = .{ .key = peer.key, .iv = peer.iv, .hp = peer.hp },
+                .seal = .{ .key = local.key, .iv = local.iv, .hp = local.hp },
             } };
         }
 
@@ -582,14 +641,13 @@ pub const Tls13Handshake = struct {
             .client_wait_certificate_verify => return self.clientProcessCertificateVerify(),
             .client_wait_finished => return self.clientProcessServerFinished(),
             .client_send_finished => return self.clientSendFinished(),
-            .server_wait_client_hello,
-            .server_send_server_hello,
-            .server_send_encrypted_extensions,
-            .server_send_certificate,
-            .server_send_certificate_verify,
-            .server_send_finished,
-            .server_wait_client_finished,
-            => return .wait_for_data,
+            .server_wait_client_hello => return self.serverProcessClientHello(),
+            .server_send_server_hello => return self.serverBuildServerHello(),
+            .server_send_encrypted_extensions => return self.serverBuildEncryptedExtensions(),
+            .server_send_certificate => return self.serverBuildCertificate(),
+            .server_send_certificate_verify => return self.serverBuildCertificateVerify(),
+            .server_send_finished => return self.serverBuildFinished(),
+            .server_wait_client_finished => return self.serverProcessClientFinished(),
             .connected => return .complete,
         }
     }
@@ -1042,6 +1100,327 @@ pub const Tls13Handshake = struct {
             .level = .handshake,
             .data = self.out_buf[0..36],
         } };
+    }
+
+    // ─── Server-side state handlers ──────────────────────────────────
+
+    /// Parse a ClientHello: extract the X25519 key share, select ALPN, capture
+    /// peer QUIC transport parameters, and update the transcript
+    /// (RFC 8446 §4.1.2 + RFC 9001 §8).
+    fn serverProcessClientHello(self: *Tls13Handshake) HandshakeError!Action {
+        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.client_hello)) return error.UnexpectedMessage;
+
+        const body = msg[4..];
+        if (body.len < 2 + 32 + 1) return error.DecodeError;
+        var pos: usize = 0;
+        pos += 2; // legacy_version
+        pos += 32; // random
+        // legacy_session_id (QUIC uses empty, but skip whatever is sent)
+        if (pos >= body.len) return error.DecodeError;
+        const sid_len = body[pos];
+        pos += 1;
+        if (pos + sid_len > body.len) return error.DecodeError;
+        pos += sid_len;
+        // cipher_suites — require TLS_AES_128_GCM_SHA256
+        if (pos + 2 > body.len) return error.DecodeError;
+        const cs_len = readU16(body[pos..]);
+        pos += 2;
+        if (pos + cs_len > body.len) return error.DecodeError;
+        var cs_found = false;
+        {
+            var cs_pos: usize = 0;
+            while (cs_pos + 2 <= cs_len) : (cs_pos += 2) {
+                if (readU16(body[pos + cs_pos ..]) == cipher_aes_128_gcm_sha256) {
+                    cs_found = true;
+                    break;
+                }
+            }
+        }
+        if (!cs_found) return error.UnsupportedVersion;
+        pos += cs_len;
+        // compression_methods
+        if (pos >= body.len) return error.DecodeError;
+        const cm_len = body[pos];
+        pos += 1;
+        if (pos + cm_len > body.len) return error.DecodeError;
+        pos += cm_len;
+        // extensions
+        if (pos + 2 > body.len) return error.DecodeError;
+        const ext_total = readU16(body[pos..]);
+        pos += 2;
+        if (pos + ext_total > body.len) return error.DecodeError;
+        const ext_end = pos + ext_total;
+
+        var have_key_share = false;
+        var have_version = false;
+        while (pos < ext_end) {
+            if (pos + 4 > ext_end) return error.DecodeError;
+            const et = readU16(body[pos..]);
+            const el = readU16(body[pos + 2 ..]);
+            pos += 4;
+            if (pos + el > ext_end) return error.DecodeError;
+            const ext = body[pos .. pos + el];
+            pos += el;
+            switch (et) {
+                @intFromEnum(ExtType.supported_versions) => {
+                    // ClientHello: 1-byte list length + 2-byte versions.
+                    if (el < 3) return error.DecodeError;
+                    var vp: usize = 1;
+                    while (vp + 2 <= el) : (vp += 2) {
+                        if (readU16(ext[vp..]) == version_tls_1_3) {
+                            have_version = true;
+                            break;
+                        }
+                    }
+                },
+                @intFromEnum(ExtType.key_share) => {
+                    // client_shares_len(2) + [group(2) + key_len(2) + key]
+                    if (el < 2) return error.DecodeError;
+                    var sp: usize = 2; // skip client_shares_len
+                    while (sp + 4 <= el) {
+                        const group = readU16(ext[sp..]);
+                        const klen = readU16(ext[sp + 2 ..]);
+                        sp += 4;
+                        if (group == group_x25519 and klen == 32 and sp + 32 <= el) {
+                            @memcpy(&self.peer_x25519_public, ext[sp..][0..32]);
+                            have_key_share = true;
+                            break;
+                        }
+                        sp += klen;
+                    }
+                },
+                @intFromEnum(ExtType.alpn) => {
+                    if (el < 2) continue; // empty ALPN list — skip
+                    const list_len = readU16(ext[0..2]);
+                    var ap: usize = 2;
+                    while (ap < 2 + list_len and ap + 1 <= el) {
+                        const plen = ext[ap];
+                        ap += 1;
+                        if (ap + plen > el) break;
+                        const proto = ext[ap .. ap + plen];
+                        for (self.config.alpn) |our| {
+                            if (std.mem.eql(u8, proto, our)) {
+                                self.negotiated_alpn_len = @min(plen, self.negotiated_alpn.len);
+                                @memcpy(
+                                    self.negotiated_alpn[0..self.negotiated_alpn_len],
+                                    proto[0..self.negotiated_alpn_len],
+                                );
+                                break;
+                            }
+                        }
+                        if (self.negotiated_alpn_len > 0) break;
+                        ap += plen;
+                    }
+                },
+                @intFromEnum(ExtType.quic_transport_parameters) => {
+                    self.peer_tp_len = @min(el, self.peer_tp.len);
+                    @memcpy(self.peer_tp[0..self.peer_tp_len], ext[0..self.peer_tp_len]);
+                },
+                else => {}, // ignore unrecognized extensions
+            }
+        }
+
+        if (!have_version) return error.UnsupportedVersion;
+        if (!have_key_share) return error.NoKeyShare;
+        if (self.config.alpn.len > 0 and self.negotiated_alpn_len == 0) return error.NoApplicationProtocol;
+
+        self.transcript.update(msg);
+        self.state = .server_send_server_hello;
+        return ._continue;
+    }
+
+    /// Build a ServerHello, complete the X25519 key exchange, and derive
+    /// handshake traffic secrets (RFC 8446 §4.1.3 + §7.1).
+    fn serverBuildServerHello(self: *Tls13Handshake) HandshakeError!Action {
+        secureRandomBytes(&self.server_random);
+
+        const buf = &self.out_buf;
+        var pos: usize = 4;
+        // legacy_version 0x0303
+        buf[pos] = 0x03;
+        buf[pos + 1] = 0x03;
+        pos += 2;
+        // random
+        @memcpy(buf[pos..][0..32], &self.server_random);
+        pos += 32;
+        // legacy_session_id echo: empty (QUIC)
+        buf[pos] = 0;
+        pos += 1;
+        // cipher_suite
+        writeU16(buf[pos..], cipher_aes_128_gcm_sha256);
+        pos += 2;
+        // legacy_compression_method: null
+        buf[pos] = 0;
+        pos += 1;
+        // extensions
+        const ext_start = pos;
+        pos += 2;
+        // supported_versions (server picks one)
+        pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.supported_versions), 2);
+        writeU16(buf[pos..], version_tls_1_3);
+        pos += 2;
+        // key_share (server: group + 2-byte key length + key)
+        pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.key_share), 2 + 2 + 32);
+        writeU16(buf[pos..], group_x25519);
+        pos += 2;
+        writeU16(buf[pos..], 32);
+        pos += 2;
+        @memcpy(buf[pos..][0..32], &self.x25519_public);
+        pos += 32;
+        const ext_len = pos - ext_start - 2;
+        writeU16(buf[ext_start..], @intCast(ext_len));
+        const msg_len = pos - 4;
+        buf[0] = @intFromEnum(HandshakeType.server_hello);
+        buf[1] = @intCast((msg_len >> 16) & 0xFF);
+        buf[2] = @intCast((msg_len >> 8) & 0xFF);
+        buf[3] = @intCast(msg_len & 0xFF);
+
+        self.transcript.update(buf[0..pos]);
+
+        // ECDHE shared secret: server secret × client public.
+        const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.InternalError;
+        self.key_schedule.deriveHandshakeSecrets(&shared, self.transcript.current());
+
+        self.pending_install_handshake = true;
+        self.state = .server_send_encrypted_extensions;
+        return Action{ .send_data = .{
+            .level = .initial,
+            .data = self.out_buf[0..pos],
+        } };
+    }
+
+    /// Build EncryptedExtensions carrying the negotiated ALPN and the server's
+    /// QUIC transport parameters (RFC 8446 §4.3.1 + RFC 9001 §8).
+    fn serverBuildEncryptedExtensions(self: *Tls13Handshake) HandshakeError!Action {
+        const alpn = self.negotiated_alpn[0..self.negotiated_alpn_len];
+        const tp = self.tp_encoded[0..self.tp_encoded_len];
+        const len = buildEncryptedExtensions(&self.out_buf, alpn, tp);
+        self.transcript.update(self.out_buf[0..len]);
+        self.state = .server_send_certificate;
+        return Action{ .send_data = .{
+            .level = .handshake,
+            .data = self.out_buf[0..len],
+        } };
+    }
+
+    /// Build the Certificate message from the configured leaf certificate
+    /// (RFC 8446 §4.4.2).
+    fn serverBuildCertificate(self: *Tls13Handshake) HandshakeError!Action {
+        if (self.config.cert_chain_der.len == 0) return error.BadCertificate;
+        const len = buildCertificate(&self.out_buf, self.config.cert_chain_der[0]);
+        self.transcript.update(self.out_buf[0..len]);
+        self.state = .server_send_certificate_verify;
+        return Action{ .send_data = .{
+            .level = .handshake,
+            .data = self.out_buf[0..len],
+        } };
+    }
+
+    /// Build CertificateVerify, signing the transcript hash up to the
+    /// Certificate with the configured private key (RFC 8446 §4.4.3).
+    fn serverBuildCertificateVerify(self: *Tls13Handshake) HandshakeError!Action {
+        const private_key = self.config.private_key_bytes orelse return error.BadCertificate;
+        const th = self.transcript.current();
+
+        // Signed content: 0x20 × 64 + context string + 0x00 + transcript hash.
+        const label = "TLS 1.3, server CertificateVerify";
+        var sign_content: [64 + label.len + 1 + 32]u8 = undefined;
+        @memset(sign_content[0..64], 0x20);
+        @memcpy(sign_content[64..][0..label.len], label);
+        sign_content[64 + label.len] = 0x00;
+        @memcpy(sign_content[64 + label.len + 1 ..][0..32], &th);
+
+        var sig_storage: [128]u8 = undefined;
+        var sig_len: usize = 0;
+        const sig_scheme: u16 = switch (self.config.private_key_algorithm) {
+            .ecdsa_p256_sha256 => blk: {
+                if (private_key.len != 32) return error.InternalError;
+                var der_buf: [EcdsaP256Sha256.Signature.der_encoded_length_max]u8 = undefined;
+                const sk = EcdsaP256Sha256.SecretKey.fromBytes(private_key[0..32].*) catch return error.InternalError;
+                const kp = EcdsaP256Sha256.KeyPair.fromSecretKey(sk) catch return error.InternalError;
+                const sig = kp.sign(&sign_content, null) catch return error.InternalError;
+                const der = sig.toDer(&der_buf);
+                sig_len = der.len;
+                @memcpy(sig_storage[0..sig_len], der);
+                break :blk sig_ecdsa_secp256r1_sha256;
+            },
+            .ed25519 => blk: {
+                if (private_key.len != 32) return error.InternalError;
+                const kp = Ed25519.KeyPair.generateDeterministic(private_key[0..32].*) catch return error.InternalError;
+                const sig = kp.sign(&sign_content, null) catch return error.InternalError;
+                const bytes = sig.toBytes();
+                sig_len = bytes.len;
+                @memcpy(sig_storage[0..sig_len], &bytes);
+                break :blk sig_ed25519;
+            },
+        };
+
+        const buf = &self.out_buf;
+        var pos: usize = 4;
+        writeU16(buf[pos..], sig_scheme);
+        pos += 2;
+        writeU16(buf[pos..], @intCast(sig_len));
+        pos += 2;
+        @memcpy(buf[pos..][0..sig_len], sig_storage[0..sig_len]);
+        pos += sig_len;
+        const body_len: u24 = @intCast(pos - 4);
+        buf[0] = @intFromEnum(HandshakeType.certificate_verify);
+        buf[1] = @intCast(body_len >> 16);
+        buf[2] = @intCast((body_len >> 8) & 0xff);
+        buf[3] = @intCast(body_len & 0xff);
+
+        self.transcript.update(buf[0..pos]);
+        self.state = .server_send_finished;
+        return Action{ .send_data = .{
+            .level = .handshake,
+            .data = self.out_buf[0..pos],
+        } };
+    }
+
+    /// Build the server Finished message and derive application traffic
+    /// secrets (RFC 8446 §4.4.4 + §7.1).
+    fn serverBuildFinished(self: *Tls13Handshake) HandshakeError!Action {
+        // verify_data covers the transcript up to (not including) Finished.
+        const verify_data = KeySchedule.computeFinishedVerifyData(
+            self.key_schedule.server_handshake_traffic_secret,
+            self.transcript.current(),
+        );
+        const len = buildFinished(&self.out_buf, verify_data);
+        self.transcript.update(self.out_buf[0..len]);
+
+        // Application secrets derive from the transcript up to server Finished.
+        self.key_schedule.deriveAppSecrets(self.transcript.current());
+        self.pending_install_app = true;
+        self.state = .server_wait_client_finished;
+        return Action{ .send_data = .{
+            .level = .handshake,
+            .data = self.out_buf[0..len],
+        } };
+    }
+
+    /// Verify the client Finished message against the transcript hash and
+    /// client handshake traffic secret (RFC 8446 §4.4.4).
+    fn serverProcessClientFinished(self: *Tls13Handshake) HandshakeError!Action {
+        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.finished)) return error.UnexpectedMessage;
+
+        const verify_data = msg[4..];
+        if (verify_data.len != 32) return error.BadFinished; // SHA-256 → 32 bytes
+
+        // client Finished covers the transcript up to (not including) itself,
+        // i.e. through the server Finished.
+        const expected = KeySchedule.computeFinishedVerifyData(
+            self.key_schedule.client_handshake_traffic_secret,
+            self.transcript.current(),
+        );
+        var received: [32]u8 = undefined;
+        @memcpy(&received, verify_data[0..32]);
+        if (!std.crypto.timing_safe.eql([32]u8, expected, received)) return error.BadFinished;
+
+        self.transcript.update(msg);
+        self.state = .connected;
+        return ._continue;
     }
 };
 
@@ -1610,4 +1989,117 @@ test "verifyCertificateVerifySignature rejects an unsupported scheme" {
         error.BadCertificateVerify,
         verifyCertificateVerifySignature(&[_]u8{}, .curveEd25519, 0x0000, &[_]u8{}, "msg"),
     );
+}
+
+
+// ─── Tests for server-side handshake + loopback ──────────────────────
+
+test "Tls13Handshake client↔server loopback completes with matching secrets" {
+    // Server ECDSA P-256 key pair (real private key for CertificateVerify).
+    const seed = [_]u8{0x55} ** 32;
+    const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const server_priv = server_kp.secret_key.bytes; // 32-byte P-256 scalar
+
+    const alpn = [_][]const u8{"hq-interop"};
+    const client_tp = [_]u8{ 0x01, 0x02, 0x03 };
+    const server_tp = [_]u8{ 0xAA, 0xBB };
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+
+    var client = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true, // leaf cert is a dummy DER
+    }, &client_tp);
+    var server = Tls13Handshake.initServer(.{
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    }, &server_tp);
+
+    // 1. Client emits ClientHello.
+    const ch_action = try client.step();
+    try std.testing.expect(std.meta.activeTag(ch_action) == .send_data);
+    try std.testing.expectEqual(EncryptionLevel.initial, ch_action.send_data.level);
+    const client_hello = ch_action.send_data.data;
+
+    // 2. Server consumes ClientHello; collect ServerHello (initial) +
+    //    EE/Certificate/CertificateVerify/Finished (handshake).
+    server.provideData(client_hello);
+    var srv_initial: [512]u8 = undefined;
+    var srv_initial_len: usize = 0;
+    var srv_hs: [4096]u8 = undefined;
+    var srv_hs_len: usize = 0;
+    var srv_hs_keys = false;
+    var srv_app_keys = false;
+    while (true) {
+        const a = try server.step();
+        switch (a) {
+            .send_data => |sd| {
+                if (sd.level == .initial) {
+                    @memcpy(srv_initial[srv_initial_len..][0..sd.data.len], sd.data);
+                    srv_initial_len += sd.data.len;
+                } else {
+                    @memcpy(srv_hs[srv_hs_len..][0..sd.data.len], sd.data);
+                    srv_hs_len += sd.data.len;
+                }
+            },
+            .install_keys => |ik| {
+                if (ik.level == .handshake) srv_hs_keys = true;
+                if (ik.level == .application) srv_app_keys = true;
+            },
+            .wait_for_data, .complete => break,
+            ._continue => continue,
+        }
+    }
+    try std.testing.expect(srv_initial_len > 0); // ServerHello
+    try std.testing.expect(srv_hs_len > 0); // EE+Cert+CV+Finished
+    try std.testing.expect(srv_hs_keys);
+    try std.testing.expect(srv_app_keys);
+
+    // 3. Client consumes ServerHello + handshake flight; emits client Finished.
+    client.provideData(srv_initial[0..srv_initial_len]);
+    client.provideData(srv_hs[0..srv_hs_len]);
+    var cli_fin: [256]u8 = undefined;
+    var cli_fin_len: usize = 0;
+    var cli_hs_keys = false;
+    var cli_app_keys = false;
+    while (true) {
+        const a = try client.step();
+        switch (a) {
+            .send_data => |sd| {
+                @memcpy(cli_fin[cli_fin_len..][0..sd.data.len], sd.data);
+                cli_fin_len += sd.data.len;
+            },
+            .install_keys => |ik| {
+                if (ik.level == .handshake) cli_hs_keys = true;
+                if (ik.level == .application) cli_app_keys = true;
+            },
+            .wait_for_data, .complete => break,
+            ._continue => continue,
+        }
+    }
+    try std.testing.expect(cli_hs_keys);
+    try std.testing.expect(cli_app_keys);
+    try std.testing.expectEqual(@as(usize, 36), cli_fin_len); // client Finished
+
+    // 4. Server consumes client Finished → connected.
+    server.provideData(cli_fin[0..cli_fin_len]);
+    try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
+    try std.testing.expect(server.isComplete());
+
+    // 5. Both complete; traffic secrets match (shared schedule).
+    try std.testing.expect(client.isComplete());
+    try std.testing.expectEqualSlices(u8, &client.key_schedule.client_handshake_traffic_secret, &server.key_schedule.client_handshake_traffic_secret);
+    try std.testing.expectEqualSlices(u8, &client.key_schedule.server_handshake_traffic_secret, &server.key_schedule.server_handshake_traffic_secret);
+    try std.testing.expectEqualSlices(u8, &client.key_schedule.client_app_traffic_secret, &server.key_schedule.client_app_traffic_secret);
+    try std.testing.expectEqualSlices(u8, &client.key_schedule.server_app_traffic_secret, &server.key_schedule.server_app_traffic_secret);
+
+    // 6. ALPN negotiated on both sides.
+    try std.testing.expectEqualStrings("hq-interop", client.negotiated_alpn[0..client.negotiated_alpn_len]);
+    try std.testing.expectEqualStrings("hq-interop", server.negotiated_alpn[0..server.negotiated_alpn_len]);
+
+    // 7. Peer transport parameters crossed over.
+    try std.testing.expectEqualSlices(u8, &server_tp, client.peer_tp[0..client.peer_tp_len]);
+    try std.testing.expectEqualSlices(u8, &client_tp, server.peer_tp[0..server.peer_tp_len]);
 }
