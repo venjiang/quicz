@@ -417,6 +417,19 @@ pub const Tls13Handshake = struct {
     tp_encoded: [1024]u8 = undefined,
     tp_encoded_len: usize = 0,
 
+    // Peer QUIC transport parameters (parsed from EncryptedExtensions)
+    peer_tp: [1024]u8 = undefined,
+    peer_tp_len: usize = 0,
+
+    // Server certificate (first in chain, DER) — verification deferred
+    server_cert: [4096]u8 = undefined,
+    server_cert_len: usize = 0,
+
+    // CertificateVerify signature — verification deferred
+    cert_verify_scheme: u16 = 0,
+    cert_verify_sig: [1024]u8 = undefined,
+    cert_verify_sig_len: usize = 0,
+
     /// Initialize as a TLS 1.3 client.
     pub fn initClient(config: TlsConfig, transport_params: []const u8) Tls13Handshake {
         var self: Tls13Handshake = undefined;
@@ -431,6 +444,10 @@ pub const Tls13Handshake = struct {
         self.pending_install_handshake = false;
         self.pending_install_app = false;
         self.negotiated_alpn_len = 0;
+        self.peer_tp_len = 0;
+        self.server_cert_len = 0;
+        self.cert_verify_scheme = 0;
+        self.cert_verify_sig_len = 0;
 
         // Copy pre-encoded transport parameters
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -503,11 +520,11 @@ pub const Tls13Handshake = struct {
         switch (self.state) {
             .client_start => return self.clientBuildHello(),
             .client_wait_server_hello => return self.clientProcessServerHello(),
-            .client_wait_encrypted_extensions,
-            .client_wait_certificate,
-            .client_wait_certificate_verify,
-            .client_wait_finished,
-            .client_send_finished,
+            .client_wait_encrypted_extensions => return self.clientProcessEncryptedExtensions(),
+            .client_wait_certificate => return self.clientProcessCertificate(),
+            .client_wait_certificate_verify => return self.clientProcessCertificateVerify(),
+            .client_wait_finished => return self.clientProcessServerFinished(),
+            .client_send_finished => return self.clientSendFinished(),
             .server_wait_client_hello,
             .server_send_server_hello,
             .server_send_encrypted_extensions,
@@ -738,6 +755,179 @@ pub const Tls13Handshake = struct {
         self.state = .client_wait_encrypted_extensions;
         return ._continue;
     }
+
+    /// Parse EncryptedExtensions and capture the negotiated ALPN and peer
+    /// QUIC transport parameters (RFC 8446 §4.3.1 + RFC 9001 §8).
+    fn clientProcessEncryptedExtensions(self: *Tls13Handshake) HandshakeError!Action {
+        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.encrypted_extensions)) return error.UnexpectedMessage;
+
+        var pos: usize = 4;
+        if (pos + 2 > msg.len) return error.DecodeError;
+        const ext_total = readU16(msg[pos..]);
+        pos += 2;
+        if (pos + ext_total > msg.len) return error.DecodeError;
+        const ext_end = pos + ext_total;
+
+        while (pos < ext_end) {
+            if (pos + 4 > ext_end) return error.DecodeError;
+            const et = readU16(msg[pos..]);
+            const el = readU16(msg[pos + 2 ..]);
+            pos += 4;
+            if (pos + el > ext_end) return error.DecodeError;
+            const ext = msg[pos .. pos + el];
+            pos += el;
+            switch (et) {
+                @intFromEnum(ExtType.alpn) => {
+                    // ALPN: 2-byte list length + (1-byte proto length + proto)
+                    if (el < 3) return error.DecodeError;
+                    const list_len = readU16(ext[0..2]);
+                    if (list_len + 2 != el) return error.DecodeError;
+                    const proto_len = ext[2];
+                    if (proto_len + 3 != el) return error.DecodeError;
+                    self.negotiated_alpn_len = @min(proto_len, self.negotiated_alpn.len);
+                    @memcpy(self.negotiated_alpn[0..self.negotiated_alpn_len], ext[3 .. 3 + self.negotiated_alpn_len]);
+                },
+                @intFromEnum(ExtType.quic_transport_parameters) => {
+                    self.peer_tp_len = @min(el, self.peer_tp.len);
+                    @memcpy(self.peer_tp[0..self.peer_tp_len], ext[0..self.peer_tp_len]);
+                },
+                else => {}, // ignore unrecognized extensions
+            }
+        }
+
+        self.transcript.update(msg);
+        self.state = .client_wait_certificate;
+        return ._continue;
+    }
+
+    /// Parse the server Certificate message and store the first certificate
+    /// (DER) for later verification (RFC 8446 §4.4.2).
+    fn clientProcessCertificate(self: *Tls13Handshake) HandshakeError!Action {
+        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.certificate)) return error.UnexpectedMessage;
+
+        var pos: usize = 4;
+        // certificate_request_context (1-byte length + data)
+        if (pos + 1 > msg.len) return error.DecodeError;
+        const ctx_len = msg[pos];
+        pos += 1;
+        if (pos + ctx_len > msg.len) return error.DecodeError;
+        pos += ctx_len;
+        // certificate_list (3-byte length + entries)
+        if (pos + 3 > msg.len) return error.DecodeError;
+        const list_len = (@as(usize, msg[pos]) << 16) |
+            (@as(usize, msg[pos + 1]) << 8) |
+            @as(usize, msg[pos + 2]);
+        pos += 3;
+        if (pos + list_len > msg.len) return error.DecodeError;
+        // first entry: 3-byte cert length + cert + 2-byte extensions length
+        if (pos + 3 > msg.len) return error.DecodeError;
+        const cert_len = (@as(usize, msg[pos]) << 16) |
+            (@as(usize, msg[pos + 1]) << 8) |
+            @as(usize, msg[pos + 2]);
+        pos += 3;
+        if (pos + cert_len > msg.len) return error.DecodeError;
+        self.server_cert_len = @min(cert_len, self.server_cert.len);
+        @memcpy(self.server_cert[0..self.server_cert_len], msg[pos .. pos + self.server_cert_len]);
+
+        self.transcript.update(msg);
+        self.state = .client_wait_certificate_verify;
+        return ._continue;
+    }
+
+    /// Parse CertificateVerify and store the signature for later verification
+    /// (RFC 8446 §4.4.3).
+    fn clientProcessCertificateVerify(self: *Tls13Handshake) HandshakeError!Action {
+        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.certificate_verify)) return error.UnexpectedMessage;
+
+        var pos: usize = 4;
+        // signature_scheme (2 bytes)
+        if (pos + 2 > msg.len) return error.DecodeError;
+        self.cert_verify_scheme = readU16(msg[pos..]);
+        pos += 2;
+        // signature (2-byte length + data)
+        if (pos + 2 > msg.len) return error.DecodeError;
+        const sig_len = readU16(msg[pos..]);
+        pos += 2;
+        if (pos + sig_len > msg.len) return error.DecodeError;
+        self.cert_verify_sig_len = @min(sig_len, self.cert_verify_sig.len);
+        @memcpy(self.cert_verify_sig[0..self.cert_verify_sig_len], msg[pos .. pos + self.cert_verify_sig_len]);
+
+        self.transcript.update(msg);
+        self.state = .client_wait_finished;
+        return ._continue;
+    }
+
+    /// Verify the server Finished message against the transcript hash and
+    /// server handshake traffic secret (RFC 8446 §4.4.4).
+    fn clientProcessServerFinished(self: *Tls13Handshake) HandshakeError!Action {
+        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.finished)) return error.UnexpectedMessage;
+
+        const verify_data = msg[4..];
+        if (verify_data.len != 32) return error.BadFinished; // SHA-256 → 32 bytes
+
+        // verify_data covers the transcript up to (not including) Finished.
+        const expected = KeySchedule.computeFinishedVerifyData(
+            self.key_schedule.server_handshake_traffic_secret,
+            self.transcript.current(),
+        );
+        var received: [32]u8 = undefined;
+        @memcpy(&received, verify_data[0..32]);
+        if (!std.crypto.timing_safe.eql([32]u8, expected, received)) return error.BadFinished;
+
+        // The transcript now includes server Finished for app secrets and the
+        // client Finished derived in the next step.
+        self.transcript.update(msg);
+        self.state = .client_send_finished;
+        return ._continue;
+    }
+
+    /// Build the client Finished message, derive application traffic
+    /// secrets, and arm the pending application key installation
+    /// (RFC 8446 §4.4.4 + §7.1).
+    ///
+    /// At this point the transcript covers every handshake message up to and
+    /// including the server Finished. Both the application secrets and the
+    /// client's own verify_data are derived from that same transcript hash —
+    /// the client Finished covers all messages up to (not including) itself.
+    fn clientSendFinished(self: *Tls13Handshake) HandshakeError!Action {
+        const th = self.transcript.current();
+
+        // Application secrets derive from the transcript up to server Finished.
+        self.key_schedule.deriveAppSecrets(th);
+
+        // Client verify_data uses the client handshake traffic secret over the
+        // same transcript hash.
+        const verify_data = KeySchedule.computeFinishedVerifyData(
+            self.key_schedule.client_handshake_traffic_secret,
+            th,
+        );
+
+        // Finished message: type + 3-byte length + 32-byte verify_data.
+        const buf = &self.out_buf;
+        buf[0] = @intFromEnum(HandshakeType.finished);
+        const msg_len: usize = 32;
+        buf[1] = @intCast((msg_len >> 16) & 0xFF);
+        buf[2] = @intCast((msg_len >> 8) & 0xFF);
+        buf[3] = @intCast(msg_len & 0xFF);
+        @memcpy(buf[4..36], &verify_data);
+
+        // The client Finished is appended to the transcript for completeness;
+        // it is the last handshake message in TLS 1.3.
+        self.transcript.update(buf[0..36]);
+        self.pending_install_app = true;
+        self.state = .connected;
+
+        // Sent at the Handshake level — 1-RTT application data follows once the
+        // caller installs the pending application keys.
+        return Action{ .send_data = .{
+            .level = .handshake,
+            .data = self.out_buf[0..36],
+        } };
+    }
 };
 
 // ─── Tests for ClientHello ───────────────────────────────────────────
@@ -961,4 +1151,244 @@ test "Tls13Handshake client rejects ServerHello missing key_share" {
     hs.provideData(sh_buf[0..sh_len]);
 
     try std.testing.expectError(error.NoKeyShare, hs.step());
+}
+
+// ─── Tests for client handshake completion ───────────────────────────
+
+/// Build a minimal EncryptedExtensions carrying an optional ALPN protocol
+/// and an optional opaque QUIC transport parameters blob.
+fn buildEncryptedExtensions(buf: []u8, alpn: []const u8, peer_tp: []const u8) usize {
+    var p: usize = 0;
+    buf[p] = @intFromEnum(HandshakeType.encrypted_extensions);
+    p += 1;
+    p += 3; // length placeholder
+    const ext_start = p;
+    p += 2; // extensions length placeholder
+    if (alpn.len > 0) {
+        const alpn_ext_len = 2 + 1 + alpn.len;
+        p = writeExtHeader(buf, p, @intFromEnum(ExtType.alpn), alpn_ext_len);
+        writeU16(buf[p..], @intCast(1 + alpn.len));
+        p += 2;
+        buf[p] = @intCast(alpn.len);
+        p += 1;
+        @memcpy(buf[p..][0..alpn.len], alpn);
+        p += alpn.len;
+    }
+    if (peer_tp.len > 0) {
+        p = writeExtHeader(buf, p, @intFromEnum(ExtType.quic_transport_parameters), peer_tp.len);
+        @memcpy(buf[p..][0..peer_tp.len], peer_tp);
+        p += peer_tp.len;
+    }
+    const ext_len = p - ext_start - 2;
+    writeU16(buf[ext_start..], @intCast(ext_len));
+    const msg_len = p - 4;
+    buf[1] = @intCast((msg_len >> 16) & 0xFF);
+    buf[2] = @intCast((msg_len >> 8) & 0xFF);
+    buf[3] = @intCast(msg_len & 0xFF);
+    return p;
+}
+
+/// Build a Certificate message carrying a single DER certificate.
+fn buildCertificate(buf: []u8, cert_der: []const u8) usize {
+    var p: usize = 0;
+    buf[p] = @intFromEnum(HandshakeType.certificate);
+    p += 1;
+    p += 3; // length placeholder
+    // certificate_request_context: empty
+    buf[p] = 0;
+    p += 1;
+    // certificate_list length (3 bytes): one entry = 3 + cert + 2 (extensions)
+    const entry_len: usize = 3 + cert_der.len + 2;
+    const list_start = p;
+    p += 3;
+    // first entry: 3-byte cert length + cert + 2-byte extensions length (0)
+    buf[p] = @intCast((cert_der.len >> 16) & 0xFF);
+    buf[p + 1] = @intCast((cert_der.len >> 8) & 0xFF);
+    buf[p + 2] = @intCast(cert_der.len & 0xFF);
+    p += 3;
+    @memcpy(buf[p..][0..cert_der.len], cert_der);
+    p += cert_der.len;
+    writeU16(buf[p..], 0); // extensions
+    p += 2;
+    buf[list_start] = @intCast((entry_len >> 16) & 0xFF);
+    buf[list_start + 1] = @intCast((entry_len >> 8) & 0xFF);
+    buf[list_start + 2] = @intCast(entry_len & 0xFF);
+    const msg_len = p - 4;
+    buf[1] = @intCast((msg_len >> 16) & 0xFF);
+    buf[2] = @intCast((msg_len >> 8) & 0xFF);
+    buf[3] = @intCast(msg_len & 0xFF);
+    return p;
+}
+
+/// Build a CertificateVerify message with a signature scheme and signature.
+fn buildCertificateVerify(buf: []u8, scheme: u16, sig: []const u8) usize {
+    var p: usize = 0;
+    buf[p] = @intFromEnum(HandshakeType.certificate_verify);
+    p += 1;
+    p += 3; // length placeholder
+    writeU16(buf[p..], scheme);
+    p += 2;
+    writeU16(buf[p..], @intCast(sig.len));
+    p += 2;
+    @memcpy(buf[p..][0..sig.len], sig);
+    p += sig.len;
+    const msg_len = p - 4;
+    buf[1] = @intCast((msg_len >> 16) & 0xFF);
+    buf[2] = @intCast((msg_len >> 8) & 0xFF);
+    buf[3] = @intCast(msg_len & 0xFF);
+    return p;
+}
+
+/// Build a Finished message carrying 32 bytes of verify_data.
+fn buildFinished(buf: []u8, verify_data: [32]u8) usize {
+    buf[0] = @intFromEnum(HandshakeType.finished);
+    const msg_len: usize = 32;
+    buf[1] = @intCast((msg_len >> 16) & 0xFF);
+    buf[2] = @intCast((msg_len >> 8) & 0xFF);
+    buf[3] = @intCast(msg_len & 0xFF);
+    @memcpy(buf[4..36], &verify_data);
+    return 36;
+}
+
+test "Tls13Handshake client completes full handshake and installs application keys" {
+    const alpn_proto = "hq-interop";
+    const alpn = [_][]const u8{alpn_proto};
+    const peer_tp = [_]u8{ 0xAB, 0xCD, 0xEF };
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &[_]u8{ 0x01, 0x02 });
+
+    // 1. ClientHello
+    const ch_action = try hs.step();
+    try std.testing.expect(std.meta.activeTag(ch_action) == .send_data);
+    const client_hello = ch_action.send_data.data;
+
+    // Server X25519 key pair + shared secret.
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    const shared = try X25519.scalarmult(hs.x25519_secret, server_public);
+
+    // Independent transcript + key schedule to predict verify_data and keys.
+    var th = TranscriptHash.init();
+    th.update(client_hello);
+    var ks = KeySchedule.init();
+
+    // 2. ServerHello
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    const server_hello = sh_buf[0..sh_len];
+    hs.provideData(server_hello);
+    th.update(server_hello);
+    ks.deriveHandshakeSecrets(&shared, th.current());
+
+    try std.testing.expect(std.meta.activeTag(try hs.step()) == ._continue);
+    const hs_install = try hs.step();
+    try std.testing.expectEqual(EncryptionLevel.handshake, hs_install.install_keys.level);
+
+    // 3. EncryptedExtensions (ALPN + peer transport params)
+    var ee_buf: [256]u8 = undefined;
+    const ee_len = buildEncryptedExtensions(&ee_buf, alpn_proto, &peer_tp);
+    const ee = ee_buf[0..ee_len];
+    hs.provideData(ee);
+    th.update(ee);
+    try std.testing.expect(std.meta.activeTag(try hs.step()) == ._continue);
+
+    // 4. Certificate
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+    var cert_buf: [512]u8 = undefined;
+    const cert_len = buildCertificate(&cert_buf, &cert_der);
+    const cert = cert_buf[0..cert_len];
+    hs.provideData(cert);
+    th.update(cert);
+    try std.testing.expect(std.meta.activeTag(try hs.step()) == ._continue);
+
+    // 5. CertificateVerify
+    const sig_scheme: u16 = 0x0807; // ed25519
+    const sig_bytes = [_]u8{0x42} ** 64;
+    var cv_buf: [256]u8 = undefined;
+    const cv_len = buildCertificateVerify(&cv_buf, sig_scheme, &sig_bytes);
+    const cv = cv_buf[0..cv_len];
+    hs.provideData(cv);
+    th.update(cv);
+    try std.testing.expect(std.meta.activeTag(try hs.step()) == ._continue);
+
+    // Captured peer state along the way.
+    try std.testing.expectEqualStrings(alpn_proto, hs.negotiated_alpn[0..hs.negotiated_alpn_len]);
+    try std.testing.expectEqualSlices(u8, &peer_tp, hs.peer_tp[0..hs.peer_tp_len]);
+    try std.testing.expectEqualSlices(u8, &cert_der, hs.server_cert[0..hs.server_cert_len]);
+    try std.testing.expectEqual(sig_scheme, hs.cert_verify_scheme);
+    try std.testing.expectEqualSlices(u8, &sig_bytes, hs.cert_verify_sig[0..hs.cert_verify_sig_len]);
+
+    // 6. Server Finished (correct verify_data over transcript up to CV).
+    const server_verify = KeySchedule.computeFinishedVerifyData(
+        ks.server_handshake_traffic_secret,
+        th.current(),
+    );
+    var sf_buf: [64]u8 = undefined;
+    const sf_len = buildFinished(&sf_buf, server_verify);
+    const server_finished = sf_buf[0..sf_len];
+    hs.provideData(server_finished);
+    th.update(server_finished); // app secrets derive from here
+    try std.testing.expect(std.meta.activeTag(try hs.step()) == ._continue);
+
+    // 7. Client sends its Finished at the Handshake level.
+    const cf_action = try hs.step();
+    try std.testing.expect(std.meta.activeTag(cf_action) == .send_data);
+    try std.testing.expectEqual(EncryptionLevel.handshake, cf_action.send_data.level);
+    const client_finished = cf_action.send_data.data;
+    try std.testing.expectEqual(@as(usize, 36), client_finished.len);
+
+    // Client verify_data uses the client handshake secret over the transcript
+    // up to (not including) the client Finished — i.e. through server Finished.
+    const expected_cf = KeySchedule.computeFinishedVerifyData(
+        ks.client_handshake_traffic_secret,
+        th.current(),
+    );
+    try std.testing.expectEqualSlices(u8, &expected_cf, client_finished[4..36]);
+
+    // 8. Application keys are installed next.
+    const app_install = try hs.step();
+    try std.testing.expectEqual(EncryptionLevel.application, app_install.install_keys.level);
+    ks.deriveAppSecrets(th.current());
+    const expected_seal = KeySchedule.deriveQuicKeys(ks.client_app_traffic_secret);
+    const expected_open = KeySchedule.deriveQuicKeys(ks.server_app_traffic_secret);
+    try std.testing.expectEqualSlices(u8, &expected_seal.key, &app_install.install_keys.seal.key);
+    try std.testing.expectEqualSlices(u8, &expected_seal.iv, &app_install.install_keys.seal.iv);
+    try std.testing.expectEqualSlices(u8, &expected_seal.hp, &app_install.install_keys.seal.hp);
+    try std.testing.expectEqualSlices(u8, &expected_open.key, &app_install.install_keys.open.key);
+    try std.testing.expectEqualSlices(u8, &expected_open.iv, &app_install.install_keys.open.iv);
+    try std.testing.expectEqualSlices(u8, &expected_open.hp, &app_install.install_keys.open.hp);
+
+    // 9. Handshake complete.
+    try std.testing.expect(std.meta.activeTag(try hs.step()) == .complete);
+    try std.testing.expect(hs.isComplete());
+}
+
+test "Tls13Handshake client rejects server Finished with wrong verify_data" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step(); // ClientHello
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var sh_buf: [128]u8 = undefined;
+    hs.provideData(sh_buf[0..buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true)]);
+    _ = try hs.step(); // _continue
+    _ = try hs.step(); // install_keys(handshake)
+
+    var buf: [512]u8 = undefined;
+    hs.provideData(buf[0..buildEncryptedExtensions(&buf, "", &[_]u8{})]);
+    _ = try hs.step();
+    hs.provideData(buf[0..buildCertificate(&buf, &[_]u8{0x30})]);
+    _ = try hs.step();
+    hs.provideData(buf[0..buildCertificateVerify(&buf, 0x0807, &[_]u8{0x01})]);
+    _ = try hs.step();
+
+    // Wrong verify_data (all zeros) — must not match the real one.
+    const bad: [32]u8 = [_]u8{0} ** 32;
+    var fin_buf: [64]u8 = undefined;
+    hs.provideData(fin_buf[0..buildFinished(&fin_buf, bad)]);
+    try std.testing.expectError(error.BadFinished, hs.step());
 }
