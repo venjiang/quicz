@@ -67,6 +67,7 @@ pub fn main() !void {
     // Set the client's Initial Source Connection ID before the first drive so
     // the backend-produced ClientHello carries it in its transport parameters.
     try client.setLocalInitialSourceConnectionId(&client_scid);
+    try server.setLocalInitialSourceConnectionId(&server_scid);
 
     // 1. Client drive initial → produces ClientHello CRYPTO.
     const client_initial_progress = try client.driveCryptoBackendInSpace(
@@ -98,15 +99,82 @@ pub fn main() !void {
     );
     try require(server_initial_progress.inbound_bytes > 0);
     try require(server_initial_progress.handshake_keys_installed);
+    try require(server_initial_progress.one_rtt_keys_installed);
+
+    // 4. Server polls its Initial datagram (ServerHello) and drives Handshake
+    //    to emit EE/Certificate/CertificateVerify/Finished + install 1-RTT keys.
+    const server_initial_dgram = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        42,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(server_initial_dgram);
+
+    const server_hs_progress = try server.driveCryptoBackendInSpace(
+        .handshake,
+        server_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(server_hs_progress.outbound_bytes > 0);
+
+    const server_hs_dgram = (try server.pollProtectedHandshakeDatagramWithInstalledKeys(
+        43,
+        &client_scid,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(server_hs_dgram);
+
+    // 5. Client processes ServerHello (Initial) and drives to install
+    //    handshake keys, then processes the Handshake flight and drives to
+    //    emit client Finished + install 1-RTT keys.
+    try client.processProtectedLongDatagramInSpace(.initial, 44, secrets.server, server_initial_dgram);
+    const client_initial_drive = try client.driveCryptoBackendInSpace(
+        .initial,
+        client_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(client_initial_drive.handshake_keys_installed);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(45, server_hs_dgram);
+    const client_hs_progress = try client.driveCryptoBackendInSpace(
+        .handshake,
+        client_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(client_hs_progress.outbound_bytes > 0);
+    try require(client_hs_progress.one_rtt_keys_installed);
+
+    // 6. Client polls its Handshake datagram (client Finished).
+    const client_hs_dgram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        46,
+        &server_scid,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_hs_dgram);
+
+    // 7. Server processes client Finished → handshake confirmed.
+    try server.processProtectedHandshakeDatagramWithInstalledKeys(47, client_hs_dgram);
+    const server_hs_drive = try server.driveCryptoBackendInSpace(
+        .handshake,
+        server_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(server_hs_drive.handshake_confirmed);
+    try require(server.handshakeConfirmed());
+    try require(client_backend.hs.isComplete());
 
     std.debug.print(
-        "client_initial_outbound={d} server_initial_inbound={d} handshake_keys={}\n",
+        "client_initial_outbound={d} server_initial_inbound={d} handshake_keys={} one_rtt_keys={} confirmed={}\n",
         .{
             client_initial_progress.outbound_bytes,
             server_initial_progress.inbound_bytes,
             server_initial_progress.handshake_keys_installed,
+            client_hs_progress.one_rtt_keys_installed,
+            server.handshakeConfirmed(),
         },
     );
-
-    std.debug.print("tls13_backend_loopback: initial flight exchange OK\n", .{});
+    std.debug.print("tls13_backend_loopback: full TLS-owned handshake OK\n", .{});
 }
