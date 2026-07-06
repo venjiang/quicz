@@ -1371,6 +1371,25 @@ pub fn build(b: *std.Build) void {
     });
     const run_lib_tests = b.addRunArtifact(lib_tests);
 
+    // zig build run-tls13-backend-loopback
+    const run_tls13_backend_loopback = b.step("run-tls13-backend-loopback", "Run pure-Zig TLS 1.3 in-memory loopback");
+    const run_tls13_backend_loopback_cmd = b.addRunArtifact(exe_tls13_backend_loopback);
+    run_tls13_backend_loopback.dependOn(&run_tls13_backend_loopback_cmd.step);
+    run_tls13_backend_loopback_cmd.step.dependOn(b.getInstallStep());
+
+    // zig build run-tls13-udp-loopback
+    const run_tls13_udp_loopback = b.step("run-tls13-udp-loopback", "Run pure-Zig TLS 1.3 UDP loopback");
+    const run_tls13_udp_loopback_cmd = b.addRunArtifact(exe_tls13_udp_loopback);
+    run_tls13_udp_loopback.dependOn(&run_tls13_udp_loopback_cmd.step);
+    run_tls13_udp_loopback_cmd.step.dependOn(b.getInstallStep());
+
+    // zig build run-tls13-lifecycle-loopback
+    const run_tls13_lifecycle_loopback = b.step("run-tls13-lifecycle-loopback", "Run pure-Zig TLS 1.3 lifecycle loopback");
+    const run_tls13_lifecycle_loopback_cmd = b.addRunArtifact(exe_tls13_lifecycle_loopback);
+    run_tls13_lifecycle_loopback.dependOn(&run_tls13_lifecycle_loopback_cmd.step);
+    run_tls13_lifecycle_loopback_cmd.step.dependOn(b.getInstallStep());
+
     const test_step = b.step("test", "Run quicz unit tests");
     test_step.dependOn(&run_lib_tests.step);
 }
+
