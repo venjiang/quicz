@@ -427,6 +427,9 @@ pub fn main() !void {
     _ = client.recvStreamFinished(stream_id) catch false;
     // M5: query local 1-RTT key phase (RFC 9001 §6).
     _ = client.localOneRttKeyPhase();
+    // M5: query peer bidi/uni stream-count block limits (RFC 9000 §19.12).
+    _ = client.peerStreamsBlockedBidiLimit();
+    _ = client.peerStreamsBlockedUniLimit();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
