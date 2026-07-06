@@ -187,6 +187,12 @@ pub const TlsConfig = struct {
     private_key_bytes: ?[]const u8 = null,
     private_key_algorithm: PrivateKeyAlgorithm = .ecdsa_p256_sha256,
     skip_cert_verify: bool = true,
+    /// Optional wall-clock seconds since epoch for certificate validity-period
+    /// checks. When null, validity is not checked.
+    now_sec: ?i64 = null,
+    /// Optional CA bundle for chain-to-trust-anchor verification. Requires
+    /// `now_sec` to be set as well.
+    ca_bundle: ?*const Certificate.Bundle = null,
 };
 
 /// TLS handshake error set.
@@ -968,8 +974,23 @@ pub const Tls13Handshake = struct {
         };
         const parsed = cert.parse() catch return error.BadCertificate;
 
+        // Hostname (SNI) check against SAN/CN (RFC 6125).
         if (self.config.server_name) |host| {
             parsed.verifyHostName(host) catch return error.BadCertificate;
+        }
+
+        // Validity period (RFC 5280 §4.1.2.5).
+        if (self.config.now_sec) |now| {
+            const not_before = @as(i64, @intCast(parsed.validity.not_before));
+            const not_after = @as(i64, @intCast(parsed.validity.not_after));
+            if (now < not_before or now > not_after) return error.BadCertificate;
+        }
+
+        // Chain to a trusted anchor (RFC 8446 §4.4.2). Requires a wall-clock
+        // timestamp for the bundle's own validity check.
+        if (self.config.ca_bundle) |bundle| {
+            const now = self.config.now_sec orelse return error.BadCertificate;
+            bundle.verify(parsed, now) catch return error.BadCertificate;
         }
     }
 
