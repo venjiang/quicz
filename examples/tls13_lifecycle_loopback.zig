@@ -412,6 +412,9 @@ pub fn main() !void {
     _ = server.retrySourceConnectionId();
     // M5: query peer-address-validation state (anti-amplification, RFC 9000 §8.1).
     _ = server.peerAddressValidated();
+    // M6: query available congestion window + full flag.
+    _ = client.availableCongestionWindow(.application);
+    _ = client.congestionWindowFull(.application);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
