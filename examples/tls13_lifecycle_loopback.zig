@@ -401,6 +401,18 @@ pub fn main() !void {
         defer allocator.free(nt_dgram);
         try server_socket.send(io, &client_socket.address, nt_dgram);
     }
+
+    // M4: server sends HANDSHAKE_DONE (RFC 9000 §19.20).
+    try server.sendHandshakeDone();
+    if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        61,
+        &client_scid,
+    )) |hd_dgram| {
+        defer allocator.free(hd_dgram);
+        try server_socket.send(io, &client_socket.address, hd_dgram);
+    }
     _ = client.lossDetectionTimerDeadlineMillis();
     // M5: query ECN validation state + next outgoing spin bit.
     _ = client.ecnValidationState(.application);
