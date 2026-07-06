@@ -20,12 +20,14 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [x] Packet protection helpers for QUIC v1/v2 Initial keys, Retry integrity, protected long/short packets, configured v2 protected long-packet/Retry wire versions, installed-key mock TLS handoff, and key update state.
 - [x] Simplified RFC 9002-style ACK, loss, PTO, NewReno congestion, congestion-window and ack-eliciting send-admission budget/reason queries, ECN, retransmission, and endpoint recovery-timer models with socket-backed UDP loopback coverage.
 - [x] In-memory endpoint routing/lifecycle helpers for DCID and IPv4 UDP tuple routing, Version Negotiation, zero-length CID routing, preferred/replacement CID routing, route retirement, stateless reset emission, and protected UDP loopbacks.
+- [x] Pure-Zig TLS 1.3 handshake (`src/quic/tls13.zig`) + `CryptoBackend` adapter (`src/quic/tls13_backend.zig`): ClientHello/ServerHello, key schedule, EncryptedExtensions/Certificate/CertificateVerify/Finished, certificate verification (ECDSA P-256 / Ed25519 / RSA-PSS), server-side state machine, and client↔server loopback — no OpenSSL.
+- [x] TLS-owned handshake over real loopback UDP (`examples/tls13_udp_loopback.zig`, `examples/tls13_lifecycle_loopback.zig`): `handshake_confirmed`, STREAM echo, RESET_STREAM, STOP_SENDING, NEW_CONNECTION_ID, NEW_TOKEN, HANDSHAKE_DONE, protected close, PTO probe, recovery-timer service.
 - [ ] Complete connection state machine and TLS-owned protected-packet packet number space routing.
 - [ ] Endpoint-owned TLS-backed socket client/server echo with a live TLS handshake driving UDP packet routing, automatic traffic-secret installation, and 1-RTT STREAM delivery.
 - [ ] Embeddable socket API where callers own UDP sockets, connection maps, timers, and datagram output queues.
 - [ ] Minimal external interop entry for `handshake` and `transfer`.
 - [ ] Full RFC 9002 loss detection and congestion control with socket-owned protected-packet loss/PTO lifecycle integration and remaining NewReno edge cases.
-- [ ] TLS 1.3 integration for QUIC (RFC 9001)
+- [ ] TLS 1.3 integration for QUIC (RFC 9001) — pure-Zig path complete; remaining: full loss/PTO lifecycle + interop
 - [ ] QUIC v2 (RFC 9369) version support
 
 ### Planned Milestones
@@ -85,6 +87,16 @@ exercises, not interoperable QUIC-over-UDP programs yet.
 
 Common runnable examples:
 
+- `run-tls13-backend-loopback`: pure-Zig TLS 1.3 in-memory loopback — two
+  `Tls13Handshake`s interlock with no OpenSSL, proving matching transcripts,
+  complementary traffic secrets, and `handshake_confirmed`.
+- `run-tls13-udp-loopback`: pure-Zig TLS 1.3 over real loopback UDP sockets —
+  `Tls13Backend` driving two `Connection`s through a complete TLS-owned
+  handshake, STREAM echo, RESET_STREAM, STOP_SENDING, and protected close.
+- `run-tls13-lifecycle-loopback`: pure-Zig TLS 1.3 with
+  `EndpointConnectionLifecycle` ownership — full handshake + STREAM echo +
+  NEW_CONNECTION_ID + NEW_TOKEN + HANDSHAKE_DONE + PTO probe + recovery-timer
+  service + protected close, all over loopback UDP with TLS-owned keys.
 - `run-tls-openssl-backend-adapter`: OpenSSL-backed C TLS adapter path,
   including local transport parameters, first outbound TLS CRYPTO flight, and
   quicz-encoded pair-transcript server transport-parameter bytes,
