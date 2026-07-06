@@ -376,6 +376,9 @@ pub fn main() !void {
     try require(client.handshakeConfirmed());
     try require(client.packetNumberSpaceDiscarded(.initial) or !client.packetNumberSpaceDiscarded(.initial));
     _ = client.hasHandshakeProtectionKeys();
+    // M5: query stream state + peer flow-control limit.
+    _ = client.streamState(stream_id) catch null;
+    _ = client.peerStreamDataBlockedLimit(stream_id);
     _ = client.lossDetectionTimerDeadlineMillis();
     // M5: query ECN validation state + next outgoing spin bit.
     _ = client.ecnValidationState(.application);
