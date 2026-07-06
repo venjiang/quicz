@@ -501,6 +501,42 @@ pub fn main() !void {
     try require(got_fin);
     try require(std.mem.eql(u8, fin_buf[0..3], "fin"));
     try require((try server.recvStreamFinalSize(stream2)) != null);
+    // M5: client opens a unidirectional stream, sends one-way data with FIN.
+    const uni = try client.openUniStream();
+    try client.sendOnStream(uni, "one-way", true);
+    var ui: usize = 0;
+    while (ui < 4) : (ui += 1) {
+        const d = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            client_handle,
+            &client,
+            80 + @as(i64, @intCast(ui)),
+            &server_scid,
+        )) orelse break;
+        defer allocator.free(d);
+        try client_socket.send(io, &server_socket.address, d);
+    }
+    var got_uni = false;
+    var uj: usize = 0;
+    var uni_buf: [16]u8 = undefined;
+    while (uj < 4) : (uj += 1) {
+        const r = server_socket.receiveTimeout(io, &recv_buf, .{ .duration = .{
+            .clock = .awake,
+            .raw = std.Io.Duration.fromMilliseconds(2000),
+        } }) catch break;
+        _ = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &server,
+            server_path,
+            81 + @as(i64, @intCast(uj)),
+            r.data,
+        );
+        if ((try server.recvOnStream(uni, &uni_buf)) != null) {
+            got_uni = true;
+            break;
+        }
+    }
+    try require(got_uni);
+    try require(std.mem.eql(u8, uni_buf[0..7], "one-way"));
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
