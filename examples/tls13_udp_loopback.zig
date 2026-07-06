@@ -178,5 +178,15 @@ pub fn main() !void {
     try require(got_echo);
     try require(std.mem.eql(u8, stream_buf[0..5], "hello"));
 
-    std.debug.print("tls13_udp_loopback: handshake + STREAM echo over UDP OK, confirmed={}\n", .{server.handshakeConfirmed()});
+    // 10. Client initiates a protected close (CONNECTION_CLOSE over 1-RTT).
+    try client.closeConnection(0, 0, "done");
+    const close_dgram = (try client.pollProtectedShortDatagramWithInstalledKeys(60, &server_scid)) orelse return error.UnexpectedState;
+    defer allocator.free(close_dgram);
+    try client_socket.send(io, &server_socket.address, close_dgram);
+
+    // 11. Server receives the close (enters closing/draining).
+    const recv_close = try server_socket.receiveTimeout(io, &recv_buf, recvTimeout());
+    try server.processProtectedShortDatagramWithInstalledKeys(61, server_scid.len, recv_close.data);
+
+    std.debug.print("tls13_udp_loopback: handshake + STREAM echo + protected close OK\n", .{});
 }
