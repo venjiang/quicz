@@ -136,5 +136,40 @@ pub fn main() !void {
     );
     try require(server_progress.handshake_keys_installed);
 
-    std.debug.print("tls13_lifecycle_loopback: lifecycle initial drive OK, client_out={d} server_keys={}\n", .{ client_progress.outbound_bytes, server_progress.handshake_keys_installed });
+    // Server polls its Initial datagram (ServerHello) and sends to client.
+    const server_initial_dgram = (try server_lifecycle.pollProtectedLongDatagram(
+        server_handle,
+        &server,
+        12,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(server_initial_dgram);
+    try server_socket.send(io, &client_socket.address, server_initial_dgram);
+
+    // Client receives ServerHello via routed lifecycle processing.
+    const recv2 = try client_socket.receiveTimeout(io, &recv_buf, .{ .duration = .{
+        .clock = .awake,
+        .raw = std.Io.Duration.fromMilliseconds(2000),
+    } });
+    _ = try client_lifecycle.processRoutedProtectedInitialDatagram(
+        client_handle,
+        &client,
+        client_path,
+        13,
+        &original_dcid,
+        recv2.data,
+    );
+    const client_drive2 = try client_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+        client_handle,
+        &client,
+        .initial,
+        client_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(client_drive2.handshake_keys_installed);
+
+    std.debug.print("tls13_lifecycle_loopback: lifecycle initial exchange OK, server_initial={d} client_hs_keys={}\n", .{ server_initial_dgram.len, client_drive2.handshake_keys_installed });
 }
