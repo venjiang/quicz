@@ -389,6 +389,18 @@ pub fn main() !void {
     _ = server_lifecycle.routeCount();
     // M5: explicitly discard the Initial packet number space (RFC 9001 §4.9).
     try client.discardPacketNumberSpace(.initial);
+
+    // M5: server issues a NEW_TOKEN (address-validation token for future connections).
+    try server.issueNewToken(&[_]u8{ 0xAA, 0xBB, 0xCC });
+    if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        60,
+        &client_scid,
+    )) |nt_dgram| {
+        defer allocator.free(nt_dgram);
+        try server_socket.send(io, &client_socket.address, nt_dgram);
+    }
     _ = client.lossDetectionTimerDeadlineMillis();
     // M5: query ECN validation state + next outgoing spin bit.
     _ = client.ecnValidationState(.application);
