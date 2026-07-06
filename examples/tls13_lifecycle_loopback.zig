@@ -435,6 +435,8 @@ pub fn main() !void {
     _ = client.peerInitialSourceConnectionId();
     // M6: query anti-amplification ack-eliciting send budget (RFC 9000 §8.2.2).
     _ = client.availableAckElicitingSendBudget(.application);
+    // M6: query anti-amplification limit remaining (RFC 9000 §8.1).
+    _ = server.antiAmplificationLimitRemaining();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
