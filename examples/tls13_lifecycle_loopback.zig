@@ -542,6 +542,8 @@ pub fn main() !void {
     try require(retired.recovery_timer_disarmed or !retired.recovery_timer_disarmed);
     // M6: query the next endpoint deadline (idle/close/recovery aggregation).
     _ = server_lifecycle.nextDeadline(server_handle, &server);
+    // M6: process pending work (idle/close timeout retirement) on the server.
+    _ = try server_lifecycle.processPendingWork(server_handle, &server, 90);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
