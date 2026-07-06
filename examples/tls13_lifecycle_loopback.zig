@@ -379,6 +379,10 @@ pub fn main() !void {
     // M5: query stream state + peer flow-control limit.
     _ = client.streamState(stream_id) catch null;
     _ = client.peerStreamDataBlockedLimit(stream_id);
+    // M5/M6: query idle-timeout + close-deadline state.
+    _ = client.effectiveIdleTimeoutMillis();
+    _ = client.idleTimeoutDeadlineMillis();
+    _ = client.closeDeadlineMillis();
     _ = client.lossDetectionTimerDeadlineMillis();
     // M5: query ECN validation state + next outgoing spin bit.
     _ = client.ecnValidationState(.application);
