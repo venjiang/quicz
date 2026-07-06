@@ -407,6 +407,9 @@ pub fn main() !void {
     _ = server.peerVersionInformation();
     // M6: query smoothed RTT (RFC 9002 §5.4).
     _ = client.smoothedRttMillis(.application);
+    // M5: query original DCID / retry SCID transport-parameter bindings.
+    _ = server.originalDestinationConnectionId();
+    _ = server.retrySourceConnectionId();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
