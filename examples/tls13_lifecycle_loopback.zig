@@ -405,6 +405,8 @@ pub fn main() !void {
     // M5: query peer version-information (RFC 9368) exchanged via transport parameters.
     _ = client.peerVersionInformation();
     _ = server.peerVersionInformation();
+    // M6: query smoothed RTT (RFC 9002 §5.4).
+    _ = client.smoothedRttMillis(.application);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
