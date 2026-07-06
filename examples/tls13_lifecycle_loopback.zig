@@ -430,6 +430,9 @@ pub fn main() !void {
     // M5: query peer bidi/uni stream-count block limits (RFC 9000 §19.12).
     _ = client.peerStreamsBlockedBidiLimit();
     _ = client.peerStreamsBlockedUniLimit();
+    // M5: query peer stateless-reset token + peer Initial SCID.
+    _ = client.peerStatelessResetToken();
+    _ = client.peerInitialSourceConnectionId();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
