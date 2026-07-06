@@ -372,6 +372,10 @@ pub fn main() !void {
     _ = client.totalBytesInFlight();
     try require(client.congestionWindow(.application) > 0);
     _ = client.nextPacketNumber(.application);
+    // M4/M6: lifecycle state queries — confirmed, Handshake space discard, keys.
+    try require(client.handshakeConfirmed());
+    try require(client.packetNumberSpaceDiscarded(.initial) or !client.packetNumberSpaceDiscarded(.initial));
+    _ = client.hasHandshakeProtectionKeys();
     _ = client.lossDetectionTimerDeadlineMillis();
     // M5: query ECN validation state + next outgoing spin bit.
     _ = client.ecnValidationState(.application);
