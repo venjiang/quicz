@@ -418,6 +418,8 @@ pub fn main() !void {
     _ = client.lossDetectionDeadlineMillis(.application);
     // M6: query pending-ACK largest packet number (RFC 9000 §19.3).
     _ = client.pendingAckLargest(.application);
+    // M5: query ECN counts (RFC 9000 §19.4).
+    _ = client.ecnCounts(.application);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
