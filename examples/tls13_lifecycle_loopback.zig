@@ -189,5 +189,26 @@ pub fn main() !void {
     defer allocator.free(server_hs_dgram);
     try server_socket.send(io, &client_socket.address, server_hs_dgram);
 
-    std.debug.print("tls13_lifecycle_loopback: lifecycle handshake flight sent, hs_dgram={d}\n", .{server_hs_dgram.len});
+    // Client receives Handshake flight, drives → client Finished + 1-RTT keys.
+    const recv3 = try client_socket.receiveTimeout(io, &recv_buf, .{ .duration = .{
+        .clock = .awake,
+        .raw = std.Io.Duration.fromMilliseconds(2000),
+    } });
+    _ = try client_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        client_path,
+        15,
+        recv3.data,
+    );
+    const client_hs_prog = try client_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+        client_handle,
+        &client,
+        .handshake,
+        client_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(client_hs_prog.outbound_bytes > 0);
+
+    std.debug.print("tls13_lifecycle_loopback: client processed handshake flight, outbound={d} one_rtt={}\n", .{ client_hs_prog.outbound_bytes, client_hs_prog.one_rtt_keys_installed });
 }
