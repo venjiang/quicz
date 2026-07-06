@@ -457,6 +457,13 @@ pub fn main() !void {
     _ = client.peerOneRttKeyUpdateCount();
     _ = client.hasPeerZeroRttProtectionKey();
     _ = client.nextPeerPacketNumber(.application);
+    // M5: query local 1-RTT key-update count + retained generation + 0-RTT/1-RTT key presence.
+    _ = client.localOneRttKeyUpdateCount();
+    _ = client.localOneRttRetainsKeyGeneration(0);
+    _ = client.hasLocalZeroRttProtectionKey();
+    _ = client.hasOneRttProtectionKeys();
+    // M5: query local transport parameters snapshot.
+    _ = client.localTransportParameters();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
