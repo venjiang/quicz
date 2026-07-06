@@ -369,6 +369,7 @@ pub fn main() !void {
 
     // M6: query bytes in flight + congestion window + loss-detection deadline.
     _ = client.bytesInFlight(.application);
+    _ = client.totalBytesInFlight();
     try require(client.congestionWindow(.application) > 0);
     _ = client.lossDetectionTimerDeadlineMillis();
     // M5: query ECN validation state + next outgoing spin bit.
