@@ -967,7 +967,7 @@ pub const Tls13Handshake = struct {
 
     /// Parse the stored server certificate and verify the SNI hostname against
     /// its SAN/CN (RFC 8446 §4.4.2 + RFC 6125).
-    fn verifyServerCertificate(self: *Tls13Handshake) HandshakeError!void {
+    pub fn verifyServerCertificate(self: *Tls13Handshake) HandshakeError!void {
         const cert: Certificate = .{
             .buffer = self.server_cert[0..self.server_cert_len],
             .index = 0,
@@ -2123,4 +2123,20 @@ test "Tls13Handshake client↔server loopback completes with matching secrets" {
     // 7. Peer transport parameters crossed over.
     try std.testing.expectEqualSlices(u8, &server_tp, client.peer_tp[0..client.peer_tp_len]);
     try std.testing.expectEqualSlices(u8, &client_tp, server.peer_tp[0..server.peer_tp_len]);
+}
+
+// ─── Tests for certificate validity-period verification ─────────────
+
+test "verifyServerCertificate surfaces unparseable certificates as BadCertificate" {
+    const cert_der = @embedFile("testdata/test_leaf.der");
+    var hs = Tls13Handshake.initClient(.{
+        .skip_cert_verify = false,
+        .now_sec = 0,
+    }, &[_]u8{});
+    @memcpy(hs.server_cert[0..cert_der.len], cert_der);
+    hs.server_cert_len = cert_der.len;
+    // test_leaf.der carries OIDs std.crypto.Certificate does not recognize;
+    // verifyServerCertificate must surface parse failure as BadCertificate
+    // rather than leaking the inner error.
+    try std.testing.expectError(error.BadCertificate, hs.verifyServerCertificate());
 }
