@@ -80,6 +80,12 @@ pub const Tls13Backend = struct {
     peer_tp_sent: bool = false,
     alpn_sent: bool = false,
 
+    /// Observability counters (never key material). Useful for interop
+    /// debugging: how many CRYPTO bytes flowed in/out, how many drive errors.
+    inbound_bytes: usize = 0,
+    outbound_bytes: usize = 0,
+    drive_errors: usize = 0,
+
     /// Initialize as a TLS 1.3 client. Transport parameters are supplied by
     /// the connection via `set_local_transport_parameters` before the
     /// ClientHello is pulled; pass them there rather than to `initClient`.
@@ -115,8 +121,12 @@ pub const Tls13Backend = struct {
     fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
         _ = space; // Tls13Handshake parses by message type; QUIC orders across spaces.
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
+        self.inbound_bytes += data.len;
         self.hs.provideData(data);
-        self.pump() catch return error.CryptoError;
+        self.pump() catch {
+            self.drive_errors += 1;
+            return error.CryptoError;
+        };
     }
 
     fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
@@ -125,11 +135,15 @@ pub const Tls13Backend = struct {
         if (bucket.pending() == 0) {
             // Nothing buffered: advance the state machine, which may produce
             // data for this or another space.
-            self.pump() catch return error.CryptoError;
+            self.pump() catch {
+                self.drive_errors += 1;
+                return error.CryptoError;
+            };
             if (bucket.pending() == 0) return null;
         }
         const out = bucket.drain(out_buf);
         if (out.len == 0) return null;
+        self.outbound_bytes += out.len;
         return out;
     }
 
