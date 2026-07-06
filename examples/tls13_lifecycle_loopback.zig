@@ -367,7 +367,8 @@ pub fn main() !void {
     // M6: service the loss-detection timer (packet/time-threshold loss).
     _ = try client.serviceLossDetectionTimer(1000001);
 
-    // M6: query the congestion window + loss-detection timer deadline.
+    // M6: query bytes in flight + congestion window + loss-detection deadline.
+    _ = client.bytesInFlight(.application);
     try require(client.congestionWindow(.application) > 0);
     _ = client.lossDetectionTimerDeadlineMillis();
     // M5: query ECN validation state + next outgoing spin bit.
