@@ -178,7 +178,14 @@ pub fn main() !void {
     try require(got_echo);
     try require(std.mem.eql(u8, stream_buf[0..5], "hello"));
 
-    // 10. Client resets the stream (RESET_STREAM over 1-RTT).
+    // 10. Client sends STOP_SENDING then RESET_STREAM on the stream.
+    try client.stopSending(stream_id, 0);
+    const ss_dgram = (try client.pollProtectedShortDatagramWithInstalledKeys(53, &server_scid)) orelse return error.UnexpectedState;
+    defer allocator.free(ss_dgram);
+    try client_socket.send(io, &server_socket.address, ss_dgram);
+    const recv_ss = try server_socket.receiveTimeout(io, &recv_buf, recvTimeout());
+    try server.processProtectedShortDatagramWithInstalledKeys(54, server_scid.len, recv_ss.data);
+
     try client.resetStream(stream_id, 0);
     const reset_dgram = (try client.pollProtectedShortDatagramWithInstalledKeys(55, &server_scid)) orelse return error.UnexpectedState;
     defer allocator.free(reset_dgram);
