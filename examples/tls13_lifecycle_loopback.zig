@@ -254,5 +254,45 @@ pub fn main() !void {
     defer allocator.free(req_dgram);
     try client_socket.send(io, &server_socket.address, req_dgram);
 
-    std.debug.print("tls13_lifecycle_loopback: STREAM sent over lifecycle, stream={d} req={d}\n", .{ stream_id, req_dgram.len });
+    // Server receives STREAM, echoes back via lifecycle.
+    const recv5 = try server_socket.receiveTimeout(io, &recv_buf, .{ .duration = .{
+        .clock = .awake,
+        .raw = std.Io.Duration.fromMilliseconds(2000),
+    } });
+    _ = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        server_path,
+        21,
+        recv5.data,
+    );
+    var stream_buf: [128]u8 = undefined;
+    const n = (try server.recvOnStream(stream_id, &stream_buf)) orelse return error.UnexpectedState;
+    try require(std.mem.eql(u8, stream_buf[0..n], "hello"));
+    try server.sendOnStream(stream_id, "hello", false);
+    var k: usize = 0;
+    while (k < 4) : (k += 1) {
+        const d = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(server_handle, &server, 22 + @as(i64, @intCast(k)), &client_scid)) orelse break;
+        defer allocator.free(d);
+        try server_socket.send(io, &client_socket.address, d);
+    }
+
+    // Client receives echo.
+    var got_echo = false;
+    var j: usize = 0;
+    while (j < 4) : (j += 1) {
+        const r = client_socket.receiveTimeout(io, &recv_buf, .{ .duration = .{
+            .clock = .awake,
+            .raw = std.Io.Duration.fromMilliseconds(2000),
+        } }) catch break;
+        _ = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(client_handle, &client, client_path, 23 + @as(i64, @intCast(j)), r.data);
+        if ((try client.recvOnStream(stream_id, &stream_buf)) != null) {
+            got_echo = true;
+            break;
+        }
+    }
+    try require(got_echo);
+    try require(std.mem.eql(u8, stream_buf[0..5], "hello"));
+
+    std.debug.print("tls13_lifecycle_loopback: lifecycle STREAM echo OK\n", .{});
 }
