@@ -242,5 +242,17 @@ pub fn main() !void {
     );
     try require(server_final.handshake_confirmed);
 
-    std.debug.print("tls13_lifecycle_loopback: lifecycle handshake confirmed={}\n", .{server_final.handshake_confirmed});
+    // Client opens a stream, sends "hello" over 1-RTT via lifecycle poll.
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "hello", false);
+    const req_dgram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        20,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(req_dgram);
+    try client_socket.send(io, &server_socket.address, req_dgram);
+
+    std.debug.print("tls13_lifecycle_loopback: STREAM sent over lifecycle, stream={d} req={d}\n", .{ stream_id, req_dgram.len });
 }
