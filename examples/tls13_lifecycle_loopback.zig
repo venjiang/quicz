@@ -371,6 +371,7 @@ pub fn main() !void {
     _ = client.bytesInFlight(.application);
     _ = client.totalBytesInFlight();
     try require(client.congestionWindow(.application) > 0);
+    _ = client.nextPacketNumber(.application);
     _ = client.lossDetectionTimerDeadlineMillis();
     // M5: query ECN validation state + next outgoing spin bit.
     _ = client.ecnValidationState(.application);
