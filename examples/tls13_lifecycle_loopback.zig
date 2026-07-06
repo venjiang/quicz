@@ -416,6 +416,8 @@ pub fn main() !void {
     _ = client.availableCongestionWindow(.application);
     _ = client.congestionWindowFull(.application);
     _ = client.lossDetectionDeadlineMillis(.application);
+    // M6: query pending-ACK largest packet number (RFC 9000 §19.3).
+    _ = client.pendingAckLargest(.application);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
