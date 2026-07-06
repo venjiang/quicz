@@ -422,6 +422,9 @@ pub fn main() !void {
     _ = client.ecnCounts(.application);
     // M6: query endpoint recovery-timer count.
     _ = client_lifecycle.recoveryTimerCount();
+    // M5: query stream final-size + finished state.
+    _ = client.recvStreamFinalSize(stream_id) catch null;
+    _ = client.recvStreamFinished(stream_id) catch false;
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
