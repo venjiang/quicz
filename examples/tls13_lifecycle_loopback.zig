@@ -316,5 +316,8 @@ pub fn main() !void {
         recv_close.data,
     );
 
-    std.debug.print("tls13_lifecycle_loopback: handshake + STREAM echo + close OK\n", .{});
+    // M6: service the recovery timer (loss/PTO scheduling) on the server.
+    _ = try server_lifecycle.serviceRecoveryTimer(server_handle, &server, 32);
+
+    std.debug.print("tls13_lifecycle_loopback: handshake + STREAM echo + close + recovery-timer OK\n", .{});
 }
