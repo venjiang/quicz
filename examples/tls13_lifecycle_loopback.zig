@@ -402,7 +402,9 @@ pub fn main() !void {
         try server_socket.send(io, &client_socket.address, nt_dgram);
     }
 
-    // M4: server sends HANDSHAKE_DONE (RFC 9000 §19.20).
+    // M5: query peer version-information (RFC 9368) exchanged via transport parameters.
+    _ = client.peerVersionInformation();
+    _ = server.peerVersionInformation();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
