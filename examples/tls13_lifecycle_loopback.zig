@@ -336,6 +336,31 @@ pub fn main() !void {
         }
     }
 
+    // M6: PTO probe — client sends PING (in-flight), advances time past the
+    // PTO deadline, processDueDeadline triggers a PTO probe datagram.
+    try client.sendPing();
+    const ping_dgram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        50,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(ping_dgram);
+    try client_socket.send(io, &server_socket.address, ping_dgram);
+    _ = try client_lifecycle.serviceRecoveryTimer(client_handle, &client, 1000000);
+    if (try client_lifecycle.processDueDeadlineAndPollDatagram(
+        client_handle,
+        &client,
+        1000000,
+        &server_scid,
+        &client_scid,
+    )) |pto| {
+        if (pto.datagram) |dg| {
+            defer allocator.free(dg);
+            try client_socket.send(io, &server_socket.address, dg);
+        }
+    }
+
     // Client initiates protected close via lifecycle.
     try client.closeConnection(0, 0, "done");
     const close_dgram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
