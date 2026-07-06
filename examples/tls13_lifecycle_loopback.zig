@@ -294,5 +294,27 @@ pub fn main() !void {
     try require(got_echo);
     try require(std.mem.eql(u8, stream_buf[0..5], "hello"));
 
-    std.debug.print("tls13_lifecycle_loopback: lifecycle STREAM echo OK\n", .{});
+    // Client initiates protected close via lifecycle.
+    try client.closeConnection(0, 0, "done");
+    const close_dgram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        30,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(close_dgram);
+    try client_socket.send(io, &server_socket.address, close_dgram);
+    const recv_close = try server_socket.receiveTimeout(io, &recv_buf, .{ .duration = .{
+        .clock = .awake,
+        .raw = std.Io.Duration.fromMilliseconds(2000),
+    } });
+    _ = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        server_path,
+        31,
+        recv_close.data,
+    );
+
+    std.debug.print("tls13_lifecycle_loopback: handshake + STREAM echo + close OK\n", .{});
 }
