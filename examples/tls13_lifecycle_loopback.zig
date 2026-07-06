@@ -446,6 +446,8 @@ pub fn main() !void {
     _ = server.pendingNewConnectionIdCount();
     _ = client.pendingPathChallengeCount();
     _ = client.outstandingPathChallengeCount();
+    // M5: query server's latest issued NEW_TOKEN.
+    _ = server.latestNewToken();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
