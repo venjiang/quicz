@@ -198,6 +198,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_tls13_udp_loopback);
 
+    // Pure-Zig TLS 1.3 with EndpointConnectionLifecycle ownership
+    const exe_tls13_lifecycle_loopback = b.addExecutable(.{
+        .name = "quicz-tls13-lifecycle-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tls13_lifecycle_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_tls13_lifecycle_loopback);
+
     // TLS C ABI adapter executable
     const exe_tls_c_abi_adapter = b.addExecutable(.{
         .name = "quicz-tls-c-abi-adapter",
