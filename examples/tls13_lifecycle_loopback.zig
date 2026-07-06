@@ -425,6 +425,8 @@ pub fn main() !void {
     // M5: query stream final-size + finished state.
     _ = client.recvStreamFinalSize(stream_id) catch null;
     _ = client.recvStreamFinished(stream_id) catch false;
+    // M5: query local 1-RTT key phase (RFC 9001 §6).
+    _ = client.localOneRttKeyPhase();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
