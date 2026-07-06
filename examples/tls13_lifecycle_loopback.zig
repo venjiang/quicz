@@ -383,6 +383,10 @@ pub fn main() !void {
     _ = client.effectiveIdleTimeoutMillis();
     _ = client.idleTimeoutDeadlineMillis();
     _ = client.closeDeadlineMillis();
+    // M5: endpoint lifecycle route + reset-token counts.
+    try require(client_lifecycle.routeCount() > 0);
+    _ = client_lifecycle.statelessResetTokenCount();
+    _ = server_lifecycle.routeCount();
     _ = client.lossDetectionTimerDeadlineMillis();
     // M5: query ECN validation state + next outgoing spin bit.
     _ = client.ecnValidationState(.application);
