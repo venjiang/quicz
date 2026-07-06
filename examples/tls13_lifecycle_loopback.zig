@@ -420,6 +420,8 @@ pub fn main() !void {
     _ = client.pendingAckLargest(.application);
     // M5: query ECN counts (RFC 9000 §19.4).
     _ = client.ecnCounts(.application);
+    // M6: query endpoint recovery-timer count.
+    _ = client_lifecycle.recoveryTimerCount();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
