@@ -440,6 +440,8 @@ pub fn main() !void {
     // M4/M5: query connection + handshake state machines.
     _ = client.connectionState();
     _ = client.handshakeState();
+    // M5: query local connection-ID count (RFC 9000 §19.15).
+    _ = server.localConnectionIdCount();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
