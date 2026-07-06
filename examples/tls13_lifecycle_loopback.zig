@@ -171,5 +171,23 @@ pub fn main() !void {
     );
     try require(client_drive2.handshake_keys_installed);
 
-    std.debug.print("tls13_lifecycle_loopback: lifecycle initial exchange OK, server_initial={d} client_hs_keys={}\n", .{ server_initial_dgram.len, client_drive2.handshake_keys_installed });
+    // Server drives Handshake → emits EE/Cert/CV/Finished flight.
+    _ = try server_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+        server_handle,
+        &server,
+        .handshake,
+        server_backend.cryptoBackend(),
+        &scratch,
+    );
+    const server_hs_dgram = (try server_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        14,
+        &client_scid,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(server_hs_dgram);
+    try server_socket.send(io, &client_socket.address, server_hs_dgram);
+
+    std.debug.print("tls13_lifecycle_loopback: lifecycle handshake flight sent, hs_dgram={d}\n", .{server_hs_dgram.len});
 }
