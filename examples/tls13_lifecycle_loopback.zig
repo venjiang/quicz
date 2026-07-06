@@ -348,6 +348,9 @@ pub fn main() !void {
     defer allocator.free(ping_dgram);
     try client_socket.send(io, &server_socket.address, ping_dgram);
     _ = try client_lifecycle.serviceRecoveryTimer(client_handle, &client, 1000000);
+    if (client_lifecycle.earliestRecoveryDeadline()) |deadline| {
+        try require(deadline.connection_id == client_handle);
+    }
     if (try client_lifecycle.processDueDeadlineAndPollDatagram(
         client_handle,
         &client,
