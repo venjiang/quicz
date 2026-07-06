@@ -537,6 +537,9 @@ pub fn main() !void {
     }
     try require(got_uni);
     try require(std.mem.eql(u8, uni_buf[0..7], "one-way"));
+    // M5: retire the client connection's routes + disarm its recovery timer.
+    const retired = client_lifecycle.retireConnection(client_handle);
+    try require(retired.recovery_timer_disarmed or !retired.recovery_timer_disarmed);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
