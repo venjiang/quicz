@@ -464,6 +464,43 @@ pub fn main() !void {
     _ = client.hasOneRttProtectionKeys();
     // M5: query local transport parameters snapshot.
     _ = client.localTransportParameters();
+    // M5: open a second stream with FIN, verify final-size delivery.
+    const stream2 = try client.openStream();
+    try client.sendOnStream(stream2, "fin", true);
+    var fin_buf: [16]u8 = undefined;
+    var fi: usize = 0;
+    while (fi < 4) : (fi += 1) {
+        const d = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            client_handle,
+            &client,
+            70 + @as(i64, @intCast(fi)),
+            &server_scid,
+        )) orelse break;
+        defer allocator.free(d);
+        try client_socket.send(io, &server_socket.address, d);
+    }
+    var got_fin = false;
+    var fj: usize = 0;
+    while (fj < 4) : (fj += 1) {
+        const r = server_socket.receiveTimeout(io, &recv_buf, .{ .duration = .{
+            .clock = .awake,
+            .raw = std.Io.Duration.fromMilliseconds(2000),
+        } }) catch break;
+        _ = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &server,
+            server_path,
+            71 + @as(i64, @intCast(fj)),
+            r.data,
+        );
+        if ((try server.recvOnStream(stream2, &fin_buf)) != null) {
+            got_fin = true;
+            break;
+        }
+    }
+    try require(got_fin);
+    try require(std.mem.eql(u8, fin_buf[0..3], "fin"));
+    try require((try server.recvStreamFinalSize(stream2)) != null);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
