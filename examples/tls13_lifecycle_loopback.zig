@@ -540,6 +540,8 @@ pub fn main() !void {
     // M5: retire the client connection's routes + disarm its recovery timer.
     const retired = client_lifecycle.retireConnection(client_handle);
     try require(retired.recovery_timer_disarmed or !retired.recovery_timer_disarmed);
+    // M6: query the next endpoint deadline (idle/close/recovery aggregation).
+    _ = server_lifecycle.nextDeadline(server_handle, &server);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
