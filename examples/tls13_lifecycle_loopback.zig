@@ -364,6 +364,9 @@ pub fn main() !void {
         }
     }
 
+    // M6: service the loss-detection timer (packet/time-threshold loss).
+    _ = try client.serviceLossDetectionTimer(1000001);
+
     // Client initiates protected close via lifecycle.
     try client.closeConnection(0, 0, "done");
     const close_dgram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
