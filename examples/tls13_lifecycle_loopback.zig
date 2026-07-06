@@ -321,8 +321,20 @@ pub fn main() !void {
         recv_cid.data,
     );
 
-    // M6: service the recovery timer (loss/PTO scheduling) on the server.
+    // M6: service the recovery timer + process a due deadline (loss/PTO probe).
     _ = try server_lifecycle.serviceRecoveryTimer(server_handle, &server, 32);
+    if (try server_lifecycle.processDueDeadlineAndPollDatagram(
+        server_handle,
+        &server,
+        100000,
+        &client_scid,
+        &server_scid,
+    )) |result| {
+        if (result.datagram) |dg| {
+            defer allocator.free(dg);
+            try server_socket.send(io, &client_socket.address, dg);
+        }
+    }
 
     // Client initiates protected close via lifecycle.
     try client.closeConnection(0, 0, "done");
