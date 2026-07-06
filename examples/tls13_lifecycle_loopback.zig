@@ -415,6 +415,7 @@ pub fn main() !void {
     // M6: query available congestion window + full flag.
     _ = client.availableCongestionWindow(.application);
     _ = client.congestionWindowFull(.application);
+    _ = client.lossDetectionDeadlineMillis(.application);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
