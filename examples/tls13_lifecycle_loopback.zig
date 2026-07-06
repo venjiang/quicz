@@ -410,6 +410,8 @@ pub fn main() !void {
     // M5: query original DCID / retry SCID transport-parameter bindings.
     _ = server.originalDestinationConnectionId();
     _ = server.retrySourceConnectionId();
+    // M5: query peer-address-validation state (anti-amplification, RFC 9000 §8.1).
+    _ = server.peerAddressValidated();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
