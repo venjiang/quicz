@@ -448,6 +448,15 @@ pub fn main() !void {
     _ = client.outstandingPathChallengeCount();
     // M5: query server's latest issued NEW_TOKEN.
     _ = server.latestNewToken();
+    // M5: query peer close diagnostics + migration-disabled + preferred address.
+    _ = client.peerClose();
+    _ = client.peerActiveMigrationDisabled();
+    _ = client.peerPreferredAddress();
+    // M5: query peer 1-RTT key phase + key-update count (RFC 9001 §6).
+    _ = client.peerOneRttKeyPhase();
+    _ = client.peerOneRttKeyUpdateCount();
+    _ = client.hasPeerZeroRttProtectionKey();
+    _ = client.nextPeerPacketNumber(.application);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
