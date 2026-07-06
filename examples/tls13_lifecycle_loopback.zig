@@ -370,7 +370,8 @@ pub fn main() !void {
     // M6: query the congestion window + loss-detection timer deadline.
     try require(client.congestionWindow(.application) > 0);
     _ = client.lossDetectionTimerDeadlineMillis();
-    // M5: query the next outgoing spin bit.
+    // M5: query ECN validation state + next outgoing spin bit.
+    _ = client.ecnValidationState(.application);
     _ = client.nextOutgoingSpinBit();
 
     // Client initiates protected close via lifecycle.
