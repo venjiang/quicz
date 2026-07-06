@@ -210,5 +210,37 @@ pub fn main() !void {
     );
     try require(client_hs_prog.outbound_bytes > 0);
 
-    std.debug.print("tls13_lifecycle_loopback: client processed handshake flight, outbound={d} one_rtt={}\n", .{ client_hs_prog.outbound_bytes, client_hs_prog.one_rtt_keys_installed });
+    // Client polls client Finished, sends to server.
+    const client_fin_dgram = (try client_lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        16,
+        &server_scid,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_fin_dgram);
+    try client_socket.send(io, &server_socket.address, client_fin_dgram);
+
+    // Server receives client Finished → handshake confirmed.
+    const recv4 = try server_socket.receiveTimeout(io, &recv_buf, .{ .duration = .{
+        .clock = .awake,
+        .raw = std.Io.Duration.fromMilliseconds(2000),
+    } });
+    _ = try server_lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        server_path,
+        17,
+        recv4.data,
+    );
+    const server_final = try server_lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+        server_handle,
+        &server,
+        .handshake,
+        server_backend.cryptoBackend(),
+        &scratch,
+    );
+    try require(server_final.handshake_confirmed);
+
+    std.debug.print("tls13_lifecycle_loopback: lifecycle handshake confirmed={}\n", .{server_final.handshake_confirmed});
 }
