@@ -65,6 +65,7 @@ pub fn main() !void {
         .initial_max_data = 8192,
         .initial_max_stream_data = 2048,
         .initial_max_streams_bidi = 8,
+        .active_connection_id_limit = 4,
         .max_datagram_size = 8192,
     });
     defer client.deinit();
@@ -72,6 +73,7 @@ pub fn main() !void {
         .initial_max_data = 8192,
         .initial_max_stream_data = 2048,
         .initial_max_streams_bidi = 8,
+        .active_connection_id_limit = 4,
         .max_datagram_size = 8192,
     });
     defer server.deinit();
@@ -295,6 +297,34 @@ pub fn main() !void {
     try require(std.mem.eql(u8, stream_buf[0..5], "hello"));
 
     // Client initiates protected close via lifecycle.
+    // M5: server issues a new connection ID (NEW_CONNECTION_ID frame over 1-RTT).
+    const new_cid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const srt = [_]u8{0xEE} ** 16;
+    _ = try server.issueConnectionId(&new_cid, srt, 0);
+    const cid_dgram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &server,
+        40,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(cid_dgram);
+    try server_socket.send(io, &client_socket.address, cid_dgram);
+    const recv_cid = try client_socket.receiveTimeout(io, &recv_buf, .{ .duration = .{
+        .clock = .awake,
+        .raw = std.Io.Duration.fromMilliseconds(2000),
+    } });
+    _ = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &client,
+        client_path,
+        41,
+        recv_cid.data,
+    );
+
+    // M6: service the recovery timer (loss/PTO scheduling) on the server.
+    _ = try server_lifecycle.serviceRecoveryTimer(server_handle, &server, 32);
+
+    // Client initiates protected close via lifecycle.
     try client.closeConnection(0, 0, "done");
     const close_dgram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         client_handle,
@@ -316,8 +346,5 @@ pub fn main() !void {
         recv_close.data,
     );
 
-    // M6: service the recovery timer (loss/PTO scheduling) on the server.
-    _ = try server_lifecycle.serviceRecoveryTimer(server_handle, &server, 32);
-
-    std.debug.print("tls13_lifecycle_loopback: handshake + STREAM echo + close + recovery-timer OK\n", .{});
+    std.debug.print("tls13_lifecycle_loopback: handshake + STREAM echo + NEW_CONNECTION_ID + recovery-timer + close OK\n", .{});
 }
