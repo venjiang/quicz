@@ -367,8 +367,9 @@ pub fn main() !void {
     // M6: service the loss-detection timer (packet/time-threshold loss).
     _ = try client.serviceLossDetectionTimer(1000001);
 
-    // M6: query the congestion window (NewReno state on the application space).
+    // M6: query the congestion window + loss-detection timer deadline.
     try require(client.congestionWindow(.application) > 0);
+    _ = client.lossDetectionTimerDeadlineMillis();
 
     // Client initiates protected close via lifecycle.
     try client.closeConnection(0, 0, "done");
