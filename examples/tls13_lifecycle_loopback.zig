@@ -433,6 +433,8 @@ pub fn main() !void {
     // M5: query peer stateless-reset token + peer Initial SCID.
     _ = client.peerStatelessResetToken();
     _ = client.peerInitialSourceConnectionId();
+    // M6: query anti-amplification ack-eliciting send budget (RFC 9000 §8.2.2).
+    _ = client.availableAckElicitingSendBudget(.application);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
