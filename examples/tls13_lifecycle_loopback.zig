@@ -544,6 +544,9 @@ pub fn main() !void {
     _ = server_lifecycle.nextDeadline(server_handle, &server);
     // M6: process pending work (idle/close timeout retirement) on the server.
     _ = try server_lifecycle.processPendingWork(server_handle, &server, 90);
+    // M5: query 0-RTT acceptance state (RFC 9001 §8.3).
+    _ = client.zeroRttAccepted();
+    _ = server.zeroRttAccepted();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
