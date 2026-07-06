@@ -17,12 +17,14 @@
 - [x] QUIC v1/v2 Initial key、Retry integrity、protected long/short packet、配置驱动 v2 protected long-packet/Retry wire version、installed-key mock TLS handoff 和 key update state helper。
 - [x] 简化 RFC 9002 风格 ACK、loss、PTO、NewReno congestion、congestion-window 与 ack-eliciting send-admission 预算/原因查询、ECN、retransmission 和 endpoint recovery-timer 模型，并有 socket-backed UDP loopback 覆盖。
 - [x] 内存态 endpoint routing/lifecycle helper，覆盖 DCID 和 IPv4 UDP tuple routing、Version Negotiation、zero-length CID routing、preferred/replacement CID routing、route retirement、stateless reset emission 和 protected UDP loopback。
+- [x] 纯 Zig TLS 1.3 握手（`src/quic/tls13.zig`）+ `CryptoBackend` adapter（`src/quic/tls13_backend.zig`）：ClientHello/ServerHello、key schedule、EncryptedExtensions/Certificate/CertificateVerify/Finished、证书验证（ECDSA P-256 / Ed25519 / RSA-PSS）、服务端状态机、client↔server loopback——无 OpenSSL。
+- [x] TLS-owned 握手经真实 loopback UDP（`examples/tls13_udp_loopback.zig`、`examples/tls13_lifecycle_loopback.zig`）：`handshake_confirmed`、STREAM echo、RESET_STREAM、STOP_SENDING、NEW_CONNECTION_ID、NEW_TOKEN、HANDSHAKE_DONE、protected close、PTO probe、recovery-timer service。
 - [ ] 完整 connection state machine 与 TLS-owned protected-packet packet number space routing。
 - [ ] Endpoint-owned TLS-backed socket client/server echo，由 live TLS handshake 驱动 UDP packet routing、自动 traffic-secret 安装和 1-RTT STREAM delivery。
 - [ ] 可嵌入 socket API，让调用方自持 UDP socket、connection map、timer 和 datagram 输出队列。
 - [ ] 面向 `handshake` 和 `transfer` 的最小外部互通入口。
 - [ ] 完整 RFC 9002 loss detection / congestion control，含 socket-owned protected-packet loss/PTO lifecycle integration 与剩余 NewReno 边界。
-- [ ] TLS 1.3 集成（RFC 9001）。
+- [ ] TLS 1.3 集成（RFC 9001）——纯 Zig 路径已完成；剩余：完整 loss/PTO lifecycle + interop。
 - [ ] QUIC v2（RFC 9369）完整版本行为支持。
 
 ### 规划里程碑
@@ -77,6 +79,15 @@ zig build run-initial-keys
 
 常用可运行示例：
 
+- `run-tls13-backend-loopback`：纯 Zig TLS 1.3 内存 loopback——两个
+  `Tls13Handshake` 互打，无 OpenSSL，验证 transcript 一致、traffic secret
+  互补、`handshake_confirmed`。
+- `run-tls13-udp-loopback`：纯 Zig TLS 1.3 经真实 loopback UDP——`Tls13Backend`
+  驱动两个 `Connection` 跑通完整 TLS-owned 握手、STREAM echo、RESET_STREAM、
+  STOP_SENDING、protected close。
+- `run-tls13-lifecycle-loopback`：纯 Zig TLS 1.3 + `EndpointConnectionLifecycle`
+  归属——完整握手 + STREAM echo + NEW_CONNECTION_ID + NEW_TOKEN +
+  HANDSHAKE_DONE + PTO probe + recovery-timer service + protected close。
 - `run-tls-openssl-backend-adapter`：OpenSSL-backed C TLS adapter 路径，覆盖本端
   transport parameters、第一段 TLS CRYPTO flight，以及 pair-transcript server
   transport-parameter、Handshake/1-RTT secret 和入站 CRYPTO 经 OpenSSL callback
