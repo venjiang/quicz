@@ -442,6 +442,10 @@ pub fn main() !void {
     _ = client.handshakeState();
     // M5: query local connection-ID count (RFC 9000 §19.15).
     _ = server.localConnectionIdCount();
+    // M5: query pending NEW_CONNECTION_ID + path-challenge counts.
+    _ = server.pendingNewConnectionIdCount();
+    _ = client.pendingPathChallengeCount();
+    _ = client.outstandingPathChallengeCount();
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
