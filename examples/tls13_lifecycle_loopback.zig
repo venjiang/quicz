@@ -387,6 +387,8 @@ pub fn main() !void {
     try require(client_lifecycle.routeCount() > 0);
     _ = client_lifecycle.statelessResetTokenCount();
     _ = server_lifecycle.routeCount();
+    // M5: explicitly discard the Initial packet number space (RFC 9001 §4.9).
+    try client.discardPacketNumberSpace(.initial);
     _ = client.lossDetectionTimerDeadlineMillis();
     // M5: query ECN validation state + next outgoing spin bit.
     _ = client.ecnValidationState(.application);
