@@ -81,18 +81,18 @@ PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_R
 
 ## 当前阶段边界
 
-截至 2026-06-04，当前实现阶段定义为 mock/installed-key 加 endpoint lifecycle
-可验证覆盖阶段。这个阶段已有足够证据证明 transport 骨架可以通过真实 loopback UDP
-socket 路由 protected datagram，保持 endpoint-owned route/timer lifecycle state，
-使用调用方持有和连接已安装的 packet-protection key，service loss/PTO recovery timer，
-并用确定性示例证明 key update、path validation、Retry、address validation、close
-和 stateless reset 行为。
+截至 2026-07-03，实现已从 mock/installed-key 阶段进入 **TLS-owned** 阶段。
+纯 Zig TLS 1.3 实现（`src/quic/tls13.zig` + `src/quic/tls13_backend.zig`）驱动
+真实 `Connection` 与 `EndpointConnectionLifecycle` 实例，通过 loopback UDP 完成完整
+TLS 1.3 握手（ClientHello → ServerHello flight → client Finished →
+`handshake_confirmed`），安装 TLS-owned Initial/Handshake/1-RTT traffic secret，
+并验证 STREAM echo、RESET_STREAM、STOP_SENDING、NEW_CONNECTION_ID、NEW_TOKEN、
+HANDSHAKE_DONE、protected close、PTO probe 与 recovery-timer service——全程无 mock
+密钥、无 OpenSSL。
 
-这个阶段不等于完整 QUIC 实现。现有证据尚不能证明真实 TLS-owned client/server
-handshake、TLS-owned traffic secret production、由 TLS transcript 驱动的自动 key
-lifecycle、外部互通或生产级 socket event loop。在这些能力存在前，依赖这些性质的
-RFC 8999、RFC 9000、RFC 9001、RFC 9002、RFC 9368 和 RFC 9369 行都必须继续保持
-`Partial`，不能标记为 `Done`。
+现有证据尚不能证明外部互通、controlled-clock loss/PTO lifecycle 测试、或在
+TLS-owned UDP 路径上的 path validation / stateless reset / Retry。在这些能力存在前，
+依赖这些性质的 RFC 行仍保持 `Partial`。
 
 主线任务仍是 IETF QUIC transport 实现。下一阶段的方向调整只收敛执行顺序和证据要求，
 不替代下方 transport 任务矩阵：优先推进 endpoint-owned live TLS handshake/socket
