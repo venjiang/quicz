@@ -547,6 +547,8 @@ pub fn main() !void {
     // M5: query 0-RTT acceptance state (RFC 9001 §8.3).
     _ = client.zeroRttAccepted();
     _ = server.zeroRttAccepted();
+    // M5: discard 0-RTT protection keys after 1-RTT is established (RFC 9001 §5.7).
+    client.discardZeroRttProtectionKeys() catch {};
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
