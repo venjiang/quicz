@@ -549,6 +549,8 @@ pub fn main() !void {
     _ = server.zeroRttAccepted();
     // M5: discard 0-RTT protection keys after 1-RTT is established (RFC 9001 §5.7).
     client.discardZeroRttProtectionKeys() catch {};
+    // M5: record peer-address bytes received (anti-amplification accounting, RFC 9000 §8.2.2).
+    try server.recordPeerAddressBytesReceived(1200);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
