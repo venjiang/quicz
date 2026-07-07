@@ -556,6 +556,9 @@ pub fn main() !void {
     var fw = std.Io.Writer.fixed(keylog_buf[0..]);
     client_backend.writeKeylog(&fw) catch {};
     std.debug.print("{s}", .{fw.buffered()});
+    // M6: query sent-packet count per space.
+    _ = client.sentPacketCount(.application);
+    _ = client.sentPacketCount(.handshake);
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,
