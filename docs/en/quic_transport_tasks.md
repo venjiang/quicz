@@ -90,21 +90,20 @@ produce or consume TLS-owned QUIC packets over UDP.
 
 ## Current Phase Boundary
 
-As of 2026-06-04, the current implementation phase is the
-mock/installed-key plus endpoint-lifecycle verification phase. This phase has
-enough evidence to show that the transport skeleton can route protected
-datagrams over real loopback UDP sockets, preserve endpoint-owned route/timer
-lifecycle state, exercise caller-owned and installed-key packet protection,
-service loss/PTO recovery timers, and prove key-update, path-validation, Retry,
-address-validation, close, and stateless-reset behavior with deterministic
-examples.
+As of 2026-07-03, the implementation has moved beyond the mock/installed-key
+phase into the **TLS-owned** phase. A pure-Zig TLS 1.3 implementation
+(`src/quic/tls13.zig` + `src/quic/tls13_backend.zig`) now drives real
+`Connection` and `EndpointConnectionLifecycle` instances over loopback UDP,
+completing the full TLS 1.3 handshake (ClientHello → ServerHello flight →
+client Finished → `handshake_confirmed`), installing TLS-owned Initial/
+Handshake/1-RTT traffic secrets, and exercising STREAM echo, RESET_STREAM,
+STOP_SENDING, NEW_CONNECTION_ID, NEW_TOKEN, HANDSHAKE_DONE, protected close,
+PTO probe, and recovery-timer service — all without mock keys or OpenSSL.
 
-This phase is intentionally not a complete QUIC implementation. The evidence
-does not prove a real TLS-owned client/server handshake, TLS-owned traffic
-secret production, automatic TLS transcript-driven key lifecycle, external
-interop, or a production socket event loop. Until those exist, all RFC 8999,
-RFC 9000, RFC 9001, RFC 9002, RFC 9368, and RFC 9369 rows that depend on those
-properties must remain `Partial` rather than `Done`.
+The evidence does not yet prove external interop, controlled-clock loss/PTO
+lifecycle tests, or path validation / stateless reset / Retry on the TLS-owned
+UDP path. Until those exist, the RFC rows that depend on those properties
+remain `Partial` rather than `Done`.
 
 The main task remains the IETF QUIC transport implementation. The next-stage
 direction refines execution order and evidence requirements without replacing
