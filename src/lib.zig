@@ -90894,13 +90894,17 @@ test "Tls13Backend + Connection: PTO probe fires after ACK loss on TLS-owned pat
     const alpn = [_][]const u8{"hq-interop"};
 
     var client = try Connection.init(std.testing.allocator, .client, .{
-        .initial_max_data = 8192, .initial_max_stream_data = 2048,
-        .initial_max_streams_bidi = 8, .max_datagram_size = 8192,
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
     });
     defer client.deinit();
     var server = try Connection.init(std.testing.allocator, .server, .{
-        .initial_max_data = 8192, .initial_max_stream_data = 2048,
-        .initial_max_streams_bidi = 8, .max_datagram_size = 8192,
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
     });
     defer server.deinit();
     try server.validatePeerAddress();
@@ -90908,11 +90912,15 @@ test "Tls13Backend + Connection: PTO probe fires after ACK loss on TLS-owned pat
     try server.setLocalInitialSourceConnectionId(&server_scid);
 
     var client_backend = tls13_backend.Tls13Backend.initClient(.{
-        .alpn = &alpn, .server_name = "example.com", .skip_cert_verify = true,
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
     });
     var server_backend = tls13_backend.Tls13Backend.initServer(.{
-        .alpn = &alpn, .cert_chain_der = &.{&cert_der},
-        .private_key_bytes = &server_priv, .private_key_algorithm = .ecdsa_p256_sha256,
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
     });
 
     var scratch: [8192]u8 = undefined;
@@ -90920,7 +90928,12 @@ test "Tls13Backend + Connection: PTO probe fires after ACK loss on TLS-owned pat
     // Complete the handshake (in-memory datagram exchange).
     _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
     const ch_dgram = (try client.pollProtectedLongCryptoDatagramInSpace(
-        .initial, 0, &original_dcid, &client_scid, &[_]u8{}, secrets.client,
+        .initial,
+        0,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
     )) orelse return error.UnexpectedState;
     defer std.testing.allocator.free(ch_dgram);
 
@@ -90929,12 +90942,19 @@ test "Tls13Backend + Connection: PTO probe fires after ACK loss on TLS-owned pat
     try std.testing.expect(server.hasHandshakeProtectionKeys());
 
     const sh_dgram = (try server.pollProtectedLongCryptoDatagramInSpace(
-        .initial, 2, &client_scid, &server_scid, &[_]u8{}, secrets.server,
+        .initial,
+        2,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
     )) orelse return error.UnexpectedState;
     defer std.testing.allocator.free(sh_dgram);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
     const shs_dgram = (try server.pollProtectedHandshakeDatagramWithInstalledKeys(
-        3, &client_scid, &server_scid,
+        3,
+        &client_scid,
+        &server_scid,
     )) orelse return error.UnexpectedState;
     defer std.testing.allocator.free(shs_dgram);
 
@@ -90942,25 +90962,32 @@ test "Tls13Backend + Connection: PTO probe fires after ACK loss on TLS-owned pat
     _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
     try client.processProtectedHandshakeDatagramWithInstalledKeys(5, shs_dgram);
     const client_hs = try client.driveCryptoBackendInSpace(
-        .handshake, client_backend.cryptoBackend(), &scratch,
+        .handshake,
+        client_backend.cryptoBackend(),
+        &scratch,
     );
     try std.testing.expect(client_hs.one_rtt_keys_installed);
 
     const cf_dgram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
-        6, &server_scid, &client_scid,
+        6,
+        &server_scid,
+        &client_scid,
     )) orelse return error.UnexpectedState;
     defer std.testing.allocator.free(cf_dgram);
 
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7, cf_dgram);
     const server_final = try server.driveCryptoBackendInSpace(
-        .handshake, server_backend.cryptoBackend(), &scratch,
+        .handshake,
+        server_backend.cryptoBackend(),
+        &scratch,
     );
     try std.testing.expect(server_final.handshake_confirmed);
 
     // Now client sends a PING over 1-RTT (in-flight), but server never ACKs (loss).
     try client.sendPing();
     const ping_dgram = (try client.pollProtectedShortDatagramWithInstalledKeys(
-        8, &server_scid,
+        8,
+        &server_scid,
     )) orelse return error.UnexpectedState;
     defer std.testing.allocator.free(ping_dgram);
     try std.testing.expect(client.bytesInFlight(.application) > 0);
@@ -90987,13 +91014,17 @@ test "Tls13Backend + Connection: RESET_STREAM closes send side on TLS-owned path
     const alpn = [_][]const u8{"hq-interop"};
 
     var client = try Connection.init(std.testing.allocator, .client, .{
-        .initial_max_data = 8192, .initial_max_stream_data = 2048,
-        .initial_max_streams_bidi = 8, .max_datagram_size = 8192,
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
     });
     defer client.deinit();
     var server = try Connection.init(std.testing.allocator, .server, .{
-        .initial_max_data = 8192, .initial_max_stream_data = 2048,
-        .initial_max_streams_bidi = 8, .max_datagram_size = 8192,
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
     });
     defer server.deinit();
     try server.validatePeerAddress();
@@ -91001,11 +91032,15 @@ test "Tls13Backend + Connection: RESET_STREAM closes send side on TLS-owned path
     try server.setLocalInitialSourceConnectionId(&server_scid);
 
     var client_backend = tls13_backend.Tls13Backend.initClient(.{
-        .alpn = &alpn, .server_name = "example.com", .skip_cert_verify = true,
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
     });
     var server_backend = tls13_backend.Tls13Backend.initServer(.{
-        .alpn = &alpn, .cert_chain_der = &.{&cert_der},
-        .private_key_bytes = &server_priv, .private_key_algorithm = .ecdsa_p256_sha256,
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
     });
 
     var scratch: [8192]u8 = undefined;
@@ -91013,18 +91048,30 @@ test "Tls13Backend + Connection: RESET_STREAM closes send side on TLS-owned path
     // Complete the handshake (in-memory).
     _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
     const ch = (try client.pollProtectedLongCryptoDatagramInSpace(
-        .initial, 0, &original_dcid, &client_scid, &[_]u8{}, secrets.client,
+        .initial,
+        0,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
     )) orelse return error.UnexpectedState;
     defer std.testing.allocator.free(ch);
     try server.processProtectedLongDatagramInSpace(.initial, 1, secrets.client, ch);
     _ = try server.driveCryptoBackendInSpace(.initial, server_backend.cryptoBackend(), &scratch);
     const sh = (try server.pollProtectedLongCryptoDatagramInSpace(
-        .initial, 2, &client_scid, &server_scid, &[_]u8{}, secrets.server,
+        .initial,
+        2,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
     )) orelse return error.UnexpectedState;
     defer std.testing.allocator.free(sh);
     _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
     const shs = (try server.pollProtectedHandshakeDatagramWithInstalledKeys(
-        3, &client_scid, &server_scid,
+        3,
+        &client_scid,
+        &server_scid,
     )) orelse return error.UnexpectedState;
     defer std.testing.allocator.free(shs);
     try client.processProtectedLongDatagramInSpace(.initial, 4, secrets.server, sh);
@@ -91032,12 +91079,16 @@ test "Tls13Backend + Connection: RESET_STREAM closes send side on TLS-owned path
     try client.processProtectedHandshakeDatagramWithInstalledKeys(5, shs);
     _ = try client.driveCryptoBackendInSpace(.handshake, client_backend.cryptoBackend(), &scratch);
     const cf = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
-        6, &server_scid, &client_scid,
+        6,
+        &server_scid,
+        &client_scid,
     )) orelse return error.UnexpectedState;
     defer std.testing.allocator.free(cf);
     try server.processProtectedHandshakeDatagramWithInstalledKeys(7, cf);
     const sf = try server.driveCryptoBackendInSpace(
-        .handshake, server_backend.cryptoBackend(), &scratch,
+        .handshake,
+        server_backend.cryptoBackend(),
+        &scratch,
     );
     try std.testing.expect(sf.handshake_confirmed);
 
@@ -91048,7 +91099,8 @@ test "Tls13Backend + Connection: RESET_STREAM closes send side on TLS-owned path
 
     // The reset must produce a 1-RTT datagram containing RESET_STREAM.
     const reset_dgram = (try client.pollProtectedShortDatagramWithInstalledKeys(
-        8, &server_scid,
+        8,
+        &server_scid,
     )) orelse return error.UnexpectedState;
     defer std.testing.allocator.free(reset_dgram);
     try std.testing.expect(reset_dgram.len > 0);
@@ -91075,13 +91127,17 @@ test "Tls13Backend + Connection: STOP_SENDING signals peer to stop on TLS-owned 
     const alpn = [_][]const u8{"hq-interop"};
 
     var client = try Connection.init(std.testing.allocator, .client, .{
-        .initial_max_data = 8192, .initial_max_stream_data = 2048,
-        .initial_max_streams_bidi = 8, .max_datagram_size = 8192,
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
     });
     defer client.deinit();
     var server = try Connection.init(std.testing.allocator, .server, .{
-        .initial_max_data = 8192, .initial_max_stream_data = 2048,
-        .initial_max_streams_bidi = 8, .max_datagram_size = 8192,
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
     });
     defer server.deinit();
     try server.validatePeerAddress();
@@ -91089,11 +91145,15 @@ test "Tls13Backend + Connection: STOP_SENDING signals peer to stop on TLS-owned 
     try server.setLocalInitialSourceConnectionId(&server_scid);
 
     var client_backend = tls13_backend.Tls13Backend.initClient(.{
-        .alpn = &alpn, .server_name = "example.com", .skip_cert_verify = true,
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
     });
     var server_backend = tls13_backend.Tls13Backend.initServer(.{
-        .alpn = &alpn, .cert_chain_der = &.{&cert_der},
-        .private_key_bytes = &server_priv, .private_key_algorithm = .ecdsa_p256_sha256,
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
     });
     var scratch: [8192]u8 = undefined;
 
@@ -91147,13 +91207,19 @@ test "Tls13Backend + Connection: NEW_CONNECTION_ID over 1-RTT on TLS-owned path"
     const alpn = [_][]const u8{"hq-interop"};
 
     var client = try Connection.init(std.testing.allocator, .client, .{
-        .initial_max_data = 8192, .initial_max_stream_data = 2048,
-        .initial_max_streams_bidi = 8, .active_connection_id_limit = 4, .max_datagram_size = 8192,
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .active_connection_id_limit = 4,
+        .max_datagram_size = 8192,
     });
     defer client.deinit();
     var server = try Connection.init(std.testing.allocator, .server, .{
-        .initial_max_data = 8192, .initial_max_stream_data = 2048,
-        .initial_max_streams_bidi = 8, .active_connection_id_limit = 4, .max_datagram_size = 8192,
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .active_connection_id_limit = 4,
+        .max_datagram_size = 8192,
     });
     defer server.deinit();
     try server.validatePeerAddress();
@@ -91161,11 +91227,15 @@ test "Tls13Backend + Connection: NEW_CONNECTION_ID over 1-RTT on TLS-owned path"
     try server.setLocalInitialSourceConnectionId(&server_scid);
 
     var client_backend = tls13_backend.Tls13Backend.initClient(.{
-        .alpn = &alpn, .server_name = "example.com", .skip_cert_verify = true,
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
     });
     var server_backend = tls13_backend.Tls13Backend.initServer(.{
-        .alpn = &alpn, .cert_chain_der = &.{&cert_der},
-        .private_key_bytes = &server_priv, .private_key_algorithm = .ecdsa_p256_sha256,
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
     });
     var scratch: [8192]u8 = undefined;
 
