@@ -90768,3 +90768,110 @@ test "stream ids must fit QUIC varint range" {
     conn.next_uni_stream_id = max_quic_varint + 1;
     try std.testing.expectError(error.InvalidStream, conn.openUniStream());
 }
+
+test "Tls13Backend drives a Connection to produce ClientHello via CryptoBackend" {
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+
+    var backend = tls13_backend.Tls13Backend.initClient(.{
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    });
+    try client.setLocalInitialSourceConnectionId(&client_scid);
+
+    var scratch: [8192]u8 = undefined;
+    const progress = try client.driveCryptoBackendInSpace(
+        .initial,
+        backend.cryptoBackend(),
+        &scratch,
+    );
+
+    // The backend must have produced a ClientHello.
+    try std.testing.expect(progress.outbound_bytes > 0);
+    try std.testing.expect(progress.local_transport_parameters_bytes > 0);
+    try std.testing.expect(!progress.handshake_keys_installed);
+    try std.testing.expect(!progress.handshake_confirmed);
+
+    // The ClientHello must be packable into a protected Initial datagram.
+    const dgram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        0,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(dgram);
+    try std.testing.expect(dgram.len >= 1200);
+}
+
+test "Tls13Backend server drives a Connection to install handshake keys" {
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    // Server key pair for CertificateVerify.
+    const seed = [_]u8{0x55} ** 32;
+    const server_kp = try std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const server_priv = server_kp.secret_key.bytes;
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+    const alpn = [_][]const u8{"hq-interop"};
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.setLocalInitialSourceConnectionId(&client_scid);
+    try server.setLocalInitialSourceConnectionId(&server_scid);
+
+    var client_backend = tls13_backend.Tls13Backend.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    });
+    var server_backend = tls13_backend.Tls13Backend.initServer(.{
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    });
+
+    var scratch: [8192]u8 = undefined;
+
+    // 1. Client produces ClientHello.
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    const client_dgram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .initial, 0, &original_dcid, &client_scid, &[_]u8{}, secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(client_dgram);
+
+    // 2. Server consumes ClientHello, installs handshake keys.
+    try server.processProtectedLongDatagramInSpace(.initial, 1, secrets.client, client_dgram);
+    const server_progress = try server.driveCryptoBackendInSpace(
+        .initial,
+        server_backend.cryptoBackend(),
+        &scratch,
+    );
+    try std.testing.expect(server_progress.inbound_bytes > 0);
+    try std.testing.expect(server_progress.handshake_keys_installed);
+}
