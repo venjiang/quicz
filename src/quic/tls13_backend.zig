@@ -213,6 +213,23 @@ pub const Tls13Backend = struct {
         return self.hs.isComplete();
     }
 
+    /// Write TLS 1.3 secrets in NSS key-log format to `writer` for
+    /// SSLKEYLOGFILE / Wireshark debugging. Call after handshake secrets are
+    /// available. Never prints private key material — only derived traffic
+    /// secrets.
+    pub fn writeKeylog(self: *Tls13Backend, writer: anytype) !void {
+        const hs = &self.hs;
+        const cr = &hs.client_random;
+        if (hs.key_schedule.handshake_secret_derived) {
+            try writer.print("SERVER_HANDSHAKE_TRAFFIC_SECRET {x} {x}\n", .{ cr.*, hs.key_schedule.server_handshake_traffic_secret });
+            try writer.print("CLIENT_HANDSHAKE_TRAFFIC_SECRET {x} {x}\n", .{ cr.*, hs.key_schedule.client_handshake_traffic_secret });
+        }
+        if (hs.key_schedule.app_secret_derived) {
+            try writer.print("SERVER_TRAFFIC_SECRET_0 {x} {x}\n", .{ cr.*, hs.key_schedule.server_app_traffic_secret });
+            try writer.print("CLIENT_TRAFFIC_SECRET_0 {x} {x}\n", .{ cr.*, hs.key_schedule.client_app_traffic_secret });
+        }
+    }
+
     // ─── Internal helpers ────────────────────────────────────────────
 
     /// Advance the state machine until it blocks (wait_for_data / complete),
