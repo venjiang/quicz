@@ -90770,7 +90770,6 @@ test "stream ids must fit QUIC varint range" {
 }
 
 test "Tls13Backend drives a Connection to produce ClientHello via CryptoBackend" {
-
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
@@ -90813,7 +90812,6 @@ test "Tls13Backend drives a Connection to produce ClientHello via CryptoBackend"
 }
 
 test "Tls13Backend server drives a Connection to install handshake keys" {
-
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
     const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
@@ -90861,7 +90859,12 @@ test "Tls13Backend server drives a Connection to install handshake keys" {
     // 1. Client produces ClientHello.
     _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
     const client_dgram = (try client.pollProtectedLongCryptoDatagramInSpace(
-        .initial, 0, &original_dcid, &client_scid, &[_]u8{}, secrets.client,
+        .initial,
+        0,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
     )) orelse return error.UnexpectedState;
     defer std.testing.allocator.free(client_dgram);
 

@@ -264,7 +264,6 @@ fn verifyRsaPssSha256(pub_key_der: []const u8, sig: []const u8, msg: []const u8)
     }
 }
 
-
 /// Fill `buf` with cryptographically secure random bytes from the OS.
 pub fn secureRandomBytes(buf: []u8) void {
     switch (builtin.os.tag) {
@@ -572,7 +571,6 @@ pub const Tls13Handshake = struct {
 
         return self;
     }
-
 
     pub fn provideData(self: *Tls13Handshake, data: []const u8) void {
         if (self.in_offset > 0 and self.in_len - self.in_offset + data.len > self.in_buf.len) {
@@ -2011,7 +2009,6 @@ test "verifyCertificateVerifySignature rejects an unsupported scheme" {
         verifyCertificateVerifySignature(&[_]u8{}, .curveEd25519, 0x0000, &[_]u8{}, "msg"),
     );
 }
-
 
 // ─── Tests for server-side handshake + loopback ──────────────────────
 
