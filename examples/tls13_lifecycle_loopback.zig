@@ -551,6 +551,11 @@ pub fn main() !void {
     client.discardZeroRttProtectionKeys() catch {};
     // M5: record peer-address bytes received (anti-amplification accounting, RFC 9000 §8.2.2).
     try server.recordPeerAddressBytesReceived(1200);
+    // #20: write SSLKEYLOGFILE-format secrets to stderr for Wireshark debugging.
+    var keylog_buf: [2048]u8 = undefined;
+    var fw = std.Io.Writer.fixed(keylog_buf[0..]);
+    client_backend.writeKeylog(&fw) catch {};
+    std.debug.print("{s}", .{fw.buffered()});
     try server.sendHandshakeDone();
     if (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         server_handle,

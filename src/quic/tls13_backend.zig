@@ -217,7 +217,7 @@ pub const Tls13Backend = struct {
     /// SSLKEYLOGFILE / Wireshark debugging. Call after handshake secrets are
     /// available. Never prints private key material — only derived traffic
     /// secrets.
-    pub fn writeKeylog(self: *Tls13Backend, writer: anytype) !void {
+    pub fn writeKeylog(self: *Tls13Backend, writer: *std.Io.Writer) !void {
         const hs = &self.hs;
         const cr = &hs.client_random;
         if (hs.key_schedule.handshake_secret_derived) {
