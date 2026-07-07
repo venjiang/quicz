@@ -91996,3 +91996,78 @@ test "Tls13Backend + Connection: Retry packet exchange on TLS-owned path" {
     try std.testing.expectEqualSlices(u8, &retry_scid, client.retrySourceConnectionId().?);
     try std.testing.expectEqualStrings(token, client.latestRetryToken().?);
 }
+
+test "Tls13Backend + Connection: HANDSHAKE_DONE over 1-RTT on TLS-owned path" {
+    const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const seed = [_]u8{0x55} ** 32;
+    const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const server_priv = server_kp.secret_key.bytes;
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+    const alpn = [_][]const u8{"hq-interop"};
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.setLocalInitialSourceConnectionId(&client_scid);
+    try server.setLocalInitialSourceConnectionId(&server_scid);
+
+    var client_backend = tls13_backend.Tls13Backend.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    });
+    var server_backend = tls13_backend.Tls13Backend.initServer(.{
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    });
+    var scratch: [8192]u8 = undefined;
+
+    // Complete the handshake.
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    const ch = (try client.pollProtectedLongCryptoDatagramInSpace(.initial, 0, &original_dcid, &client_scid, &[_]u8{}, secrets.client)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(ch);
+    try server.processProtectedLongDatagramInSpace(.initial, 1, secrets.client, ch);
+    _ = try server.driveCryptoBackendInSpace(.initial, server_backend.cryptoBackend(), &scratch);
+    const sh = (try server.pollProtectedLongCryptoDatagramInSpace(.initial, 2, &client_scid, &server_scid, &[_]u8{}, secrets.server)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(sh);
+    _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+    const shs = (try server.pollProtectedHandshakeDatagramWithInstalledKeys(3, &client_scid, &server_scid)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(shs);
+    try client.processProtectedLongDatagramInSpace(.initial, 4, secrets.server, sh);
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(5, shs);
+    _ = try client.driveCryptoBackendInSpace(.handshake, client_backend.cryptoBackend(), &scratch);
+    const cf = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(6, &server_scid, &client_scid)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(cf);
+    try server.processProtectedHandshakeDatagramWithInstalledKeys(7, cf);
+    _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+
+    // Server queues HANDSHAKE_DONE and emits it over 1-RTT.
+    try server.sendHandshakeDone();
+    const hd_dgram = (try server.pollProtectedShortDatagramWithInstalledKeys(8, &client_scid)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(hd_dgram);
+    try std.testing.expect(server.handshake_done_sent);
+
+    // Client receives HANDSHAKE_DONE, confirming the handshake.
+    try client.processProtectedShortDatagramWithInstalledKeys(9, client_scid.len, hd_dgram);
+    try std.testing.expect(client.handshake_confirmed);
+}
