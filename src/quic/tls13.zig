@@ -494,11 +494,11 @@ pub const Tls13Handshake = struct {
     peer_tp: [1024]u8 = undefined,
     peer_tp_len: usize = 0,
 
-    // Server certificate (first in chain, DER) — verification deferred
+    // Server certificate (first in chain, DER) — verified via verifyServerCertificate
     server_cert: [4096]u8 = undefined,
     server_cert_len: usize = 0,
 
-    // CertificateVerify signature — verification deferred
+    // CertificateVerify signature — verified via verifyCertificateVerify
     cert_verify_scheme: u16 = 0,
     cert_verify_sig: [1024]u8 = undefined,
     cert_verify_sig_len: usize = 0,
