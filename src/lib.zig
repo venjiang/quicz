@@ -91938,3 +91938,61 @@ test "Tls13Backend + Connection: NEW_TOKEN over 1-RTT on TLS-owned path" {
     try client.processProtectedShortDatagramWithInstalledKeys(9, client_scid.len, token_dgram);
     try std.testing.expectEqualStrings(token, client.latestNewToken().?);
 }
+
+test "Tls13Backend + Connection: Retry packet exchange on TLS-owned path" {
+    const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const retry_scid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const seed = [_]u8{0x55} ** 32;
+    const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const server_priv = server_kp.secret_key.bytes;
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+    const alpn = [_][]const u8{"hq-interop"};
+    _ = server_priv;
+    _ = cert_der;
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.setLocalInitialSourceConnectionId(&client_scid);
+    try server.setLocalInitialSourceConnectionId(&server_scid);
+
+    var client_backend = tls13_backend.Tls13Backend.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    });
+    var scratch: [8192]u8 = undefined;
+
+    // Client sends a real ClientHello over Initial.
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    const ch = (try client.pollProtectedLongCryptoDatagramInSpace(.initial, 0, &original_dcid, &client_scid, &[_]u8{}, secrets.client)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(ch);
+
+    // Server responds with a Retry packet instead of a ServerHello.
+    const token: []const u8 = "retry-token-for-client-address";
+    const retry_dgram = try server.issueRetryDatagram(0, &original_dcid, &client_scid, &retry_scid, token);
+    defer std.testing.allocator.free(retry_dgram);
+    try std.testing.expect(retry_dgram.len > 0);
+
+    // Client receives the Retry, records the retry SCID and token.
+    try client.processRetryDatagram(10, &original_dcid, retry_dgram);
+    try std.testing.expectEqualSlices(u8, &retry_scid, client.retrySourceConnectionId().?);
+    try std.testing.expectEqualStrings(token, client.latestRetryToken().?);
+}
