@@ -1590,12 +1590,32 @@ pub const Connection = struct {
     /// This models endpoint-owned key update initiation after handshake
     /// confirmation. A second local update is rejected until an Application ACK
     /// covers a packet number sent with the new key phase.
+    /// Schedule the retained previous-generation key for discard one PTO after
+    /// `now_millis`, so delayed packets protected with the old key phase can be
+    /// opened during the retain window and the old key is dropped afterwards
+    /// (RFC 9001 §6.5 / RFC 9002 §6.2).
+    fn schedulePreviousKeyDiscard(
+        self: *Connection,
+        state: *protection.Aes128KeyPhaseState,
+        now_millis: ?i64,
+    ) void {
+        const now = now_millis orelse return;
+        const deadline = ptoDeadlineFromStart(
+            now,
+            self.recovery_state,
+            false,
+            self.recovery_state.pto_count,
+        );
+        state.schedulePreviousDiscard(deadline);
+    }
+
     pub fn initiateOneRttKeyUpdate(self: *Connection) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (!self.handshake_confirmed) return error.InvalidPacket;
         if (self.local_one_rtt_key_update_ack_threshold != null) return error.InvalidPacket;
         if (self.local_one_rtt_key_phase_state) |*state| {
             state.initiateKeyUpdate();
+            self.schedulePreviousKeyDiscard(state, self.last_packet_activity_millis);
             self.local_one_rtt_key_update_ack_threshold = self.next_packet_number;
             return;
         }
@@ -2141,6 +2161,14 @@ pub const Connection = struct {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        // Drop retained previous-generation 1-RTT keys once their post-update
+        // retain window expires (RFC 9001 §6.5).
+        if (self.local_one_rtt_key_phase_state) |*state| {
+            _ = state.discardExpiredPrevious(now_millis);
+        }
+        if (self.peer_one_rtt_key_phase_state) |*state| {
+            _ = state.discardExpiredPrevious(now_millis);
+        }
         try self.expireLossDetectionTimeouts(now_millis);
         const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
         var expired_space: ?PacketNumberSpace = null;
@@ -3766,7 +3794,12 @@ pub const Connection = struct {
         defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
 
         try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number, close_on_frame_payload_error);
-        _ = key_phase_state.updateAfterReceiving(decoded.packet.header.key_phase);
+        if (key_phase_state.updateAfterReceiving(decoded.packet.header.key_phase)) {
+            // Retain the old peer receive key for one PTO so delayed packets
+            // protected with the previous key phase can still be opened
+            // (RFC 9001 §6.5 / RFC 9002 §6.2).
+            self.schedulePreviousKeyDiscard(key_phase_state, now_millis);
+        }
     }
 
     /// Remove 1-RTT short-header protection using installed peer traffic keys.
@@ -70378,4 +70411,49 @@ test "Tls13Backend + Connection: rejectZeroRtt drops early data on TLS-owned pat
     // No early data was delivered to the stream.
     var recv_buf: [32]u8 = undefined;
     try std.testing.expect((try server.recvOnStream(stream_id, &recv_buf)) == null);
+}
+
+test "checkPtoTimeouts discards retained peer previous key after one PTO" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    // Client initiates a key update and sends a PING with the new key phase.
+    try client.initiateOneRttKeyUpdate();
+    try client.sendPing();
+    const ping = (try client.pollProtectedShortDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping);
+
+    // Server receives the gen-1 PING: peer state advances and the old gen-0
+    // receive key is retained for one PTO (RFC 9001 §6.5 / RFC 9002 §6.2).
+    try server.processProtectedShortDatagramWithInstalledKeys(11, server_dcid.len, ping);
+    try std.testing.expectEqual(@as(?u64, 1), server.peerOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(0));
+
+    // Within the PTO retain window the previous key is still held.
+    try server.checkPtoTimeouts(12);
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(0));
+
+    // After the PTO retain window expires the previous key is discarded.
+    try server.checkPtoTimeouts(10_000);
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(1));
 }
