@@ -243,7 +243,16 @@ pub const Tls13Backend = struct {
                     self.bucketForLevel(sd.level).append(sd.data);
                 },
                 .install_keys => {},
-                .wait_for_data, .complete => return,
+                .wait_for_data => return,
+                .complete => {
+                    // After the handshake completes, a client may receive
+                    // post-handshake NewSessionTicket messages in Application
+                    // CRYPTO; drain them to derive the resumption PSK.
+                    if (!self.hs.is_server) {
+                        try self.hs.clientProcessPostHandshake();
+                    }
+                    return;
+                },
                 ._continue => continue,
             }
         }

@@ -483,6 +483,31 @@ test "Tls13Handshake clientProcessNewSessionTicket derives and stores PSK" {
     try std.testing.expect(hs.resumption_psk != null);
 }
 
+test "Tls13Handshake clientProcessPostHandshake drains NewSessionTicket from input buffer" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp);
+    const shared_secret = [_]u8{0x01} ** 32;
+    hs.key_schedule.deriveHandshakeSecrets(&shared_secret, hs.transcript.current());
+    hs.key_schedule.deriveAppSecrets(hs.transcript.current());
+    hs.state = .connected;
+
+    const nst_msg = [_]u8{
+        0x04, 0x00, 0x00, 0x11, // type=new_session_ticket, length=17
+        0x00, 0x00, 0x0e, 0x10, // ticket_lifetime=3600
+        0x00, 0x00, 0x00, 0x01, // ticket_age_add=1
+        0x02, 0xaa, 0xbb, // nonce_len=2, nonce=0xaabb
+        0x00, 0x04, 0xcc, 0xdd, 0xee, 0xff, // ticket_len=4, ticket
+    };
+    hs.provideData(&nst_msg);
+    try std.testing.expect(hs.resumption_psk == null);
+    try hs.clientProcessPostHandshake();
+    try std.testing.expect(hs.resumption_psk != null);
+}
+
 test "TranscriptHash is empty hash on init" {
     const th = TranscriptHash.init();
     const hash = th.current();
@@ -817,6 +842,20 @@ pub const Tls13Handshake = struct {
         const nst = try parseNewSessionTicket(msg);
         const rms = self.key_schedule.deriveResumptionMasterSecret(self.transcript.current());
         self.resumption_psk = KeySchedule.derivePskFromTicket(rms, nst.ticket_nonce);
+    }
+
+    /// Process buffered post-handshake messages (client side, after the
+    /// handshake is complete). Currently handles NewSessionTicket to derive
+    /// and store the resumption PSK; other post-handshake messages are
+    /// ignored. Drains complete messages from the input buffer.
+    pub fn clientProcessPostHandshake(self: *Tls13Handshake) HandshakeError!void {
+        if (self.is_server) return;
+        if (self.state != .connected) return;
+        while (self.readHandshakeMsg()) |msg| {
+            if (msg.len > 0 and msg[0] == @intFromEnum(HandshakeType.new_session_ticket)) {
+                try self.clientProcessNewSessionTicket(msg);
+            }
+        }
     }
 
     /// Build a ClientHello message with ALPN, SNI, key_share, and QUIC
