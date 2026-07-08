@@ -661,6 +661,16 @@ test "Tls13Handshake ClientHello includes pre_shared_key when has_psk" {
         }
     }
     try std.testing.expect(found_psk);
+    // early_data extension (0x002A) must also be present (empty, signals 0-RTT).
+    var found_early_data = false;
+    i = 0;
+    while (i + 4 < data.len) : (i += 1) {
+        if (data[i] == 0x00 and data[i + 1] == 0x2A) {
+            found_early_data = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_early_data);
 }
 
 test "TranscriptHash is empty hash on init" {
@@ -1157,6 +1167,12 @@ pub const Tls13Handshake = struct {
         pos += 1;
         buf[pos] = 0x01; // psk_dhe_ke
         pos += 1;
+
+        // early_data (RFC 8446 §4.2.10) -- empty extension signals 0-RTT
+        // intent. Must precede pre_shared_key.
+        if (self.has_psk) {
+            pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.early_data), 0);
+        }
 
         // pre_shared_key (MUST be last; RFC 8446 §4.2.11) when a resumption
         // PSK + ticket are available. The binder is computed over the
