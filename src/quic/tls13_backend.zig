@@ -20,6 +20,7 @@ const PacketNumberSpace = transport_types.PacketNumberSpace;
 const CryptoBackend = crypto_types.CryptoBackend;
 const HandshakeTrafficSecrets = crypto_types.HandshakeTrafficSecrets;
 const OneRttTrafficSecrets = crypto_types.OneRttTrafficSecrets;
+const ZeroRttTrafficSecrets = crypto_types.ZeroRttTrafficSecrets;
 const Tls13Handshake = tls13.Tls13Handshake;
 const TlsConfig = tls13.TlsConfig;
 const EncryptionLevel = tls13.EncryptionLevel;
@@ -116,6 +117,7 @@ pub const Tls13Backend = struct {
             .set_local_transport_parameters = setLocalTransportParameters,
             .pull_peer_transport_parameters = pullPeerTransportParameters,
             .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
+            .pull_zero_rtt_traffic_secrets = pullZeroRttTrafficSecrets,
             .pull_1rtt_traffic_secrets = pullOneRttTrafficSecrets,
             .pull_negotiated_alpn = pullNegotiatedAlpn,
             .handshake_confirmed = handshakeConfirmed,
@@ -217,6 +219,15 @@ pub const Tls13Backend = struct {
     fn handshakeConfirmed(context: *anyopaque) bool {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
         return self.hs.isComplete();
+    }
+
+    fn pullZeroRttTrafficSecrets(context: *anyopaque) Error!?ZeroRttTrafficSecrets {
+        const self: *Tls13Backend = @ptrCast(@alignCast(context));
+        // Client: derive the early traffic secret from the PSK-based early
+        // secret and the ClientHello transcript; expose as the local write
+        // secret so the connection can install 0-RTT keys.
+        const early = self.pullEarlyTrafficSecret() orelse return null;
+        return .{ .local = early, .peer = null };
     }
 
     /// Return the resumption PSK derived from a post-handshake
