@@ -134,6 +134,14 @@ pub const KeySchedule = struct {
         return expandLabel(self.early_secret, "c e traffic", &transcript_hash, secret_len);
     }
 
+    /// Derive the resumption binder key for the PSK binder in a
+    /// pre_shared_key extension (RFC 8446 §7.1). Requires a PSK-based
+    /// early secret; feeds `computeFinishedVerifyData` to produce the
+    /// binder HMAC over the ClientHello transcript truncated at the binder.
+    pub fn deriveBinderKey(self: *const KeySchedule) [secret_len]u8 {
+        return expandLabel(self.early_secret, "res binder", &.{}, secret_len);
+    }
+
     /// Derive QUIC packet protection keys from a traffic secret (RFC 9001 §5.1).
     pub fn deriveQuicKeys(
         traffic_secret: [secret_len]u8,
@@ -565,6 +573,23 @@ test "Tls13Handshake initClientWithPsk seeds PSK and sets has_psk" {
     // has_psk is false for a regular initClient.
     const hs2 = Tls13Handshake.initClient(.{ .alpn = &alpn, .server_name = "example.com" }, &tp);
     try std.testing.expect(!hs2.has_psk);
+}
+
+test "KeySchedule deriveBinderKey is deterministic and PSK-dependent" {
+    const psk = [_]u8{0xab} ** secret_len;
+    const ks = KeySchedule.initWithPsk(psk);
+    const binder1 = ks.deriveBinderKey();
+    const binder2 = ks.deriveBinderKey();
+    try std.testing.expectEqualSlices(u8, &binder1, &binder2);
+    // Different PSK yields a different binder key.
+    const psk2 = [_]u8{0xcd} ** secret_len;
+    const ks2 = KeySchedule.initWithPsk(psk2);
+    const binder3 = ks2.deriveBinderKey();
+    try std.testing.expect(!std.mem.eql(u8, &binder1, &binder3));
+    // Binder key differs from the early traffic secret.
+    const transcript = [_]u8{0x02} ** 32;
+    const early = ks.deriveEarlyTrafficSecret(transcript);
+    try std.testing.expect(!std.mem.eql(u8, &binder1, &early));
 }
 
 test "TranscriptHash is empty hash on init" {
