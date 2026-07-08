@@ -117,7 +117,7 @@ fn validatePreferredAddressConnectionIdLen(cid: []const u8) !void {
 
 fn validateIntegerParameter(id: ParameterId, value: u64) !void {
     switch (id) {
-        .max_udp_payload_size => if (value < 1200) return error.InvalidParameterValue,
+        .max_udp_payload_size => if (value < 1200 or value > max_udp_payload_size_default) return error.InvalidParameterValue,
         .initial_max_streams_bidi, .initial_max_streams_uni => if (value > max_stream_count) return error.InvalidParameterValue,
         .ack_delay_exponent => if (value > 20) return error.InvalidParameterValue,
         .max_ack_delay => if (value >= (@as(u64, 1) << 14)) return error.InvalidParameterValue,
@@ -570,6 +570,11 @@ test "transport parameters reject invalid values and lengths" {
     var raw: [32]u8 = undefined;
     var writer = buffer.fixedWriter(&raw);
     try encodeUncheckedIntegerValue(writer.writer(), .max_udp_payload_size, 1199);
+    try std.testing.expectError(error.InvalidParameterValue, parse(writer.getWritten(), std.testing.allocator));
+
+    // RFC 9000 §18.2: max_udp_payload_size values above 65527 are invalid.
+    writer = buffer.fixedWriter(&raw);
+    try encodeUncheckedIntegerValue(writer.writer(), .max_udp_payload_size, max_udp_payload_size_default + 1);
     try std.testing.expectError(error.InvalidParameterValue, parse(writer.getWritten(), std.testing.allocator));
 
     writer = buffer.fixedWriter(&raw);

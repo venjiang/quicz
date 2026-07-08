@@ -11630,6 +11630,16 @@ test "effectiveIdleTimeoutMillis uses shorter non-zero endpoint value" {
         .max_idle_timeout = 1000,
     });
     try std.testing.expectEqual(@as(?u64, 250), shorter_local.effectiveIdleTimeoutMillis());
+
+    // A local zero (no preference) with a non-zero peer value adopts the peer
+    // timeout; RFC 9000 §10.1 treats zero as "no preference" rather than
+    // "disabled" when the other endpoint advertises a non-zero value.
+    var local_zero_peer_nonzero = try Connection.init(std.testing.allocator, .client, .{});
+    defer local_zero_peer_nonzero.deinit();
+    try local_zero_peer_nonzero.applyPeerTransportParameters(.{
+        .max_idle_timeout = 400,
+    });
+    try std.testing.expectEqual(@as(?u64, 400), local_zero_peer_nonzero.effectiveIdleTimeoutMillis());
 }
 
 test "successful send refreshes idle timeout and timeout closes connection" {
@@ -62098,6 +62108,14 @@ test "regular ACK disables ECN validation for newly acknowledged ECT packet" {
     try std.testing.expectEqual(@as(usize, 0), conn.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 0), conn.bytesInFlight(.application));
     try std.testing.expectEqual(EcnValidationState.failed, conn.ecnValidationState(.application));
+
+    // Once validation has failed, further ECT-marked sends are rejected
+    // (RFC 9000 §13.4.2: the endpoint MUST disable ECN and SHOULD NOT set
+    // ECT codepoints in packets it sends).
+    try std.testing.expectError(
+        error.InvalidPacket,
+        conn.recordEcnPacketSentInSpace(.application, 70, 100, .ect0),
+    );
 }
 
 test "ACK_ECN disables validation when counters do not cover newly acknowledged ECT packets" {

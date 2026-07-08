@@ -328,6 +328,11 @@ pub fn timeThresholdLossDelayMs(latest_rtt_ms: ?u64, smoothed_rtt_ms: u64) u64 {
 test "initial and minimum congestion windows follow RFC 9002 bounds" {
     try std.testing.expectEqual(@as(usize, 13500), initialCongestionWindow(1350));
     try std.testing.expectEqual(@as(usize, 2400), minimumCongestionWindow(1200));
+
+    // RFC 9002 §4.1 clamps the initial window to 14720 bytes once
+    // 10 * max_datagram_size exceeds it.
+    try std.testing.expectEqual(@as(usize, 14720), initialCongestionWindow(1472));
+    try std.testing.expectEqual(@as(usize, 14720), initialCongestionWindow(1500));
 }
 
 test "time threshold loss delay follows RFC 9002 multiplier and granularity" {
