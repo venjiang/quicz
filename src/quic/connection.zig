@@ -70112,3 +70112,165 @@ test "Tls13Backend + Connection: NewSessionTicket lets client derive resumption 
     try std.testing.expect(client_backend.resumptionPsk() != null);
     try std.testing.expect(client_backend.hs.session_ticket_len > 0);
 }
+
+test "Tls13Backend + Connection: resumption PSK from handshake drives 0-RTT round-trip" {
+    const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+    const alpn = [_][]const u8{"hq-interop"};
+    const seed = [_]u8{0x55} ** 32;
+    const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const server_priv = server_kp.secret_key.bytes;
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+    var scratch: [8192]u8 = undefined;
+
+    // === Phase 1: full handshake -> NewSessionTicket -> resumption PSK ===
+    const dcid1 = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid1 = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid1 = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const secrets1 = try protection.deriveInitialSecrets(.v1, &dcid1);
+
+    var client1 = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer client1.deinit();
+    var server1 = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer server1.deinit();
+    try server1.validatePeerAddress();
+    try client1.setLocalInitialSourceConnectionId(&client_scid1);
+    try server1.setLocalInitialSourceConnectionId(&server_scid1);
+
+    var client1_backend = tls13_backend.Tls13Backend.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    });
+    var server1_backend = tls13_backend.Tls13Backend.initServer(.{
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    });
+
+    _ = try client1.driveCryptoBackendInSpace(.initial, client1_backend.cryptoBackend(), &scratch);
+    const ch1 = (try client1.pollProtectedLongCryptoDatagramInSpace(.initial, 0, &dcid1, &client_scid1, &[_]u8{}, secrets1.client)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(ch1);
+    try server1.processProtectedLongDatagramInSpace(.initial, 1, secrets1.client, ch1);
+    _ = try server1.driveCryptoBackendInSpace(.initial, server1_backend.cryptoBackend(), &scratch);
+    const sh1 = (try server1.pollProtectedLongCryptoDatagramInSpace(.initial, 2, &client_scid1, &server_scid1, &[_]u8{}, secrets1.server)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(sh1);
+    _ = try server1.driveCryptoBackendInSpace(.handshake, server1_backend.cryptoBackend(), &scratch);
+    const shs1 = (try server1.pollProtectedHandshakeDatagramWithInstalledKeys(3, &client_scid1, &server_scid1)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(shs1);
+    try client1.processProtectedLongDatagramInSpace(.initial, 4, secrets1.server, sh1);
+    _ = try client1.driveCryptoBackendInSpace(.initial, client1_backend.cryptoBackend(), &scratch);
+    try client1.processProtectedHandshakeDatagramWithInstalledKeys(5, shs1);
+    _ = try client1.driveCryptoBackendInSpace(.handshake, client1_backend.cryptoBackend(), &scratch);
+    const cf1 = (try client1.pollProtectedHandshakeDatagramWithInstalledKeys(6, &server_scid1, &client_scid1)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(cf1);
+    try server1.processProtectedHandshakeDatagramWithInstalledKeys(7, cf1);
+    const server1_final = try server1.driveCryptoBackendInSpace(.handshake, server1_backend.cryptoBackend(), &scratch);
+    try std.testing.expect(server1_final.handshake_confirmed);
+
+    // Drain the NewSessionTicket the server emitted at handshake completion
+    // and feed it to the client so it derives a resumption PSK + stores the
+    // ticket - the real PSK source for the next connection.
+    var nst_buf: [4096]u8 = undefined;
+    const nst_bytes = (try server1_backend.cryptoBackend().pull(
+        server1_backend.cryptoBackend().context,
+        .application,
+        &nst_buf,
+    )) orelse return error.UnexpectedState;
+    try std.testing.expect(client1_backend.hs.isComplete());
+    var client1_cb = client1_backend.cryptoBackend();
+    try client1_cb.receive(client1_cb.context, .application, nst_bytes);
+    const resumption_psk = client1_backend.resumptionPsk() orelse return error.NoResumptionPsk;
+    try std.testing.expect(client1_backend.hs.session_ticket_len > 0);
+    const ticket_len = client1_backend.hs.session_ticket_len;
+    var ticket: [4096]u8 = undefined;
+    @memcpy(ticket[0..ticket_len], client1_backend.hs.session_ticket[0..ticket_len]);
+
+    // === Phase 2: 0-RTT resumption with the real PSK from phase 1 ===
+    const dcid2 = [_]u8{ 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97 };
+    const client_scid2 = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const server_scid2 = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const secrets2 = try protection.deriveInitialSecrets(.v1, &dcid2);
+
+    var client2 = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer client2.deinit();
+    var server2 = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer server2.deinit();
+    try client2.setLocalInitialSourceConnectionId(&client_scid2);
+    try server2.setLocalInitialSourceConnectionId(&server_scid2);
+
+    var client2_backend = tls13_backend.Tls13Backend.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    }, resumption_psk);
+    @memcpy(client2_backend.hs.session_ticket[0..ticket_len], ticket[0..ticket_len]);
+    client2_backend.hs.session_ticket_len = ticket_len;
+
+    var server2_backend = tls13_backend.Tls13Backend.initServerWithPsk(.{
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    }, resumption_psk);
+
+    // Client drives Initial: builds ClientHello + installs 0-RTT local keys.
+    _ = try client2.driveCryptoBackendInSpace(.initial, client2_backend.cryptoBackend(), &scratch);
+    try std.testing.expect(client2.hasLocalZeroRttProtectionKey());
+
+    const ch2 = (try client2.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        8,
+        &dcid2,
+        &client_scid2,
+        &[_]u8{},
+        secrets2.client,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(ch2);
+
+    // Server parses the PSK offer, verifies the binder against the real PSK
+    // derived in phase 1, derives the client early traffic secret, and
+    // installs peer 0-RTT keys.
+    try server2.processProtectedLongDatagramInSpace(.initial, 9, secrets2.client, ch2);
+    _ = try server2.driveCryptoBackendInSpace(.initial, server2_backend.cryptoBackend(), &scratch);
+    try std.testing.expect(server2_backend.hs.peer_psk_binder_valid);
+    try std.testing.expect(server2.hasPeerZeroRttProtectionKey());
+    try server2.acceptZeroRtt();
+    try std.testing.expect(server2.zeroRttAccepted());
+
+    // Client emits 0-RTT early data on a stream before the handshake finishes.
+    const stream_id = try client2.openStream();
+    try client2.sendOnStream(stream_id, "early data", true);
+    const zero_rtt = (try client2.pollProtectedZeroRttDatagramWithInstalledKeys(
+        10,
+        &server_scid2,
+        &client_scid2,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(zero_rtt);
+
+    // Server opens the 0-RTT datagram with installed + accepted peer keys.
+    try server2.processProtectedZeroRttDatagramWithInstalledKeys(11, zero_rtt);
+    var recv_buf: [32]u8 = undefined;
+    const recv_len = (try server2.recvOnStream(stream_id, &recv_buf)) orelse return error.UnexpectedState;
+    try std.testing.expectEqualStrings("early data", recv_buf[0..recv_len]);
+}
