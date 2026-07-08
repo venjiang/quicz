@@ -873,6 +873,10 @@ fn writeU16(buf: []u8, val: u16) void {
     std.mem.writeInt(u16, buf[0..2], val, .big);
 }
 
+fn writeU32(buf: []u8, val: u32) void {
+    std.mem.writeInt(u32, buf[0..4], val, .big);
+}
+
 fn writeExtHeader(buf: []u8, pos: usize, ext_type: u16, ext_len: usize) usize {
     writeU16(buf[pos..], ext_type);
     writeU16(buf[pos + 2 ..], @intCast(ext_len));
@@ -992,6 +996,10 @@ pub const Tls13Handshake = struct {
     peer_psk_binder_msg_offset: usize = 0,
     peer_psk_binder_valid: bool = false,
 
+    // Server-side: whether a post-handshake NewSessionTicket has been emitted
+    // for this connection (one-shot, so pump does not regenerate it).
+    nst_sent: bool = false,
+
     /// Initialize as a TLS 1.3 client.
     pub fn initClient(config: TlsConfig, transport_params: []const u8) Tls13Handshake {
         var self: Tls13Handshake = undefined;
@@ -1019,6 +1027,7 @@ pub const Tls13Handshake = struct {
         self.peer_offered_early_data = false;
         self.server_early_traffic_secret_derived = false;
         self.peer_psk_binder_valid = false;
+        self.nst_sent = false;
 
         // Copy pre-encoded transport parameters
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -1074,6 +1083,7 @@ pub const Tls13Handshake = struct {
         self.peer_offered_early_data = false;
         self.server_early_traffic_secret_derived = false;
         self.peer_psk_binder_valid = false;
+        self.nst_sent = false;
 
         // Copy pre-encoded transport parameters (sent in EncryptedExtensions).
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -2139,6 +2149,59 @@ pub const Tls13Handshake = struct {
         self.transcript.update(msg);
         self.state = .connected;
         return ._continue;
+    }
+
+    /// Build a post-handshake NewSessionTicket (RFC 8446 §4.6.1) so the
+    /// client can derive a resumption PSK and reuse it for 0-RTT in a future
+    /// connection. The ticket is an opaque blob here (a real implementation
+    /// encrypts the resumption master secret or derived PSK into it); the
+    /// client only stores it as the psk_identity for the next ClientHello.
+    /// The PSK itself is derived by both ends from
+    /// resumption_master_secret + ticket_nonce, so the server need not ship
+    /// the secret in the clear.
+    pub fn serverBuildNewSessionTicket(self: *Tls13Handshake) HandshakeError!Action {
+        const rms = self.key_schedule.deriveResumptionMasterSecret(self.transcript.current());
+
+        // 16-byte ticket nonce; the PSK derived from it is available to the
+        // server (e.g. for a ticket store) via derivePskFromTicket.
+        var nonce: [16]u8 = undefined;
+        secureRandomBytes(&nonce);
+        _ = KeySchedule.derivePskFromTicket(rms, &nonce);
+
+        const buf = &self.out_buf;
+        var pos: usize = 4; // reserve type + 3-byte length
+        // ticket_lifetime = 3600 (1 hour)
+        writeU32(buf[pos..], 3600);
+        pos += 4;
+        // ticket_age_add = 0 (skeleton: no obfuscated age timing)
+        writeU32(buf[pos..], 0);
+        pos += 4;
+        // ticket_nonce<0..255>
+        buf[pos] = @intCast(nonce.len);
+        pos += 1;
+        @memcpy(buf[pos..][0..nonce.len], &nonce);
+        pos += nonce.len;
+        // ticket<1..2^16-1>: carry the nonce as the opaque identity.
+        writeU16(buf[pos..], @intCast(nonce.len));
+        pos += 2;
+        @memcpy(buf[pos..][0..nonce.len], &nonce);
+        pos += nonce.len;
+        // extensions<0..2^16-2>: empty
+        writeU16(buf[pos..], 0);
+        pos += 2;
+
+        const msg_len = pos - 4;
+        buf[0] = @intFromEnum(HandshakeType.new_session_ticket);
+        buf[1] = @intCast((msg_len >> 16) & 0xFF);
+        buf[2] = @intCast((msg_len >> 8) & 0xFF);
+        buf[3] = @intCast(msg_len & 0xFF);
+
+        self.out_len = pos;
+        self.nst_sent = true;
+        return Action{ .send_data = .{
+            .level = .application,
+            .data = self.out_buf[0..self.out_len],
+        } };
     }
 };
 

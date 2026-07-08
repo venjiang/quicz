@@ -82,6 +82,7 @@ pub const Tls13Backend = struct {
     alpn_sent: bool = false,
     early_traffic_secret_sent: bool = false,
     server_early_secret_sent: bool = false,
+    nst_emitted: bool = false,
 
     /// Observability counters (never key material). Useful for interop
     /// debugging: how many CRYPTO bytes flowed in/out, how many drive errors.
@@ -309,6 +310,14 @@ pub const Tls13Backend = struct {
                     // CRYPTO; drain them to derive the resumption PSK.
                     if (!self.hs.is_server) {
                         try self.hs.clientProcessPostHandshake();
+                    } else if (!self.nst_emitted and !self.hs.nst_sent) {
+                        // Server emits one NewSessionTicket so the client can
+                        // resume with 0-RTT in a future connection.
+                        self.nst_emitted = true;
+                        const nst = try self.hs.serverBuildNewSessionTicket();
+                        if (nst == .send_data) {
+                            self.bucketForLevel(nst.send_data.level).append(nst.send_data.data);
+                        }
                     }
                     return;
                 },
