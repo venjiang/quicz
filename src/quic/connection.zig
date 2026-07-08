@@ -3794,11 +3794,17 @@ pub const Connection = struct {
         defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
 
         try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number, close_on_frame_payload_error);
-        if (key_phase_state.updateAfterReceiving(decoded.packet.header.key_phase)) {
-            // Retain the old peer receive key for one PTO so delayed packets
-            // protected with the previous key phase can still be opened
-            // (RFC 9001 §6.5 / RFC 9002 §6.2).
-            self.schedulePreviousKeyDiscard(key_phase_state, now_millis);
+        // Only a packet that authenticated against the `next` key generation
+        // signals a peer-initiated key update; a delayed packet opened with the
+        // retained `previous` key must not advance key-phase state, even though
+        // its revealed phase bit also differs from `current` (RFC 9001 §6.5).
+        if (decoded.peer_initiated_key_update) {
+            if (key_phase_state.updateAfterReceiving(decoded.packet.header.key_phase)) {
+                // Retain the old peer receive key for one PTO so delayed packets
+                // protected with the previous key phase can still be opened
+                // (RFC 9001 §6.5 / RFC 9002 §6.2).
+                self.schedulePreviousKeyDiscard(key_phase_state, now_millis);
+            }
         }
     }
 
@@ -70456,4 +70462,90 @@ test "checkPtoTimeouts discards retained peer previous key after one PTO" {
     try server.checkPtoTimeouts(10_000);
     try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
     try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(1));
+}
+
+test "delayed previous-key packet opens without advancing peer key phase" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    // Client initiates a key update and sends a PING with the gen-1 key phase.
+    try client.initiateOneRttKeyUpdate();
+    try client.sendPing();
+    const ping = (try client.pollProtectedShortDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping);
+
+    // Server receives the gen-1 PING: peer state advances to gen 1 and the old
+    // gen-0 receive key is retained for one PTO (RFC 9001 §6.5).
+    try server.processProtectedShortDatagramWithInstalledKeys(11, server_dcid.len, ping);
+    try std.testing.expectEqual(@as(?u64, 1), server.peerOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(0));
+
+    // A packet protected with the retained gen-0 key (key phase false) must
+    // still be opened via the previous-generation branch. Its revealed phase
+    // bit equals the toggled value of `next`, so only the next-before-previous
+    // ordering in unprotect plus the peer_initiated_key_update signal keep the
+    // receive path from advancing on this delayed old-key packet.
+    const delayed_plaintext = [_]u8{
+        @intFromEnum(frame.FrameType.ping),
+        @intFromEnum(frame.FrameType.padding),
+        @intFromEnum(frame.FrameType.padding),
+    };
+    const delayed_ping = try protection.protectShortPacketAes128(
+        std.testing.allocator,
+        .{
+            .dcid = &server_dcid,
+            .key_phase = false,
+            .packet_number = 1,
+        },
+        try packet.encodePacketNumberForHeader(1, null),
+        secrets.client,
+        &delayed_plaintext,
+    );
+    defer std.testing.allocator.free(delayed_ping);
+    try server.processProtectedShortDatagramWithInstalledKeys(12, server_dcid.len, delayed_ping);
+    // The delayed old-key packet must NOT advance peer key-phase state.
+    try std.testing.expectEqual(@as(?u64, 1), server.peerOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(1));
+
+    // After the PTO retain window expires the previous key is discarded; a
+    // further old-key packet then fails to authenticate (RFC 9001 §6.5).
+    try server.checkPtoTimeouts(10_000);
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
+    const stale_ping = try protection.protectShortPacketAes128(
+        std.testing.allocator,
+        .{
+            .dcid = &server_dcid,
+            .key_phase = false,
+            .packet_number = 2,
+        },
+        try packet.encodePacketNumberForHeader(2, null),
+        secrets.client,
+        &delayed_plaintext,
+    );
+    defer std.testing.allocator.free(stale_ping);
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedShortDatagramWithInstalledKeys(13, server_dcid.len, stale_ping),
+    );
+    try std.testing.expectEqual(@as(?u64, 1), server.peerOneRttKeyUpdateCount());
 }

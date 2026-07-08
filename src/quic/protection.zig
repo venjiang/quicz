@@ -140,6 +140,13 @@ pub const OpenedShortPacket = struct {
 pub const DecodedProtectedShortPacket = struct {
     packet: OpenedShortPacket,
     len: usize,
+    /// True when the datagram authenticated against the `next` key generation,
+    /// i.e. the peer initiated a 1-RTT key update (RFC 9001 §6.5). False for
+    /// packets opened with `current` or a retained `previous` generation, so
+    /// the receive path can avoid advancing key-phase state for delayed
+    /// old-key packets whose revealed phase bit merely matches the toggled
+    /// value of `next`.
+    peer_initiated_key_update: bool = false,
 };
 
 /// Current and next 1-RTT keys used while a QUIC key update is in progress.
@@ -825,7 +832,9 @@ pub fn unprotectShortPacketAes128WithKeyUpdate(
         return unprotectShortPacketAes128(allocator, keys.current, datagram, dcid_len, expected_packet_number);
     }
     if (unprotectShortPacketAes128(allocator, keys.next, datagram, dcid_len, expected_packet_number)) |decoded| {
-        return decoded;
+        var opened = decoded;
+        opened.peer_initiated_key_update = true;
+        return opened;
     } else |next_err| {
         if (keys.previous) |prev| {
             if (keys.previous_key_phase) |prev_kp| {
@@ -1152,6 +1161,60 @@ test "Aes128KeyPhaseState retains previous key until discard deadline" {
 
     // Once previous is gone, a further call is a no-op.
     try std.testing.expect(!state.discardExpiredPrevious(2_000));
+}
+
+test "unprotectShortPacketAes128WithKeyUpdate opens delayed packet with retained previous key" {
+    const dcid = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    const secrets = try deriveInitialSecrets(.v1, &dcid);
+    const plaintext = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x01 };
+    const header = packet.ShortHeader{
+        .dcid = &dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 7,
+    };
+
+    // Protect a packet with the initial (generation 0) key.
+    const gen0_protected = try protectShortPacketAes128(std.testing.allocator, header, .{
+        .len = 1,
+        .truncated_packet_number = 7,
+    }, secrets.client, &plaintext);
+    defer std.testing.allocator.free(gen0_protected);
+
+    // Advance to generation 1; the gen-0 key is retained as previous.
+    var state = Aes128KeyPhaseState.init(secrets.client, false);
+    state.initiateKeyUpdate();
+    try std.testing.expectEqual(@as(?u64, 0), state.previousKeyGeneration());
+
+    // The delayed gen-0 packet is opened with the retained previous key,
+    // even though the current key phase is now generation 1 (RFC 9001 §6.5).
+    var opened = try unprotectShortPacketAes128WithKeyUpdate(
+        std.testing.allocator,
+        state.keyUpdateKeys(),
+        gen0_protected,
+        dcid.len,
+        0,
+    );
+    defer deinitProtectedShortPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 7), opened.packet.header.packet_number);
+    try std.testing.expect(!opened.packet.header.key_phase);
+    try std.testing.expectEqualSlices(u8, &plaintext, opened.packet.plaintext);
+
+    // Once the previous key is discarded, the delayed gen-0 packet can no
+    // longer be opened: next fails to authenticate and there is no previous
+    // to fall back to.
+    state.schedulePreviousDiscard(1_000);
+    _ = state.discardExpiredPrevious(1_000);
+    try std.testing.expectError(
+        error.AuthenticationFailed,
+        unprotectShortPacketAes128WithKeyUpdate(
+            std.testing.allocator,
+            state.keyUpdateKeys(),
+            gen0_protected,
+            dcid.len,
+            0,
+        ),
+    );
 }
 
 test "AES header protection mask matches RFC 9001 Appendix A.2 sample" {
