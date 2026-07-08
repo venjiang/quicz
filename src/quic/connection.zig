@@ -70274,3 +70274,100 @@ test "Tls13Backend + Connection: resumption PSK from handshake drives 0-RTT roun
     const recv_len = (try server2.recvOnStream(stream_id, &recv_buf)) orelse return error.UnexpectedState;
     try std.testing.expectEqualStrings("early data", recv_buf[0..recv_len]);
 }
+
+test "Tls13Backend + Connection: rejectZeroRtt drops early data on TLS-owned path" {
+    const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const alpn = [_][]const u8{"hq-interop"};
+    const psk = [_]u8{0xab} ** tls13.secret_len;
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    const seed = [_]u8{0x55} ** 32;
+    const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const server_priv = server_kp.secret_key.bytes;
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try client.setLocalInitialSourceConnectionId(&client_scid);
+    try server.setLocalInitialSourceConnectionId(&server_scid);
+
+    var client_backend = tls13_backend.Tls13Backend.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    }, psk);
+    @memcpy(client_backend.hs.session_ticket[0..ticket.len], &ticket);
+    client_backend.hs.session_ticket_len = ticket.len;
+
+    var server_backend = tls13_backend.Tls13Backend.initServerWithPsk(.{
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    }, psk);
+
+    var scratch: [8192]u8 = undefined;
+
+    // Client drives Initial: builds ClientHello + installs 0-RTT local keys.
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    try std.testing.expect(client.hasLocalZeroRttProtectionKey());
+
+    const ch = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        0,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(ch);
+
+    // Server parses the PSK offer, verifies the binder, derives the early
+    // secret, and installs peer 0-RTT keys.
+    try server.processProtectedLongDatagramInSpace(.initial, 1, secrets.client, ch);
+    _ = try server.driveCryptoBackendInSpace(.initial, server_backend.cryptoBackend(), &scratch);
+    try std.testing.expect(server_backend.hs.peer_psk_binder_valid);
+    try std.testing.expect(server.hasPeerZeroRttProtectionKey());
+
+    // TLS policy rejects early data (anti-replay or app policy): the installed
+    // peer 0-RTT keys are discarded and acceptance stays false.
+    try server.rejectZeroRtt();
+    try std.testing.expect(!server.zeroRttAccepted());
+    try std.testing.expect(!server.hasPeerZeroRttProtectionKey());
+
+    // Client still emits 0-RTT early data (it does not yet know the server
+    // rejected it).
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "early data", true);
+    const zero_rtt = (try client.pollProtectedZeroRttDatagramWithInstalledKeys(
+        2,
+        &server_scid,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(zero_rtt);
+
+    // Server cannot open the 0-RTT datagram: keys were discarded by reject.
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedZeroRttDatagramWithInstalledKeys(3, zero_rtt),
+    );
+
+    // No early data was delivered to the stream.
+    var recv_buf: [32]u8 = undefined;
+    try std.testing.expect((try server.recvOnStream(stream_id, &recv_buf)) == null);
+}
