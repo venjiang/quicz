@@ -223,6 +223,16 @@ pub const Tls13Backend = struct {
 
     fn pullZeroRttTrafficSecrets(context: *anyopaque) Error!?ZeroRttTrafficSecrets {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
+        // The connection pulls traffic secrets before pulling CRYPTO bytes,
+        // so for a PSK-resumed client the ClientHello may not be built yet.
+        // Pump once to emit it (arming client_hello_built) so the early
+        // traffic secret can be derived over the ClientHello transcript.
+        if (!self.hs.is_server and self.hs.has_psk and !self.client_hello_built) {
+            self.pump() catch {
+                self.drive_errors += 1;
+                return error.CryptoError;
+            };
+        }
         // Client: derive the early traffic secret from the PSK-based early
         // secret and the ClientHello transcript; expose as the local write
         // secret so the connection can install 0-RTT keys.

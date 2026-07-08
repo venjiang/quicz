@@ -69883,3 +69883,60 @@ test "Tls13Backend + Connection: initiateOneRttKeyUpdate on TLS-owned path" {
     try server.processProtectedShortDatagramWithKeyPhaseState(9, &server_state, server_scid.len, ku_dgram);
     try std.testing.expectEqual(@as(u64, 1), server_state.keyUpdateCount());
 }
+
+test "Tls13Backend + Connection: PSK installs 0-RTT keys via traffic-secret hook on TLS-owned path" {
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const alpn = [_][]const u8{"hq-interop"};
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    try client.setLocalInitialSourceConnectionId(&client_scid);
+
+    // A resumption PSK (normally derived from a prior session's
+    // NewSessionTicket). Seeding the backend with it arms the 0-RTT path:
+    // the ClientHello is built with early-data intent and the key schedule
+    // carries a PSK-based early secret.
+    const resumption_psk = [_]u8{0xab} ** tls13.secret_len;
+    var client_backend = tls13_backend.Tls13Backend.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    }, resumption_psk);
+
+    var scratch: [8192]u8 = undefined;
+
+    // Driving the Initial space builds the ClientHello. The CryptoBackend
+    // pump emits the ClientHello (arming client_hello_built); the connection
+    // then pulls traffic secrets. pullZeroRttTrafficSecrets derives the
+    // early traffic secret from the PSK-based early secret and the
+    // ClientHello transcript, and the connection installs it as the local
+    // 0-RTT packet-protection key.
+    const progress = try client.driveCryptoBackendInSpace(
+        .initial,
+        client_backend.cryptoBackend(),
+        &scratch,
+    );
+    try std.testing.expect(progress.zero_rtt_keys_installed);
+    try std.testing.expect(client.hasLocalZeroRttProtectionKey());
+    // Client only installs the local (send) side; peer 0-RTT keys come from
+    // the server accepting early data, which has not happened yet.
+    try std.testing.expect(!client.hasPeerZeroRttProtectionKey());
+
+    // With 0-RTT keys installed, the client can emit early data before the
+    // handshake completes: open a stream and protect a 0-RTT datagram.
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "early data", true);
+    const zero_rtt = (try client.pollProtectedZeroRttDatagramWithInstalledKeys(
+        0,
+        &server_scid,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(zero_rtt);
+    try std.testing.expect(zero_rtt.len > 0);
+}
