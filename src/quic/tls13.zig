@@ -127,6 +127,13 @@ pub const KeySchedule = struct {
         return expandLabel(resumption_master_secret, "resumption", ticket_nonce, secret_len);
     }
 
+    /// Derive the client early traffic secret for 0-RTT early data
+    /// (RFC 8446 §7.1). Requires a PSK-based early secret (`initWithPsk`);
+    /// with a no-PSK schedule the result is not useful for 0-RTT.
+    pub fn deriveEarlyTrafficSecret(self: *const KeySchedule, transcript_hash: [32]u8) [secret_len]u8 {
+        return expandLabel(self.early_secret, "c e traffic", &transcript_hash, secret_len);
+    }
+
     /// Derive QUIC packet protection keys from a traffic secret (RFC 9001 §5.1).
     pub fn deriveQuicKeys(
         traffic_secret: [secret_len]u8,
@@ -526,6 +533,20 @@ test "resumption PSK round-trips through initWithPsk" {
     // The resumed early secret must differ from a fresh (no-PSK) early secret.
     const fresh = KeySchedule.init();
     try std.testing.expect(!std.mem.eql(u8, &resumed.early_secret, &fresh.early_secret));
+}
+
+test "KeySchedule deriveEarlyTrafficSecret is deterministic and PSK-dependent" {
+    const psk = [_]u8{0xab} ** secret_len;
+    const ks = KeySchedule.initWithPsk(psk);
+    const transcript = [_]u8{0x02} ** 32;
+    const early1 = ks.deriveEarlyTrafficSecret(transcript);
+    const early2 = ks.deriveEarlyTrafficSecret(transcript);
+    try std.testing.expectEqualSlices(u8, &early1, &early2);
+    // Different PSK yields a different early traffic secret.
+    const psk2 = [_]u8{0xcd} ** secret_len;
+    const ks2 = KeySchedule.initWithPsk(psk2);
+    const early3 = ks2.deriveEarlyTrafficSecret(transcript);
+    try std.testing.expect(!std.mem.eql(u8, &early1, &early3));
 }
 
 test "TranscriptHash is empty hash on init" {
