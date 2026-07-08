@@ -673,6 +673,47 @@ test "Tls13Handshake ClientHello includes pre_shared_key when has_psk" {
     try std.testing.expect(found_early_data);
 }
 
+test "Tls13Handshake server parses client pre_shared_key and early_data extensions" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+    var client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+
+    // Build the ClientHello (with pre_shared_key + early_data).
+    const action = try client.step();
+    try std.testing.expect(action == .send_data);
+    const client_hello = action.send_data.data;
+
+    // Server receives the ClientHello and parses its extensions.
+    var server = Tls13Handshake.initServer(.{
+        .alpn = &alpn,
+    }, &tp);
+    server.provideData(client_hello);
+    _ = try server.step();
+
+    // Server recorded the 0-RTT offer and parsed the first identity + binder.
+    try std.testing.expect(server.peer_offered_psk);
+    try std.testing.expect(server.peer_offered_early_data);
+    try std.testing.expectEqual(@as(usize, ticket.len), server.peer_psk_identity_len);
+    try std.testing.expectEqualSlices(u8, &ticket, server.peer_psk_identity[0..server.peer_psk_identity_len]);
+    // The binder is 32 bytes computed by the client over the truncated
+    // ClientHello transcript; it must be non-zero (not the placeholder).
+    var binder_is_zero = true;
+    for (server.peer_psk_binder) |b| {
+        if (b != 0) {
+            binder_is_zero = false;
+            break;
+        }
+    }
+    try std.testing.expect(!binder_is_zero);
+}
+
 test "TranscriptHash is empty hash on init" {
     const th = TranscriptHash.init();
     const hash = th.current();
@@ -847,6 +888,22 @@ pub const Tls13Handshake = struct {
     session_ticket: [4096]u8 = undefined,
     session_ticket_len: usize = 0,
 
+    // Server-side: a PSK configured out-of-band (extern_psk or a restored
+    // resumption_psk) used to accept a resumed client's 0-RTT. When present,
+    // the server seeds `KeySchedule.initWithPsk` so it can derive the same
+    // client early traffic secret the client used to protect early data.
+    server_psk: ?[secret_len]u8 = null,
+
+    // Server-side: the psk_identity offered by the client in its
+    // pre_shared_key extension (parsed but not yet validated against a
+    // ticket store). `peer_offered_psk` is set whenever the extension is
+    // present; `peer_offered_early_data` tracks the early_data extension.
+    peer_psk_identity: [4096]u8 = undefined,
+    peer_psk_identity_len: usize = 0,
+    peer_psk_binder: [32]u8 = undefined,
+    peer_offered_psk: bool = false,
+    peer_offered_early_data: bool = false,
+
     /// Initialize as a TLS 1.3 client.
     pub fn initClient(config: TlsConfig, transport_params: []const u8) Tls13Handshake {
         var self: Tls13Handshake = undefined;
@@ -868,6 +925,10 @@ pub const Tls13Handshake = struct {
         self.resumption_psk = null;
         self.has_psk = false;
         self.session_ticket_len = 0;
+        self.server_psk = null;
+        self.peer_psk_identity_len = 0;
+        self.peer_offered_psk = false;
+        self.peer_offered_early_data = false;
 
         // Copy pre-encoded transport parameters
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -917,6 +978,10 @@ pub const Tls13Handshake = struct {
         self.resumption_psk = null;
         self.has_psk = false;
         self.session_ticket_len = 0;
+        self.server_psk = null;
+        self.peer_psk_identity_len = 0;
+        self.peer_offered_psk = false;
+        self.peer_offered_early_data = false;
 
         // Copy pre-encoded transport parameters (sent in EncryptedExtensions).
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -1690,6 +1755,46 @@ pub const Tls13Handshake = struct {
                 @intFromEnum(ExtType.quic_transport_parameters) => {
                     self.peer_tp_len = @min(el, self.peer_tp.len);
                     @memcpy(self.peer_tp[0..self.peer_tp_len], ext[0..self.peer_tp_len]);
+                },
+                @intFromEnum(ExtType.early_data) => {
+                    // Empty extension (RFC 8446 §4.2.10): the client signals
+                    // 0-RTT intent. The server only records the offer here;
+                    // acceptance is gated on a matching PSK and policy.
+                    self.peer_offered_early_data = true;
+                },
+                @intFromEnum(ExtType.pre_shared_key) => {
+                    // RFC 8446 §4.2.11. Must be the last extension; parse the
+                    // first offered identity + binder. identities<7..2^16-1>
+                    // then binders<33..2^16-1>.
+                    self.peer_offered_psk = true;
+                    var pp: usize = 0;
+                    if (pp + 2 > el) return error.DecodeError;
+                    const identities_len = readU16(ext[pp..]);
+                    pp += 2;
+                    if (pp + identities_len > el) return error.DecodeError;
+                    // First identity: identity_len(2) + identity + age(4).
+                    if (identities_len < 2) return error.DecodeError;
+                    const identity_len = readU16(ext[pp..]);
+                    pp += 2;
+                    if (pp + identity_len + 4 > 2 + identities_len) return error.DecodeError;
+                    const il = @min(identity_len, self.peer_psk_identity.len);
+                    @memcpy(self.peer_psk_identity[0..il], ext[pp..][0..il]);
+                    self.peer_psk_identity_len = il;
+                    pp += identity_len;
+                    pp += 4; // obfuscated_ticket_age
+                    // Skip remaining identities to reach the binder list.
+                    pp = 2 + identities_len;
+                    if (pp + 2 > el) return error.DecodeError;
+                    const binders_len = readU16(ext[pp..]);
+                    pp += 2;
+                    if (pp + binders_len > el) return error.DecodeError;
+                    if (binders_len < 1) return error.DecodeError;
+                    const binder_len = ext[pp];
+                    pp += 1;
+                    if (binder_len != self.peer_psk_binder.len or pp + binder_len > el) {
+                        return error.DecodeError;
+                    }
+                    @memcpy(&self.peer_psk_binder, ext[pp..][0..binder_len]);
                 },
                 else => {}, // ignore unrecognized extensions
             }
