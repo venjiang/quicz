@@ -549,6 +549,24 @@ test "KeySchedule deriveEarlyTrafficSecret is deterministic and PSK-dependent" {
     try std.testing.expect(!std.mem.eql(u8, &early1, &early3));
 }
 
+test "Tls13Handshake initClientWithPsk seeds PSK and sets has_psk" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+    const hs = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    try std.testing.expect(hs.has_psk);
+    // early_secret = HKDF-Extract(0, psk)
+    const zeros = [_]u8{0} ** secret_len;
+    const expected_early = HkdfSha256.extract(&zeros, &psk);
+    try std.testing.expectEqualSlices(u8, &expected_early, &hs.key_schedule.early_secret);
+    // has_psk is false for a regular initClient.
+    const hs2 = Tls13Handshake.initClient(.{ .alpn = &alpn, .server_name = "example.com" }, &tp);
+    try std.testing.expect(!hs2.has_psk);
+}
+
 test "TranscriptHash is empty hash on init" {
     const th = TranscriptHash.init();
     const hash = th.current();
@@ -713,6 +731,10 @@ pub const Tls13Handshake = struct {
     // side). Seeds `KeySchedule.initWithPsk` for a future resumed session.
     resumption_psk: ?[secret_len]u8 = null,
 
+    // True when the client was initialized with a resumption PSK, enabling
+    // 0-RTT early data in the ClientHello.
+    has_psk: bool = false,
+
     /// Initialize as a TLS 1.3 client.
     pub fn initClient(config: TlsConfig, transport_params: []const u8) Tls13Handshake {
         var self: Tls13Handshake = undefined;
@@ -745,6 +767,17 @@ pub const Tls13Handshake = struct {
             break :blk X25519.recoverPublicKey(self.x25519_secret) catch unreachable;
         };
 
+        return self;
+    }
+
+    /// Initialize as a TLS 1.3 client with a resumption PSK (RFC 8446 §7.1
+    /// + §8.1). The PSK seeds the key schedule via `initWithPsk` and enables
+    /// 0-RTT early data. The caller obtains the PSK from a prior session's
+    /// `resumptionPsk` (client side, after a NewSessionTicket).
+    pub fn initClientWithPsk(config: TlsConfig, transport_params: []const u8, psk: [secret_len]u8) Tls13Handshake {
+        var self = initClient(config, transport_params);
+        self.key_schedule = KeySchedule.initWithPsk(psk);
+        self.has_psk = true;
         return self;
     }
 
