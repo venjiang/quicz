@@ -944,6 +944,17 @@ pub const Connection = struct {
         return self.state;
     }
 
+    /// Return the error code of the queued transport/application CONNECTION_CLOSE,
+    /// or null when no close is pending. Endpoint loops can observe the close
+    /// reason (e.g. KEY_UPDATE_ERROR) without draining the emitted frame.
+    pub fn pendingCloseErrorCode(self: Connection) ?u64 {
+        const pending = self.pending_close orelse return null;
+        return switch (pending) {
+            .connection => |c| c.error_code,
+            .application => |a| a.error_code,
+        };
+    }
+
     /// Return the close/drain deadline in milliseconds, or null when no timer is active.
     pub fn closeDeadlineMillis(self: Connection) ?i64 {
         return self.close_deadline_millis;
@@ -3789,6 +3800,19 @@ pub const Connection = struct {
             expected_packet_number,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.KeyUpdateError => {
+                // The packet's revealed key phase matches a previous
+                // generation whose keys were already discarded past the PTO
+                // retain window: the peer is protecting packets with keys
+                // older than the retained generation (RFC 9001 §6.5). Surface
+                // this as a KEY_UPDATE_ERROR transport close.
+                self.closeConnection(
+                    transport_error.codeValue(.key_update_error),
+                    0,
+                    "packet protected with discarded key",
+                ) catch {};
+                return error.InvalidPacket;
+            },
             else => return error.InvalidPacket,
         };
         defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
@@ -70548,4 +70572,70 @@ test "delayed previous-key packet opens without advancing peer key phase" {
         server.processProtectedShortDatagramWithInstalledKeys(13, server_dcid.len, stale_ping),
     );
     try std.testing.expectEqual(@as(?u64, 1), server.peerOneRttKeyUpdateCount());
+}
+
+test "discarded previous-key packet queues KEY_UPDATE_ERROR close" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+
+    // Client initiates a key update; server advances and retains gen-0.
+    try client.initiateOneRttKeyUpdate();
+    try client.sendPing();
+    const ping = (try client.pollProtectedShortDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ping);
+    try server.processProtectedShortDatagramWithInstalledKeys(11, server_dcid.len, ping);
+    try std.testing.expectEqual(@as(?u64, 1), server.peerOneRttKeyUpdateCount());
+
+    // Discard the retained previous key past the PTO retain window.
+    try server.checkPtoTimeouts(10_000);
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
+
+    // A packet protected with the discarded gen-0 key phase is a peer protocol
+    // violation: the receive path queues a KEY_UPDATE_ERROR transport
+    // CONNECTION_CLOSE (RFC 9001 §6.5).
+    const stale_plaintext = [_]u8{
+        @intFromEnum(frame.FrameType.ping),
+        @intFromEnum(frame.FrameType.padding),
+        @intFromEnum(frame.FrameType.padding),
+    };
+    const stale_ping = try protection.protectShortPacketAes128(
+        std.testing.allocator,
+        .{
+            .dcid = &server_dcid,
+            .key_phase = false,
+            .packet_number = 1,
+        },
+        try packet.encodePacketNumberForHeader(1, null),
+        secrets.client,
+        &stale_plaintext,
+    );
+    defer std.testing.allocator.free(stale_ping);
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedShortDatagramWithInstalledKeys(12, server_dcid.len, stale_ping),
+    );
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expectEqual(
+        @as(?u64, transport_error.codeValue(.key_update_error)),
+        server.pendingCloseErrorCode(),
+    );
 }

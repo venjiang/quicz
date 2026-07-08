@@ -58,6 +58,11 @@ pub const ProtectionError = error{
     InvalidPacketNumberLength,
     InvalidPayloadLength,
     AuthenticationFailed,
+    /// A packet's revealed key phase matches a previous generation whose keys
+    /// have already been discarded past the PTO retain window, i.e. the peer is
+    /// protecting packets with keys older than the retained generation
+    /// (RFC 9001 §6.5). Callers MAY surface this as a KEY_UPDATE_ERROR.
+    KeyUpdateError,
 };
 
 const HkdfLabelSet = struct {
@@ -163,6 +168,10 @@ pub const ShortPacketKeyUpdateKeys = struct {
     previous: ?Aes128PacketProtectionKeys = null,
     /// Short-header key phase bit corresponding to `previous`.
     previous_key_phase: ?bool = null,
+    /// Short-header key phase bit of the most recently discarded previous
+    /// generation. A packet whose revealed phase matches this value can no
+    /// longer be opened and is a KEY_UPDATE_ERROR (RFC 9001 §6.5).
+    discarded_previous_key_phase: ?bool = null,
 };
 
 /// Caller-owned key-phase state for one 1-RTT packet-protection direction.
@@ -182,6 +191,11 @@ pub const Aes128KeyPhaseState = struct {
     previous: ?Aes128PacketProtectionKeys = null,
     previous_key_phase: ?bool = null,
     previous_discard_deadline_millis: ?i64 = null,
+    /// Key phase of the most recently discarded previous generation, kept after
+    /// the retain window expires so packets protected with keys older than the
+    /// retained generation can be surfaced as KEY_UPDATE_ERROR (RFC 9001 §6.5).
+    /// Null before any previous generation has been discarded.
+    discarded_previous_key_phase: ?bool = null,
 
     /// Initialize key-phase state from the currently active 1-RTT keys.
     pub fn init(current: Aes128PacketProtectionKeys, current_key_phase: bool) Aes128KeyPhaseState {
@@ -244,6 +258,7 @@ pub const Aes128KeyPhaseState = struct {
             .current_key_phase = self.current_key_phase,
             .previous = self.previous,
             .previous_key_phase = self.previous_key_phase,
+            .discarded_previous_key_phase = self.discarded_previous_key_phase,
         };
     }
 
@@ -273,6 +288,7 @@ pub const Aes128KeyPhaseState = struct {
     pub fn discardExpiredPrevious(self: *Aes128KeyPhaseState, now_millis: i64) bool {
         const deadline = self.previous_discard_deadline_millis orelse return false;
         if (now_millis < deadline) return false;
+        self.discarded_previous_key_phase = self.previous_key_phase;
         self.previous = null;
         self.previous_key_phase = null;
         self.previous_discard_deadline_millis = null;
@@ -843,6 +859,11 @@ pub fn unprotectShortPacketAes128WithKeyUpdate(
                 }
             }
         }
+        if (keys.discarded_previous_key_phase) |discarded_kp| {
+            if (key_phase == discarded_kp) {
+                return error.KeyUpdateError;
+            }
+        }
         return next_err;
     }
 }
@@ -1200,13 +1221,15 @@ test "unprotectShortPacketAes128WithKeyUpdate opens delayed packet with retained
     try std.testing.expect(!opened.packet.header.key_phase);
     try std.testing.expectEqualSlices(u8, &plaintext, opened.packet.plaintext);
 
-    // Once the previous key is discarded, the delayed gen-0 packet can no
-    // longer be opened: next fails to authenticate and there is no previous
-    // to fall back to.
+    // Once the previous key is discarded past the retain window, the delayed
+    // gen-0 packet can no longer be opened: next fails to authenticate, there
+    // is no previous to fall back to, and the revealed phase matches the
+    // discarded previous generation, so the peer is protecting packets with
+    // keys older than the retained generation (RFC 9001 §6.5).
     state.schedulePreviousDiscard(1_000);
     _ = state.discardExpiredPrevious(1_000);
     try std.testing.expectError(
-        error.AuthenticationFailed,
+        error.KeyUpdateError,
         unprotectShortPacketAes128WithKeyUpdate(
             std.testing.allocator,
             state.keyUpdateKeys(),
