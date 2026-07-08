@@ -60023,7 +60023,9 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     try client.initiateOneRttKeyUpdate();
     try std.testing.expectEqual(@as(?bool, true), client.localOneRttKeyPhase());
     try std.testing.expectEqual(@as(?u64, 1), client.localOneRttKeyUpdateCount());
-    try std.testing.expectEqual(@as(?bool, false), client.localOneRttRetainsKeyGeneration(0));
+    // The previous generation is retained after an advance so delayed packets
+    // protected with the old key phase can still be opened (RFC 9001 §6.5).
+    try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(0));
     try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(1));
     try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(2));
     try std.testing.expectEqual(@as(?u64, 0), client.pendingOneRttKeyUpdateAckThreshold());
@@ -60037,7 +60039,7 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     defer std.testing.allocator.free(ping);
     try server.processProtectedShortDatagramWithInstalledKeys(11, server_dcid.len, ping);
     try std.testing.expectEqual(@as(?u64, 1), server.peerOneRttKeyUpdateCount());
-    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(0));
     try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(1));
     try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(2));
     const ack = (try server.pollProtectedShortDatagramWithInstalledKeys(
@@ -60051,7 +60053,10 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     try client.initiateOneRttKeyUpdate();
     try std.testing.expectEqual(@as(?bool, false), client.localOneRttKeyPhase());
     try std.testing.expectEqual(@as(?u64, 2), client.localOneRttKeyUpdateCount());
-    try std.testing.expectEqual(@as(?bool, false), client.localOneRttRetainsKeyGeneration(1));
+    // Second advance overwrites the retained previous: generation 1 is now
+    // previous, generation 0 is no longer retained.
+    try std.testing.expectEqual(@as(?bool, false), client.localOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(1));
     try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(2));
     try std.testing.expectEqual(@as(?bool, true), client.localOneRttRetainsKeyGeneration(3));
     try std.testing.expectEqual(@as(?u64, 1), client.pendingOneRttKeyUpdateAckThreshold());
@@ -60065,30 +60070,33 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     try server.processProtectedShortDatagramWithInstalledKeys(15, server_dcid.len, second_ping);
     try std.testing.expectEqual(@as(?bool, false), server.peerOneRttKeyPhase());
     try std.testing.expectEqual(@as(?u64, 2), server.peerOneRttKeyUpdateCount());
-    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(1));
+    // Second peer advance overwrites the retained previous: generation 1 is
+    // now previous, generation 0 is no longer retained.
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(1));
     try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(2));
     try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(3));
-    const stale_generation_1_keys = protection.nextAes128PacketProtectionKeys(secrets.client);
+    const stale_generation_0_keys = secrets.client;
     const stale_ping_plaintext = [_]u8{
         @intFromEnum(frame.FrameType.ping),
         @intFromEnum(frame.FrameType.padding),
         @intFromEnum(frame.FrameType.padding),
     };
-    const stale_generation_1_ping = try protection.protectShortPacketAes128(
+    const stale_generation_0_ping = try protection.protectShortPacketAes128(
         std.testing.allocator,
         .{
             .dcid = &server_dcid,
-            .key_phase = true,
+            .key_phase = false,
             .packet_number = 2,
         },
         try packet.encodePacketNumberForHeader(2, null),
-        stale_generation_1_keys,
+        stale_generation_0_keys,
         &stale_ping_plaintext,
     );
-    defer std.testing.allocator.free(stale_generation_1_ping);
+    defer std.testing.allocator.free(stale_generation_0_ping);
     try std.testing.expectError(
         error.InvalidPacket,
-        server.processProtectedShortDatagramWithInstalledKeys(16, server_dcid.len, stale_generation_1_ping),
+        server.processProtectedShortDatagramWithInstalledKeys(16, server_dcid.len, stale_generation_0_ping),
     );
     try std.testing.expectEqual(@as(u64, 2), server.nextPeerPacketNumber(.application));
     try std.testing.expectEqual(@as(?u64, 1), server.pendingAckLargest(.application));

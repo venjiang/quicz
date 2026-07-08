@@ -150,6 +150,12 @@ pub const ShortPacketKeyUpdateKeys = struct {
     next: Aes128PacketProtectionKeys,
     /// Short-header key phase bit corresponding to `current`.
     current_key_phase: bool,
+    /// Retained previous-generation keys for opening delayed packets still
+    /// protected with the old key phase (RFC 9001 §6.5). Null when no
+    /// previous generation is retained.
+    previous: ?Aes128PacketProtectionKeys = null,
+    /// Short-header key phase bit corresponding to `previous`.
+    previous_key_phase: ?bool = null,
 };
 
 /// Caller-owned key-phase state for one 1-RTT packet-protection direction.
@@ -162,6 +168,13 @@ pub const Aes128KeyPhaseState = struct {
     next: Aes128PacketProtectionKeys,
     current_key_phase: bool,
     key_update_count: u64,
+    /// Previously active keys retained for one PTO after a key update, so
+    /// delayed packets protected with the old key phase can still be opened
+    /// (RFC 9001 §6.5). Null before the first advance, after the retain
+    /// window expires, or once a newer advance overwrites it.
+    previous: ?Aes128PacketProtectionKeys = null,
+    previous_key_phase: ?bool = null,
+    previous_discard_deadline_millis: ?i64 = null,
 
     /// Initialize key-phase state from the currently active 1-RTT keys.
     pub fn init(current: Aes128PacketProtectionKeys, current_key_phase: bool) Aes128KeyPhaseState {
@@ -198,17 +211,32 @@ pub const Aes128KeyPhaseState = struct {
         return self.key_update_count +| 1;
     }
 
-    /// Return whether the state still retains keys for `generation`.
-    pub fn retainsKeyGeneration(self: Aes128KeyPhaseState, generation: u64) bool {
-        return generation == self.currentKeyGeneration() or generation == self.nextKeyGeneration();
+    /// Previously retained key generation, if any. The previous generation is
+    /// `key_update_count - 1` after at least one advance.
+    pub fn previousKeyGeneration(self: Aes128KeyPhaseState) ?u64 {
+        if (self.previous == null) return null;
+        return self.key_update_count -% 1;
     }
 
-    /// Current and next keys for opening a packet that might use either phase.
+    /// Return whether the state still retains keys for `generation`.
+    pub fn retainsKeyGeneration(self: Aes128KeyPhaseState, generation: u64) bool {
+        if (generation == self.currentKeyGeneration()) return true;
+        if (generation == self.nextKeyGeneration()) return true;
+        if (self.previousKeyGeneration()) |prev_gen| {
+            return generation == prev_gen;
+        }
+        return false;
+    }
+
+    /// Current, next, and retained previous keys for opening a packet that
+    /// might use any of those key phases.
     pub fn keyUpdateKeys(self: Aes128KeyPhaseState) ShortPacketKeyUpdateKeys {
         return .{
             .current = self.current,
             .next = self.next,
             .current_key_phase = self.current_key_phase,
+            .previous = self.previous,
+            .previous_key_phase = self.previous_key_phase,
         };
     }
 
@@ -226,7 +254,32 @@ pub const Aes128KeyPhaseState = struct {
         return true;
     }
 
+    /// Schedule the retained previous key to be discarded at `deadline_millis`.
+    /// Has no effect when no previous generation is retained.
+    pub fn schedulePreviousDiscard(self: *Aes128KeyPhaseState, deadline_millis: i64) void {
+        if (self.previous == null) return;
+        self.previous_discard_deadline_millis = deadline_millis;
+    }
+
+    /// Drop the retained previous key once its discard deadline has passed.
+    /// Returns true if the previous key was discarded by this call.
+    pub fn discardExpiredPrevious(self: *Aes128KeyPhaseState, now_millis: i64) bool {
+        const deadline = self.previous_discard_deadline_millis orelse return false;
+        if (now_millis < deadline) return false;
+        self.previous = null;
+        self.previous_key_phase = null;
+        self.previous_discard_deadline_millis = null;
+        return true;
+    }
+
     fn advance(self: *Aes128KeyPhaseState) void {
+        // Retain the outgoing current key as previous so delayed packets
+        // protected with the old key phase can still be opened during the
+        // post-update retain window (RFC 9001 §6.5). A newer advance
+        // overwrites any previous that was not yet discarded.
+        self.previous = self.current;
+        self.previous_key_phase = self.current_key_phase;
+        self.previous_discard_deadline_millis = null;
         self.current = self.next;
         self.next = nextAes128PacketProtectionKeys(self.current);
         self.current_key_phase = !self.current_key_phase;
@@ -748,11 +801,18 @@ pub fn unprotectShortPacketAes128(
     };
 }
 
-/// Remove protection from a 1-RTT short packet that can use current or next keys.
+/// Remove protection from a 1-RTT short packet that can use current, next, or
+/// retained previous keys.
 ///
-/// The key phase bit is revealed with the current header-protection key, then
-/// the packet is authenticated with either `current` or `next`. This models the
-/// QUIC key update key selection rule without owning endpoint key-phase state.
+/// The key phase bit is revealed with the current header-protection key. When
+/// it matches the current phase the packet is opened with `current`. When it
+/// differs the packet is opened with `next` first (the peer initiated a key
+/// update), falling back to the retained `previous` only if `next` fails to
+/// authenticate and the phase matches the old key phase - modeling the delayed
+/// old-key packet case from RFC 9001 §6.5. Because the key phase bit is a
+/// single toggling bit, `next` must be tried before `previous` so that a
+/// second peer update (same phase as a discarded generation) is not mistaken
+/// for a delayed old-key packet.
 pub fn unprotectShortPacketAes128WithKeyUpdate(
     allocator: std.mem.Allocator,
     keys: ShortPacketKeyUpdateKeys,
@@ -761,8 +821,21 @@ pub fn unprotectShortPacketAes128WithKeyUpdate(
     expected_packet_number: u64,
 ) !DecodedProtectedShortPacket {
     const key_phase = try peekShortPacketKeyPhaseAes128(keys.current.hp, datagram, dcid_len);
-    const selected = if (key_phase == keys.current_key_phase) keys.current else keys.next;
-    return unprotectShortPacketAes128(allocator, selected, datagram, dcid_len, expected_packet_number);
+    if (key_phase == keys.current_key_phase) {
+        return unprotectShortPacketAes128(allocator, keys.current, datagram, dcid_len, expected_packet_number);
+    }
+    if (unprotectShortPacketAes128(allocator, keys.next, datagram, dcid_len, expected_packet_number)) |decoded| {
+        return decoded;
+    } else |next_err| {
+        if (keys.previous) |prev| {
+            if (keys.previous_key_phase) |prev_kp| {
+                if (key_phase == prev_kp) {
+                    return unprotectShortPacketAes128(allocator, prev, datagram, dcid_len, expected_packet_number);
+                }
+            }
+        }
+        return next_err;
+    }
 }
 
 const ProtectedLongPrefix = struct {
@@ -1025,7 +1098,10 @@ test "Aes128KeyPhaseState advances send and receive phases" {
     state.initiateKeyUpdate();
     try std.testing.expect(state.currentKeyPhase());
     try std.testing.expectEqual(@as(u64, 1), state.keyUpdateCount());
-    try std.testing.expect(!state.retainsKeyGeneration(0));
+    // The previous generation is retained after an advance so delayed packets
+    // protected with the old key phase can still be opened (RFC 9001 §6.5).
+    try std.testing.expectEqual(@as(?u64, 0), state.previousKeyGeneration());
+    try std.testing.expect(state.retainsKeyGeneration(0));
     try std.testing.expect(state.retainsKeyGeneration(1));
     try std.testing.expect(state.retainsKeyGeneration(2));
     const updated_current = state.currentKeys();
@@ -1034,16 +1110,48 @@ test "Aes128KeyPhaseState advances send and receive phases" {
     try std.testing.expectEqualSlices(u8, &secrets.client.hp, &updated_current.hp);
     try std.testing.expectEqualSlices(u8, &updated_current.secret, &updated_keys.current.secret);
     try std.testing.expectEqual(true, updated_keys.current_key_phase);
+    try std.testing.expect(updated_keys.previous != null);
+    try std.testing.expectEqual(@as(?bool, false), updated_keys.previous_key_phase);
 
     try std.testing.expect(!state.updateAfterReceiving(true));
     try std.testing.expectEqual(@as(u64, 1), state.keyUpdateCount());
     try std.testing.expect(state.updateAfterReceiving(false));
     try std.testing.expect(!state.currentKeyPhase());
     try std.testing.expectEqual(@as(u64, 2), state.keyUpdateCount());
-    try std.testing.expect(!state.retainsKeyGeneration(1));
+    // A newer advance overwrites the retained previous: generation 1 is now
+    // previous, and generation 0 is no longer retained.
+    try std.testing.expectEqual(@as(?u64, 1), state.previousKeyGeneration());
+    try std.testing.expect(!state.retainsKeyGeneration(0));
+    try std.testing.expect(state.retainsKeyGeneration(1));
     try std.testing.expect(state.retainsKeyGeneration(2));
     try std.testing.expect(state.retainsKeyGeneration(3));
     try std.testing.expectEqual(false, state.keyUpdateKeys().current_key_phase);
+}
+
+test "Aes128KeyPhaseState retains previous key until discard deadline" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try deriveInitialSecrets(.v1, &dcid);
+
+    var state = Aes128KeyPhaseState.init(secrets.client, false);
+    state.initiateKeyUpdate();
+    try std.testing.expectEqual(@as(?u64, 0), state.previousKeyGeneration());
+    try std.testing.expect(state.retainsKeyGeneration(0));
+
+    // Before a deadline is scheduled, the previous key never expires.
+    try std.testing.expect(!state.discardExpiredPrevious(1_000_000));
+
+    // Schedule a discard deadline one PTO ahead; the previous key is retained
+    // until the deadline passes, then dropped (RFC 9001 §6.5 / RFC 9002 §6.2).
+    state.schedulePreviousDiscard(1_000);
+    try std.testing.expect(!state.discardExpiredPrevious(999));
+    try std.testing.expect(state.retainsKeyGeneration(0));
+    try std.testing.expect(state.discardExpiredPrevious(1_000));
+    try std.testing.expectEqual(@as(?u64, null), state.previousKeyGeneration());
+    try std.testing.expect(!state.retainsKeyGeneration(0));
+    try std.testing.expect(state.retainsKeyGeneration(1));
+
+    // Once previous is gone, a further call is a no-op.
+    try std.testing.expect(!state.discardExpiredPrevious(2_000));
 }
 
 test "AES header protection mask matches RFC 9001 Appendix A.2 sample" {
