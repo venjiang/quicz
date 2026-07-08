@@ -114,6 +114,12 @@ pub const KeySchedule = struct {
         self.app_secret_derived = true;
     }
 
+    /// Derive the resumption master secret (RFC 8446 §7.1). Used to derive
+    /// PSK values for session resumption and 0-RTT early data.
+    pub fn deriveResumptionMasterSecret(self: *const KeySchedule, transcript_hash: [32]u8) [secret_len]u8 {
+        return expandLabel(self.master_secret, "res master", &transcript_hash, secret_len);
+    }
+
     /// Derive QUIC packet protection keys from a traffic secret (RFC 9001 §5.1).
     pub fn deriveQuicKeys(
         traffic_secret: [secret_len]u8,
@@ -341,6 +347,21 @@ test "KeySchedule computeFinishedVerifyData produces 32 bytes" {
     const transcript = [_]u8{0x12} ** 32;
     const verify_data = KeySchedule.computeFinishedVerifyData(base_key, transcript);
     try std.testing.expectEqual(@as(usize, 32), verify_data.len);
+}
+
+test "KeySchedule deriveResumptionMasterSecret is deterministic and distinct" {
+    var ks = KeySchedule.init();
+    const shared_secret = [_]u8{0x01} ** 32;
+    const transcript = [_]u8{0x02} ** 32;
+    ks.deriveHandshakeSecrets(&shared_secret, transcript);
+    ks.deriveAppSecrets(transcript);
+    const rms1 = ks.deriveResumptionMasterSecret(transcript);
+    const rms2 = ks.deriveResumptionMasterSecret(transcript);
+    try std.testing.expectEqual(@as(usize, secret_len), rms1.len);
+    try std.testing.expectEqualSlices(u8, &rms1, &rms2);
+    // Resumption master secret must differ from the app traffic secrets.
+    try std.testing.expect(!std.mem.eql(u8, &rms1, &ks.client_app_traffic_secret));
+    try std.testing.expect(!std.mem.eql(u8, &rms1, &ks.server_app_traffic_secret));
 }
 
 test "TranscriptHash is empty hash on init" {
