@@ -12,7 +12,7 @@ const EcdsaP256Sha256 = crypto.sign.ecdsa.EcdsaP256Sha256;
 const Ed25519 = crypto.sign.Ed25519;
 const SignatureScheme = crypto.tls.SignatureScheme;
 
-const secret_len: usize = 32;
+pub const secret_len: usize = 32;
 const key_len: usize = 16;
 const iv_len: usize = 12;
 const hp_len: usize = 16;

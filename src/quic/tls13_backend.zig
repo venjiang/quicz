@@ -213,6 +213,13 @@ pub const Tls13Backend = struct {
         return self.hs.isComplete();
     }
 
+    /// Return the resumption PSK derived from a post-handshake
+    /// NewSessionTicket, or null if none has been received. The PSK seeds
+    /// `Tls13Handshake.initWithPsk` for a future resumed session with 0-RTT.
+    pub fn resumptionPsk(self: *const Tls13Backend) ?[tls13.secret_len]u8 {
+        return self.hs.resumption_psk;
+    }
+
     /// Write TLS 1.3 secrets in NSS key-log format to `writer` for
     /// SSLKEYLOGFILE / Wireshark debugging. Call after handshake secrets are
     /// available. Never prints private key material — only derived traffic
@@ -279,6 +286,18 @@ pub const Tls13Backend = struct {
 
 const X25519 = std.crypto.dh.X25519;
 const testing = std.testing;
+
+test "Tls13Backend resumptionPsk returns stored PSK" {
+    var backend = Tls13Backend.initClient(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    });
+    try std.testing.expect(backend.resumptionPsk() == null);
+    backend.hs.resumption_psk = [_]u8{0x01} ** tls13.secret_len;
+    const psk = backend.resumptionPsk().?;
+    try std.testing.expectEqual(@as(usize, tls13.secret_len), psk.len);
+    try std.testing.expectEqual(@as(u8, 0x01), psk[0]);
+}
 
 test "Tls13Backend drives a full client handshake through CryptoBackend hooks" {
     const alpn_proto = "hq-interop";
