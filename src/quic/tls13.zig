@@ -740,6 +740,8 @@ test "Tls13Handshake initServerWithPsk derives matching client early traffic sec
     // After parsing the ClientHello, the server has derived the client
     // early traffic secret over the (shared) ClientHello transcript.
     try std.testing.expect(server.server_early_traffic_secret_derived);
+    // The binder verifies against the matching PSK.
+    try std.testing.expect(server.peer_psk_binder_valid);
 
     // Same PSK -> same early secret.
     try std.testing.expectEqualSlices(u8, &client.key_schedule.early_secret, &server.key_schedule.early_secret);
@@ -757,6 +759,35 @@ test "Tls13Handshake initServerWithPsk derives matching client early traffic sec
     // same ClientHello -> same transcript hash.
     const client_early = client.key_schedule.deriveEarlyTrafficSecret(client.transcript.current());
     try std.testing.expectEqualSlices(u8, &client_early, &server.server_early_traffic_secret);
+}
+
+test "Tls13Handshake server rejects mismatched PSK binder" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const client_psk = [_]u8{0xab} ** secret_len;
+    const server_psk = [_]u8{0xcd} ** secret_len;
+
+    var client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, client_psk);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+    const action = try client.step();
+    const client_hello = action.send_data.data;
+
+    // Server is configured with a different PSK: the binder_key derived
+    // from it will not match the one the client used.
+    var server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+    }, &tp, server_psk);
+    server.provideData(client_hello);
+    _ = try server.step();
+
+    // Binder verification fails and the early traffic secret is NOT derived.
+    try std.testing.expect(!server.peer_psk_binder_valid);
+    try std.testing.expect(!server.server_early_traffic_secret_derived);
 }
 
 test "TranscriptHash is empty hash on init" {
@@ -955,6 +986,12 @@ pub const Tls13Handshake = struct {
     peer_offered_psk: bool = false,
     peer_offered_early_data: bool = false,
 
+    // Server-side: the byte offset of the client's psk_binder within the
+    // ClientHello handshake message (used to recompute the truncated
+    // transcript hash for binder verification), and the verification result.
+    peer_psk_binder_msg_offset: usize = 0,
+    peer_psk_binder_valid: bool = false,
+
     /// Initialize as a TLS 1.3 client.
     pub fn initClient(config: TlsConfig, transport_params: []const u8) Tls13Handshake {
         var self: Tls13Handshake = undefined;
@@ -981,6 +1018,7 @@ pub const Tls13Handshake = struct {
         self.peer_offered_psk = false;
         self.peer_offered_early_data = false;
         self.server_early_traffic_secret_derived = false;
+        self.peer_psk_binder_valid = false;
 
         // Copy pre-encoded transport parameters
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -1035,6 +1073,7 @@ pub const Tls13Handshake = struct {
         self.peer_offered_psk = false;
         self.peer_offered_early_data = false;
         self.server_early_traffic_secret_derived = false;
+        self.peer_psk_binder_valid = false;
 
         // Copy pre-encoded transport parameters (sent in EncryptedExtensions).
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -1864,6 +1903,11 @@ pub const Tls13Handshake = struct {
                         return error.DecodeError;
                     }
                     @memcpy(&self.peer_psk_binder, ext[pp..][0..binder_len]);
+                    // Record the binder's offset within the ClientHello
+                    // message so the truncated transcript hash can be
+                    // recomputed for verification. `ext` starts at body
+                    // offset (pos - el); binder starts at ext offset pp.
+                    self.peer_psk_binder_msg_offset = 4 + (pos - el) + pp;
                 },
                 else => {}, // ignore unrecognized extensions
             }
@@ -1873,14 +1917,32 @@ pub const Tls13Handshake = struct {
         if (!have_key_share) return error.NoKeyShare;
         if (self.config.alpn.len > 0 and self.negotiated_alpn_len == 0) return error.NoApplicationProtocol;
 
-        self.transcript.update(msg);
-        // If the server holds a PSK and the client offered one, derive the
-        // client early traffic secret over the ClientHello transcript so the
-        // server can open 0-RTT early data (RFC 8446 §7.1 + §2.2). This is
-        // the peer (receive) 0-RTT secret for the server.
-        if (self.server_psk != null and self.peer_offered_psk) {
-            self.server_early_traffic_secret = self.key_schedule.deriveEarlyTrafficSecret(self.transcript.current());
-            self.server_early_traffic_secret_derived = true;
+        // Update the transcript. When the client offered a PSK, split the
+        // update at the binder so the truncated transcript hash can be used
+        // to verify the binder (RFC 8446 §4.2.11).
+        if (self.peer_offered_psk) {
+            const binder_offset = self.peer_psk_binder_msg_offset;
+            self.transcript.update(msg[0..binder_offset]);
+            const truncated_hash = self.transcript.current();
+            self.transcript.update(msg[binder_offset..]);
+            // If the server holds a PSK, verify the binder and, on success,
+            // derive the client early traffic secret over the (now complete)
+            // ClientHello transcript so 0-RTT can be opened.
+            if (self.server_psk != null) {
+                const binder_key = self.key_schedule.deriveBinderKey();
+                const expected = KeySchedule.computeFinishedVerifyData(binder_key, truncated_hash);
+                self.peer_psk_binder_valid = std.crypto.timing_safe.eql(
+                    [32]u8,
+                    expected,
+                    self.peer_psk_binder,
+                );
+                if (self.peer_psk_binder_valid) {
+                    self.server_early_traffic_secret = self.key_schedule.deriveEarlyTrafficSecret(self.transcript.current());
+                    self.server_early_traffic_secret_derived = true;
+                }
+            }
+        } else {
+            self.transcript.update(msg);
         }
         self.state = .server_send_server_hello;
         return ._continue;
