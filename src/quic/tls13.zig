@@ -508,6 +508,26 @@ test "Tls13Handshake clientProcessPostHandshake drains NewSessionTicket from inp
     try std.testing.expect(hs.resumption_psk != null);
 }
 
+test "resumption PSK round-trips through initWithPsk" {
+    var ks = KeySchedule.init();
+    const shared_secret = [_]u8{0x01} ** 32;
+    const transcript = [_]u8{0x02} ** 32;
+    ks.deriveHandshakeSecrets(&shared_secret, transcript);
+    ks.deriveAppSecrets(transcript);
+    const rms = ks.deriveResumptionMasterSecret(transcript);
+    const nonce = [_]u8{0x03} ** 16;
+    const psk = KeySchedule.derivePskFromTicket(rms, &nonce);
+
+    // A resumed session seeds the key schedule with the PSK.
+    const resumed = KeySchedule.initWithPsk(psk);
+    const zeros = [_]u8{0} ** secret_len;
+    const expected_early = HkdfSha256.extract(&zeros, &psk);
+    try std.testing.expectEqualSlices(u8, &expected_early, &resumed.early_secret);
+    // The resumed early secret must differ from a fresh (no-PSK) early secret.
+    const fresh = KeySchedule.init();
+    try std.testing.expect(!std.mem.eql(u8, &resumed.early_secret, &fresh.early_secret));
+}
+
 test "TranscriptHash is empty hash on init" {
     const th = TranscriptHash.init();
     const hash = th.current();
