@@ -617,6 +617,22 @@ test "Tls13Handshake clientProcessNewSessionTicket stores session ticket" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xcc, 0xdd, 0xee, 0xff }, hs.session_ticket[0..4]);
 }
 
+test "PSK binder computes via computeFinishedVerifyData over binder key" {
+    const psk = [_]u8{0xab} ** secret_len;
+    const ks = KeySchedule.initWithPsk(psk);
+    const binder_key = ks.deriveBinderKey();
+    const transcript = [_]u8{0x02} ** 32;
+    const binder = KeySchedule.computeFinishedVerifyData(binder_key, transcript);
+    try std.testing.expectEqual(@as(usize, 32), binder.len);
+    // Deterministic.
+    const binder2 = KeySchedule.computeFinishedVerifyData(binder_key, transcript);
+    try std.testing.expectEqualSlices(u8, &binder, &binder2);
+    // Different transcript yields a different binder.
+    const transcript2 = [_]u8{0x03} ** 32;
+    const binder3 = KeySchedule.computeFinishedVerifyData(binder_key, transcript2);
+    try std.testing.expect(!std.mem.eql(u8, &binder, &binder3));
+}
+
 test "TranscriptHash is empty hash on init" {
     const th = TranscriptHash.init();
     const hash = th.current();
