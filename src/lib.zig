@@ -187,90 +187,6 @@ test "frame payload helper classifies packet type close error" {
     try std.testing.expectEqualStrings("packet type", close.reason_phrase);
 }
 
-const max_quic_varint = protocol_limits.max_quic_varint;
-const max_stream_count = protocol_limits.max_stream_count;
-const max_connection_id_len = protocol_limits.max_connection_id_len;
-const min_initial_destination_connection_id_len = protocol_limits.min_initial_destination_connection_id_len;
-const min_initial_udp_datagram_len = protocol_limits.min_initial_udp_datagram_len;
-const min_active_connection_id_limit = protocol_limits.min_active_connection_id_limit;
-const close_state_pto_multiplier = protocol_limits.close_state_pto_multiplier;
-const max_path_challenge_transmissions = protocol_limits.max_path_challenge_transmissions;
-const packet_threshold_loss_gap = protocol_limits.packet_threshold_loss_gap;
-const anti_amplification_multiplier = protocol_limits.anti_amplification_multiplier;
-
-const EcnAckValidationResult = connection_state.EcnAckValidationResult;
-const PendingStreamFrame = connection_state.PendingStreamFrame;
-const PendingCryptoFrame = connection_state.PendingCryptoFrame;
-const PendingRecvStreamFrame = connection_state.PendingRecvStreamFrame;
-const PendingBlockedFrame = connection_state.PendingBlockedFrame;
-const PendingMaxFrame = connection_state.PendingMaxFrame;
-const PendingCloseFrame = connection_state.PendingCloseFrame;
-const PeerCloseSnapshot = connection_state.PeerCloseSnapshot;
-const PendingPathChallenge = connection_state.PendingPathChallenge;
-const OutstandingPathChallenge = connection_state.OutstandingPathChallenge;
-const SentPacket = connection_state.SentPacket;
-const RttEstimateSnapshot = connection_state.RttEstimateSnapshot;
-const PtoBackoffSnapshot = connection_state.PtoBackoffSnapshot;
-const PacketNumberSpaceState = packet_number_space.State;
-const PacketNumberSpaceView = packet_number_space.View;
-const ActiveConnectionId = connection_state.ActiveConnectionId;
-const ActiveConnectionIdSnapshot = connection_state.ActiveConnectionIdSnapshot;
-const LocalConnectionId = connection_state.LocalConnectionId;
-const LocalConnectionIdSnapshot = connection_state.LocalConnectionIdSnapshot;
-const deinitPendingStreamFrameSlice = connection_state.deinitPendingStreamFrameSlice;
-const deinitPendingCryptoFrameSlice = connection_state.deinitPendingCryptoFrameSlice;
-const deinitSentPacketSlice = connection_state.deinitSentPacketSlice;
-const clearSentPacketList = connection_state.clearSentPacketList;
-const deinitSentPacketList = connection_state.deinitSentPacketList;
-const deinitPendingCloseFrame = connection_state.deinitPendingCloseFrame;
-const quicVarIntWireLen = wire_len.quicVarIntWireLen;
-const protectedLongDatagramWireLen = wire_len.protectedLongDatagramWireLen;
-const protectedLongPlaintextLenForMinDatagram = wire_len.protectedLongPlaintextLenForMinDatagram;
-const protectedShortDatagramWireLen = wire_len.protectedShortDatagramWireLen;
-const protectedShortPlaintextLenForMinDatagram = wire_len.protectedShortPlaintextLenForMinDatagram;
-const addWireLen = wire_len.addWireLen;
-const streamFrameWireLen = wire_len.streamFrameWireLen;
-const cryptoFrameWireLen = wire_len.cryptoFrameWireLen;
-const maxStreamFrameDataLen = wire_len.maxStreamFrameDataLen;
-const maxCryptoFrameDataLen = wire_len.maxCryptoFrameDataLen;
-const ackFrameWireLen = wire_len.ackFrameWireLen;
-const pathResponseFrameWireLen = wire_len.pathResponseFrameWireLen;
-const pathChallengeFrameWireLen = wire_len.pathChallengeFrameWireLen;
-const pingFrameWireLen = wire_len.pingFrameWireLen;
-const resetStreamFrameWireLen = wire_len.resetStreamFrameWireLen;
-const stopSendingFrameWireLen = wire_len.stopSendingFrameWireLen;
-const retireConnectionIdFrameWireLen = wire_len.retireConnectionIdFrameWireLen;
-const newConnectionIdFrameWireLen = wire_len.newConnectionIdFrameWireLen;
-const newTokenFrameWireLen = wire_len.newTokenFrameWireLen;
-const handshakeDoneFrameWireLen = wire_len.handshakeDoneFrameWireLen;
-const closeReasonLenWireLen = wire_len.closeReasonLenWireLen;
-const connectionCloseFrameWireLen = wire_len.connectionCloseFrameWireLen;
-const applicationCloseFrameWireLen = wire_len.applicationCloseFrameWireLen;
-const closeFrameWireLen = wire_len.closeFrameWireLen;
-const blockedFrameWireLen = wire_len.blockedFrameWireLen;
-const maxFrameWireLen = wire_len.maxFrameWireLen;
-const ackFrameRangesAreValid = frame_rules.ackFrameRangesAreValid;
-const ackFrameContains = frame_rules.ackFrameContains;
-const frameIsAckEliciting = frame_rules.frameIsAckEliciting;
-const frameAllowedInPacketNumberSpace = frame_rules.frameAllowedInPacketNumberSpace;
-const defaultFramePacketTypeForSpace = frame_rules.defaultFramePacketTypeForSpace;
-const packetNumberSpaceForFramePacketType = frame_rules.packetNumberSpaceForFramePacketType;
-const frameAllowedInFramePacketType = frame_rules.frameAllowedInFramePacketType;
-const zeroEcnCounts = packet_number_space.zeroEcnCounts;
-const protectedLongDatagramKeysForSpace = packet_context.protectedLongDatagramKeysForSpace;
-const streamEndOffset = stream_id_rules.endOffset;
-const streamRangesOverlap = stream_id_rules.rangesOverlap;
-const isBidirectionalStream = stream_id_rules.isBidirectional;
-const isLocalStreamInitiator = stream_id_rules.isLocalInitiator;
-const isLocalBidirectionalStream = stream_id_rules.isLocalBidirectional;
-const isLocalUnidirectionalStream = stream_id_rules.isLocalUnidirectional;
-const streamCountForId = stream_id_rules.countForId;
-
-const PeerTransportParameterValidationError = connection_rules.PeerTransportParameterValidationError;
-const peerTransportParameterValidationErrorAsPublic = connection_rules.peerTransportParameterValidationErrorAsPublic;
-const statelessResetTokensEqual = connection_rules.statelessResetTokensEqual;
-const validateInitialDestinationConnectionIdLength = connection_rules.validateInitialDestinationConnectionIdLength;
-
 /// Endpoint result after accepting Version Negotiation and creating the follow-up connection.
 pub const EndpointVersionNegotiationHandoffResult = struct {
     /// Version Negotiation endpoint state changes and follow-up route.
@@ -341,14 +257,6 @@ pub const EndpointCryptoBackendDriveView = struct {
     /// Scratch buffer used for backend pull and transport-parameter bytes.
     scratch: []u8,
 };
-
-fn endpointEcnPathState(state: EcnValidationState) endpoint.EcnPathValidationState {
-    return switch (state) {
-        .unknown => .unknown,
-        .capable => .capable,
-        .failed => .failed,
-    };
-}
 
 /// Endpoint-owned routing and recovery-timer lifecycle for connection handles.
 ///
