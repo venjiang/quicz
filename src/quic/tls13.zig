@@ -311,6 +311,49 @@ fn readU16(buf: []const u8) u16 {
     return std.mem.readInt(u16, buf[0..2], .big);
 }
 
+fn readU32(buf: []const u8) u32 {
+    return std.mem.readInt(u32, buf[0..4], .big);
+}
+
+/// Parsed NewSessionTicket handshake message (RFC 8446 §4.6.1).
+pub const NewSessionTicket = struct {
+    ticket_lifetime: u32,
+    ticket_age_add: u32,
+    ticket_nonce: []const u8,
+    ticket: []const u8,
+};
+
+/// Parse a NewSessionTicket handshake message (RFC 8446 §4.6.1). The
+/// `ticket_nonce` feeds `KeySchedule.derivePskFromTicket` to produce the
+/// resumption PSK. Slices reference `msg` and remain valid while it does.
+pub fn parseNewSessionTicket(msg: []const u8) HandshakeError!NewSessionTicket {
+    if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.new_session_ticket)) return error.UnexpectedMessage;
+    var pos: usize = 4;
+    if (pos + 4 > msg.len) return error.DecodeError;
+    const ticket_lifetime = readU32(msg[pos..]);
+    pos += 4;
+    if (pos + 4 > msg.len) return error.DecodeError;
+    const ticket_age_add = readU32(msg[pos..]);
+    pos += 4;
+    if (pos + 1 > msg.len) return error.DecodeError;
+    const nonce_len = msg[pos];
+    pos += 1;
+    if (pos + nonce_len > msg.len) return error.DecodeError;
+    const ticket_nonce = msg[pos .. pos + nonce_len];
+    pos += nonce_len;
+    if (pos + 2 > msg.len) return error.DecodeError;
+    const ticket_len = readU16(msg[pos..]);
+    pos += 2;
+    if (pos + ticket_len > msg.len) return error.DecodeError;
+    const ticket = msg[pos .. pos + ticket_len];
+    return .{
+        .ticket_lifetime = ticket_lifetime,
+        .ticket_age_add = ticket_age_add,
+        .ticket_nonce = ticket_nonce,
+        .ticket = ticket,
+    };
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────
 
 test "KeySchedule init is deterministic and differs from PSK" {
@@ -389,6 +432,30 @@ test "KeySchedule derivePskFromTicket is deterministic and nonce-dependent" {
     try std.testing.expect(!std.mem.eql(u8, &psk_a1, &psk_b));
     // PSK differs from the resumption master secret.
     try std.testing.expect(!std.mem.eql(u8, &psk_a1, &rms));
+}
+
+test "parseNewSessionTicket parses fields" {
+    const msg = [_]u8{
+        0x04, 0x00, 0x00, 0x18, // type=new_session_ticket, length=24
+        0x00, 0x00, 0x0e, 0x10, // ticket_lifetime=3600
+        0x00, 0x00, 0x00, 0x01, // ticket_age_add=1
+        0x02, 0xaa, 0xbb, // nonce_len=2, nonce=0xaabb
+        0x00, 0x04, 0xcc, 0xdd, 0xee, 0xff, // ticket_len=4, ticket=0xccddeeff
+    };
+    const nst = try parseNewSessionTicket(&msg);
+    try std.testing.expectEqual(@as(u32, 3600), nst.ticket_lifetime);
+    try std.testing.expectEqual(@as(u32, 1), nst.ticket_age_add);
+    try std.testing.expectEqual(@as(usize, 2), nst.ticket_nonce.len);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0xbb }, nst.ticket_nonce);
+    try std.testing.expectEqual(@as(usize, 4), nst.ticket.len);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xcc, 0xdd, 0xee, 0xff }, nst.ticket);
+}
+
+test "parseNewSessionTicket rejects wrong type and truncation" {
+    const wrong_type = [_]u8{ 0x01, 0x00, 0x00, 0x00 };
+    try std.testing.expectError(error.UnexpectedMessage, parseNewSessionTicket(&wrong_type));
+    const truncated = [_]u8{ 0x04, 0x00, 0x00, 0x00, 0x00 };
+    try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&truncated));
 }
 
 test "TranscriptHash is empty hash on init" {
