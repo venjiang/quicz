@@ -714,6 +714,51 @@ test "Tls13Handshake server parses client pre_shared_key and early_data extensio
     try std.testing.expect(!binder_is_zero);
 }
 
+test "Tls13Handshake initServerWithPsk derives matching client early traffic secret" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+
+    var client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+    const action = try client.step();
+    const client_hello = action.send_data.data;
+
+    var server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+    }, &tp, psk);
+    try std.testing.expect(server.server_psk != null);
+    try std.testing.expect(!server.server_early_traffic_secret_derived);
+    server.provideData(client_hello);
+    _ = try server.step();
+
+    // After parsing the ClientHello, the server has derived the client
+    // early traffic secret over the (shared) ClientHello transcript.
+    try std.testing.expect(server.server_early_traffic_secret_derived);
+
+    // Same PSK -> same early secret.
+    try std.testing.expectEqualSlices(u8, &client.key_schedule.early_secret, &server.key_schedule.early_secret);
+
+    // Recompute the expected secret directly from the ClientHello bytes the
+    // client sent: same PSK (early secret) + same ClientHello transcript.
+    var expected_ks = KeySchedule.initWithPsk(psk);
+    var expected_th = TranscriptHash.init();
+    expected_th.update(client_hello);
+    const expected = expected_ks.deriveEarlyTrafficSecret(expected_th.current());
+    try std.testing.expectEqualSlices(u8, &expected, &server.server_early_traffic_secret);
+
+    // The server's peer (receive) 0-RTT secret must equal the client's
+    // local (send) early traffic secret: same PSK -> same early secret,
+    // same ClientHello -> same transcript hash.
+    const client_early = client.key_schedule.deriveEarlyTrafficSecret(client.transcript.current());
+    try std.testing.expectEqualSlices(u8, &client_early, &server.server_early_traffic_secret);
+}
+
 test "TranscriptHash is empty hash on init" {
     const th = TranscriptHash.init();
     const hash = th.current();
@@ -894,6 +939,12 @@ pub const Tls13Handshake = struct {
     // client early traffic secret the client used to protect early data.
     server_psk: ?[secret_len]u8 = null,
 
+    // Server-side: the client early traffic secret derived over the
+    // ClientHello transcript once a matching PSK is in place. This is the
+    // peer (receive) 0-RTT secret for the server.
+    server_early_traffic_secret: [secret_len]u8 = undefined,
+    server_early_traffic_secret_derived: bool = false,
+
     // Server-side: the psk_identity offered by the client in its
     // pre_shared_key extension (parsed but not yet validated against a
     // ticket store). `peer_offered_psk` is set whenever the extension is
@@ -929,6 +980,7 @@ pub const Tls13Handshake = struct {
         self.peer_psk_identity_len = 0;
         self.peer_offered_psk = false;
         self.peer_offered_early_data = false;
+        self.server_early_traffic_secret_derived = false;
 
         // Copy pre-encoded transport parameters
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -982,6 +1034,7 @@ pub const Tls13Handshake = struct {
         self.peer_psk_identity_len = 0;
         self.peer_offered_psk = false;
         self.peer_offered_early_data = false;
+        self.server_early_traffic_secret_derived = false;
 
         // Copy pre-encoded transport parameters (sent in EncryptedExtensions).
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -995,6 +1048,18 @@ pub const Tls13Handshake = struct {
             break :blk X25519.recoverPublicKey(self.x25519_secret) catch unreachable;
         };
 
+        return self;
+    }
+
+    /// Initialize as a TLS 1.3 server configured with a PSK for accepting a
+    /// resumed client's 0-RTT early data. The PSK must match the one the
+    /// client used (extern_psk or a restored resumption_psk); the server
+    /// derives the client early traffic secret from it once the ClientHello
+    /// arrives.
+    pub fn initServerWithPsk(config: TlsConfig, transport_params: []const u8, psk: [secret_len]u8) Tls13Handshake {
+        var self = initServer(config, transport_params);
+        self.server_psk = psk;
+        self.key_schedule = KeySchedule.initWithPsk(psk);
         return self;
     }
 
@@ -1272,6 +1337,18 @@ pub const Tls13Handshake = struct {
             @memset(buf[pos..][0..binder_len], 0);
             pos += binder_len;
 
+            // Fill in extensions length + handshake header BEFORE the
+            // transcript update, so the binder is computed over the real
+            // header/lengths (matching what the server hashes).
+            self.out_len = pos;
+            const ext_len = pos - ext_start - 2;
+            writeU16(buf[ext_start..], @intCast(ext_len));
+            const msg_len = pos - 4;
+            buf[0] = @intFromEnum(HandshakeType.client_hello);
+            buf[1] = @intCast((msg_len >> 16) & 0xFF);
+            buf[2] = @intCast((msg_len >> 8) & 0xFF);
+            buf[3] = @intCast(msg_len & 0xFF);
+
             // Binder = computeFinishedVerifyData(binder_key, transcript hash
             // truncated at the binder list, i.e. up to and including the
             // binder_len byte, excluding the binder bytes).
@@ -1282,14 +1359,6 @@ pub const Tls13Handshake = struct {
             @memcpy(buf[binder_offset..][0..binder_len], &binder);
             self.transcript.update(buf[binder_offset..][0..binder_len]);
 
-            self.out_len = pos;
-            const ext_len = pos - ext_start - 2;
-            writeU16(buf[ext_start..], @intCast(ext_len));
-            const msg_len = pos - 4;
-            buf[0] = @intFromEnum(HandshakeType.client_hello);
-            buf[1] = @intCast((msg_len >> 16) & 0xFF);
-            buf[2] = @intCast((msg_len >> 8) & 0xFF);
-            buf[3] = @intCast(msg_len & 0xFF);
             self.state = .client_wait_server_hello;
             return Action{ .send_data = .{
                 .level = .initial,
@@ -1805,6 +1874,14 @@ pub const Tls13Handshake = struct {
         if (self.config.alpn.len > 0 and self.negotiated_alpn_len == 0) return error.NoApplicationProtocol;
 
         self.transcript.update(msg);
+        // If the server holds a PSK and the client offered one, derive the
+        // client early traffic secret over the ClientHello transcript so the
+        // server can open 0-RTT early data (RFC 8446 §7.1 + §2.2). This is
+        // the peer (receive) 0-RTT secret for the server.
+        if (self.server_psk != null and self.peer_offered_psk) {
+            self.server_early_traffic_secret = self.key_schedule.deriveEarlyTrafficSecret(self.transcript.current());
+            self.server_early_traffic_secret_derived = true;
+        }
         self.state = .server_send_server_hello;
         return ._continue;
     }

@@ -81,6 +81,7 @@ pub const Tls13Backend = struct {
     peer_tp_sent: bool = false,
     alpn_sent: bool = false,
     early_traffic_secret_sent: bool = false,
+    server_early_secret_sent: bool = false,
 
     /// Observability counters (never key material). Useful for interop
     /// debugging: how many CRYPTO bytes flowed in/out, how many drive errors.
@@ -105,6 +106,12 @@ pub const Tls13Backend = struct {
     /// ServerHello flight is pulled.
     pub fn initServer(config: TlsConfig) Tls13Backend {
         return .{ .hs = Tls13Handshake.initServer(config, &[_]u8{}) };
+    }
+
+    /// Initialize as a TLS 1.3 server configured with a PSK for accepting a
+    /// resumed client's 0-RTT early data. The PSK must match the client's.
+    pub fn initServerWithPsk(config: TlsConfig, psk: [tls13.secret_len]u8) Tls13Backend {
+        return .{ .hs = Tls13Handshake.initServerWithPsk(config, &[_]u8{}, psk) };
     }
 
     /// Return a `CryptoBackend` value whose callbacks drive this backend.
@@ -223,11 +230,19 @@ pub const Tls13Backend = struct {
 
     fn pullZeroRttTrafficSecrets(context: *anyopaque) Error!?ZeroRttTrafficSecrets {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
+        if (self.hs.is_server) {
+            // Server: expose the client early traffic secret as the peer
+            // (receive) 0-RTT secret once the ClientHello has been parsed
+            // and a matching PSK derived it. One-shot.
+            if (!self.hs.server_early_traffic_secret_derived or self.server_early_secret_sent) return null;
+            self.server_early_secret_sent = true;
+            return .{ .local = null, .peer = self.hs.server_early_traffic_secret };
+        }
         // The connection pulls traffic secrets before pulling CRYPTO bytes,
         // so for a PSK-resumed client the ClientHello may not be built yet.
         // Pump once to emit it (arming client_hello_built) so the early
         // traffic secret can be derived over the ClientHello transcript.
-        if (!self.hs.is_server and self.hs.has_psk and !self.client_hello_built) {
+        if (self.hs.has_psk and !self.client_hello_built) {
             self.pump() catch {
                 self.drive_errors += 1;
                 return error.CryptoError;
