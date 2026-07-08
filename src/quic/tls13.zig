@@ -458,6 +458,31 @@ test "parseNewSessionTicket rejects wrong type and truncation" {
     try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&truncated));
 }
 
+test "Tls13Handshake clientProcessNewSessionTicket derives and stores PSK" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp);
+    // Drive the key schedule to application secrets and mark connected so
+    // the post-handshake path is reachable.
+    const shared_secret = [_]u8{0x01} ** 32;
+    hs.key_schedule.deriveHandshakeSecrets(&shared_secret, hs.transcript.current());
+    hs.key_schedule.deriveAppSecrets(hs.transcript.current());
+    hs.state = .connected;
+
+    const nst_msg = [_]u8{
+        0x04, 0x00, 0x00, 0x12, // type=new_session_ticket, length=18
+        0x00, 0x00, 0x0e, 0x10, // ticket_lifetime=3600
+        0x00, 0x00, 0x00, 0x01, // ticket_age_add=1
+        0x02, 0xaa, 0xbb, // nonce_len=2, nonce=0xaabb
+        0x00, 0x04, 0xcc, 0xdd, 0xee, 0xff, // ticket_len=4, ticket
+    };
+    try hs.clientProcessNewSessionTicket(&nst_msg);
+    try std.testing.expect(hs.resumption_psk != null);
+}
+
 test "TranscriptHash is empty hash on init" {
     const th = TranscriptHash.init();
     const hash = th.current();
@@ -618,6 +643,10 @@ pub const Tls13Handshake = struct {
     cert_verify_sig: [1024]u8 = undefined,
     cert_verify_sig_len: usize = 0,
 
+    // Resumption PSK derived from a post-handshake NewSessionTicket (client
+    // side). Seeds `KeySchedule.initWithPsk` for a future resumed session.
+    resumption_psk: ?[secret_len]u8 = null,
+
     /// Initialize as a TLS 1.3 client.
     pub fn initClient(config: TlsConfig, transport_params: []const u8) Tls13Handshake {
         var self: Tls13Handshake = undefined;
@@ -636,6 +665,7 @@ pub const Tls13Handshake = struct {
         self.server_cert_len = 0;
         self.cert_verify_scheme = 0;
         self.cert_verify_sig_len = 0;
+        self.resumption_psk = null;
 
         // Copy pre-encoded transport parameters
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -671,6 +701,7 @@ pub const Tls13Handshake = struct {
         self.server_cert_len = 0;
         self.cert_verify_scheme = 0;
         self.cert_verify_sig_len = 0;
+        self.resumption_psk = null;
 
         // Copy pre-encoded transport parameters (sent in EncryptedExtensions).
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -773,6 +804,19 @@ pub const Tls13Handshake = struct {
 
     pub fn isComplete(self: *const Tls13Handshake) bool {
         return self.state == .connected;
+    }
+
+    /// Process a post-handshake NewSessionTicket message (client side, after
+    /// the handshake is complete). Derives the resumption PSK from the
+    /// resumption master secret and the ticket nonce, and stores it for a
+    /// future resumed session that can send 0-RTT early data
+    /// (RFC 8446 §4.6.1 + §7.1 + §8.1).
+    pub fn clientProcessNewSessionTicket(self: *Tls13Handshake, msg: []const u8) HandshakeError!void {
+        if (self.is_server) return error.UnexpectedMessage;
+        if (self.state != .connected) return error.UnexpectedMessage;
+        const nst = try parseNewSessionTicket(msg);
+        const rms = self.key_schedule.deriveResumptionMasterSecret(self.transcript.current());
+        self.resumption_psk = KeySchedule.derivePskFromTicket(rms, nst.ticket_nonce);
     }
 
     /// Build a ClientHello message with ALPN, SNI, key_share, and QUIC
