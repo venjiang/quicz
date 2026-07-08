@@ -120,6 +120,13 @@ pub const KeySchedule = struct {
         return expandLabel(self.master_secret, "res master", &transcript_hash, secret_len);
     }
 
+    /// Derive a PSK from the resumption master secret and a NewSessionTicket
+    /// nonce (RFC 8446 §8.1). The resulting PSK seeds `initWithPsk` for a
+    /// resumed session that can send 0-RTT early data.
+    pub fn derivePskFromTicket(resumption_master_secret: [secret_len]u8, ticket_nonce: []const u8) [secret_len]u8 {
+        return expandLabel(resumption_master_secret, "resumption", ticket_nonce, secret_len);
+    }
+
     /// Derive QUIC packet protection keys from a traffic secret (RFC 9001 §5.1).
     pub fn deriveQuicKeys(
         traffic_secret: [secret_len]u8,
@@ -362,6 +369,26 @@ test "KeySchedule deriveResumptionMasterSecret is deterministic and distinct" {
     // Resumption master secret must differ from the app traffic secrets.
     try std.testing.expect(!std.mem.eql(u8, &rms1, &ks.client_app_traffic_secret));
     try std.testing.expect(!std.mem.eql(u8, &rms1, &ks.server_app_traffic_secret));
+}
+
+test "KeySchedule derivePskFromTicket is deterministic and nonce-dependent" {
+    var ks = KeySchedule.init();
+    const shared_secret = [_]u8{0x01} ** 32;
+    const transcript = [_]u8{0x02} ** 32;
+    ks.deriveHandshakeSecrets(&shared_secret, transcript);
+    ks.deriveAppSecrets(transcript);
+    const rms = ks.deriveResumptionMasterSecret(transcript);
+    const nonce_a = [_]u8{0x03} ** 16;
+    const nonce_b = [_]u8{0x04} ** 16;
+    const psk_a1 = KeySchedule.derivePskFromTicket(rms, &nonce_a);
+    const psk_a2 = KeySchedule.derivePskFromTicket(rms, &nonce_a);
+    const psk_b = KeySchedule.derivePskFromTicket(rms, &nonce_b);
+    try std.testing.expectEqual(@as(usize, secret_len), psk_a1.len);
+    try std.testing.expectEqualSlices(u8, &psk_a1, &psk_a2);
+    // Different ticket nonces yield different PSKs.
+    try std.testing.expect(!std.mem.eql(u8, &psk_a1, &psk_b));
+    // PSK differs from the resumption master secret.
+    try std.testing.expect(!std.mem.eql(u8, &psk_a1, &rms));
 }
 
 test "TranscriptHash is empty hash on init" {
