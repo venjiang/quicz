@@ -79,6 +79,7 @@ pub const Tls13Backend = struct {
     one_rtt_secrets_sent: bool = false,
     peer_tp_sent: bool = false,
     alpn_sent: bool = false,
+    early_traffic_secret_sent: bool = false,
 
     /// Observability counters (never key material). Useful for interop
     /// debugging: how many CRYPTO bytes flowed in/out, how many drive errors.
@@ -91,6 +92,11 @@ pub const Tls13Backend = struct {
     /// ClientHello is pulled; pass them there rather than to `initClient`.
     pub fn initClient(config: TlsConfig) Tls13Backend {
         return .{ .hs = Tls13Handshake.initClient(config, &[_]u8{}) };
+    }
+
+    /// Initialize as a TLS 1.3 client with a resumption PSK for 0-RTT.
+    pub fn initClientWithPsk(config: TlsConfig, psk: [tls13.secret_len]u8) Tls13Backend {
+        return .{ .hs = Tls13Handshake.initClientWithPsk(config, &[_]u8{}, psk) };
     }
 
     /// Initialize as a TLS 1.3 server. Transport parameters are supplied by
@@ -220,6 +226,16 @@ pub const Tls13Backend = struct {
         return self.hs.resumption_psk;
     }
 
+    /// Return the client early traffic secret for 0-RTT, or null when the
+    /// client has no PSK or the ClientHello has not been built yet. The
+    /// secret protects 0-RTT early data; the caller derives packet-protection
+    /// keys via `protection.deriveAes128PacketProtectionKeys`. One-shot.
+    pub fn pullEarlyTrafficSecret(self: *Tls13Backend) ?[tls13.secret_len]u8 {
+        if (!self.hs.has_psk or self.early_traffic_secret_sent or !self.client_hello_built) return null;
+        self.early_traffic_secret_sent = true;
+        return self.hs.key_schedule.deriveEarlyTrafficSecret(self.hs.transcript.current());
+    }
+
     /// Write TLS 1.3 secrets in NSS key-log format to `writer` for
     /// SSLKEYLOGFILE / Wireshark debugging. Call after handshake secrets are
     /// available. Never prints private key material — only derived traffic
@@ -297,6 +313,24 @@ test "Tls13Backend resumptionPsk returns stored PSK" {
     const psk = backend.resumptionPsk().?;
     try std.testing.expectEqual(@as(usize, tls13.secret_len), psk.len);
     try std.testing.expectEqual(@as(u8, 0x01), psk[0]);
+}
+
+test "Tls13Backend pullEarlyTrafficSecret returns 0-RTT secret after ClientHello" {
+    var backend = Tls13Backend.initClientWithPsk(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    }, [_]u8{0xab} ** tls13.secret_len);
+    // Before the ClientHello is built, no early secret.
+    try std.testing.expect(backend.pullEarlyTrafficSecret() == null);
+    // Drive the ClientHello via the CryptoBackend pull hook (triggers pump).
+    var cb = backend.cryptoBackend();
+    var out_buf: [4096]u8 = undefined;
+    _ = cb.pull(cb.context, .initial, &out_buf) catch {};
+    // After the ClientHello is built, the early traffic secret is available.
+    const early = backend.pullEarlyTrafficSecret() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, tls13.secret_len), early.len);
+    // One-shot: a second pull returns null.
+    try std.testing.expect(backend.pullEarlyTrafficSecret() == null);
 }
 
 test "Tls13Backend drives a full client handshake through CryptoBackend hooks" {
