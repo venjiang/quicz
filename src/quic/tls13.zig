@@ -633,6 +633,36 @@ test "PSK binder computes via computeFinishedVerifyData over binder key" {
     try std.testing.expect(!std.mem.eql(u8, &binder, &binder3));
 }
 
+test "Tls13Handshake ClientHello includes pre_shared_key when has_psk" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+    var hs = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    // Provide a session ticket so pre_shared_key is emitted.
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(hs.session_ticket[0..ticket.len], &ticket);
+    hs.session_ticket_len = ticket.len;
+
+    const action = try hs.step();
+    try std.testing.expect(action == .send_data);
+    const data = action.send_data.data;
+    // ClientHello type
+    try std.testing.expectEqual(@as(u8, 1), data[0]);
+    // Find pre_shared_key extension (0x0029) in the data.
+    var found_psk = false;
+    var i: usize = 0;
+    while (i + 4 < data.len) : (i += 1) {
+        if (data[i] == 0x00 and data[i + 1] == 0x29) {
+            found_psk = true;
+            break;
+        }
+    }
+    try std.testing.expect(found_psk);
+}
+
 test "TranscriptHash is empty hash on init" {
     const th = TranscriptHash.init();
     const hash = th.current();
@@ -694,6 +724,7 @@ const ExtType = enum(u16) {
     supported_groups = 0x000A,
     signature_algorithms = 0x000D,
     alpn = 0x0010,
+    pre_shared_key = 0x0029,
     psk_key_exchange_modes = 0x002D,
     early_data = 0x002A,
     supported_versions = 0x002B,
@@ -1126,6 +1157,64 @@ pub const Tls13Handshake = struct {
         pos += 1;
         buf[pos] = 0x01; // psk_dhe_ke
         pos += 1;
+
+        // pre_shared_key (MUST be last; RFC 8446 §4.2.11) when a resumption
+        // PSK + ticket are available. The binder is computed over the
+        // ClientHello transcript truncated at the binder list.
+        if (self.has_psk and self.session_ticket_len > 0) {
+            const ticket_len = self.session_ticket_len;
+            const identity_len = 2 + ticket_len + 4;
+            const identities_len = identity_len;
+            const binder_len: usize = 32;
+            const binders_len = 1 + binder_len;
+            const psk_ext_data_len = 2 + identities_len + 2 + binders_len;
+            pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.pre_shared_key), psk_ext_data_len);
+            // identities
+            writeU16(buf[pos..], @intCast(identities_len));
+            pos += 2;
+            writeU16(buf[pos..], @intCast(ticket_len));
+            pos += 2;
+            @memcpy(buf[pos..][0..ticket_len], self.session_ticket[0..ticket_len]);
+            pos += ticket_len;
+            // obfuscated_ticket_age: 0 (no timing for this skeleton)
+            buf[pos] = 0;
+            buf[pos + 1] = 0;
+            buf[pos + 2] = 0;
+            buf[pos + 3] = 0;
+            pos += 4;
+            // binders
+            writeU16(buf[pos..], @intCast(binders_len));
+            pos += 2;
+            buf[pos] = @intCast(binder_len);
+            pos += 1;
+            const binder_offset = pos;
+            @memset(buf[pos..][0..binder_len], 0);
+            pos += binder_len;
+
+            // Binder = computeFinishedVerifyData(binder_key, transcript hash
+            // truncated at the binder list, i.e. up to and including the
+            // binder_len byte, excluding the binder bytes).
+            self.transcript.update(buf[0..binder_offset]);
+            const th = self.transcript.current();
+            const binder_key = self.key_schedule.deriveBinderKey();
+            const binder = KeySchedule.computeFinishedVerifyData(binder_key, th);
+            @memcpy(buf[binder_offset..][0..binder_len], &binder);
+            self.transcript.update(buf[binder_offset..][0..binder_len]);
+
+            self.out_len = pos;
+            const ext_len = pos - ext_start - 2;
+            writeU16(buf[ext_start..], @intCast(ext_len));
+            const msg_len = pos - 4;
+            buf[0] = @intFromEnum(HandshakeType.client_hello);
+            buf[1] = @intCast((msg_len >> 16) & 0xFF);
+            buf[2] = @intCast((msg_len >> 8) & 0xFF);
+            buf[3] = @intCast(msg_len & 0xFF);
+            self.state = .client_wait_server_hello;
+            return Action{ .send_data = .{
+                .level = .initial,
+                .data = self.out_buf[0..self.out_len],
+            } };
+        }
 
         // Fill in extensions length
         const ext_len = pos - ext_start - 2;
