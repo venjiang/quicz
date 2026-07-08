@@ -592,6 +592,31 @@ test "KeySchedule deriveBinderKey is deterministic and PSK-dependent" {
     try std.testing.expect(!std.mem.eql(u8, &binder1, &early));
 }
 
+test "Tls13Handshake clientProcessNewSessionTicket stores session ticket" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp);
+    const shared_secret = [_]u8{0x01} ** 32;
+    hs.key_schedule.deriveHandshakeSecrets(&shared_secret, hs.transcript.current());
+    hs.key_schedule.deriveAppSecrets(hs.transcript.current());
+    hs.state = .connected;
+
+    const nst_msg = [_]u8{
+        0x04, 0x00, 0x00, 0x11,
+        0x00, 0x00, 0x0e, 0x10,
+        0x00, 0x00, 0x00, 0x01,
+        0x02, 0xaa, 0xbb, 0x00,
+        0x04, 0xcc, 0xdd, 0xee,
+        0xff,
+    };
+    try hs.clientProcessNewSessionTicket(&nst_msg);
+    try std.testing.expectEqual(@as(usize, 4), hs.session_ticket_len);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xcc, 0xdd, 0xee, 0xff }, hs.session_ticket[0..4]);
+}
+
 test "TranscriptHash is empty hash on init" {
     const th = TranscriptHash.init();
     const hash = th.current();
@@ -760,6 +785,11 @@ pub const Tls13Handshake = struct {
     // 0-RTT early data in the ClientHello.
     has_psk: bool = false,
 
+    // Session ticket from a post-handshake NewSessionTicket (client side).
+    // Carried in the pre_shared_key extension of a resumed ClientHello.
+    session_ticket: [4096]u8 = undefined,
+    session_ticket_len: usize = 0,
+
     /// Initialize as a TLS 1.3 client.
     pub fn initClient(config: TlsConfig, transport_params: []const u8) Tls13Handshake {
         var self: Tls13Handshake = undefined;
@@ -779,6 +809,8 @@ pub const Tls13Handshake = struct {
         self.cert_verify_scheme = 0;
         self.cert_verify_sig_len = 0;
         self.resumption_psk = null;
+        self.has_psk = false;
+        self.session_ticket_len = 0;
 
         // Copy pre-encoded transport parameters
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -826,6 +858,8 @@ pub const Tls13Handshake = struct {
         self.cert_verify_scheme = 0;
         self.cert_verify_sig_len = 0;
         self.resumption_psk = null;
+        self.has_psk = false;
+        self.session_ticket_len = 0;
 
         // Copy pre-encoded transport parameters (sent in EncryptedExtensions).
         const tp_len = @min(transport_params.len, self.tp_encoded.len);
@@ -941,6 +975,9 @@ pub const Tls13Handshake = struct {
         const nst = try parseNewSessionTicket(msg);
         const rms = self.key_schedule.deriveResumptionMasterSecret(self.transcript.current());
         self.resumption_psk = KeySchedule.derivePskFromTicket(rms, nst.ticket_nonce);
+        const ticket_len = @min(nst.ticket.len, self.session_ticket.len);
+        @memcpy(self.session_ticket[0..ticket_len], nst.ticket[0..ticket_len]);
+        self.session_ticket_len = ticket_len;
     }
 
     /// Process buffered post-handshake messages (client side, after the
