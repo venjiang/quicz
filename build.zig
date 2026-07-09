@@ -226,6 +226,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_tls13_stateless_reset_loopback);
 
+    // Pure-Zig TLS 1.3 path validation over UDP loopback executable
+    const exe_tls13_path_validation_loopback = b.addExecutable(.{
+        .name = "quicz-tls13-path-validation-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tls13_path_validation_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_tls13_path_validation_loopback);
+
     // TLS C ABI adapter executable
     const exe_tls_c_abi_adapter = b.addExecutable(.{
         .name = "quicz-tls-c-abi-adapter",
@@ -1408,6 +1422,12 @@ pub fn build(b: *std.Build) void {
     const run_tls13_stateless_reset_loopback_cmd = b.addRunArtifact(exe_tls13_stateless_reset_loopback);
     run_tls13_stateless_reset_loopback.dependOn(&run_tls13_stateless_reset_loopback_cmd.step);
     run_tls13_stateless_reset_loopback_cmd.step.dependOn(b.getInstallStep());
+
+    // zig build run-tls13-path-validation-loopback
+    const run_tls13_path_validation_loopback = b.step("run-tls13-path-validation-loopback", "Run pure-Zig TLS 1.3 path validation UDP loopback");
+    const run_tls13_path_validation_loopback_cmd = b.addRunArtifact(exe_tls13_path_validation_loopback);
+    run_tls13_path_validation_loopback.dependOn(&run_tls13_path_validation_loopback_cmd.step);
+    run_tls13_path_validation_loopback_cmd.step.dependOn(b.getInstallStep());
 
     const test_step = b.step("test", "Run quicz unit tests");
     test_step.dependOn(&run_lib_tests.step);
