@@ -7649,6 +7649,18 @@ pub const Connection = struct {
 
         if (try backend.pullZeroRttTrafficSecrets()) |secrets| {
             try self.installZeroRttTrafficSecrets(secrets);
+            // Server-side application policy (RFC 9001 §8): when configured to
+            // accept 0-RTT, accept installed peer receive keys automatically so
+            // early data is delivered to streams. When disabled (the safe
+            // default), keys stay installed but not accepted, so
+            // `processProtectedZeroRttDatagramWithInstalledKeys` rejects
+            // early-data packets. Clients only carry `local` 0-RTT secrets and
+            // are unaffected by this gate; application layers retain the manual
+            // `acceptZeroRtt()`/`rejectZeroRtt()` override for anti-replay
+            // checks.
+            if (secrets.peer != null and self.config.accept_zero_rtt) {
+                try self.acceptZeroRtt();
+            }
             progress.zero_rtt_keys_installed = true;
         }
 
@@ -70759,6 +70771,202 @@ test "Tls13Backend + Connection: rejectZeroRtt drops early data on TLS-owned pat
     // No early data was delivered to the stream.
     var recv_buf: [32]u8 = undefined;
     try std.testing.expect((try server.recvOnStream(stream_id, &recv_buf)) == null);
+}
+
+test "Tls13Backend + Connection: accept_zero_rtt config auto-accepts early data" {
+    const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const alpn = [_][]const u8{"hq-interop"};
+    const psk = [_]u8{0xab} ** tls13.secret_len;
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    const seed = [_]u8{0x55} ** 32;
+    const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const server_priv = server_kp.secret_key.bytes;
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    // Server is configured to accept 0-RTT: drive should auto-accept installed
+    // peer 0-RTT receive keys without a manual acceptZeroRtt() call.
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+        .accept_zero_rtt = true,
+    });
+    defer server.deinit();
+    try client.setLocalInitialSourceConnectionId(&client_scid);
+    try server.setLocalInitialSourceConnectionId(&server_scid);
+
+    var client_backend = tls13_backend.Tls13Backend.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    }, psk);
+    @memcpy(client_backend.hs.session_ticket[0..ticket.len], &ticket);
+    client_backend.hs.session_ticket_len = ticket.len;
+
+    var server_backend = tls13_backend.Tls13Backend.initServerWithPsk(.{
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    }, psk);
+
+    var scratch: [8192]u8 = undefined;
+
+    // Client drives Initial: builds ClientHello + installs 0-RTT local keys.
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    try std.testing.expect(client.hasLocalZeroRttProtectionKey());
+
+    const ch = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        0,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(ch);
+
+    // Server parses the PSK offer, verifies the binder, derives the early
+    // secret, installs peer 0-RTT keys, and auto-accepts them per config.
+    try server.processProtectedLongDatagramInSpace(.initial, 1, secrets.client, ch);
+    _ = try server.driveCryptoBackendInSpace(.initial, server_backend.cryptoBackend(), &scratch);
+    try std.testing.expect(server_backend.hs.peer_psk_binder_valid);
+    try std.testing.expect(server.hasPeerZeroRttProtectionKey());
+    try std.testing.expect(server.zeroRttAccepted());
+
+    // Client emits 0-RTT early data on a stream before the handshake finishes.
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "early data", true);
+    const zero_rtt = (try client.pollProtectedZeroRttDatagramWithInstalledKeys(
+        2,
+        &server_scid,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(zero_rtt);
+
+    // Server opens the 0-RTT datagram with auto-accepted peer keys.
+    try server.processProtectedZeroRttDatagramWithInstalledKeys(3, zero_rtt);
+    var recv_buf: [32]u8 = undefined;
+    const recv_len = (try server.recvOnStream(stream_id, &recv_buf)) orelse return error.UnexpectedState;
+    try std.testing.expectEqualStrings("early data", recv_buf[0..recv_len]);
+}
+
+test "Tls13Backend + Connection: accept_zero_rtt=false ignores early data" {
+    const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const alpn = [_][]const u8{"hq-interop"};
+    const psk = [_]u8{0xab} ** tls13.secret_len;
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    const seed = [_]u8{0x55} ** 32;
+    const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const server_priv = server_kp.secret_key.bytes;
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    // Server keeps the safe default accept_zero_rtt=false: drive installs peer
+    // 0-RTT keys but does not accept them, so early data is ignored without a
+    // manual acceptZeroRtt()/rejectZeroRtt() call.
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try client.setLocalInitialSourceConnectionId(&client_scid);
+    try server.setLocalInitialSourceConnectionId(&server_scid);
+
+    var client_backend = tls13_backend.Tls13Backend.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    }, psk);
+    @memcpy(client_backend.hs.session_ticket[0..ticket.len], &ticket);
+    client_backend.hs.session_ticket_len = ticket.len;
+
+    var server_backend = tls13_backend.Tls13Backend.initServerWithPsk(.{
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    }, psk);
+
+    var scratch: [8192]u8 = undefined;
+
+    // Client drives Initial: builds ClientHello + installs 0-RTT local keys.
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    try std.testing.expect(client.hasLocalZeroRttProtectionKey());
+
+    const ch = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        0,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(ch);
+
+    // Server parses the PSK offer, verifies the binder, derives the early
+    // secret, and installs peer 0-RTT keys. The configured policy left the
+    // keys installed but not accepted.
+    try server.processProtectedLongDatagramInSpace(.initial, 1, secrets.client, ch);
+    _ = try server.driveCryptoBackendInSpace(.initial, server_backend.cryptoBackend(), &scratch);
+    try std.testing.expect(server_backend.hs.peer_psk_binder_valid);
+    try std.testing.expect(server.hasPeerZeroRttProtectionKey());
+    try std.testing.expect(!server.zeroRttAccepted());
+
+    // Client still emits 0-RTT early data (it does not yet know the server
+    // will ignore it).
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, "early data", true);
+    const zero_rtt = (try client.pollProtectedZeroRttDatagramWithInstalledKeys(
+        2,
+        &server_scid,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(zero_rtt);
+
+    // Server cannot open the 0-RTT datagram: keys are installed but not
+    // accepted per the configured policy.
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedZeroRttDatagramWithInstalledKeys(3, zero_rtt),
+    );
+
+    // No early data was delivered to the stream.
+    var recv_buf: [32]u8 = undefined;
+    try std.testing.expect((try server.recvOnStream(stream_id, &recv_buf)) == null);
+
+    // Once 1-RTT keys are installed, the client discards its 0-RTT send keys
+    // (RFC 9001 §8: client stops sending 0-RTT once 1-RTT is available) and
+    // communication continues over 1-RTT.
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try std.testing.expect(!client.hasLocalZeroRttProtectionKey());
 }
 
 test "checkPtoTimeouts discards retained peer previous key after one PTO" {

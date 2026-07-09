@@ -167,4 +167,21 @@ pub const Config = struct {
     /// spin values. Future endpoint path state can reset this value when a new
     /// path or destination CID is selected.
     enable_spin_bit: bool = false,
+    /// Server-side application policy for accepting client 0-RTT early data on
+    /// resumed PSK connections (RFC 9001 §8 "0-RTT Replay" + RFC 9000 §8.3
+    /// "Anti-replay").
+    ///
+    /// When false (the safe default), `driveCryptoBackendInSpace` installs peer
+    /// 0-RTT receive keys exposed by the TLS backend but does not accept them,
+    /// so `processProtectedZeroRttDatagramWithInstalledKeys` rejects early-data
+    /// packets and 0-RTT is ignored before the handshake completes. Callers
+    /// retain the manual `acceptZeroRtt()`/`rejectZeroRtt()` override to apply
+    /// anti-replay checks before deciding.
+    ///
+    /// When true, `driveCryptoBackendInSpace` accepts installed peer 0-RTT keys
+    /// automatically once the TLS backend exposes them, so early data is
+    /// delivered to streams. Servers that enable this must run anti-replay
+    /// defenses (single-use PSK identities, address-validation tokens) outside
+    /// the connection because 0-RTT is vulnerable to replay.
+    accept_zero_rtt: bool = false,
 };
