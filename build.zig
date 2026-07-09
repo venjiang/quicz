@@ -212,6 +212,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_tls13_lifecycle_loopback);
 
+    // Pure-Zig TLS 1.3 stateless reset over UDP loopback executable
+    const exe_tls13_stateless_reset_loopback = b.addExecutable(.{
+        .name = "quicz-tls13-stateless-reset-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tls13_stateless_reset_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_tls13_stateless_reset_loopback);
+
     // TLS C ABI adapter executable
     const exe_tls_c_abi_adapter = b.addExecutable(.{
         .name = "quicz-tls-c-abi-adapter",
@@ -1389,7 +1403,12 @@ pub fn build(b: *std.Build) void {
     run_tls13_lifecycle_loopback.dependOn(&run_tls13_lifecycle_loopback_cmd.step);
     run_tls13_lifecycle_loopback_cmd.step.dependOn(b.getInstallStep());
 
+    // zig build run-tls13-stateless-reset-loopback
+    const run_tls13_stateless_reset_loopback = b.step("run-tls13-stateless-reset-loopback", "Run pure-Zig TLS 1.3 stateless reset UDP loopback");
+    const run_tls13_stateless_reset_loopback_cmd = b.addRunArtifact(exe_tls13_stateless_reset_loopback);
+    run_tls13_stateless_reset_loopback.dependOn(&run_tls13_stateless_reset_loopback_cmd.step);
+    run_tls13_stateless_reset_loopback_cmd.step.dependOn(b.getInstallStep());
+
     const test_step = b.step("test", "Run quicz unit tests");
     test_step.dependOn(&run_lib_tests.step);
 }
-
