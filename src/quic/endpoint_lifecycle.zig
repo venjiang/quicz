@@ -21453,6 +21453,52 @@ pub const EndpointConnectionLifecycle = struct {
         return route;
     }
 
+    /// Route and process one installed-key protected 1-RTT datagram, commit a
+    /// validated path migration, and propagate close on frame errors.
+    ///
+    /// This is the installed-key counterpart of
+    /// `processRoutedProtectedShortDatagramAndUpdatePathOrClose()`: it uses the
+    /// connection's installed 1-RTT keys instead of caller-supplied keys, and
+    /// commits a route path update only when the packet routes to
+    /// `connection_id`, authentication/frame processing succeeds, the routed
+    /// tuple differs from the stored route, and the connection consumes at
+    /// least one outstanding PATH_CHALLENGE.
+    pub fn processRoutedProtectedShortDatagramWithInstalledKeysAndUpdatePathOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+    ) EndpointProtectedDatagramError!EndpointPathValidatedShortDatagramResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+
+        const outstanding_before = connection.outstandingPathChallengeCount();
+        try self.processProtectedShortDatagramWithInstalledKeysOrClose(
+            connection_id,
+            connection,
+            now_millis,
+            route.destination_connection_id.asSlice().len,
+            datagram,
+        );
+
+        const outstanding_after = connection.outstandingPathChallengeCount();
+        const updated_route: ?endpoint.RouteResult = if (route.path_changed and outstanding_after < outstanding_before)
+            try self.updateRoutePathFromValidatedDatagramAndResetSpinBit(
+                route.destination_connection_id.asSlice(),
+                path,
+                connection,
+            )
+        else
+            null;
+
+        return .{
+            .route = route,
+            .updated_route = updated_route,
+        };
+    }
+
     /// Process one installed-key 1-RTT datagram and select the next wakeup.
     ///
     /// This is the no-output receive step for endpoint loops that want to

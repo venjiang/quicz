@@ -3,21 +3,19 @@
 //! 在 TLS-owned UDP 路径上验证 path validation：用 Tls13Backend 完成真实
 //! TLS 1.3 握手安装 1-RTT keys，client 从新 socket 发 1-RTT PING 触发
 //! server 检测路径变化（NAT 重绑定模拟），server 发 PATH_CHALLENGE 到新
-//! 路径，client 回 PATH_RESPONSE，server 验证后手动 commit lifecycle
-//! route path update（路径迁移）。
+//! 路径，client 回 PATH_RESPONSE，server 验证后由 core API 自动 commit
+//! lifecycle route path update（路径迁移）。
 //!
 //! 组合参考：
 //!   - tls13_udp_loopback.zig / tls13_stateless_reset_loopback.zig（Tls13Backend 握手）
 //!   - udp_path_validation_loopback.zig（mock-key path validation + route commit）
 //!
-//! Core 缺口：lifecycle 没有提供 installed-key + 自动 path update commit
-//! 的组合函数。`processRoutedProtectedShortDatagramWithInstalledKeys` /
-//! `...OrClose` 只返回 `RouteResult`（含 path_changed），不调用
-//! `updateRoutePathFromValidatedDatagramAndResetSpinBit`。本 example 手动
-//! 复刻 mock-key `processRoutedProtectedShortDatagramAndUpdatePathOrClose`
-//! 的 commit 逻辑：当 `outstandingPathChallengeCount()` 在收到
-//! PATH_RESPONSE 后减少时，手动调用
-//! `updateRoutePathFromValidatedDatagramAndResetSpinBit` 提交路径迁移。
+//! Core 集成：lifecycle 提供 installed-key + 自动 path update commit 的
+//! 组合函数 `processRoutedProtectedShortDatagramWithInstalledKeysAndUpdatePathOrClose`
+//! （对称于 mock-key 版 `processRoutedProtectedShortDatagramAndUpdatePathOrClose`）：
+//! 在 `path_changed` 且 `outstandingPathChallengeCount()` 收到 PATH_RESPONSE
+//! 后减少时，自动调用 `updateRoutePathFromValidatedDatagramAndResetSpinBit`
+//! 提交路径迁移。
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -279,14 +277,12 @@ pub fn main() !void {
     }
     try require(response_sent);
 
-    // === server 收 PATH_RESPONSE，验证路径，手动 commit route path update ===
-    // installed-key 路径无自动 commit 封装，手动复刻 mock-key
-    // processRoutedProtectedShortDatagramAndUpdatePathOrClose 的 commit 逻辑：
-    // 检查 outstandingPathChallengeCount 在处理前后是否减少（PATH_RESPONSE
-    // 消耗了 outstanding PATH_CHALLENGE），若是则调用
-    // updateRoutePathFromValidatedDatagramAndResetSpinBit 提交路径迁移。
+    // === server 收 PATH_RESPONSE，验证路径，core API 自动 commit route path update ===
+    // processRoutedProtectedShortDatagramWithInstalledKeysAndUpdatePathOrClose 在
+    // path_changed 且 outstandingPathChallengeCount() 减少时自动调用
+    // updateRoutePathFromValidatedDatagramAndResetSpinBit 提交路径迁移
+    // （对称于 mock-key 版 processRoutedProtectedShortDatagramAndUpdatePathOrClose）。
     var response_path: endpoint.Udp4Tuple = undefined;
-    var response_route: endpoint.RouteResult = undefined;
     var outstanding_before: usize = 0;
     var outstanding_after: usize = 0;
     var response_bytes: usize = 0;
@@ -297,7 +293,7 @@ pub fn main() !void {
             const recv = server_socket.receiveTimeout(io, &recv_buf, recvTimeout()) catch break;
             const path = try udp4Tuple(server_socket.address, recv.from);
             outstanding_before = server.outstandingPathChallengeCount();
-            const route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(
+            const result = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndUpdatePathOrClose(
                 server_handle,
                 &server,
                 path,
@@ -305,10 +301,9 @@ pub fn main() !void {
                 recv.data,
             );
             outstanding_after = server.outstandingPathChallengeCount();
-            if (outstanding_after < outstanding_before) {
-                // PATH_RESPONSE 被处理，outstanding PATH_CHALLENGE 消耗。
+            if (result.updated_route != null) {
+                // PATH_RESPONSE 被处理，outstanding PATH_CHALLENGE 消耗，route 已 commit。
                 response_path = path;
-                response_route = route;
                 response_bytes = recv.data.len;
                 path_validated = true;
                 break;
@@ -318,18 +313,6 @@ pub fn main() !void {
     try require(path_validated);
     try require(outstanding_before == 1);
     try require(outstanding_after == 0);
-    try require(response_route.connection_id == server_handle);
-    try require(response_route.path_changed);
-    try require(std.mem.eql(u8, response_route.destination_connection_id.asSlice(), &server_scid));
-
-    // 手动 commit route path update（模拟 mock-key 版的自动 commit）。
-    // 这将 lifecycle route 从 old_path 迁移到 new_path，并重置 spin-bit。
-    const updated_route = try server_lifecycle.updateRoutePathFromValidatedDatagramAndResetSpinBit(
-        response_route.destination_connection_id.asSlice(),
-        response_path,
-        &server,
-    );
-    try require(updated_route.connection_id == server_handle);
 
     // 验证 route 已迁移：新路径成为当前路径，routeDatagram 不再报 path_changed。
     // 用 ping_dgram（DCID=server_scid）在新路径上路由，确认 path_changed=false。

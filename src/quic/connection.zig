@@ -41578,6 +41578,146 @@ test "EndpointConnectionLifecycle path update OrClose queues close without route
     try std.testing.expect(unchanged_route.path_changed);
 }
 
+test "EndpointConnectionLifecycle installed-key path update commits after PATH_RESPONSE validation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(88, &server_dcid, old_path, .{});
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    // PING 从新路径到达：检测 path_changed，但不 commit（outstanding 未减少）。
+    try client.sendPing();
+    const migrated_ping = (try client.pollProtectedShortDatagramWithInstalledKeys(1, &server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(migrated_ping);
+    const ping_result = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndUpdatePathOrClose(
+        88,
+        &server,
+        new_path,
+        2,
+        migrated_ping,
+    );
+    try std.testing.expect(ping_result.route.path_changed);
+    try std.testing.expect(ping_result.updated_route == null);
+    try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+
+    // PATH_CHALLENGE/RESPONSE 交换后，outstanding 1->0 触发 route commit。
+    const challenge_data = [_]u8{ 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb };
+    try server.sendPathChallenge(challenge_data);
+    const challenge = (try server.pollProtectedShortDatagramWithInstalledKeys(3, &client_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(challenge);
+    try std.testing.expectEqual(@as(usize, 1), server.outstandingPathChallengeCount());
+    try client.processProtectedShortDatagramWithInstalledKeys(4, client_dcid.len, challenge);
+
+    const response = (try client.pollProtectedShortDatagramWithInstalledKeys(5, &server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response);
+    const validation_result = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndUpdatePathOrClose(
+        88,
+        &server,
+        new_path,
+        6,
+        response,
+    );
+    try std.testing.expect(validation_result.route.path_changed);
+    const updated_route = validation_result.updated_route orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 88), updated_route.connection_id);
+    try std.testing.expect(!updated_route.path_changed);
+    try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+
+    const confirmed_route = try lifecycle.routeDatagram(new_path, response);
+    try std.testing.expectEqual(@as(u64, 88), confirmed_route.connection_id);
+    try std.testing.expect(!confirmed_route.path_changed);
+}
+
+test "EndpointConnectionLifecycle installed-key path update OrClose queues close without route update" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(89, &server_dcid, old_path, .{});
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    // 先发 PATH_CHALLENGE 让 outstanding=1，验证 close 时 outstanding 不被消耗。
+    const challenge_data = [_]u8{ 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb };
+    try server.sendPathChallenge(challenge_data);
+    const challenge = (try server.pollProtectedShortDatagramWithInstalledKeys(3, &client_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(challenge);
+    try std.testing.expectEqual(@as(usize, 1), server.outstandingPathChallengeCount());
+
+    // 构造含未知帧类型的 invalid short packet，用 client secret 保护
+    // （= server installed peer keys，二者均由 deriveAes128PacketProtectionKeys
+    // 以 hkdf_labels_v1 从同一 secret 派生，可互解）。
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_short = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
+    defer std.testing.allocator.free(invalid_short);
+
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndUpdatePathOrClose(
+        89,
+        &server,
+        new_path,
+        4,
+        invalid_short,
+    ));
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 1), server.outstandingPathChallengeCount());
+    const unchanged_route = try lifecycle.routeDatagram(new_path, invalid_short);
+    try std.testing.expectEqual(@as(u64, 89), unchanged_route.connection_id);
+    try std.testing.expect(unchanged_route.path_changed);
+}
+
 test "EndpointConnectionLifecycle retires zero-length CID routes by path" {
     var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer lifecycle.deinit();
