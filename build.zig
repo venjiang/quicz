@@ -268,6 +268,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_interop_client);
 
+    // 事件驱动 interop loopback executable（deadline 驱动收发循环）
+    const exe_interop_event_loopback = b.addExecutable(.{
+        .name = "quicz-interop-event-loopback",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/interop_event_loopback.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_interop_event_loopback);
+
     // TLS C ABI adapter executable
     const exe_tls_c_abi_adapter = b.addExecutable(.{
         .name = "quicz-tls-c-abi-adapter",
@@ -1470,6 +1484,15 @@ pub fn build(b: *std.Build) void {
     run_interop_client_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_interop_client_cmd.addArgs(args);
+    }
+
+    // zig build run-interop-event-loopback -- [TESTCASE]
+    const run_interop_event_loopback = b.step("run-interop-event-loopback", "Run event-driven interop loopback (TESTCASE: handshake/transfer/loss)");
+    const run_interop_event_loopback_cmd = b.addRunArtifact(exe_interop_event_loopback);
+    run_interop_event_loopback.dependOn(&run_interop_event_loopback_cmd.step);
+    run_interop_event_loopback_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_interop_event_loopback_cmd.addArgs(args);
     }
 
     const test_step = b.step("test", "Run quicz unit tests");
