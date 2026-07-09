@@ -15384,6 +15384,114 @@ test "EndpointLossDetectionTimers disarms connection after loss-time service" {
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), timers.earliestDeadline());
 }
 
+test "PTO probe backoff doubles deadline across successive expirations on controlled clock" {
+    // RFC 9002 §6.2.2: 每次 PTO 触发后 pto_count 递增，下一次 PTO deadline = basePto * 2^pto_count。
+    // 用固定 now_millis 推进时钟（controlled clock），不依赖真实丢包或 sleep。
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+
+    // basePto = smoothed_rtt(100) + max(4*rttvar(50), granularity(1)) + max_ack_delay(25) = 325
+    const base_pto_ms: i64 = 325;
+
+    // 发送 ack-eliciting 包，sent_time=10；deadline1 = 10 + basePto = 335 (pto_count=0)
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    const deadline1 = conn.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, deadline1.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline1.kind);
+    try std.testing.expectEqual(@as(i64, 10 + base_pto_ms), deadline1.deadline_millis);
+
+    // 推进到 deadline1，PTO 触发：pto_count 0->1，probe 排队
+    const serviced1 = (try conn.serviceLossDetectionTimer(deadline1.deadline_millis)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced1.kind);
+    try std.testing.expectEqual(@as(u8, 1), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_ping_count);
+
+    // poll probe1 (PING)，sent_time=336，成为下一次 PTO 基准
+    var out_buf_1: [32]u8 = undefined;
+    const probe1 = (try conn.pollTx(336, &out_buf_1)) orelse return error.TestUnexpectedResult;
+    var decoded1 = try frame.decodeFrameSlice(probe1, std.testing.allocator);
+    defer frame.deinitFrame(&decoded1.frame, std.testing.allocator);
+    switch (decoded1.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
+
+    // deadline2 = 336 + 2*basePto = 986 (pto_count=1，backoff 翻倍)
+    const deadline2 = conn.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, deadline2.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline2.kind);
+    try std.testing.expectEqual(@as(i64, 336 + 2 * base_pto_ms), deadline2.deadline_millis);
+
+    // 未到 deadline2，serviceLossDetectionTimer 为 no-op
+    try std.testing.expectEqual(
+        @as(?LossDetectionTimerDeadline, null),
+        try conn.serviceLossDetectionTimer(deadline2.deadline_millis - 1),
+    );
+
+    // 推进到 deadline2，PTO 再次触发：pto_count 1->2
+    const serviced2 = (try conn.serviceLossDetectionTimer(deadline2.deadline_millis)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, serviced2.kind);
+    try std.testing.expectEqual(@as(u8, 2), conn.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_ping_count);
+
+    // poll probe2 (PING)，sent_time=987
+    var out_buf_2: [32]u8 = undefined;
+    const probe2 = (try conn.pollTx(987, &out_buf_2)) orelse return error.TestUnexpectedResult;
+    var decoded2 = try frame.decodeFrameSlice(probe2, std.testing.allocator);
+    defer frame.deinitFrame(&decoded2.frame, std.testing.allocator);
+    switch (decoded2.frame) {
+        .ping => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    // deadline3 = 987 + 4*basePto = 2287 (pto_count=2，再次翻倍)
+    const deadline3 = conn.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(PacketNumberSpace.application, deadline3.space);
+    try std.testing.expectEqual(LossDetectionTimerKind.pto, deadline3.kind);
+    try std.testing.expectEqual(@as(i64, 987 + 4 * base_pto_ms), deadline3.deadline_millis);
+}
+
+test "ACK-driven packet loss reduces congestion window under controlled clock" {
+    // RFC 9002 §7: ACK 不含某 pn 触发 packet-threshold loss，NewReno onCongestionEvent 将 cwnd 减半。
+    // 手动构造 ACK frame（只 ACK largest pn）模拟未 ACK 的包丢失，无需真实乱序。
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+
+    // initialCongestionWindow(1200) = min(10*1200, max(2*1200, 14720)) = 12000
+    const cwnd_initial = conn.congestionWindow(.application);
+    try std.testing.expectEqual(@as(usize, 12000), cwnd_initial);
+
+    // 发送 pn 0..3，各 100 字节
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 11, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 12, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 13, 100);
+    try std.testing.expectEqual(@as(usize, 400), conn.bytesInFlight(.application));
+
+    // 手动构造 ACK 只确认 pn=3：pn 0 落入 packet-threshold (k=3) 窗口被标 lost
+    try conn.receiveAckInSpace(.application, 100, .{
+        .largest_acknowledged = 3,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    // pn 0 lost，pn 3 acked；sent_packets 剩 pn 1,2
+    try std.testing.expectEqual(@as(usize, 2), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 200), conn.bytesInFlight(.application));
+
+    // NewReno onCongestionEvent: ssthresh = cwnd/2 = 6000，cwnd = max(6000, minimumWindow=2400) = 6000
+    try std.testing.expectEqual(@as(usize, 6000), conn.congestionWindow(.application));
+    try std.testing.expect(conn.congestionWindow(.application) < cwnd_initial);
+}
+
 test "EndpointConnectionLifecycle retires routes with recovery timer" {
     var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer lifecycle.deinit();
@@ -68609,6 +68717,150 @@ test "Tls13Backend + Connection: PTO probe fires after ACK loss on TLS-owned pat
 
     // The client must still have bytes in flight (no ACK received).
     try std.testing.expect(client.bytesInFlight(.application) > 0);
+}
+
+test "Tls13Backend + Connection: PTO probe fires and backoffs on TLS-owned path after handshake confirmation" {
+    // 区别于 "PTO probe fires after ACK loss"：本测试先让 client 接收 HANDSHAKE_DONE
+    // 进入 handshake_confirmed，使 application PTO 真正 allowed，再验证 PTO probe 通过
+    // pollProtectedShortDatagramWithInstalledKeys 发出 + pto_count 递增 + backoff。
+    const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    const seed = [_]u8{0x55} ** 32;
+    const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const server_priv = server_kp.secret_key.bytes;
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+    const alpn = [_][]const u8{"hq-interop"};
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.setLocalInitialSourceConnectionId(&client_scid);
+    try server.setLocalInitialSourceConnectionId(&server_scid);
+
+    var client_backend = tls13_backend.Tls13Backend.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    });
+    var server_backend = tls13_backend.Tls13Backend.initServer(.{
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    });
+
+    var scratch: [8192]u8 = undefined;
+
+    // Complete the handshake (in-memory datagram exchange).
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    const ch_dgram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        0,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(ch_dgram);
+
+    try server.processProtectedLongDatagramInSpace(.initial, 1, secrets.client, ch_dgram);
+    _ = try server.driveCryptoBackendInSpace(.initial, server_backend.cryptoBackend(), &scratch);
+    try std.testing.expect(server.hasHandshakeProtectionKeys());
+
+    const sh_dgram = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        2,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(sh_dgram);
+    _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+    const shs_dgram = (try server.pollProtectedHandshakeDatagramWithInstalledKeys(
+        3,
+        &client_scid,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(shs_dgram);
+
+    try client.processProtectedLongDatagramInSpace(.initial, 4, secrets.server, sh_dgram);
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(5, shs_dgram);
+    const client_hs = try client.driveCryptoBackendInSpace(
+        .handshake,
+        client_backend.cryptoBackend(),
+        &scratch,
+    );
+    try std.testing.expect(client_hs.one_rtt_keys_installed);
+
+    const cf_dgram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        6,
+        &server_scid,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(cf_dgram);
+
+    try server.processProtectedHandshakeDatagramWithInstalledKeys(7, cf_dgram);
+    _ = try server.driveCryptoBackendInSpace(
+        .handshake,
+        server_backend.cryptoBackend(),
+        &scratch,
+    );
+
+    // Server emits HANDSHAKE_DONE over 1-RTT; client receives it -> handshake_confirmed.
+    // 只有 handshake_confirmed 后 application PTO 才被 allowed（RFC 9002 §6.2.2）。
+    try server.sendHandshakeDone();
+    const hd_dgram = (try server.pollProtectedShortDatagramWithInstalledKeys(8, &client_scid)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(hd_dgram);
+    try client.processProtectedShortDatagramWithInstalledKeys(9, client_scid.len, hd_dgram);
+    try std.testing.expect(client.handshake_confirmed);
+
+    // Client sends PING over 1-RTT (in-flight, ack-eliciting)，server 不 ACK（模拟丢失）。
+    try client.sendPing();
+    const ping_dgram = (try client.pollProtectedShortDatagramWithInstalledKeys(
+        10,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(ping_dgram);
+    try std.testing.expect(client.bytesInFlight(.application) > 0);
+    try std.testing.expectEqual(@as(u8, 0), client.recovery_state.pto_count);
+
+    // 推进时钟远超 PTO deadline -> PTO 触发：pto_count 0->1，probe 排队。
+    _ = try client.serviceLossDetectionTimer(1_000_000);
+    try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_ping_count);
+
+    // poll PTO probe（加密 PING datagram）over 1-RTT。
+    const probe_dgram = (try client.pollProtectedShortDatagramWithInstalledKeys(
+        1_000_001,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(probe_dgram);
+    try std.testing.expect(probe_dgram.len > 0);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_ping_count);
+
+    // 推进时钟远超 backoff deadline（基于 probe sent_time + 2*basePto）-> pto_count 1->2。
+    _ = try client.serviceLossDetectionTimer(10_000_000);
+    try std.testing.expectEqual(@as(u8, 2), client.recovery_state.pto_count);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_ping_count);
 }
 
 test "Tls13Backend + Connection: RESET_STREAM closes send side on TLS-owned path" {
