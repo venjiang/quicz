@@ -60,6 +60,10 @@ const OutBucket = struct {
 
 const max_out: usize = 32768;
 
+/// 缓存 ClientHello 的最大容量。与 `Tls13Handshake.out_buf` 一致（16384 字节），
+/// 足以容纳完整的 ClientHello（含 transport parameters + PSK binder）。
+const max_cached_client_hello: usize = 16384;
+
 /// A `Tls13Handshake` exposed as a `CryptoBackend`. The connection never owns
 /// this value; the caller holds it (stack or long-lived struct) for as long as
 /// the connection drives it.
@@ -69,6 +73,14 @@ pub const Tls13Backend = struct {
     out_initial: OutBucket = .{},
     out_handshake: OutBucket = .{},
     out_app: OutBucket = .{},
+
+    /// 缓存首份 ClientHello 字节，用于 Retry 后重发。ClientHello 内容在 Retry
+    /// 前后完全相同（RFC 8446 §4.1.2：client 重发相同 ClientHello 字节），
+    /// 变的只是 QUIC Initial 包的 DCID/token/protection keys。首次 pump() 产
+    /// `send_data(.initial)` 时缓存，`retryReceived()` 把缓存字节重新放回
+    /// `out_initial` bucket，不触发 hs 状态机重新 build（避免 transcript 错乱）。
+    cached_client_hello: [max_cached_client_hello]u8 = undefined,
+    cached_client_hello_len: usize = 0,
 
     /// Set once the ClientHello has been emitted, after which
     /// `set_local_transport_parameters` is ignored (the transport parameters
@@ -273,6 +285,28 @@ pub const Tls13Backend = struct {
         return self.hs.key_schedule.deriveEarlyTrafficSecret(self.hs.transcript.current());
     }
 
+    /// 通知 backend 已收到 Retry，重新把缓存的 ClientHello 字节放回 `out_initial`
+    /// bucket，供 connection 重新 pull 并重发。
+    ///
+    /// Retry 后 client 重发的 ClientHello CRYPTO 字节完全相同（RFC 8446 §4.1.2），
+    /// 变的只是 QUIC Initial 包的 DCID（retry_scid）、token 字段、protection keys。
+    /// 因此不重置 `client_hello_built`、不触发 hs 状态机重新 build（那会导致
+    /// transcript 错乱），只重置 `out_initial` bucket 放入缓存字节。下次
+    /// `pull(.initial)` 直接 drain 缓存字节，无需 pump。
+    ///
+    /// 调用方序列：
+    ///   1. `processRetryDatagram` 记录 retry_token + retry_scid
+    ///   2. `retryReceived()` 重新缓存 ClientHello 到 out_initial
+    ///   3. `Connection.resetInitialCryptoSendForRetry()` 重置 crypto send state
+    ///   4. `driveCryptoBackendInSpace(.initial)` 重新 pull ClientHello 入队
+    ///   5. `pollProtectedLongCryptoDatagramInSpace` 用 retry_secrets + retry_scid 重发
+    pub fn retryReceived(self: *Tls13Backend) void {
+        self.out_initial = .{};
+        if (self.cached_client_hello_len > 0) {
+            self.out_initial.append(self.cached_client_hello[0..self.cached_client_hello_len]);
+        }
+    }
+
     /// Write TLS 1.3 secrets in NSS key-log format to `writer` for
     /// SSLKEYLOGFILE / Wireshark debugging. Call after handshake secrets are
     /// available. Never prints private key material — only derived traffic
@@ -299,7 +333,14 @@ pub const Tls13Backend = struct {
             const action = try self.hs.step();
             switch (action) {
                 .send_data => |sd| {
-                    if (!self.client_hello_built and sd.level == .initial) self.client_hello_built = true;
+                    if (!self.client_hello_built and sd.level == .initial) {
+                        self.client_hello_built = true;
+                        // 缓存首份 ClientHello 字节用于 Retry 后重发。ClientHello
+                        // 内容在 Retry 前后不变，重发相同字节即可（RFC 8446 §4.1.2）。
+                        const n = @min(sd.data.len, self.cached_client_hello.len);
+                        @memcpy(self.cached_client_hello[0..n], sd.data[0..n]);
+                        self.cached_client_hello_len = n;
+                    }
                     self.bucketForLevel(sd.level).append(sd.data);
                 },
                 .install_keys => {},
@@ -513,4 +554,43 @@ test "Tls13Backend set_local_transport_parameters is ignored after ClientHello i
     _ = try cb.setLocalTransportParameters(&second_tp);
     try testing.expectEqual(@as(usize, 2), backend.hs.tp_encoded_len);
     try testing.expectEqual(@as(u8, 0xAA), backend.hs.tp_encoded[0]);
+}
+
+test "Tls13Backend.retryReceived re-emits cached ClientHello" {
+    var backend = Tls13Backend.initClient(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    });
+    var cb = backend.cryptoBackend();
+
+    const local_tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    _ = try cb.setLocalTransportParameters(&local_tp);
+
+    // 首次 pull(.initial) -> ClientHello。
+    var scratch: [4096]u8 = undefined;
+    const ch1_opt = try cb.pull(cb.context, .initial, &scratch);
+    try testing.expect(ch1_opt != null);
+    try testing.expect(backend.client_hello_built);
+    try testing.expect(backend.cached_client_hello_len > 0);
+    try testing.expectEqual(backend.cached_client_hello_len, ch1_opt.?.len);
+
+    // 拷贝首份 ClientHello 字节（pull 返回的 slice 指向 scratch，会被覆盖）。
+    var ch1_copy: [4096]u8 = undefined;
+    @memcpy(ch1_copy[0..ch1_opt.?.len], ch1_opt.?);
+    const ch1_bytes = ch1_copy[0..ch1_opt.?.len];
+
+    // 首次 pull 后 bucket 已 drain 空，hs 状态机在 client_wait_server_hello
+    // 返回 wait_for_data，无新数据产生。
+    try testing.expect((try cb.pull(cb.context, .initial, &scratch)) == null);
+
+    // retryReceived 重新把缓存的 ClientHello 放回 out_initial bucket。
+    backend.retryReceived();
+
+    // 再次 pull(.initial) -> 相同的 ClientHello 字节。
+    const ch2_opt = try cb.pull(cb.context, .initial, &scratch);
+    try testing.expect(ch2_opt != null);
+    try testing.expectEqualSlices(u8, ch1_bytes, ch2_opt.?);
+
+    // 再次 pull(.initial) -> null（bucket 再次 drain 空）。
+    try testing.expect((try cb.pull(cb.context, .initial, &scratch)) == null);
 }

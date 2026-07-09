@@ -1880,6 +1880,43 @@ pub const Connection = struct {
         self.recordPacketActivity(now_millis);
     }
 
+    /// 重置 Initial packet space 的发送侧状态，用于 Retry 后重发 ClientHello。
+    ///
+    /// 首次 `pollProtectedLongCryptoDatagramInSpace` commit 后 ClientHello CRYPTO
+    /// 字节已从 `crypto_send_queue` 移除并释放，`crypto_send_offset` 前进到
+    /// ClientHello 末尾，`next_packet_number` 前进到 1，无法重发。本方法重置整个
+    /// 发送侧：清空 queue、offset 归零、packet number 归零、清空 sent_packets、
+    /// 重置 recovery 计数，让后续 `driveCryptoBackendInSpace(.initial)` 重新 pull
+    /// 出 ClientHello（由 `Tls13Backend.retryReceived` 重新缓存）并从 packet number
+    /// 0 重新入队发送。
+    ///
+    /// RFC 9000 §17.2.5.1：Retry 后 client 丢弃 original DCID 派生的 initial keys
+    /// 及其发送记录。server 从未 process 首份 ch（`issueRetryDatagram` 要求
+    /// `next_peer_packet_number==0`），所以重发用 packet_number=0 与 server 端
+    /// `expected_packet_number=0` 匹配，不违反 §21.4 的 packet number 重用禁令
+    ///（首份 ch 从未被 server 接受，等同从未发送）。
+    ///
+    /// 与 `discardPacketNumberSpaceState` 的区别：**不**置 `discarded = true`，
+    /// **不**清 recv 侧状态（`crypto_recv_buffer`/`crypto_read_offset`/
+    /// `next_peer_packet_number`）、**不**清 initial keys（caller 用 retry_scid
+    /// 重新派生的 keys 通过 `pollProtectedLongCryptoDatagramInSpace` 传入）。
+    /// 仅 client 侧合法。
+    pub fn resetInitialCryptoSendForRetry(self: *Connection) Error!void {
+        if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.side != .client) return error.InvalidPacket;
+        if (self.initial_packet_space.discarded) return error.InvalidPacket;
+        const packet_space = self.packetNumberSpace(.initial);
+        self.rollbackCryptoSendQueue(packet_space.crypto_send_queue, 0);
+        packet_space.crypto_send_offset.* = 0;
+        clearSentPacketList(self.allocator, packet_space.sent_packets);
+        packet_space.next_packet_number.* = 0;
+        packet_space.pending_ping_count.* = 0;
+        packet_space.pto_probe_count.* = 0;
+        packet_space.congestion_probe_count.* = 0;
+        packet_space.recovery_state.bytes_in_flight = 0;
+        packet_space.recovery_state.pto_count = 0;
+    }
+
     /// Validate and act on one client-side Version Negotiation packet.
     ///
     /// Incorrect connection-ID echoes and packets that include the client's
@@ -69558,6 +69595,129 @@ test "Tls13Backend + Connection: Retry packet exchange on TLS-owned path" {
     try client.processRetryDatagram(10, &original_dcid, retry_dgram);
     try std.testing.expectEqualSlices(u8, &retry_scid, client.retrySourceConnectionId().?);
     try std.testing.expectEqualStrings(token, client.latestRetryToken().?);
+}
+
+test "Tls13Backend + Connection: Retry then resend ClientHello and complete handshake on TLS-owned path" {
+    const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const retry_scid = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const seed = [_]u8{0x55} ** 32;
+    const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const server_priv = server_kp.secret_key.bytes;
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+    const alpn = [_][]const u8{"hq-interop"};
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.setLocalInitialSourceConnectionId(&client_scid);
+    try server.setLocalInitialSourceConnectionId(&server_scid);
+
+    var client_backend = tls13_backend.Tls13Backend.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    });
+    var server_backend = tls13_backend.Tls13Backend.initServer(.{
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    });
+    var scratch: [8192]u8 = undefined;
+
+    // 1. Client sends a real ClientHello over Initial (packet_number=0, original_dcid).
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    const ch = (try client.pollProtectedLongCryptoDatagramInSpace(.initial, 0, &original_dcid, &client_scid, &[_]u8{}, secrets.client)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(ch);
+
+    // 2. Server responds with a Retry packet instead of a ServerHello.
+    const token: []const u8 = "retry-token-for-client-address";
+    const retry_dgram = try server.issueRetryDatagram(0, &original_dcid, &client_scid, &retry_scid, token);
+    defer std.testing.allocator.free(retry_dgram);
+    try std.testing.expect(retry_dgram.len > 0);
+
+    // 3. Client receives the Retry, records the retry SCID and token.
+    try client.processRetryDatagram(10, &original_dcid, retry_dgram);
+    try std.testing.expectEqualSlices(u8, &retry_scid, client.retrySourceConnectionId().?);
+    try std.testing.expectEqualStrings(token, client.latestRetryToken().?);
+
+    // 4. Server validates the retry token -> peerAddressValidated.
+    try server.validateRetryToken(client.latestRetryToken().?);
+    try std.testing.expect(server.peerAddressValidated());
+
+    // 5. Retry_secrets: initial secrets re-derived from retry_scid (RFC 9000 §17.2.5.1).
+    const retry_secrets = try protection.deriveInitialSecrets(.v1, &retry_scid);
+
+    // 6. Backend re-emits cached ClientHello; connection resets initial send state.
+    client_backend.retryReceived();
+    try client.resetInitialCryptoSendForRetry();
+
+    // 7. Client re-drives initial -> ClientHello re-queued from offset 0.
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+
+    // 8. Client re-sends ClientHello Initial with retry_scid as DCID + retry_secrets.
+    // token field auto-injected from self.retry_token (initialTokenForPacket).
+    const retry_ch = (try client.pollProtectedLongCryptoDatagramInSpace(.initial, 11, &retry_scid, &client_scid, &[_]u8{}, retry_secrets.client)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(retry_ch);
+    try std.testing.expect(retry_ch.len > 0);
+
+    // 9. Server receives the resent ClientHello (retry_secrets.client decrypts:
+    //    server uses the *client* initial keys to decrypt client-sent packets).
+    try server.processProtectedLongDatagramInSpace(.initial, 12, retry_secrets.client, retry_ch);
+    _ = try server.driveCryptoBackendInSpace(.initial, server_backend.cryptoBackend(), &scratch);
+
+    // 10. Server -> ServerHello (Initial, retry_secrets.server) + Handshake flight.
+    const sh = (try server.pollProtectedLongCryptoDatagramInSpace(.initial, 13, &client_scid, &server_scid, &[_]u8{}, retry_secrets.server)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(sh);
+    _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+    const shs = (try server.pollProtectedHandshakeDatagramWithInstalledKeys(14, &client_scid, &server_scid)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(shs);
+
+    // 11. Client receives ServerHello + Handshake flight -> client Finished.
+    try client.processProtectedLongDatagramInSpace(.initial, 15, retry_secrets.server, sh);
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(16, shs);
+    _ = try client.driveCryptoBackendInSpace(.handshake, client_backend.cryptoBackend(), &scratch);
+    const cf = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(17, &server_scid, &client_scid)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(cf);
+
+    // 12. Server receives client Finished -> handshake confirmed + 1-RTT keys.
+    try server.processProtectedHandshakeDatagramWithInstalledKeys(18, cf);
+    _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+    try std.testing.expect(server.handshakeConfirmed());
+
+    // 13. Server sends HANDSHAKE_DONE over 1-RTT.
+    try server.sendHandshakeDone();
+    const hd_dgram = (try server.pollProtectedShortDatagramWithInstalledKeys(19, &client_scid)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(hd_dgram);
+
+    // 14. Client receives HANDSHAKE_DONE -> handshake confirmed.
+    try client.processProtectedShortDatagramWithInstalledKeys(20, client_scid.len, hd_dgram);
+    try std.testing.expect(client.handshakeConfirmed());
+
+    // 15. Client sends 1-RTT PING; server receives -> 1-RTT acked.
+    try client.sendPing();
+    const ping_dgram = (try client.pollProtectedShortDatagramWithInstalledKeys(21, &server_scid)) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(ping_dgram);
+    try server.processProtectedShortDatagramWithInstalledKeys(22, server_scid.len, ping_dgram);
+    try std.testing.expect(server.peerAddressValidated());
 }
 
 test "Tls13Backend + Connection: HANDSHAKE_DONE over 1-RTT on TLS-owned path" {

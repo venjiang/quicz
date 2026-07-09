@@ -1,14 +1,19 @@
-//! TLS-owned Retry over loopback UDP (RFC 9000 §8.1.2 地址验证).
+//! TLS-owned Retry 完整闭环 over loopback UDP（RFC 9000 §8.1.2 地址验证 +
+//! §17.2.5 Retry 后重发 + RFC 8446 TLS 1.3 握手完成 + 1-RTT 数据交换）。
 //!
-//! 在 TLS-owned UDP 路径上验证 Retry 地址验证交换：用 Tls13Backend 产生
-//! 真实 ClientHello Initial，server 用 issueRetryDatagram 发 Retry（含
-//! retry_token + retry_scid），client 用 processRetryDatagram 处理 Retry
-//! 并记录 retry_scid + token，server 用 validateRetryToken 验证 token
-//! 通过并标记 peerAddressValidated。EndpointConnectionLifecycle 注册
-//! CID 路由 + switchInitialDestinationConnectionIdAfterRetry 完成端点级
-//! DCID 切换（RFC 9000 §8.1.2 / §17.2.5）。
+//! 在 TLS-owned UDP 路径上闭合 Retry 全流程：用 Tls13Backend 产生真实
+//! ClientHello Initial，server 用 issueRetryDatagram 发 Retry（含 retry_token +
+//! retry_scid），client 用 processRetryDatagram 处理 Retry 并记录 retry_scid +
+//! token，server 用 validateRetryToken 验证 token 通过并标记
+//! peerAddressValidated。随后 client 用 Tls13Backend.retryReceived() 重新缓存
+//! ClientHello + Connection.resetInitialCryptoSendForRetry() 重置 Initial crypto
+//! send state，用 retry_scid 作为 DCID + retry_secrets（deriveInitialSecrets
+//! (retry_scid)）重发 ClientHello Initial。server 收重发 Initial，继续 TLS 握手
+//! （ServerHello + EE/Cert/CV/Finished），client 产 client Finished，server
+//! confirmHandshake + 发 HANDSHAKE_DONE，client 收到后 handshake_confirmed。
+//! 最后 1-RTT PING/PONG 交换验证应用数据通道。
 //!
-//! 覆盖范围（闭合 docs §94 "Retry on TLS-owned UDP" 端点级缺口的可闭合部分）：
+//! 覆盖范围（闭合 docs §94 "Retry on TLS-owned UDP" 端点级缺口）：
 //!   - 真实 Tls13Backend ClientHello Initial over UDP（driveCryptoBackendInSpace
 //!     + pollProtectedLongCryptoDatagramInSpace，用 deriveInitialSecrets
 //!     (original_dcid) 的 client 初始密钥保护）
@@ -19,26 +24,23 @@
 //!   - client routeDatagram + processRetryDatagram（记录 retry_scid +
 //!     retry_token，自动注入后续 Initial token 字段）
 //!   - server validateRetryToken -> peerAddressValidated（一次性消费 token）
-//!   - retry_secrets 重派生演示（deriveInitialSecrets(retry_scid)，RFC 9000
-//!     要求 Retry 后用 retry_scid 作为 DCID 重派生 initial secrets）
-//!
-//! 未覆盖（core API 缺口，已报告，不在此 example 实现）：
-//!   Retry 后重发 ClientHello Initial + 完整 TLS 握手完成。当前 Connection
-//!   没有"为 Retry 重置 Initial crypto send offset 到 0 且不 discard 该
-//!   space"的公共 API（discardPacketNumberSpaceState 会 discard，不可用；
-//!   packetNumberSpace 是私有 fn，外部够不到 crypto_send_offset 指针）。
-//!   Tls13Backend 也没有"重新产出 ClientHello 字节"的接口（client_hello_built
-//!   单向置位，hs.step() 在 client_wait_server_hello 无数据返回 wait_for_data）。
-//!   首次 poll commit 后 ClientHello CRYPTO 字节已从 crypto_send_queue 移除
-//!   并释放，crypto_send_offset 前进到 client_hello_len，无法重发。参考
-//!   connection.zig:69505 测试同样只覆盖到 processRetryDatagram。补齐需新增
-//!   Connection.resetInitialCryptoSendForRetry() 或 Tls13Backend.retryReceived()
-//!   重新产出 ClientHello。
+//!   - retry_secrets 重派生（deriveInitialSecrets(retry_scid)，RFC 9000
+//!     §17.2.5.1 要求 Retry 后用 retry_scid 作为 DCID 重派生 initial secrets）
+//!   - **Tls13Backend.retryReceived() 重新缓存 ClientHello 到 out_initial**
+//!   - **Connection.resetInitialCryptoSendForRetry() 重置 Initial 发送侧状态**
+//!     （crypto_send_offset/packet_number/sent_packets/recovery 归零，不 discard）
+//!   - **client 重发 ClientHello Initial（retry_scid DCID + retry_secrets.client）**
+//!   - **server 收重发 Initial（retry_secrets.client 解密）+ TLS 握手交换**
+//!     （ServerHello/Cert/CV/Finished + installHandshakeTrafficSecrets +
+//!     confirmHandshake + installOneRttTrafficSecrets）
+//!   - **1-RTT PING/PONG 数据交换**（sendPing + pollProtectedShortDatagram
+//!     WithInstalledKeys + processProtectedShortDatagramWithInstalledKeys）
 //!
 //! 组合参考：
 //!   - tls13_path_validation_loopback.zig（Tls13Backend 握手 + lifecycle UDP 模板）
 //!   - udp_retry_loopback.zig（mock-key Retry + lifecycle switch 流程）
-//!   - connection.zig:69505 测试（Tls13Backend Retry connection 级 API 序列）
+//!   - connection.zig Retry 完整闭环测试（Tls13Backend + Connection: Retry then
+//!     resend ClientHello and complete handshake on TLS-owned path）
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -49,7 +51,7 @@ const protection = quicz.protection;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const endpoint = quicz.endpoint;
 
-// 常量与 connection.zig:69505 测试一致（RFC 9000 §17.2.5 Retry 场景）。
+// 常量与 connection.zig Retry 测试一致（RFC 9000 §17.2.5 Retry 场景）。
 const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
 const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
 const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
@@ -141,15 +143,12 @@ pub fn main() !void {
         .server_name = "example.com",
         .skip_cert_verify = true,
     });
-    // server backend 在 Retry 场景不 drive（server 发 Retry 而非 ServerHello）。
-    // 保留构造以展示完整 setup；重发 + 握手完成需 core API 缺口补齐后启用。
     var server_backend = Tls13Backend.initServer(.{
         .alpn = &alpn,
         .cert_chain_der = &.{&cert_der},
         .private_key_bytes = &server_priv,
         .private_key_algorithm = .ecdsa_p256_sha256,
     });
-    _ = &server_backend;
 
     var scratch: [8192]u8 = undefined;
     var recv_buf: [2048]u8 = undefined;
@@ -248,30 +247,127 @@ pub fn main() !void {
     try require(server.peerAddressValidated());
     try require(server.pendingRetryTokenCount() == 0);
 
-    // === 步骤 7: retry_secrets 重派生演示（RFC 9000 §17.2.5.1）===
+    // === 步骤 7: retry_secrets 重派生（RFC 9000 §17.2.5.1）===
     // Retry 后 client 重发 Initial 时 DCID 改为 retry_scid，initial secrets
     // 必须用 retry_scid 重新派生（salt = v1 initial salt，IKM = retry_scid）。
-    // 此处演示重派生成功；实际重发 Initial 需 core API 缺口补齐（见顶部注释）。
     const retry_secrets = try protection.deriveInitialSecrets(.v1, &retry_scid);
-    _ = retry_secrets;
 
-    std.debug.print("tls13_retry_loopback: ClientHello Initial + Retry exchange + token validation OK\n", .{});
+    // === 步骤 8: client 重发 ClientHello Initial（retry_scid DCID + retry_secrets）===
+    // Tls13Backend.retryReceived() 把缓存的 ClientHello 字节重新放回 out_initial
+    // bucket（不触发 hs 状态机重新 build，避免 transcript 错乱）。
+    // Connection.resetInitialCryptoSendForRetry() 重置 Initial 发送侧状态
+    // （crypto_send_offset/packet_number/sent_packets/recovery 归零，不 discard）。
+    // 然后 driveCryptoBackendInSpace(.initial) 重新 pull ClientHello 入队，
+    // pollProtectedLongCryptoDatagramInSpace 用 retry_scid 作为 DCID +
+    // retry_secrets.client 保护重发。token 字段由 initialTokenForPacket 自动
+    // 注入 retry_token（token 参数传空切片）。
+    client_backend.retryReceived();
+    try client.resetInitialCryptoSendForRetry();
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    const retry_ch_dgram = (try client.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        43,
+        &retry_scid,
+        &client_scid,
+        &[_]u8{},
+        retry_secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(retry_ch_dgram);
+    try require(retry_ch_dgram.len > 0);
+    try client_socket.send(io, &server_socket.address, retry_ch_dgram);
+
+    // === 步骤 9: server UDP recv 重发 Initial + driveCryptoBackendInSpace 产 ServerHello ===
+    // server 用 retry_secrets.client（client initial keys）解密重发的 ClientHello。
+    const recv3 = try server_socket.receiveTimeout(io, &recv_buf, recvTimeout());
+    try server.processProtectedLongDatagramInSpace(.initial, 44, retry_secrets.client, recv3.data);
+    _ = try server.driveCryptoBackendInSpace(.initial, server_backend.cryptoBackend(), &scratch);
+
+    // server -> ServerHello (Initial, retry_secrets.server) + Handshake flight。
+    const sh_dgram = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        45,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        retry_secrets.server,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(sh_dgram);
+    try server_socket.send(io, &client_socket.address, sh_dgram);
+
+    _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+    const shs_dgram = (try server.pollProtectedHandshakeDatagramWithInstalledKeys(
+        46,
+        &client_scid,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(shs_dgram);
+    try server_socket.send(io, &client_socket.address, shs_dgram);
+
+    // === 步骤 10: client UDP recv ServerHello + Handshake flight -> client Finished ===
+    // client 用 retry_secrets.server（server initial keys）解密 ServerHello。
+    const recv4 = try client_socket.receiveTimeout(io, &recv_buf, recvTimeout());
+    try client.processProtectedLongDatagramInSpace(.initial, 47, retry_secrets.server, recv4.data);
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+
+    const recv5 = try client_socket.receiveTimeout(io, &recv_buf, recvTimeout());
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(48, recv5.data);
+    _ = try client.driveCryptoBackendInSpace(.handshake, client_backend.cryptoBackend(), &scratch);
+    const cf_dgram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        49,
+        &server_scid,
+        &client_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(cf_dgram);
+    try client_socket.send(io, &server_socket.address, cf_dgram);
+
+    // === 步骤 11: server UDP recv client Finished -> handshake confirmed + 1-RTT keys ===
+    const recv6 = try server_socket.receiveTimeout(io, &recv_buf, recvTimeout());
+    try server.processProtectedHandshakeDatagramWithInstalledKeys(50, recv6.data);
+    _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+    try require(server.handshakeConfirmed());
+
+    // === 步骤 12: server 发 HANDSHAKE_DONE over 1-RTT ===
+    try server.sendHandshakeDone();
+    const hd_dgram = (try server.pollProtectedShortDatagramWithInstalledKeys(51, &client_scid)) orelse return error.UnexpectedState;
+    defer allocator.free(hd_dgram);
+    try server_socket.send(io, &client_socket.address, hd_dgram);
+
+    // === 步骤 13: client UDP recv HANDSHAKE_DONE -> handshake confirmed ===
+    const recv7 = try client_socket.receiveTimeout(io, &recv_buf, recvTimeout());
+    try client.processProtectedShortDatagramWithInstalledKeys(52, client_scid.len, recv7.data);
+    try require(client.handshakeConfirmed());
+
+    // === 步骤 14: 1-RTT PING/PONG 数据交换 ===
+    try client.sendPing();
+    const ping_dgram = (try client.pollProtectedShortDatagramWithInstalledKeys(53, &server_scid)) orelse return error.UnexpectedState;
+    defer allocator.free(ping_dgram);
+    try client_socket.send(io, &server_socket.address, ping_dgram);
+
+    const recv8 = try server_socket.receiveTimeout(io, &recv_buf, recvTimeout());
+    try server.processProtectedShortDatagramWithInstalledKeys(54, server_scid.len, recv8.data);
+    try require(server.peerAddressValidated());
+
+    std.debug.print("tls13_retry_loopback: Retry -> resend ClientHello -> handshake done -> 1-RTT OK\n", .{});
     std.debug.print("  client_port={} server_port={}\n", .{
         client_path.local.port,
         server_path.local.port,
     });
-    std.debug.print("  client_hello_bytes={} retry_bytes={}\n", .{
+    std.debug.print("  first_ch_bytes={} retry_dgram_bytes={} resent_ch_bytes={}\n", .{
         client_dgram.len,
         retry_dgram.len,
+        retry_ch_dgram.len,
     });
     std.debug.print("  retry_scid_matched={} token_matched={} retry_token_validated={}\n", .{
         std.mem.eql(u8, client.retrySourceConnectionId().?, &retry_scid),
         std.mem.eql(u8, client.latestRetryToken().?, token),
         server.peerAddressValidated(),
     });
-    std.debug.print("  pending_retry_tokens={} address_validated={} dcid_switched={}\n", .{
-        server.pendingRetryTokenCount(),
-        server.peerAddressValidated(),
+    std.debug.print("  dcid_switched={} client_hello_resent={}\n", .{
         std.mem.eql(u8, switched.destination_connection_id.asSlice(), &retry_scid),
+        retry_ch_dgram.len > 0,
+    });
+    std.debug.print("  handshake_done={} one_rtt_acked={}\n", .{
+        client.handshakeConfirmed() and server.handshakeConfirmed(),
+        server.peerAddressValidated(),
     });
 }
