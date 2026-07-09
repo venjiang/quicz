@@ -254,6 +254,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_tls13_retry_loopback);
 
+    // QUIC-Interop-Runner 风格 interop client executable（M7 外部互通起步）
+    const exe_interop_client = b.addExecutable(.{
+        .name = "quicz-interop-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/interop_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_interop_client);
+
     // TLS C ABI adapter executable
     const exe_tls_c_abi_adapter = b.addExecutable(.{
         .name = "quicz-tls-c-abi-adapter",
@@ -1448,6 +1462,15 @@ pub fn build(b: *std.Build) void {
     const run_tls13_retry_loopback_cmd = b.addRunArtifact(exe_tls13_retry_loopback);
     run_tls13_retry_loopback.dependOn(&run_tls13_retry_loopback_cmd.step);
     run_tls13_retry_loopback_cmd.step.dependOn(b.getInstallStep());
+
+    // zig build run-interop-client -- <server_host> <server_port> [TESTCASE]
+    const run_interop_client = b.step("run-interop-client", "Run QUIC interop client (TESTCASE/SSLKEYLOGFILE env, local loopback self-test)");
+    const run_interop_client_cmd = b.addRunArtifact(exe_interop_client);
+    run_interop_client.dependOn(&run_interop_client_cmd.step);
+    run_interop_client_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_interop_client_cmd.addArgs(args);
+    }
 
     const test_step = b.step("test", "Run quicz unit tests");
     test_step.dependOn(&run_lib_tests.step);
