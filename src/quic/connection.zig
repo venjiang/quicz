@@ -15492,6 +15492,69 @@ test "ACK-driven packet loss reduces congestion window under controlled clock" {
     try std.testing.expect(conn.congestionWindow(.application) < cwnd_initial);
 }
 
+test "persistent congestion resets congestion window to minimum under controlled clock" {
+    // RFC 9002 §5.3: 两个连续 ack-eliciting 包都被判定 lost，且发送时间间隔 >= persistent congestion
+    // duration（basePto * kPersistentCongestionDuration=3），触发 persistent congestion：cwnd 重置到
+    // minimum window（比 NewReno 减半更激进）。区别于上一个 NewReno 减半测试（cwnd=6000），本测试
+    // 验证 PC 重置 cwnd=minimumWindow(2400)，并保留 onCongestionEvent 设的 ssthresh=6000。
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+
+    // initialCongestionWindow(1200) = min(10*1200, max(2*1200, 14720)) = 12000
+    // basePto = smoothed_rtt(100) + max(4*rttvar(50)=200, 1) + max_ack_delay(25) = 325
+    // persistentCongestionDuration = basePto * 3 = 975
+    const cwnd_initial = conn.congestionWindow(.application);
+    try std.testing.expectEqual(@as(usize, 12000), cwnd_initial);
+    try std.testing.expectEqual(@as(u64, 975), conn.recovery_state.persistentCongestionDurationMs());
+
+    // 步骤 1：发送 pn 0 并 ACK，建立 first RTT sample（first_rtt_sample_sent_time=10）。
+    // RFC 9002 §5.3 要求 persistent congestion 只考虑 first RTT sample 之后发送的包。
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try conn.receiveAckInSpace(.application, 110, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(?i64, 10), conn.first_rtt_sample_sent_time_millis);
+
+    // 步骤 2：发送 pn 1..5。pn 1 与 pn 2 发送时间间隔 1000ms >= 975ms（PC duration）。
+    _ = try conn.recordPacketSentInSpace(.application, 200, 100); // pn 1
+    _ = try conn.recordPacketSentInSpace(.application, 1200, 100); // pn 2，与 pn 1 间隔 1000ms
+    _ = try conn.recordPacketSentInSpace(.application, 1201, 100); // pn 3
+    _ = try conn.recordPacketSentInSpace(.application, 1202, 100); // pn 4
+    _ = try conn.recordPacketSentInSpace(.application, 1203, 100); // pn 5
+    try std.testing.expectEqual(@as(usize, 500), conn.bytesInFlight(.application));
+
+    // 步骤 3：构造 ACK 只确认 pn 5。packet-threshold (k=3) 使 pn 1,2 都 lost
+    //（5-1=4>=3, 5-2=3>=3）。pn 1,2 连续且发送间隔 1000ms >= 975ms -> persistent congestion。
+    // pn 3,4 未达 packet threshold（5-3=2<3），也未达 time threshold（1201+113=1314>1300），存活。
+    try conn.receiveAckInSpace(.application, 1300, .{
+        .largest_acknowledged = 5,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    // pn 1,2 lost；pn 3,4 仍在 sent_packets（区别于全 lost 的场景）
+    try std.testing.expectEqual(@as(usize, 2), conn.sentPacketCount(.application));
+    // pn 5 acked + pn 1,2 lost -> bytes_in_flight = pn 3,4 = 200
+    try std.testing.expectEqual(@as(usize, 200), conn.bytesInFlight(.application));
+
+    // NewReno onCongestionEvent 先触发：ssthresh = 12000/2 = 6000，cwnd = max(6000, 2400) = 6000。
+    // 随后 persistent congestion 重置 cwnd 到 minimumCongestionWindow(1200) = 2400（比减半更激进）。
+    try std.testing.expectEqual(recovery.minimumCongestionWindow(1200), conn.congestionWindow(.application));
+    try std.testing.expectEqual(@as(usize, 2400), conn.congestionWindow(.application));
+    // cwnd 重置到 minimum（2400），明显小于 NewReno 减半值（6000）
+    try std.testing.expect(conn.congestionWindow(.application) < @as(usize, 6000));
+    // ssthresh 保留 onCongestionEvent 设的减半值（onPersistentCongestion 不改 ssthresh）
+    try std.testing.expectEqual(@as(usize, 6000), conn.recovery_state.ssthresh);
+    // persistent congestion 清除 congestion recovery period，允许立即进入新一轮恢复
+    try std.testing.expect(conn.recovery_state.wouldStartCongestionRecovery(1300));
+}
+
 test "EndpointConnectionLifecycle retires routes with recovery timer" {
     var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer lifecycle.deinit();
