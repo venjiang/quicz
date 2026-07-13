@@ -78,6 +78,20 @@ This is bounded 1-RTT short-packet evidence only. Initial and Handshake
 receive paths retain their current ordering rules, and no external server
 interoperability result has been recorded.
 
+### Separate-process local Zig interoperability evidence
+
+`zig build run-tls13-process-interop` starts the independently compiled
+`quicz-tls13-process-echo-server` and `quicz-tls13-process-echo-client` as
+separate processes. They use real loopback UDP sockets, complete the pure-Zig
+TLS-owned Initial/Handshake/1-RTT sequence, observe each peer's Initial source
+connection ID, and exchange a bidirectional STREAM echo (`echo_bytes=5`). The
+server serves one test connection and exits, making the command reproducible.
+
+This is a local Zig-to-Zig integration gate, not external interoperability.
+It uses the local deterministic test certificate with client certificate
+verification disabled; CA/SNI verification and an independently implemented
+peer remain required before the external-interop row can change from Missing.
+
 ## RFC Coverage Status
 
 Status values are `Done`, `Partial`, `Missing`, and `Deferred`. `Partial`

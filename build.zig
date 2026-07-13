@@ -58,6 +58,32 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_client);
 
+    const exe_tls13_process_echo_server = b.addExecutable(.{
+        .name = "quicz-tls13-process-echo-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tls13_process_echo_server.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_tls13_process_echo_server);
+
+    const exe_tls13_process_echo_client = b.addExecutable(.{
+        .name = "quicz-tls13-process-echo-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/tls13_process_echo_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_tls13_process_echo_client);
+
     // Codec roundtrip executable
     const exe_codec = b.addExecutable(.{
         .name = "quicz-codec-roundtrip",
@@ -966,6 +992,14 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_client_cmd.addArgs(args);
     }
+
+    const run_tls13_process_interop = b.step(
+        "run-tls13-process-interop",
+        "Run separate pure-Zig QUIC client and server over local UDP",
+    );
+    const run_tls13_process_interop_cmd = b.addSystemCommand(&.{ "sh", "scripts/run_tls13_process_interop.sh" });
+    run_tls13_process_interop.dependOn(&run_tls13_process_interop_cmd.step);
+    run_tls13_process_interop_cmd.step.dependOn(b.getInstallStep());
 
     // zig build run-codec
     const run_codec = b.step("run-codec", "Run quicz codec roundtrip example");

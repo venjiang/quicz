@@ -56,6 +56,18 @@ version-information 原语）：
 | qlog、PMTU discovery、GSO/GRO、高级 congestion selection | transport loop 可用后的运维/性能扩展。 | Deferred 或未实现。 |
 | 外部互通 | 声称第一轮可用 transport 里程碑前必须具备。 | 未实现。 |
 
+### 独立进程本地 Zig 互通证据
+
+`zig build run-tls13-process-interop` 会分别启动独立编译的
+`quicz-tls13-process-echo-server` 与 `quicz-tls13-process-echo-client`。
+两个进程通过真实 loopback UDP socket 完成纯 Zig TLS 持有的
+Initial/Handshake/1-RTT 流程，记录对端 Initial source connection ID，并完成
+bidirectional STREAM echo（`echo_bytes=5`）。服务端只处理一个测试连接后退出，
+该命令可重复执行。
+
+这是本地 Zig 到 Zig 的集成门槛，不是外部互通。它使用本地确定性测试证书，客户端
+关闭证书校验；在 CA/SNI 校验和独立实现对端通过前，“外部互通”一行仍保持未实现。
+
 ## RFC 覆盖状态
 
 状态值使用 `Done`、`Partial`、`Missing` 和 `Deferred`。`Partial` 表示仓库
