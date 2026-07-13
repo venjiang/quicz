@@ -137,7 +137,10 @@ pub fn main(init: std.process.Init) !void {
         backend.cryptoBackend(),
         &scratch,
     );
-    const client_scid = accepted_initial.accepted_initial.initial_accept.source_connection_id;
+    // The accept metadata borrows the UDP receive buffer, which subsequent
+    // receives reuse. Keep the peer CID from Connection-owned state for the
+    // later 1-RTT echo destination.
+    const client_scid = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
 
     // A client may split its ClientHello across Initial packets or retransmit
     // an Initial before the server can emit a response. Keep using Connection's
