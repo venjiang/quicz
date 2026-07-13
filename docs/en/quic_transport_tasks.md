@@ -62,6 +62,22 @@ packet/key/token and RFC 9368 version-information primitives:
 | qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
 | External interop | Required to claim the first usable transport milestone. | Missing. |
 
+### 1-RTT packet-number reordering evidence
+
+The protected 1-RTT short-packet receive path now retains a bounded history of
+received packet-number ranges. It accepts authenticated forward gaps and
+delayed packets, rejects duplicates before frame side effects, and generates
+ACK ranges for non-contiguous receipt. The `received packet ranges merge
+reordered packets and encode ACK gaps` and `processProtectedShortDatagram
+acknowledges reordered packets with ACK ranges` tests cover range merging,
+duplicate rejection, and ACK encoding. `zig build run-interop-event-loopback
+-- loss` drops the first client 1-RTT STREAM datagram, then verifies PTO-driven
+retransmission and a successful transfer (`pto_recovered=true`).
+
+This is bounded 1-RTT short-packet evidence only. Initial and Handshake
+receive paths retain their current ordering rules, and no external server
+interoperability result has been recorded.
+
 ## RFC Coverage Status
 
 Status values are `Done`, `Partial`, `Missing`, and `Deferred`. `Partial`

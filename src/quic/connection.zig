@@ -173,6 +173,7 @@ const RttEstimateSnapshot = connection_state.RttEstimateSnapshot;
 const PtoBackoffSnapshot = connection_state.PtoBackoffSnapshot;
 const PacketNumberSpaceState = packet_number_space.State;
 const PacketNumberSpaceView = packet_number_space.View;
+const ReceivedPacketRanges = packet_number_space.ReceivedPacketRanges;
 const ActiveConnectionId = connection_state.ActiveConnectionId;
 const ActiveConnectionIdSnapshot = connection_state.ActiveConnectionIdSnapshot;
 const LocalConnectionId = connection_state.LocalConnectionId;
@@ -640,6 +641,7 @@ pub const Connection = struct {
     application_packet_space_discarded: bool,
     next_peer_packet_number: u64,
     pending_ack_largest: ?u64,
+    received_packet_ranges: ReceivedPacketRanges,
     pending_path_responses: std.ArrayList([8]u8),
     pending_path_challenges: std.ArrayList(PendingPathChallenge),
     outstanding_path_challenges: std.ArrayList(OutstandingPathChallenge),
@@ -788,6 +790,7 @@ pub const Connection = struct {
             .application_packet_space_discarded = false,
             .next_peer_packet_number = 0,
             .pending_ack_largest = null,
+            .received_packet_ranges = .{},
             .pending_path_responses = .empty,
             .pending_path_challenges = .empty,
             .outstanding_path_challenges = .empty,
@@ -2281,6 +2284,7 @@ pub const Connection = struct {
             self.peer_handshake_keys = null;
         }
         packet_space.pending_ack_largest.* = null;
+        packet_space.received_packet_ranges.* = .{};
         packet_space.largest_acknowledged.* = null;
         packet_space.first_rtt_sample_sent_time_millis.* = null;
         packet_space.loss_deadline_millis.* = null;
@@ -2394,10 +2398,10 @@ pub const Connection = struct {
         try self.receiveAckFrame(space, now_millis, ack_ecn.ack, ack_ecn.ecn_counts);
     }
 
-    /// Queue an ACK for the next received packet number in the selected space.
+    /// Queue an ACK for the next expected packet number in the selected space.
     pub fn queueAckForReceivedPacketInSpace(self: *Connection, space: PacketNumberSpace) Error!void {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
-        try self.queueAckForReceivedPacket(space);
+        try self.queueAckForReceivedPacket(space, null);
     }
 
     /// Queue one ack-eliciting PING in a selected packet number space.
@@ -3150,6 +3154,7 @@ pub const Connection = struct {
                 .next_packet_number = &self.initial_packet_space.next_packet_number,
                 .next_peer_packet_number = &self.initial_packet_space.next_peer_packet_number,
                 .pending_ack_largest = &self.initial_packet_space.pending_ack_largest,
+                .received_packet_ranges = &self.initial_packet_space.received_packet_ranges,
                 .largest_acknowledged = &self.initial_packet_space.largest_acknowledged,
                 .first_rtt_sample_sent_time_millis = &self.initial_packet_space.first_rtt_sample_sent_time_millis,
                 .loss_deadline_millis = &self.initial_packet_space.loss_deadline_millis,
@@ -3174,6 +3179,7 @@ pub const Connection = struct {
                 .next_packet_number = &self.handshake_packet_space.next_packet_number,
                 .next_peer_packet_number = &self.handshake_packet_space.next_peer_packet_number,
                 .pending_ack_largest = &self.handshake_packet_space.pending_ack_largest,
+                .received_packet_ranges = &self.handshake_packet_space.received_packet_ranges,
                 .largest_acknowledged = &self.handshake_packet_space.largest_acknowledged,
                 .first_rtt_sample_sent_time_millis = &self.handshake_packet_space.first_rtt_sample_sent_time_millis,
                 .loss_deadline_millis = &self.handshake_packet_space.loss_deadline_millis,
@@ -3198,6 +3204,7 @@ pub const Connection = struct {
                 .next_packet_number = &self.next_packet_number,
                 .next_peer_packet_number = &self.next_peer_packet_number,
                 .pending_ack_largest = &self.pending_ack_largest,
+                .received_packet_ranges = &self.received_packet_ranges,
                 .largest_acknowledged = &self.largest_acknowledged,
                 .first_rtt_sample_sent_time_millis = &self.first_rtt_sample_sent_time_millis,
                 .loss_deadline_millis = &self.loss_deadline_millis,
@@ -3296,6 +3303,7 @@ pub const Connection = struct {
             defaultFramePacketTypeForSpace(space),
             now_millis,
             datagram,
+            null,
         );
     }
 
@@ -3539,11 +3547,10 @@ pub const Connection = struct {
             now_millis,
             decoded.packet.plaintext,
             close_on_frame_payload_error,
+            decoded.packet.header.packet_number,
         );
         const packet_space_after = self.packetNumberSpace(route.space);
-        if (packet_space_after.next_peer_packet_number.* == expected_packet_number) {
-            packet_space_after.next_peer_packet_number.* = std.math.add(u64, expected_packet_number, 1) catch return error.Internal;
-        }
+        _ = try self.recordReceivedPacketNumber(packet_space_after, decoded.packet.header.packet_number);
         if (pending_original_destination_dcid) |cid| {
             self.recordOriginalDestinationConnectionId(cid);
         }
@@ -3712,7 +3719,7 @@ pub const Connection = struct {
         };
         defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
 
-        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number, close_on_frame_payload_error);
+        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, close_on_frame_payload_error);
     }
 
     /// Remove 1-RTT short-header packet protection with current/next key phases.
@@ -3777,7 +3784,7 @@ pub const Connection = struct {
         };
         defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
 
-        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number, close_on_frame_payload_error);
+        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, close_on_frame_payload_error);
     }
 
     /// Remove 1-RTT short-header packet protection with caller-owned key state.
@@ -3854,7 +3861,7 @@ pub const Connection = struct {
         };
         defer protection.deinitProtectedShortPacket(&decoded, self.allocator);
 
-        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, expected_packet_number, close_on_frame_payload_error);
+        try self.processDecodedProtectedShortDatagram(now_millis, &decoded, datagram.len, close_on_frame_payload_error);
         // Only a packet that authenticated against the `next` key generation
         // signals a peer-initiated key update; a delayed packet opened with the
         // retained `previous` key must not advance key-phase state, even though
@@ -3909,22 +3916,21 @@ pub const Connection = struct {
         now_millis: i64,
         decoded: *const protection.DecodedProtectedShortPacket,
         datagram_len: usize,
-        expected_packet_number: u64,
         close_on_frame_payload_error: bool,
     ) Error!void {
         if (decoded.len != datagram_len) return error.InvalidPacket;
-        if (decoded.packet.header.packet_number != expected_packet_number) return error.InvalidPacket;
+        const packet_space = self.packetNumberSpace(.application);
+        if (!packet_space.received_packet_ranges.canRecord(decoded.packet.header.packet_number)) return error.InvalidPacket;
         try self.processDatagramInSpaceWithPacketTypeMaybeClose(
             .application,
             .one_rtt,
             now_millis,
             decoded.packet.plaintext,
             close_on_frame_payload_error,
+            decoded.packet.header.packet_number,
         );
         const packet_space_after = self.packetNumberSpace(.application);
-        if (packet_space_after.next_peer_packet_number.* == expected_packet_number) {
-            packet_space_after.next_peer_packet_number.* = std.math.add(u64, expected_packet_number, 1) catch return error.Internal;
-        }
+        _ = try self.recordReceivedPacketNumber(packet_space_after, decoded.packet.header.packet_number);
         if (self.side == .server) {
             self.discardZeroRttProtectionKeyState();
         }
@@ -6203,6 +6209,7 @@ pub const Connection = struct {
             packet_type,
             now_millis,
             datagram,
+            null,
         );
     }
 
@@ -6554,11 +6561,37 @@ pub const Connection = struct {
         now_millis: i64,
         datagram: []const u8,
         close_on_frame_payload_error: bool,
+        received_packet_number: ?u64,
     ) Error!void {
         if (close_on_frame_payload_error) {
-            return self.processDatagramForPacketTypeOrClose(packet_type, now_millis, datagram);
+            if (try classifyFramePayloadCloseError(packet_type, datagram, self.allocator)) |close| {
+                try self.closeConnection(
+                    transport_error.codeValue(close.code),
+                    close.frame_type,
+                    close.reason_phrase,
+                );
+                return error.InvalidPacket;
+            }
+
+            self.processDatagramInSpaceWithPacketType(space, packet_type, now_millis, datagram, received_packet_number) catch |err| {
+                switch (err) {
+                    error.InvalidPacket, error.InvalidStream => {
+                        if (try self.classifyFrameProcessingCloseError(packet_type, datagram)) |close| {
+                            try self.closeConnection(
+                                transport_error.codeValue(close.code),
+                                close.frame_type,
+                                close.reason_phrase,
+                            );
+                            return error.InvalidPacket;
+                        }
+                    },
+                    else => {},
+                }
+                return err;
+            };
+            return;
         }
-        return self.processDatagramInSpaceWithPacketType(space, packet_type, now_millis, datagram);
+        return self.processDatagramInSpaceWithPacketType(space, packet_type, now_millis, datagram, received_packet_number);
     }
 
     fn processDatagramInSpaceWithPacketType(
@@ -6567,6 +6600,7 @@ pub const Connection = struct {
         packet_type: FramePacketType,
         now_millis: i64,
         datagram: []const u8,
+        received_packet_number: ?u64,
     ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
         if (datagram.len == 0 or datagram.len > self.config.max_datagram_size) return error.InvalidPacket;
@@ -6599,6 +6633,7 @@ pub const Connection = struct {
 
         const next_peer_packet_number_snapshot = packet_space.next_peer_packet_number.*;
         const pending_ack_largest_snapshot = packet_space.pending_ack_largest.*;
+        const received_packet_ranges_snapshot = packet_space.received_packet_ranges.*;
         const pending_path_response_count = self.pending_path_responses.items.len;
         const outstanding_path_challenge_count = self.outstanding_path_challenges.items.len;
         const outstanding_path_challenge_snapshots = self.allocator.alloc(OutstandingPathChallenge, outstanding_path_challenge_count) catch return error.OutOfMemory;
@@ -6712,6 +6747,7 @@ pub const Connection = struct {
             packet_space = self.packetNumberSpace(space);
             packet_space.next_peer_packet_number.* = next_peer_packet_number_snapshot;
             packet_space.pending_ack_largest.* = pending_ack_largest_snapshot;
+            packet_space.received_packet_ranges.* = received_packet_ranges_snapshot;
             self.pending_path_responses.items.len = pending_path_response_count;
             self.outstanding_path_challenges.items.len = outstanding_path_challenge_count;
             @memcpy(self.outstanding_path_challenges.items[0..outstanding_path_challenge_count], outstanding_path_challenge_snapshots);
@@ -6803,7 +6839,7 @@ pub const Connection = struct {
         }
 
         if (ack_eliciting and !self.closed) {
-            try self.queueAckForReceivedPacket(space);
+            try self.queueAckForReceivedPacket(space, received_packet_number);
         }
         self.markHandshakeSpaceUsed(space);
         try self.drainPendingRecvStreams();
@@ -8894,13 +8930,10 @@ pub const Connection = struct {
         return false;
     }
 
-    fn pendingAckFrame(self: Connection, space: PacketNumberSpace) ?frame.AckFrame {
-        const largest = self.pendingAckLargest(space) orelse return null;
-        return .{
-            .largest_acknowledged = largest,
-            .ack_delay = 0,
-            .first_ack_range = largest,
-        };
+    fn pendingAckFrame(self: *Connection, space: PacketNumberSpace) ?frame.AckFrame {
+        const packet_space = self.packetNumberSpace(space);
+        _ = packet_space.pending_ack_largest.* orelse return null;
+        return packet_space.received_packet_ranges.ackFrame();
     }
 
     fn queuePingInSpace(self: *Connection, space: PacketNumberSpace) Error!void {
@@ -9943,14 +9976,31 @@ pub const Connection = struct {
         }
     }
 
-    fn queueAckForReceivedPacket(self: *Connection, space: PacketNumberSpace) Error!void {
+    fn queueAckForReceivedPacket(
+        self: *Connection,
+        space: PacketNumberSpace,
+        received_packet_number: ?u64,
+    ) Error!void {
         const packet_space = self.packetNumberSpace(space);
         if (packet_space.discarded.*) return error.InvalidPacket;
-        if (packet_space.next_peer_packet_number.* > max_quic_varint) return error.InvalidPacket;
+        const packet_number = received_packet_number orelse packet_space.next_peer_packet_number.*;
+        if (!try self.recordReceivedPacketNumber(packet_space, packet_number)) return;
 
-        const packet_number = packet_space.next_peer_packet_number.*;
-        packet_space.pending_ack_largest.* = if (packet_space.pending_ack_largest.*) |largest| @max(largest, packet_number) else packet_number;
-        packet_space.next_peer_packet_number.* = std.math.add(u64, packet_number, 1) catch return error.Internal;
+        packet_space.pending_ack_largest.* = packet_space.received_packet_ranges.ranges[0].largest;
+    }
+
+    fn recordReceivedPacketNumber(
+        self: *Connection,
+        packet_space: PacketNumberSpaceView,
+        packet_number: u64,
+    ) Error!bool {
+        _ = self;
+        if (packet_number > max_quic_varint) return error.InvalidPacket;
+        const inserted = packet_space.received_packet_ranges.record(packet_number);
+        if (inserted) {
+            packet_space.next_peer_packet_number.* = packet_space.received_packet_ranges.nextExpectedPacketNumber();
+        }
+        return inserted;
     }
 
     fn activeConnectionIdCount(self: Connection) u64 {
@@ -60579,7 +60629,7 @@ test "installed one RTT key update ACK confirmation rolls back with invalid payl
     try client.initiateOneRttKeyUpdate();
 }
 
-test "processProtectedShortDatagram rejects invalid short packets without mutation" {
+test "processProtectedShortDatagram accepts forward gaps and rejects tampered packets without mutation" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
@@ -60601,12 +60651,9 @@ test "processProtectedShortDatagram rejects invalid short packets without mutati
     }, try packet.encodePacketNumberForHeader(1, null), secrets.client, &plaintext);
     defer std.testing.allocator.free(wrong_packet_number);
 
-    try std.testing.expectError(
-        error.InvalidPacket,
-        server.processProtectedShortDatagram(10, secrets.client, server_dcid.len, wrong_packet_number),
-    );
-    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
-    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try server.processProtectedShortDatagram(10, secrets.client, server_dcid.len, wrong_packet_number);
+    try std.testing.expectEqual(@as(u64, 2), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 1), server.pendingAckLargest(.application));
 
     const tampered = try protection.protectShortPacketAes128(std.testing.allocator, .{
         .dcid = &server_dcid,
@@ -60621,8 +60668,83 @@ test "processProtectedShortDatagram rejects invalid short packets without mutati
         error.InvalidPacket,
         server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, tampered),
     );
-    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
-    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 2), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 1), server.pendingAckLargest(.application));
+}
+
+test "processProtectedShortDatagram acknowledges reordered packets with ACK ranges" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const plaintext = [_]u8{
+        @intFromEnum(frame.FrameType.ping),
+        @intFromEnum(frame.FrameType.padding),
+        @intFromEnum(frame.FrameType.padding),
+        @intFromEnum(frame.FrameType.padding),
+    };
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    const packet_zero = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(packet_zero);
+    const packet_one = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 1,
+    }, try packet.encodePacketNumberForHeader(1, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(packet_one);
+    const packet_two = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 2,
+    }, try packet.encodePacketNumberForHeader(2, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(packet_two);
+
+    try server.processProtectedShortDatagram(10, secrets.client, server_dcid.len, packet_zero);
+    try server.processProtectedShortDatagram(11, secrets.client, server_dcid.len, packet_two);
+    try std.testing.expectEqual(@as(u64, 3), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 2), server.pendingAckLargest(.application));
+
+    const ack_datagram = (try server.pollProtectedShortDatagram(12, &client_dcid, secrets.server)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack_datagram);
+    var opened_ack = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        secrets.server,
+        ack_datagram,
+        client_dcid.len,
+        0,
+    );
+    defer protection.deinitProtectedShortPacket(&opened_ack, std.testing.allocator);
+    var decoded_ack = try frame.decodeFrameSlice(opened_ack.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded_ack.frame, std.testing.allocator);
+    switch (decoded_ack.frame) {
+        .ack => |ack| {
+            try std.testing.expectEqual(@as(u64, 2), ack.largest_acknowledged);
+            try std.testing.expectEqual(@as(u64, 0), ack.first_ack_range);
+            try std.testing.expectEqual(@as(usize, 1), ack.ranges.len);
+            try std.testing.expectEqual(@as(u64, 0), ack.ranges[0].gap);
+            try std.testing.expectEqual(@as(u64, 0), ack.ranges[0].ack_range);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try server.processProtectedShortDatagram(13, secrets.client, server_dcid.len, packet_one);
+    try std.testing.expectEqual(@as(u64, 3), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, 2), server.pendingAckLargest(.application));
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processProtectedShortDatagram(14, secrets.client, server_dcid.len, packet_one),
+    );
 }
 
 test "pollProtectedShortDatagram emits protected PING and ACK-only response" {

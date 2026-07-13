@@ -14,9 +14,8 @@
 //! 场景（本地 loopback 自测）：
 //!   handshake - 事件循环驱动 TLS 1.3 握手到两端 handshakeConfirmed
 //!   transfer  - 握手后开 bidirectional stream，发数据收 echo
-//!   loss      - transfer 中 server 延迟回 ACK（模拟处理延迟/ACK 丢失），
-//!               client PTO deadline 触发 probe，probe 被 server 处理后
-//!               server 回 ACK + echo，最终 transfer 成功（同步交替驱动做不到）
+//!   loss      - 丢弃首个 client 1-RTT STREAM 数据报，client PTO/retransmission
+//!               后的 packet-number gap 由 server 接收并 ACK，最终 transfer 成功
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -87,9 +86,8 @@ const Endpoint = struct {
     /// 发包目标 DCID（对端 SCID）与本端 SCID。
     dcid: []const u8,
     scid: []const u8,
-    /// 抑制 driveAndPoll：收包后只 processRecv，不发 ACK/echo。
-    /// loss 场景用此模拟 ACK 丢失/处理延迟，使对端 PTO 触发。
-    suppress_drive: bool = false,
+    /// 丢弃下一份已轮询的 1-RTT 数据报，用于真实 packet-loss 场景。
+    drop_next_one_rtt_datagram: bool = false,
 };
 
 /// 按 header form 分发收包到 Initial/Handshake/1-RTT 路由路径。
@@ -212,6 +210,10 @@ fn driveAndPoll(ep: *Endpoint, io: std.Io, now: i64, secrets: protection.Initial
             ep.dcid,
         ) catch null) orelse break;
         defer ep.allocator.free(dg);
+        if (ep.drop_next_one_rtt_datagram) {
+            ep.drop_next_one_rtt_datagram = false;
+            continue;
+        }
         try ep.socket.send(io, &ep.peer_socket.address, dg);
     }
 }
@@ -268,14 +270,11 @@ fn stepEventLoop(
     var progressed = false;
 
     // 1. 两端各尝试收包（短 timeout 轮询，有包则处理 + drive + poll + send）。
-    //    suppress_drive 时只 processRecv，不发 ACK/echo（模拟 ACK 丢失）。
     for ([_]*Endpoint{ client, server }) |ep| {
         const recv = ep.socket.receiveTimeout(io, recv_buf, shortTimeout()) catch null;
         if (recv) |r| {
             processRecv(ep, r.data, now.*);
-            if (!ep.suppress_drive) {
-                try driveAndPoll(ep, io, now.*, secrets, scratch);
-            }
+            try driveAndPoll(ep, io, now.*, secrets, scratch);
             progressed = true;
         }
     }
@@ -449,15 +448,11 @@ pub fn main(init: std.process.Init) !void {
     const payload = "quicz-interop-event-loop-payload";
     const stream_id = try client.openStream();
     try client.sendOnStream(stream_id, payload, false);
-    // poll + send client 的 STREAM datagram。
-    try driveAndPoll(&client_ep, io, now, secrets, &scratch);
-
-    // loss 场景：server suppress_drive，收到 STREAM 后不回 ACK/echo。
-    // client 收不到 ACK -> PTO deadline 触发 -> 发 probe -> server 恢复 drive。
-    // 这模拟 ACK 丢失/处理延迟场景下的 PTO 恢复（同步交替驱动做不到）。
     if (testcase == .loss) {
-        server_ep.suppress_drive = true;
+        client_ep.drop_next_one_rtt_datagram = true;
     }
+    // poll + send client 的 STREAM datagram；loss 场景会实际丢弃第一份。
+    try driveAndPoll(&client_ep, io, now, secrets, &scratch);
 
     var got_echo = false;
     var echo_len: usize = 0;
@@ -467,17 +462,10 @@ pub fn main(init: std.process.Init) !void {
         while (iters < 2000) : (iters += 1) {
             if (got_echo) break;
             try stepEventLoop(io, &client_ep, &server_ep, &now, secrets, &scratch, &recv_buf, &pto_fired);
-            // PTO 触发后恢复 server drive，发 ACK + echo。
-            if (testcase == .loss and pto_fired and server_ep.suppress_drive) {
-                server_ep.suppress_drive = false;
+            // server 收到 STREAM 后 echo 回 client。
+            if ((try server.recvOnStream(stream_id, &stream_buf))) |n| {
+                try server.sendOnStream(stream_id, stream_buf[0..n], false);
                 try driveAndPoll(&server_ep, io, now, secrets, &scratch);
-            }
-            // server 收到 STREAM 后 echo 回 client（suppress 期间不 echo）。
-            if (!server_ep.suppress_drive) {
-                if ((try server.recvOnStream(stream_id, &stream_buf))) |n| {
-                    try server.sendOnStream(stream_id, stream_buf[0..n], false);
-                    try driveAndPoll(&server_ep, io, now, secrets, &scratch);
-                }
             }
             // client 收 echo。
             if ((try client.recvOnStream(stream_id, &stream_buf))) |n| {
