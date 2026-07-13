@@ -79,7 +79,8 @@ Initial/Handshake/1-RTT 流程，记录对端 Initial source connection ID，并
 bidirectional STREAM echo（`echo_bytes=5`）。服务端通过
 `EndpointConnectionLifecycle` 分类并接受首个 Initial；只有认证成功后才注册
 Original DCID 与 server SCID route，然后由 TLS 产生第一份响应。服务端只处理一个
-测试连接后退出，该命令可重复执行。
+测试连接后退出，该命令可重复执行。后续 Handshake 与 1-RTT STREAM 的收发会使用
+这些已注册 route 和 lifecycle timer refresh。
 
 这是本地 Zig 到 Zig 的集成门槛，不是外部互通。它使用本地确定性测试证书，客户端
 关闭证书校验；它不能替代下方的证书校验外部互通证据。

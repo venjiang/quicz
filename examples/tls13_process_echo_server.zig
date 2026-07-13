@@ -177,13 +177,21 @@ pub fn main(init: std.process.Init) !void {
     var handshake_datagrams: usize = 0;
     while (!handshake_confirmed and handshake_datagrams < max_initial_datagrams) : (handshake_datagrams += 1) {
         const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-        const client_long_packets = try connection.processProtectedLongDatagramWithInstalledHandshakeKeys(
+        const client_route = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+            server_handle,
+            &connection,
+            server_path,
             4 + @as(i64, @intCast(handshake_datagrams)),
-            initial_secrets.client,
             received.data,
         );
-        try require(client_long_packets > 0);
-        const handshake_progress = try connection.driveCryptoBackendInSpace(.handshake, backend.cryptoBackend(), &scratch);
+        try require(client_route.connection_id == server_handle);
+        const handshake_progress = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+            server_handle,
+            &connection,
+            .handshake,
+            backend.cryptoBackend(),
+            &scratch,
+        );
         handshake_confirmed = handshake_progress.handshake_confirmed;
     }
     try require(handshake_confirmed);
@@ -194,11 +202,14 @@ pub fn main(init: std.process.Init) !void {
     var application_datagrams: usize = 0;
     while (echoed_len == null and application_datagrams < max_initial_datagrams) : (application_datagrams += 1) {
         const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-        try connection.processProtectedShortDatagramWithInstalledKeys(
+        const stream_route = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &connection,
+            server_path,
             5 + @as(i64, @intCast(application_datagrams)),
-            server_scid.len,
             received.data,
         );
+        try require(stream_route.connection_id == server_handle);
         echoed_len = try connection.recvOnStream(0, &stream_buffer);
     }
     const echo_len = echoed_len orelse return error.MissingStreamData;
@@ -207,7 +218,9 @@ pub fn main(init: std.process.Init) !void {
 
     var sent_packets: usize = 0;
     while (sent_packets < 4) : (sent_packets += 1) {
-        const packet = (try connection.pollProtectedShortDatagramWithInstalledKeys(
+        const packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &connection,
             6 + @as(i64, @intCast(sent_packets)),
             client_scid,
         )) orelse break;
