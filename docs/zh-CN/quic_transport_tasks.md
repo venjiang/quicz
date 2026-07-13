@@ -56,6 +56,20 @@ version-information 原语）：
 | qlog、PMTU discovery、GSO/GRO、高级 congestion selection | transport loop 可用后的运维/性能扩展。 | Deferred 或未实现。 |
 | 外部互通 | 声称第一轮可用 transport 里程碑前必须具备。 | 部分完成：客户端专用二进制已与两个来自不同实现家族的本机独立服务端完成证书校验的 QUIC/TLS 握手；外部 STREAM transfer 和更广泛场景尚未验证。 |
 
+### Packet number 重排证据
+
+受保护 long-header 与 1-RTT short-packet 接收路径都会保留有界的已收 packet
+number range 历史。它们接受已认证的前向间隙和延迟包，在 frame side effect 前拒绝
+重复包，并为不连续接收生成 ACK range。`received packet ranges merge reordered
+packets and encode ACK gaps`、`protected long datagram bridge accepts a
+retransmitted Handshake packet number` 与 `processProtectedShortDatagram
+acknowledges reordered packets with ACK ranges` 测试分别覆盖 range 合并、long-header
+重传、重复包拒绝和 ACK 编码。`zig build run-interop-event-loopback -- loss` 会丢弃首个
+client 1-RTT STREAM datagram，并验证 PTO 驱动重传和成功 transfer（`pto_recovered=true`）。
+
+这为 Initial/Handshake/1-RTT packet number space 提供聚焦覆盖。完整的外部
+client-to-server STREAM transfer 通过前，不能将其视为外部服务端互通证据。
+
 ### 独立进程本地 Zig 互通证据
 
 `zig build run-tls13-process-interop` 会分别启动独立编译的

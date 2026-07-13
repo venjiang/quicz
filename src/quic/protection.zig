@@ -320,6 +320,9 @@ pub const ProtectedLongPacketInfo = struct {
     version: packet.Version,
     /// Long-header packet type carried in byte 0.
     packet_type: packet.PacketType,
+    /// Header-visible destination connection ID. For a client Initial, this
+    /// is the input to QUIC Initial key derivation.
+    dcid: []const u8,
     /// Number of datagram bytes consumed by this protected long packet.
     len: usize,
 };
@@ -565,6 +568,7 @@ pub fn peekProtectedLongPacketInfo(datagram: []const u8) !ProtectedLongPacketInf
     return .{
         .version = prefix.version,
         .packet_type = prefix.packet_type,
+        .dcid = prefix.dcid,
         .len = packet_end,
     };
 }
@@ -1540,11 +1544,13 @@ test "peekProtectedLongPacketInfo returns protected long packet boundaries" {
     const first = try peekProtectedLongPacketInfo(coalesced);
     try std.testing.expectEqual(packet.Version.v1, first.version);
     try std.testing.expectEqual(packet.PacketType.initial, first.packet_type);
+    try std.testing.expectEqualSlices(u8, &dcid, first.dcid);
     try std.testing.expectEqual(initial.len, first.len);
 
     const second = try peekProtectedLongPacketInfo(coalesced[first.len..]);
     try std.testing.expectEqual(packet.Version.v1, second.version);
     try std.testing.expectEqual(packet.PacketType.handshake, second.packet_type);
+    try std.testing.expectEqualSlices(u8, &dcid, second.dcid);
     try std.testing.expectEqual(handshake.len, second.len);
 }
 

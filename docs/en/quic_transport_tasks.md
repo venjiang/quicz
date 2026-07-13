@@ -62,21 +62,23 @@ packet/key/token and RFC 9368 version-information primitives:
 | qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
 | External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes a certificate-verified QUIC/TLS handshake with two independently implemented local servers from distinct implementation families; external stream transfer and broader interop scenarios remain unproven. |
 
-### 1-RTT packet-number reordering evidence
+### Packet-number reordering evidence
 
-The protected 1-RTT short-packet receive path now retains a bounded history of
-received packet-number ranges. It accepts authenticated forward gaps and
-delayed packets, rejects duplicates before frame side effects, and generates
-ACK ranges for non-contiguous receipt. The `received packet ranges merge
-reordered packets and encode ACK gaps` and `processProtectedShortDatagram
-acknowledges reordered packets with ACK ranges` tests cover range merging,
-duplicate rejection, and ACK encoding. `zig build run-interop-event-loopback
--- loss` drops the first client 1-RTT STREAM datagram, then verifies PTO-driven
-retransmission and a successful transfer (`pto_recovered=true`).
+Protected long-header and 1-RTT short-packet receive paths retain a bounded
+history of received packet-number ranges. They accept authenticated forward
+gaps and delayed packets, reject duplicates before frame side effects, and
+generate ACK ranges for non-contiguous receipt. The `received packet ranges
+merge reordered packets and encode ACK gaps`, `protected long datagram bridge
+accepts a retransmitted Handshake packet number`, and
+`processProtectedShortDatagram acknowledges reordered packets with ACK ranges`
+tests cover range merging, long-header retransmission, duplicate rejection, and
+ACK encoding. `zig build run-interop-event-loopback -- loss` drops the first
+client 1-RTT STREAM datagram, then verifies PTO-driven retransmission and a
+successful transfer (`pto_recovered=true`).
 
-This is bounded 1-RTT short-packet evidence only. Initial and Handshake
-receive paths retain their current ordering rules, and no external server
-interoperability result has been recorded.
+This gives focused Initial/Handshake/1-RTT packet-number-space coverage. A
+full external client-to-server stream transfer remains required before it is
+external server interoperability evidence.
 
 ### Separate-process local Zig interoperability evidence
 

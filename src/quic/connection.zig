@@ -3523,7 +3523,7 @@ pub const Connection = struct {
         if (@intFromEnum(decoded.packet.header.version) != @intFromEnum(self.config.chosen_version) or decoded.packet.header.packet_type != route.packet_type) {
             return error.InvalidPacket;
         }
-        if (decoded.packet.header.packet_number != expected_packet_number) return error.InvalidPacket;
+        if (!packet_space.received_packet_ranges.canRecord(decoded.packet.header.packet_number)) return error.InvalidPacket;
 
         const pending_original_destination_dcid = if (route.space == .initial and self.side == .server and self.original_destination_connection_id_len == null)
             decoded.packet.header.dcid
@@ -58582,6 +58582,37 @@ test "protected long datagram bridge emits Handshake CRYPTO packet" {
     try std.testing.expectEqualStrings("server handshake", crypto_buf[0..recv_len]);
     try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(.handshake));
     try std.testing.expectEqual(@as(?u64, 0), client.pendingAckLargest(.handshake));
+}
+
+test "protected long datagram bridge accepts a retransmitted Handshake packet number" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+
+    try server.sendCryptoInSpace(.handshake, "retransmitted handshake");
+    server.handshake_packet_space.next_packet_number = 4;
+    const protected = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .handshake,
+        10,
+        &dcid,
+        &scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    try client.processProtectedLongDatagramInSpace(.handshake, 11, secrets.server, protected);
+    var crypto_buf: [64]u8 = undefined;
+    const recv_len = (try client.recvCryptoInSpace(.handshake, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("retransmitted handshake", crypto_buf[0..recv_len]);
+    try std.testing.expectEqual(@as(u64, 5), client.nextPeerPacketNumber(.handshake));
+    try std.testing.expectEqual(@as(?u64, 4), client.pendingAckLargest(.handshake));
 }
 
 test "processProtectedLongDatagramInSpace rejects oversized UDP datagram before mutation" {

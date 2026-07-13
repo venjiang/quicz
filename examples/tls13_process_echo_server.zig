@@ -11,7 +11,6 @@ const Tls13Backend = quicz.tls13_backend.Tls13Backend;
 const protection = quicz.protection;
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
-const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
 const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
 
 fn recvTimeout() std.Io.Timeout {
@@ -43,8 +42,6 @@ pub fn main(init: std.process.Init) !void {
     const server_private_key = server_key_pair.secret_key.bytes;
     const certificate_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xde, 0xad, 0xbe, 0xef };
     const alpn = [_][]const u8{"hq-interop"};
-    const initial_secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-
     var connection = try Connection.init(allocator, .server, .{
         .initial_max_data = 8192,
         .initial_max_stream_data = 2048,
@@ -65,6 +62,9 @@ pub fn main(init: std.process.Init) !void {
     var receive_buffer: [2048]u8 = undefined;
 
     const received_initial = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+    const initial_info = try protection.peekProtectedLongPacketInfo(received_initial.data);
+    if (initial_info.packet_type != .initial) return error.InvalidPacket;
+    const initial_secrets = try protection.deriveInitialSecrets(initial_info.version, initial_info.dcid);
     try connection.processProtectedLongDatagramInSpace(.initial, 1, initial_secrets.client, received_initial.data);
     const client_scid = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
 
