@@ -7,7 +7,10 @@ const std = @import("std");
 const quicz = @import("quicz");
 
 const Connection = quicz.Connection;
+const EndpointConnectionLifecycle = quicz.EndpointConnectionLifecycle;
 const Tls13Backend = quicz.tls13_backend.Tls13Backend;
+const endpoint = quicz.endpoint;
+const quic_packet = quicz.packet;
 const protection = quicz.protection;
 
 const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
@@ -97,20 +100,50 @@ pub fn main(init: std.process.Init) !void {
     var scratch: [8192]u8 = undefined;
     var receive_buffer: [2048]u8 = undefined;
 
+    // The endpoint owns acceptance and route registration. Connection and TLS
+    // storage remain local to this one-shot process server.
+    const server_handle: u64 = 1;
+    var lifecycle = EndpointConnectionLifecycle.init(allocator);
+    defer lifecycle.deinit();
+
     const received_initial = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+    const server_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(bind_address.ip4.bytes, bind_address.ip4.port),
+        .remote = endpoint.Udp4Address.init(received_initial.from.ip4.bytes, received_initial.from.ip4.port),
+    };
+    var endpoint_output: [128]u8 = undefined;
+    const initial_accept = switch (try lifecycle.feedDatagram(
+        &endpoint_output,
+        server_path,
+        received_initial.data,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+    )) {
+        .accept_initial => |value| value,
+        else => return error.InvalidPacket,
+    };
     const initial_info = try protection.peekProtectedLongPacketInfo(received_initial.data);
-    if (initial_info.packet_type != .initial) return error.InvalidPacket;
     var original_dcid: [20]u8 = undefined;
     @memcpy(original_dcid[0..initial_info.dcid.len], initial_info.dcid);
     const initial_secrets = try protection.deriveInitialSecrets(initial_info.version, initial_info.dcid);
-    try connection.processProtectedLongDatagramInSpace(.initial, 1, initial_secrets.client, received_initial.data);
-    const client_scid = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
+    const accepted_initial = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram(
+        server_handle,
+        &connection,
+        1,
+        initial_accept,
+        &server_scid,
+        received_initial.data,
+        .{ .active_migration_disabled = true },
+        backend.cryptoBackend(),
+        &scratch,
+    );
+    const client_scid = accepted_initial.accepted_initial.initial_accept.source_connection_id;
 
     // A client may split its ClientHello across Initial packets or retransmit
     // an Initial before the server can emit a response. Keep using Connection's
     // authenticated CRYPTO reassembly until TLS derives Handshake keys, while
     // accepting only the original client's Initial DCID.
-    var initial_progress = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
+    var initial_progress = accepted_initial.backend;
     var initial_datagrams: usize = 1;
     while (!initial_progress.handshake_keys_installed and initial_datagrams < max_initial_datagrams) : (initial_datagrams += 1) {
         const next_initial = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
@@ -123,14 +156,7 @@ pub fn main(init: std.process.Init) !void {
         initial_progress = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
     }
     try require(initial_progress.handshake_keys_installed);
-    const server_initial = (try connection.pollProtectedLongCryptoDatagramInSpace(
-        .initial,
-        2,
-        client_scid,
-        &server_scid,
-        &[_]u8{},
-        initial_secrets.server,
-    )) orelse return error.UnexpectedState;
+    const server_initial = accepted_initial.response_datagram orelse return error.UnexpectedState;
     defer allocator.free(server_initial);
     try socket.send(io, &received_initial.from, server_initial);
 

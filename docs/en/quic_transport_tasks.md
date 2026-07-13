@@ -87,6 +87,9 @@ external server interoperability evidence.
 separate processes. They use real loopback UDP sockets, complete the pure-Zig
 TLS-owned Initial/Handshake/1-RTT sequence, observe each peer's Initial source
 connection ID, and exchange a bidirectional STREAM echo (`echo_bytes=5`). The
+server classifies and accepts its first Initial through
+`EndpointConnectionLifecycle`, registering its Original DCID and server SCID
+routes only after authentication before TLS produces the first response. The
 server serves one test connection and exits, making the command reproducible.
 
 This is a local Zig-to-Zig integration gate, not external interoperability.
