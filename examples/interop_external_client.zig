@@ -11,14 +11,18 @@ const Connection = quicz.Connection;
 const Tls13Backend = quicz.tls13_backend.Tls13Backend;
 const protection = quicz.protection;
 
-const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
-const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
-
 fn recvTimeout() std.Io.Timeout {
     return .{ .duration = .{
         .clock = .awake,
         .raw = std.Io.Duration.fromMilliseconds(2000),
     } };
+}
+
+/// Some peers pad a server Initial UDP datagram to 1200 bytes after the encoded
+/// long packet. This is neither a QUIC long nor short packet, so discard only
+/// an all-zero tail at this UDP integration boundary.
+fn isZeroOnlyDatagramPadding(datagram_tail: []const u8) bool {
+    return datagram_tail.len > 0 and std.mem.allEqual(u8, datagram_tail, 0);
 }
 
 fn processServerLongDatagram(
@@ -68,6 +72,11 @@ pub fn main(init: std.process.Init) !void {
     var local_address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
     var socket = try local_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
+
+    var original_dcid: [8]u8 = undefined;
+    quicz.tls13.secureRandomBytes(&original_dcid);
+    var client_scid: [8]u8 = undefined;
+    quicz.tls13.secureRandomBytes(&client_scid);
 
     const now = std.Io.Clock.real.now(io);
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
@@ -122,11 +131,14 @@ pub fn main(init: std.process.Init) !void {
                 received.data,
             );
             if (long_packet_bytes < received.data.len) {
-                try connection.processProtectedShortDatagramWithInstalledKeys(
-                    now_millis,
-                    client_scid.len,
-                    received.data[long_packet_bytes..],
-                );
+                const datagram_tail = received.data[long_packet_bytes..];
+                if (!isZeroOnlyDatagramPadding(datagram_tail)) {
+                    try connection.processProtectedShortDatagramWithInstalledKeys(
+                        now_millis,
+                        client_scid.len,
+                        datagram_tail,
+                    );
+                }
             }
             if (!sent_finished) {
                 const server_scid = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
@@ -143,4 +155,10 @@ pub fn main(init: std.process.Init) !void {
 
     if (!sent_finished or !connection.handshakeConfirmed()) return error.HandshakeNotConfirmed;
     std.debug.print("external_handshake_done=true certificate_verified=true alpn=hq-interop\n", .{});
+}
+
+test "zero-only datagram padding is isolated from a short packet" {
+    try std.testing.expect(isZeroOnlyDatagramPadding(&[_]u8{ 0, 0, 0 }));
+    try std.testing.expect(!isZeroOnlyDatagramPadding(&[_]u8{}));
+    try std.testing.expect(!isZeroOnlyDatagramPadding(&[_]u8{ 0x40, 0 }));
 }

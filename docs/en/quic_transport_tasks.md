@@ -60,7 +60,7 @@ packet/key/token and RFC 9368 version-information primitives:
 | HTTP/3 and QPACK | Application-layer work after the transport is interoperable. | Deferred. |
 | QUIC v2 and RFC 9368 compatible version negotiation | Optional extension unless a selected interop target requires it. | Partial primitives exist; full behavior is deferred. |
 | qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
-| External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes a certificate-verified QUIC/TLS handshake with an independently implemented local server; external stream transfer and broader interop scenarios remain unproven. |
+| External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes a certificate-verified QUIC/TLS handshake with two independently implemented local servers from distinct implementation families; external stream transfer and broader interop scenarios remain unproven. |
 
 ### 1-RTT packet-number reordering evidence
 
@@ -99,9 +99,14 @@ external evidence below.
 CA bundle, uses the real wall clock and SNI, keeps certificate verification
 enabled, and drives TLS-owned Initial, Handshake, and 1-RTT keys over a real
 UDP socket. Coalesced long-header packets are processed before a trailing
-1-RTT short-header packet in the same datagram. Against an independently
-implemented local server with an ECDSA P-256 certificate, the command reported
+1-RTT short-header packet in the same datagram. Against two independently
+implemented local servers from distinct implementation families, each using an
+ECDSA P-256 certificate, the command reported
 `external_handshake_done=true certificate_verified=true alpn=hq-interop`.
+One peer pads its first UDP response with an all-zero tail after the complete
+long-header packet; the example discards only that exact zero-only datagram
+tail at its UDP boundary. Any nonzero tail still follows normal protected
+short-header processing.
 
 This is external handshake evidence only. External STREAM transfer, Retry,
 loss/recovery, version negotiation, and application-protocol interoperability
