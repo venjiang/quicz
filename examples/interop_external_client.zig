@@ -1,8 +1,10 @@
-//! Client-only QUIC interoperability handshake against an independent server.
+//! Client-only QUIC interoperability echo against an independent server.
 //!
 //! Usage: quicz-interop-external-client <server_ip> <server_port> <ca_pem> [server_name]
 //! `ca_pem` must be an absolute path. The client always verifies the server
-//! certificate and requires the `hq-interop` ALPN selected by the peer.
+//! certificate and requires the `hq-interop` ALPN selected by the peer. After
+//! the TLS handshake, it sends a FIN-terminated `hello` on one bidirectional
+//! stream and requires the matching echo.
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -23,6 +25,10 @@ fn recvTimeout() std.Io.Timeout {
 /// an all-zero tail at this UDP integration boundary.
 fn isZeroOnlyDatagramPadding(datagram_tail: []const u8) bool {
     return datagram_tail.len > 0 and std.mem.allEqual(u8, datagram_tail, 0);
+}
+
+fn require(condition: bool) !void {
+    if (!condition) return error.UnexpectedState;
 }
 
 fn processServerLongDatagram(
@@ -154,7 +160,63 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (!sent_finished or !connection.handshakeConfirmed()) return error.HandshakeNotConfirmed;
-    std.debug.print("external_handshake_done=true certificate_verified=true alpn=hq-interop\n", .{});
+
+    // The independent echo peer reads a request until FIN, then writes the
+    // same bytes back on this bidirectional stream. Do not use a local-only
+    // stream contract here: the peer must parse the protected 1-RTT packet.
+    const peer_connection_id = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
+    const stream_id = try connection.openStream();
+    try connection.sendOnStream(stream_id, "hello", true);
+    var sent_application_datagrams: usize = 0;
+    while (sent_application_datagrams < 4) : (sent_application_datagrams += 1) {
+        const datagram = (try connection.pollProtectedShortDatagramWithInstalledKeys(
+            20 + @as(i64, @intCast(sent_application_datagrams)),
+            peer_connection_id,
+        )) orelse break;
+        defer allocator.free(datagram);
+        try socket.send(io, &server_address, datagram);
+    }
+
+    var stream_buffer: [128]u8 = undefined;
+    var received_application_datagrams: usize = 0;
+    var got_echo = false;
+    while (received_application_datagrams < 8) : (received_application_datagrams += 1) {
+        const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+        const now_millis = 30 + @as(i64, @intCast(received_application_datagrams));
+        if ((received.data[0] & 0x80) != 0) {
+            const long_packet_bytes = try processServerLongDatagram(
+                &connection,
+                &backend,
+                &scratch,
+                initial_secrets.server,
+                now_millis,
+                received.data,
+            );
+            if (long_packet_bytes < received.data.len) {
+                const datagram_tail = received.data[long_packet_bytes..];
+                if (!isZeroOnlyDatagramPadding(datagram_tail)) {
+                    try connection.processProtectedShortDatagramWithInstalledKeys(
+                        now_millis,
+                        client_scid.len,
+                        datagram_tail,
+                    );
+                }
+            }
+        } else {
+            try connection.processProtectedShortDatagramWithInstalledKeys(
+                now_millis,
+                client_scid.len,
+                received.data,
+            );
+        }
+        if (try connection.recvOnStream(stream_id, &stream_buffer)) |echoed_len| {
+            try require(std.mem.eql(u8, stream_buffer[0..echoed_len], "hello"));
+            got_echo = true;
+            break;
+        }
+    }
+    if (!got_echo) return error.MissingStreamEcho;
+    std.debug.print("external_handshake_done=true certificate_verified=true alpn=hq-interop echo_bytes=5\n", .{});
 }
 
 test "zero-only datagram padding is isolated from a short packet" {

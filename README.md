@@ -25,7 +25,8 @@ A QUIC implementation in [Zig](https://ziglang.org/) aiming to follow the IETF Q
 - [ ] Complete connection state machine and TLS-owned protected-packet packet number space routing.
 - [ ] Endpoint-owned TLS-backed socket client/server echo with a live TLS handshake driving UDP packet routing, automatic traffic-secret installation, and 1-RTT STREAM delivery.
 - [ ] Embeddable socket API where callers own UDP sockets, connection maps, timers, and datagram output queues.
-- [ ] Minimal external interop entry for `handshake` and `transfer`.
+- [x] Minimal external interop entry for certificate-verified `handshake` and a
+  FIN-terminated `transfer` against an independent QUIC server.
 - [ ] Full RFC 9002 loss detection and congestion control with socket-owned protected-packet loss/PTO lifecycle integration and remaining NewReno edge cases.
 - [ ] TLS 1.3 integration for QUIC (RFC 9001) — pure-Zig path complete; remaining: full loss/PTO lifecycle + interop
 - [ ] QUIC v2 (RFC 9369) version support

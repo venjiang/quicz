@@ -22,7 +22,8 @@
 - [ ] 完整 connection state machine 与 TLS-owned protected-packet packet number space routing。
 - [ ] Endpoint-owned TLS-backed socket client/server echo，由 live TLS handshake 驱动 UDP packet routing、自动 traffic-secret 安装和 1-RTT STREAM delivery。
 - [ ] 可嵌入 socket API，让调用方自持 UDP socket、connection map、timer 和 datagram 输出队列。
-- [ ] 面向 `handshake` 和 `transfer` 的最小外部互通入口。
+- [x] 面向证书校验 `handshake` 与带 FIN `transfer` 的最小外部互通入口，已对独立 QUIC
+  server 验证。
 - [ ] 完整 RFC 9002 loss detection / congestion control，含 socket-owned protected-packet loss/PTO lifecycle integration 与剩余 NewReno 边界。
 - [ ] TLS 1.3 集成（RFC 9001）——纯 Zig 路径已完成；剩余：完整 loss/PTO lifecycle + interop。
 - [ ] QUIC v2（RFC 9369）完整版本行为支持。

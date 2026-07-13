@@ -1016,7 +1016,7 @@ pub fn build(b: *std.Build) void {
 
     const run_interop_external_client = b.step(
         "run-interop-external-client",
-        "Run client-only QUIC handshake against an external server",
+        "Run certificate-verified QUIC echo against an external server",
     );
     const run_interop_external_client_cmd = b.addRunArtifact(exe_interop_external_client);
     run_interop_external_client.dependOn(&run_interop_external_client_cmd.step);
