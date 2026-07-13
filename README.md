@@ -82,8 +82,9 @@ zig build run-initial-keys
 ```
 
 `zig build` builds the static library at `zig-out/lib/libquicz.a` and all
-example binaries under `zig-out/bin/`. The examples are deterministic protocol
-exercises, not interoperable QUIC-over-UDP programs yet.
+example binaries under `zig-out/bin/`. Most examples are deterministic
+protocol exercises; the separate-process Zig echo and the Go/Rust client
+examples below are real loopback QUIC-over-UDP interoperability probes.
 
 Common runnable examples:
 
@@ -97,6 +98,16 @@ Common runnable examples:
   `EndpointConnectionLifecycle` ownership — full handshake + STREAM echo +
   NEW_CONNECTION_ID + NEW_TOKEN + HANDSHAKE_DONE + PTO probe + recovery-timer
   service + protected close, all over loopback UDP with TLS-owned keys.
+- `run-tls13-process-interop`: starts separate Zig client and server processes
+  and proves a real UDP STREAM echo.
+
+For external-language client examples, first run
+`zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443`, then use either
+`examples/interop/go_echo_client` or `examples/interop/rust_echo_client` with
+the supplied local test trust anchor at
+`examples/interop/testdata/quicz-echo-ca.pem`. Both examples require CA/SNI
+input and keep certificate verification enabled; see the transport task matrix
+for exact commands and the local-only certificate boundary.
 - `run-tls-openssl-backend-adapter`: OpenSSL-backed C TLS adapter path,
   including local transport parameters, first outbound TLS CRYPTO flight, and
   quicz-encoded pair-transcript server transport-parameter bytes,

@@ -60,7 +60,7 @@ packet/key/token and RFC 9368 version-information primitives:
 | HTTP/3 and QPACK | Application-layer work after the transport is interoperable. | Deferred. |
 | QUIC v2 and RFC 9368 compatible version negotiation | Optional extension unless a selected interop target requires it. | Partial primitives exist; full behavior is deferred. |
 | qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
-| External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes a certificate-verified QUIC/TLS handshake with two independently implemented local servers from distinct implementation families; external stream transfer and broader interop scenarios remain unproven. |
+| External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes a certificate-verified QUIC/TLS handshake with two independently implemented local servers, and Go and Rust clients complete certificate-verified STREAM echoes against the local Zig server. Broader server, retry, recovery, and application-protocol scenarios remain unproven. |
 
 ### Packet-number reordering evidence
 
@@ -94,6 +94,27 @@ It uses the local deterministic test certificate with client certificate
 verification disabled; it does not substitute for the certificate-verified
 external evidence below.
 
+### Go and Rust client interoperability examples
+
+`examples/interop/go_echo_client` and `examples/interop/rust_echo_client`
+are independent QUIC clients for the one-shot Zig echo server. Each requires a
+caller-supplied PEM trust anchor and SNI, keeps certificate verification
+enabled, negotiates `hq-interop`, sends `hello` on stream 0, and requires the
+five-byte echo before reporting success. The repository-local development
+commands are:
+
+```sh
+zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443
+(cd examples/interop/go_echo_client && go run . -addr 127.0.0.1:4443 -ca ../testdata/quicz-echo-ca.pem -server-name localhost)
+(cd examples/interop/rust_echo_client && cargo run -- 127.0.0.1:4443 ../testdata/quicz-echo-ca.pem localhost)
+```
+
+Both clients reported `handshake_done=true echo_bytes=5` against the Zig
+server. The server accepts a bounded Initial flight, coalesced Initial and
+Handshake packets, and 1-RTT ACK/control packets that precede the stream
+payload. The PEM file is a local test trust anchor for `localhost` and
+`127.0.0.1`, not a deployment credential or a public CA.
+
 ### External certificate-verified handshake evidence
 
 `zig build run-interop-external-client -- <server_ip> <server_port>
@@ -110,9 +131,11 @@ long-header packet; the example discards only that exact zero-only datagram
 tail at its UDP boundary. Any nonzero tail still follows normal protected
 short-header processing.
 
-This is external handshake evidence only. External STREAM transfer, Retry,
-loss/recovery, version negotiation, and application-protocol interoperability
-remain required before the milestone can be considered complete.
+The client-only path above is external handshake evidence only. The separate
+Go and Rust examples prove external-client-to-Zig-server stream echoes, but
+Retry, loss/recovery, version negotiation, broader server behavior, and
+application-protocol interoperability remain required before the milestone can
+be considered complete.
 
 ## RFC Coverage Status
 

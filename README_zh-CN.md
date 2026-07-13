@@ -75,7 +75,7 @@ zig build run-codec
 zig build run-initial-keys
 ```
 
-`zig build` 会构建 `zig-out/lib/libquicz.a` 静态库，以及 `zig-out/bin/` 下的所有示例二进制。当前示例是确定性的协议行为练习，还不是可互操作的 QUIC-over-UDP 程序。
+`zig build` 会构建 `zig-out/lib/libquicz.a` 静态库，以及 `zig-out/bin/` 下的所有示例二进制。大多数示例是确定性的协议行为练习；独立进程 Zig echo 和下方 Go/Rust 客户端示例则是真实 loopback QUIC-over-UDP 互通探针。
 
 常用可运行示例：
 
@@ -88,6 +88,14 @@ zig build run-initial-keys
 - `run-tls13-lifecycle-loopback`：纯 Zig TLS 1.3 + `EndpointConnectionLifecycle`
   归属——完整握手 + STREAM echo + NEW_CONNECTION_ID + NEW_TOKEN +
   HANDSHAKE_DONE + PTO probe + recovery-timer service + protected close。
+- `run-tls13-process-interop`：启动独立的 Zig client/server 进程，并验证真实 UDP
+  STREAM echo。
+
+如需运行其它语言客户端示例，先执行
+`zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443`，再在
+`examples/interop/go_echo_client` 或 `examples/interop/rust_echo_client` 中运行命令，并传入
+仓库提供的本地测试信任锚 `examples/interop/testdata/quicz-echo-ca.pem`。两个示例都要求
+CA/SNI 输入并保持证书校验开启；精确命令和仅限本地测试的证书边界见传输任务矩阵。
 - `run-tls-openssl-backend-adapter`：OpenSSL-backed C TLS adapter 路径，覆盖本端
   transport parameters、第一段 TLS CRYPTO flight，以及 pair-transcript server
   transport-parameter、Handshake/1-RTT secret 和入站 CRYPTO 经 OpenSSL callback

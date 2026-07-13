@@ -3480,6 +3480,25 @@ pub const Connection = struct {
         try self.processProtectedLongDatagramInSpace(.handshake, now_millis, keys, datagram);
     }
 
+    /// Process a coalesced Initial and Handshake UDP datagram using caller
+    /// Initial keys and the installed peer Handshake keys.
+    ///
+    /// This keeps the exact UDP datagram length available for RFC 9000 Initial
+    /// size validation while `processProtectedLongDatagram()` slices each
+    /// authenticated long-header packet at its encoded boundary.
+    pub fn processProtectedLongDatagramWithInstalledHandshakeKeys(
+        self: *Connection,
+        now_millis: i64,
+        initial_keys: protection.Aes128PacketProtectionKeys,
+        datagram: []const u8,
+    ) Error!usize {
+        const handshake_keys = self.peer_handshake_keys orelse return error.InvalidPacket;
+        return self.processProtectedLongDatagram(now_millis, .{
+            .initial = initial_keys,
+            .handshake = handshake_keys,
+        }, datagram);
+    }
+
     /// Remove installed-key Handshake protection and queue CONNECTION_CLOSE on frame errors.
     ///
     /// This keeps the installed-key lookup and success path of
