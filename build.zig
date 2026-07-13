@@ -84,6 +84,19 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe_tls13_process_echo_client);
 
+    const exe_interop_external_client = b.addExecutable(.{
+        .name = "quicz-interop-external-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/interop_external_client.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "quicz", .module = quicz_mod },
+            },
+        }),
+    });
+    b.installArtifact(exe_interop_external_client);
+
     // Codec roundtrip executable
     const exe_codec = b.addExecutable(.{
         .name = "quicz-codec-roundtrip",
@@ -1000,6 +1013,17 @@ pub fn build(b: *std.Build) void {
     const run_tls13_process_interop_cmd = b.addSystemCommand(&.{ "sh", "scripts/run_tls13_process_interop.sh" });
     run_tls13_process_interop.dependOn(&run_tls13_process_interop_cmd.step);
     run_tls13_process_interop_cmd.step.dependOn(b.getInstallStep());
+
+    const run_interop_external_client = b.step(
+        "run-interop-external-client",
+        "Run client-only QUIC handshake against an external server",
+    );
+    const run_interop_external_client_cmd = b.addRunArtifact(exe_interop_external_client);
+    run_interop_external_client.dependOn(&run_interop_external_client_cmd.step);
+    run_interop_external_client_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_interop_external_client_cmd.addArgs(args);
+    }
 
     // zig build run-codec
     const run_codec = b.step("run-codec", "Run quicz codec roundtrip example");

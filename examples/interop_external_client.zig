@@ -1,0 +1,146 @@
+//! Client-only QUIC interoperability handshake against an independent server.
+//!
+//! Usage: quicz-interop-external-client <server_ip> <server_port> <ca_pem> [server_name]
+//! `ca_pem` must be an absolute path. The client always verifies the server
+//! certificate and requires the `hq-interop` ALPN selected by the peer.
+
+const std = @import("std");
+const quicz = @import("quicz");
+
+const Connection = quicz.Connection;
+const Tls13Backend = quicz.tls13_backend.Tls13Backend;
+const protection = quicz.protection;
+
+const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+
+fn recvTimeout() std.Io.Timeout {
+    return .{ .duration = .{
+        .clock = .awake,
+        .raw = std.Io.Duration.fromMilliseconds(2000),
+    } };
+}
+
+fn processServerLongDatagram(
+    connection: *Connection,
+    backend: *Tls13Backend,
+    scratch: []u8,
+    initial_keys: protection.Aes128PacketProtectionKeys,
+    now_millis: i64,
+    datagram: []const u8,
+) !usize {
+    var offset: usize = 0;
+    while (offset < datagram.len and (datagram[offset] & 0x80) != 0) {
+        const info = try protection.peekProtectedLongPacketInfo(datagram[offset..]);
+        const packet_end = std.math.add(usize, offset, info.len) catch return error.InvalidPacket;
+        if (packet_end > datagram.len) return error.InvalidPacket;
+        const packet = datagram[offset..packet_end];
+        switch (info.packet_type) {
+            .initial => {
+                try connection.processProtectedLongDatagramInSpace(.initial, now_millis, initial_keys, packet);
+                _ = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), scratch);
+            },
+            .handshake => {
+                try connection.processProtectedHandshakeDatagramWithInstalledKeys(now_millis, packet);
+                _ = try connection.driveCryptoBackendInSpace(.handshake, backend.cryptoBackend(), scratch);
+            },
+            .zero_rtt, .retry => return error.UnsupportedPacketType,
+        }
+        offset = packet_end;
+    }
+    return offset;
+}
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+
+    var args = std.process.Args.Iterator.init(init.minimal.args);
+    _ = args.next();
+    const server_ip = args.next() orelse return error.MissingArgs;
+    const server_port = try std.fmt.parseInt(u16, args.next() orelse return error.MissingArgs, 10);
+    const ca_pem = args.next() orelse return error.MissingArgs;
+    const server_name = args.next() orelse "localhost";
+    if (args.next() != null) return error.InvalidArgs;
+    if (!std.Io.Dir.path.isAbsolute(ca_pem)) return error.CaPathMustBeAbsolute;
+
+    const server_address = try std.Io.net.IpAddress.parseIp4(server_ip, server_port);
+    var local_address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var socket = try local_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer socket.close(io);
+
+    const now = std.Io.Clock.real.now(io);
+    var ca_bundle: std.crypto.Certificate.Bundle = .empty;
+    defer ca_bundle.deinit(allocator);
+    try ca_bundle.addCertsFromFilePathAbsolute(allocator, io, now, ca_pem);
+
+    const alpn = [_][]const u8{"hq-interop"};
+    const initial_secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    var connection = try Connection.init(allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+    });
+    defer connection.deinit();
+    try connection.setLocalInitialSourceConnectionId(&client_scid);
+
+    var backend = Tls13Backend.initClient(.{
+        .alpn = &alpn,
+        .server_name = server_name,
+        .skip_cert_verify = false,
+        .now_sec = now.toSeconds(),
+        .ca_bundle = &ca_bundle,
+    });
+    var scratch: [8192]u8 = undefined;
+    var receive_buffer: [8192]u8 = undefined;
+
+    _ = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
+    const client_initial = (try connection.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        1,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        initial_secrets.client,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(client_initial);
+    try socket.send(io, &server_address, client_initial);
+
+    var sent_finished = false;
+    var datagrams_received: usize = 0;
+    while (datagrams_received < 8 and !connection.handshakeConfirmed()) : (datagrams_received += 1) {
+        const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+        const now_millis = @as(i64, @intCast(2 + datagrams_received));
+        if ((received.data[0] & 0x80) != 0) {
+            const long_packet_bytes = try processServerLongDatagram(
+                &connection,
+                &backend,
+                &scratch,
+                initial_secrets.server,
+                now_millis,
+                received.data,
+            );
+            if (long_packet_bytes < received.data.len) {
+                try connection.processProtectedShortDatagramWithInstalledKeys(
+                    now_millis,
+                    client_scid.len,
+                    received.data[long_packet_bytes..],
+                );
+            }
+            if (!sent_finished) {
+                const server_scid = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
+                if (try connection.pollProtectedHandshakeDatagramWithInstalledKeys(now_millis + 1, server_scid, &client_scid)) |client_finished| {
+                    defer allocator.free(client_finished);
+                    try socket.send(io, &server_address, client_finished);
+                    sent_finished = true;
+                }
+            }
+        } else {
+            try connection.processProtectedShortDatagramWithInstalledKeys(now_millis, client_scid.len, received.data);
+        }
+    }
+
+    if (!sent_finished or !connection.handshakeConfirmed()) return error.HandshakeNotConfirmed;
+    std.debug.print("external_handshake_done=true certificate_verified=true alpn=hq-interop\n", .{});
+}

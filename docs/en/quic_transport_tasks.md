@@ -60,7 +60,7 @@ packet/key/token and RFC 9368 version-information primitives:
 | HTTP/3 and QPACK | Application-layer work after the transport is interoperable. | Deferred. |
 | QUIC v2 and RFC 9368 compatible version negotiation | Optional extension unless a selected interop target requires it. | Partial primitives exist; full behavior is deferred. |
 | qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
-| External interop | Required to claim the first usable transport milestone. | Missing. |
+| External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes a certificate-verified QUIC/TLS handshake with an independently implemented local server; external stream transfer and broader interop scenarios remain unproven. |
 
 ### 1-RTT packet-number reordering evidence
 
@@ -89,8 +89,23 @@ server serves one test connection and exits, making the command reproducible.
 
 This is a local Zig-to-Zig integration gate, not external interoperability.
 It uses the local deterministic test certificate with client certificate
-verification disabled; CA/SNI verification and an independently implemented
-peer remain required before the external-interop row can change from Missing.
+verification disabled; it does not substitute for the certificate-verified
+external evidence below.
+
+### External certificate-verified handshake evidence
+
+`zig build run-interop-external-client -- <server_ip> <server_port>
+<absolute_ca_pem> [server_name]` runs a client-only path. It loads the supplied
+CA bundle, uses the real wall clock and SNI, keeps certificate verification
+enabled, and drives TLS-owned Initial, Handshake, and 1-RTT keys over a real
+UDP socket. Coalesced long-header packets are processed before a trailing
+1-RTT short-header packet in the same datagram. Against an independently
+implemented local server with an ECDSA P-256 certificate, the command reported
+`external_handshake_done=true certificate_verified=true alpn=hq-interop`.
+
+This is external handshake evidence only. External STREAM transfer, Retry,
+loss/recovery, version negotiation, and application-protocol interoperability
+remain required before the milestone can be considered complete.
 
 ## RFC Coverage Status
 
