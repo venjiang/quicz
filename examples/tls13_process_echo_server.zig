@@ -232,5 +232,25 @@ pub fn main(init: std.process.Init) !void {
     }
     try require(sent_packets > 0);
 
-    std.debug.print("zig_process_server: handshake_done=true echo_bytes={d}\n", .{echo_len});
+    const received_close = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+    const close_route = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        server_handle,
+        &connection,
+        server_path,
+        10,
+        received_close.data,
+    );
+    try require(close_route.connection_id == server_handle);
+    try require(connection.connectionState() == .draining);
+    const server_drain_deadline = connection.closeDeadlineMillis() orelse return error.UnexpectedState;
+    const server_retired = (try lifecycle.checkCloseTimeoutsAndRetireConnection(
+        server_handle,
+        &connection,
+        server_drain_deadline,
+    )) orelse return error.UnexpectedState;
+    try require(server_retired.routes_retired > 0);
+    try require(connection.connectionState() == .closed);
+    try require(lifecycle.routeCount() == 0);
+
+    std.debug.print("zig_process_server: handshake_done=true echo_bytes={d} close_cleanup=true\n", .{echo_len});
 }

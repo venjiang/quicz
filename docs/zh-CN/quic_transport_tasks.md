@@ -81,7 +81,9 @@ bidirectional STREAM echo（`echo_bytes=5`）。服务端通过
 Original DCID 与 server SCID route，然后由 TLS 产生第一份响应。客户端在绑定 UDP
 socket 后注册自己的 SCID route。两端后续 Handshake 与 1-RTT STREAM 的收发都会使用
 这些已注册 route 和 lifecycle timer refresh。服务端只处理一个测试连接后退出，该命令
-可重复执行。
+可重复执行。匹配 echo 后，客户端发送受保护的 `CONNECTION_CLOSE`；服务端通过 route
+处理它并进入 draining，两个 lifecycle owner 都会在 close deadline 退役 route
+（`close_cleanup=true`）。
 
 这是本地 Zig 到 Zig 的集成门槛，不是外部互通。它使用本地确定性测试证书，客户端
 关闭证书校验；它不能替代下方的证书校验外部互通证据。

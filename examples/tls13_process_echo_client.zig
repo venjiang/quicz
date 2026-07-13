@@ -134,5 +134,25 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     try require(got_echo);
-    std.debug.print("zig_process_client: handshake_done=true echo_bytes=5\n", .{});
+
+    try connection.closeConnection(0, 0, "process echo complete");
+    const close_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        client_handle,
+        &connection,
+        10,
+        server_scid,
+    )) orelse return error.UnexpectedState;
+    defer allocator.free(close_packet);
+    try socket.send(io, &server_address, close_packet);
+    const client_close_deadline = connection.closeDeadlineMillis() orelse return error.UnexpectedState;
+    const client_retired = (try lifecycle.checkCloseTimeoutsAndRetireConnection(
+        client_handle,
+        &connection,
+        client_close_deadline,
+    )) orelse return error.UnexpectedState;
+    try require(client_retired.routes_retired > 0);
+    try require(connection.connectionState() == .closed);
+    try require(lifecycle.routeCount() == 0);
+
+    std.debug.print("zig_process_client: handshake_done=true echo_bytes=5 close_cleanup=true\n", .{});
 }
