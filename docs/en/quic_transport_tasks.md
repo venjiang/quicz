@@ -60,7 +60,7 @@ packet/key/token and RFC 9368 version-information primitives:
 | HTTP/3 and QPACK | Application-layer work after the transport is interoperable. | Deferred. |
 | QUIC v2 and RFC 9368 compatible version negotiation | Optional extension unless a selected interop target requires it. | Partial primitives exist; full behavior is deferred. |
 | qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
-| External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes a certificate-verified QUIC/TLS handshake with two independently implemented local servers, and Go and Rust clients complete certificate-verified bidirectional STREAM FIN echoes against the local Zig server, including its bounded Retry path. Broader server, recovery, and application-protocol scenarios remain unproven. |
+| External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes certificate-verified QUIC/TLS handshakes with two independently implemented local servers, plus a certificate-verified bidirectional STREAM FIN echo through a `quic-go` v0.59.0 server that forces Retry; Go and Rust clients complete certificate-verified bidirectional STREAM FIN echoes against the local Zig server, including its bounded Retry path. Loss/recovery, version negotiation, broader server, and application-protocol scenarios remain unproven. |
 
 ### Packet-number reordering evidence
 
@@ -236,7 +236,15 @@ matching five-byte echo followed by the peer FIN. Against a local independent
 This validates an external server's protected 1-RTT STREAM parsing, echo, and
 terminal send-side close, not merely the TLS handshake.
 
-This is still a narrow external interop proof. Retry, loss/recovery, version
+The external client also accepts one valid v1 Retry before handshake
+confirmation: it verifies the Retry integrity tag against the original DCID,
+re-emits the cached ClientHello with the Retry SCID and derived Initial keys,
+and sends the stored token automatically. An independent `quic-go` v0.59.0
+server using `Transport.VerifySourceAddress` to force Retry completed the same
+certificate-verified FIN echo. This is real peer-driven Retry behavior, not a
+local token fixture.
+
+This is still a narrow external interop proof. Loss/recovery, version
 negotiation, broader server behavior, and application-protocol interoperability
 remain required before the milestone can be considered complete.
 

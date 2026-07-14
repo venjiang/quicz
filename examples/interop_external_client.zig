@@ -31,6 +31,13 @@ fn require(condition: bool) !void {
     if (!condition) return error.UnexpectedState;
 }
 
+fn isRetryDatagram(datagram: []const u8) bool {
+    if (datagram.len < 5 or (datagram[0] & 0x80) == 0 or (datagram[0] & 0x40) == 0) return false;
+    const version: quicz.packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
+    const type_bits: u2 = @intCast((datagram[0] >> 4) & 0x03);
+    return quicz.packet.longHeaderPacketTypeFromBits(version, type_bits) == .retry;
+}
+
 fn processServerLongDatagram(
     connection: *Connection,
     backend: *Tls13Backend,
@@ -123,16 +130,40 @@ pub fn main(init: std.process.Init) !void {
     try socket.send(io, &server_address, client_initial);
 
     var sent_finished = false;
+    var received_retry = false;
+    var server_initial_keys = initial_secrets.server;
     var datagrams_received: usize = 0;
     while (datagrams_received < 8 and !connection.handshakeConfirmed()) : (datagrams_received += 1) {
         const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
         const now_millis = @as(i64, @intCast(2 + datagrams_received));
+        if (isRetryDatagram(received.data)) {
+            if (received_retry) return error.DuplicateRetry;
+            try connection.processRetryDatagram(now_millis, &original_dcid, received.data);
+            const retry_scid = connection.retrySourceConnectionId() orelse return error.MissingPeerConnectionId;
+            const retry_secrets = try protection.deriveInitialSecrets(.v1, retry_scid);
+            backend.retryReceived();
+            try connection.resetInitialCryptoSendForRetry();
+            _ = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
+            const retry_initial = (try connection.pollProtectedLongCryptoDatagramInSpace(
+                .initial,
+                now_millis,
+                retry_scid,
+                &client_scid,
+                &[_]u8{},
+                retry_secrets.client,
+            )) orelse return error.UnexpectedState;
+            defer allocator.free(retry_initial);
+            try socket.send(io, &server_address, retry_initial);
+            received_retry = true;
+            server_initial_keys = retry_secrets.server;
+            continue;
+        }
         if ((received.data[0] & 0x80) != 0) {
             const long_packet_bytes = try processServerLongDatagram(
                 &connection,
                 &backend,
                 &scratch,
-                initial_secrets.server,
+                server_initial_keys,
                 now_millis,
                 received.data,
             );
@@ -189,7 +220,7 @@ pub fn main(init: std.process.Init) !void {
                 &connection,
                 &backend,
                 &scratch,
-                initial_secrets.server,
+                server_initial_keys,
                 now_millis,
                 received.data,
             );
@@ -228,4 +259,12 @@ test "zero-only datagram padding is isolated from a short packet" {
     try std.testing.expect(isZeroOnlyDatagramPadding(&[_]u8{ 0, 0, 0 }));
     try std.testing.expect(!isZeroOnlyDatagramPadding(&[_]u8{}));
     try std.testing.expect(!isZeroOnlyDatagramPadding(&[_]u8{ 0x40, 0 }));
+}
+
+test "Retry detector accepts only a v1 Retry header" {
+    const retry = [_]u8{ 0xf0, 0, 0, 0, 1 };
+    const initial = [_]u8{ 0xc0, 0, 0, 0, 1 };
+    try std.testing.expect(isRetryDatagram(&retry));
+    try std.testing.expect(!isRetryDatagram(&initial));
+    try std.testing.expect(!isRetryDatagram(&[_]u8{ 0xf0, 0, 0, 0 }));
 }

@@ -54,7 +54,7 @@ version-information 原语）：
 | HTTP/3 和 QPACK | transport 可互通后再做的应用层工作。 | Deferred。 |
 | QUIC v2 和 RFC 9368 compatible version negotiation | 可选扩展，除非选定互通目标要求。 | 已有部分 primitive；完整行为 deferred。 |
 | qlog、PMTU discovery、GSO/GRO、高级 congestion selection | transport loop 可用后的运维/性能扩展。 | Deferred 或未实现。 |
-| 外部互通 | 声称第一轮可用 transport 里程碑前必须具备。 | 部分完成：客户端专用二进制已与两个来自不同实现家族的本机独立服务端完成证书校验的 QUIC/TLS 握手；Go 与 Rust 客户端已和本地 Zig server 完成证书校验的双向 STREAM FIN echo，包含有界 Retry 路径。更广泛的服务端、recovery 和应用层场景尚未验证。 |
+| 外部互通 | 声称第一轮可用 transport 里程碑前必须具备。 | 部分完成：客户端专用二进制已与两个来自不同实现家族的本机独立服务端完成证书校验的 QUIC/TLS 握手，并通过强制 Retry 的 `quic-go` v0.59.0 server 完成证书校验的双向 STREAM FIN echo；Go 与 Rust 客户端已和本地 Zig server 完成证书校验的双向 STREAM FIN echo，包含有界 Retry 路径。loss/recovery、version negotiation、更广泛的服务端和应用层场景尚未验证。 |
 
 ### Packet number 重排证据
 
@@ -185,7 +185,12 @@ ECDSA P-256 证书的本机独立服务端，命令均输出
 `external_handshake_done=true certificate_verified=true alpn=hq-interop echo_bytes=5`。
 这证明外部 server 真实解析了受保护的 1-RTT STREAM、完成 echo 并关闭自己的发送侧，而不只是完成 TLS 握手。
 
-这仍只是窄范围的外部互通证据。Retry、loss/recovery、version negotiation、更广泛的服务端
+外部客户端还会在握手确认前接受一个有效的 v1 Retry：它以 original DCID 验证 Retry integrity tag，
+使用 Retry SCID 和重新派生的 Initial key 重发缓存的 ClientHello，并自动携带保存的 token。一个通过
+`Transport.VerifySourceAddress` 强制 Retry 的独立 `quic-go` v0.59.0 server 完成了同样的证书校验
+双向 FIN echo。这是由真实 peer 驱动的 Retry 行为，不是本地 token fixture。
+
+这仍只是窄范围的外部互通证据。loss/recovery、version negotiation、更广泛的服务端
 行为和应用层协议互通仍需验证，里程碑不能据此视为完成。
 
 ## RFC 覆盖状态
