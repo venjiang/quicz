@@ -3,8 +3,8 @@
 //! Usage: quicz-interop-external-client <server_ip> <server_port> <ca_pem> [server_name]
 //! `ca_pem` must be an absolute path. The client always verifies the server
 //! certificate and requires the `hq-interop` ALPN selected by the peer. After
-//! the TLS handshake, it sends a FIN-terminated `hello` on one bidirectional
-//! stream and requires the matching echo.
+//! the TLS handshake, it sends FIN-terminated `hello` and `world` on separate
+//! bidirectional streams and requires both matching echoes.
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -12,6 +12,8 @@ const quicz = @import("quicz");
 const Connection = quicz.Connection;
 const Tls13Backend = quicz.tls13_backend.Tls13Backend;
 const protection = quicz.protection;
+const echo_payloads = [_][]const u8{ "hello", "world" };
+const echo_total_bytes: usize = 10;
 
 fn recvTimeout() std.Io.Timeout {
     return .{ .duration = .{
@@ -208,14 +210,16 @@ pub fn main(init: std.process.Init) !void {
 
     if (!sent_finished or !connection.handshakeConfirmed()) return error.HandshakeNotConfirmed;
 
-    // The independent echo peer reads a request until FIN, then writes the
-    // same bytes back on this bidirectional stream. Do not use a local-only
-    // stream contract here: the peer must parse the protected 1-RTT packet.
+    // The independent peer must parse both protected 1-RTT STREAMs and finish
+    // each matching response. This is intentionally not a local-only contract.
     const peer_connection_id = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
-    const stream_id = try connection.openStream();
-    try connection.sendOnStream(stream_id, "hello", true);
+    var stream_ids: [echo_payloads.len]u64 = undefined;
+    for (echo_payloads, 0..) |payload, index| {
+        stream_ids[index] = try connection.openStream();
+        try connection.sendOnStream(stream_ids[index], payload, true);
+    }
     var sent_application_datagrams: usize = 0;
-    while (sent_application_datagrams < 4) : (sent_application_datagrams += 1) {
+    while (sent_application_datagrams < 8) : (sent_application_datagrams += 1) {
         const datagram = (try connection.pollProtectedShortDatagramWithInstalledKeys(
             nowMillis(io),
             peer_connection_id,
@@ -227,10 +231,10 @@ pub fn main(init: std.process.Init) !void {
     var stream_buffer: [128]u8 = undefined;
     var received_application_datagrams: usize = 0;
     var recovery_timer_services: usize = 0;
-    var got_echo = false;
-    var got_echo_fin = false;
+    var got_echo: [echo_payloads.len]bool = .{ false, false };
+    var got_echo_fin: [echo_payloads.len]bool = .{ false, false };
     var pto_recovered = false;
-    while (received_application_datagrams < 8 and recovery_timer_services < 4) {
+    while (received_application_datagrams < 16 and recovery_timer_services < 4) {
         const next_recovery_deadline = if (connection.lossDetectionTimerDeadlineMillis()) |deadline|
             deadline.deadline_millis
         else
@@ -289,18 +293,20 @@ pub fn main(init: std.process.Init) !void {
         // must not consume the bounded application receive budget before PTO.
         if (!processed_application_datagram) continue;
         received_application_datagrams += 1;
-        if (try connection.recvOnStream(stream_id, &stream_buffer)) |echoed_len| {
-            try require(std.mem.eql(u8, stream_buffer[0..echoed_len], "hello"));
-            got_echo = true;
+        inline for (stream_ids, echo_payloads, 0..) |stream_id, payload, index| {
+            if (try connection.recvOnStream(stream_id, &stream_buffer)) |echoed_len| {
+                try require(std.mem.eql(u8, stream_buffer[0..echoed_len], payload));
+                got_echo[index] = true;
+            }
+            if (got_echo[index] and try connection.recvStreamFinished(stream_id)) {
+                got_echo_fin[index] = true;
+            }
         }
-        if (got_echo and try connection.recvStreamFinished(stream_id)) {
-            got_echo_fin = true;
-            break;
-        }
+        if (std.mem.allEqual(bool, &got_echo_fin, true)) break;
     }
-    if (!got_echo) return error.MissingStreamEcho;
-    if (!got_echo_fin) return error.MissingStreamFin;
-    std.debug.print("external_handshake_done=true certificate_verified=true alpn=hq-interop echo_bytes=5 pto_recovered={}\n", .{pto_recovered});
+    if (!std.mem.allEqual(bool, &got_echo, true)) return error.MissingStreamEcho;
+    if (!std.mem.allEqual(bool, &got_echo_fin, true)) return error.MissingStreamFin;
+    std.debug.print("external_handshake_done=true certificate_verified=true alpn=hq-interop echo_streams=2 echo_bytes={d} pto_recovered={}\n", .{ echo_total_bytes, pto_recovered });
 }
 
 test "zero-only datagram padding is isolated from a short packet" {

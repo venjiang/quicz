@@ -13,7 +13,7 @@ by `build.zig`; `zig build --help` is the authoritative generated index.
 | `run-server` | `echo_server.zig` | Minimal frame-payload echo server. |
 | `run-client` | `echo_client.zig` | Minimal frame-payload echo client. |
 | `run-tls13-process-interop` | `tls13_process_echo_{client,server}.zig` | Separate pure-Zig TLS/QUIC processes, two FIN streams, routing and close cleanup. |
-| `run-interop-external-client -- <ip> <port> <ca> [name]` | `interop_external_client.zig` | Certificate-verified Zig client against an independent IPv4 QUIC server. |
+| `run-interop-external-client -- <ip> <port> <ca> [name]` | `interop_external_client.zig` | Certificate-verified IPv4 peer probe with FIN `hello`/`world` echoes on streams 0 and 4. |
 | `run-interop-client -- <host> <port> [testcase]` | `interop_client.zig` | QUIC-Interop-Runner-style client and local fallback probe. |
 | `run-interop-event-loopback -- [handshake|transfer|loss|congestion|persistent|key-update|path]` | `interop_event_loopback.zig` | TLS-owned UDP event-loop scenarios. |
 | Go client | `interop/go_echo_client/main.go` | quic-go client sending FIN streams 0 and 4 to the Zig server. |

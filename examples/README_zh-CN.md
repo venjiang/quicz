@@ -12,7 +12,7 @@
 | `run-server` | `echo_server.zig` | 最小 frame-payload echo server。 |
 | `run-client` | `echo_client.zig` | 最小 frame-payload echo client。 |
 | `run-tls13-process-interop` | `tls13_process_echo_{client,server}.zig` | 独立纯 Zig TLS/QUIC 进程、两条 FIN stream、路由和 close cleanup。 |
-| `run-interop-external-client -- <ip> <port> <ca> [name]` | `interop_external_client.zig` | 连接独立 IPv4 QUIC server 的证书校验 Zig client。 |
+| `run-interop-external-client -- <ip> <port> <ca> [name]` | `interop_external_client.zig` | 连接独立 IPv4 QUIC server，校验 stream 0、4 的 FIN `hello`/`world` echo。 |
 | `run-interop-client -- <host> <port> [testcase]` | `interop_client.zig` | QUIC-Interop-Runner 风格 client 与本地回退探针。 |
 | `run-interop-event-loopback -- [mode]` | `interop_event_loopback.zig` | handshake、transfer、loss、congestion、persistent、key-update、path 事件循环。 |
 | Go client | `interop/go_echo_client/main.go` | quic-go client 向 Zig server 发送 stream 0、4 的 FIN 数据。 |
