@@ -102,13 +102,26 @@ Common runnable examples:
 - `run-tls13-process-interop`: starts separate Zig client and server processes
   and proves a real UDP STREAM echo.
 
-For external-language client examples, first run
-`zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443`, then use either
-`examples/interop/go_echo_client` or `examples/interop/rust_echo_client` with
-the supplied local test trust anchor at
-`examples/interop/testdata/quicz-echo-ca.pem`. Both examples require CA/SNI
-input and keep certificate verification enabled; see the transport task matrix
-for exact commands and the local-only certificate boundary.
+### Go and Rust client probes
+
+Start the one-shot Zig server in one terminal:
+
+```bash
+zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443
+```
+
+Then run either verified external-language client in another terminal:
+
+```bash
+(cd examples/interop/go_echo_client && go run . -addr 127.0.0.1:4443 -ca ../testdata/quicz-echo-ca.pem -server-name localhost)
+(cd examples/interop/rust_echo_client && cargo run -- 127.0.0.1:4443 ../testdata/quicz-echo-ca.pem localhost)
+```
+
+Each client requires the CA and SNI inputs, keeps certificate verification
+enabled, negotiates `hq-interop`, and reports
+`handshake_done=true echo_bytes=5` only after a verified STREAM echo. The PEM
+file is a local `localhost`/`127.0.0.1` test trust anchor, not a deployment
+credential or public CA.
 - `run-tls-openssl-backend-adapter`: OpenSSL-backed C TLS adapter path,
   including local transport parameters, first outbound TLS CRYPTO flight, and
   quicz-encoded pair-transcript server transport-parameter bytes,

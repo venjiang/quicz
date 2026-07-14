@@ -119,10 +119,13 @@ zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443
 ```
 
 Both clients reported `handshake_done=true echo_bytes=5` against the Zig
-server. The server accepts a bounded Initial flight, coalesced Initial and
-Handshake packets, and 1-RTT ACK/control packets that precede the stream
-payload. The PEM file is a local test trust anchor for `localhost` and
-`127.0.0.1`, not a deployment credential or a public CA.
+server when rerun on 2026-07-13. The server reassembles a bounded ClientHello
+across Initial packets, iterates coalesced Initial/Handshake packets before
+consuming the Handshake packet, and routes late long-header ACK traffic without
+decrypting it after that key space is discarded. It also accepts 1-RTT
+ACK/control packets that precede the stream payload. The PEM file is a local
+test trust anchor for `localhost` and `127.0.0.1`, not a deployment credential
+or a public CA.
 
 ### External certificate-verified handshake and STREAM echo evidence
 

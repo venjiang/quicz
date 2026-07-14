@@ -101,10 +101,12 @@ zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443
 (cd examples/interop/rust_echo_client && cargo run -- 127.0.0.1:4443 ../testdata/quicz-echo-ca.pem localhost)
 ```
 
-两个客户端对 Zig server 都输出了 `handshake_done=true echo_bytes=5`。server 支持有上限的
-Initial flight、共包的 Initial/Handshake，以及先于 stream payload 到达的 1-RTT ACK/control
-packet。该 PEM 文件只是在 `localhost` 和 `127.0.0.1` 上使用的本地测试信任锚，不是部署凭据
-或公共 CA。
+两个客户端在 2026-07-13 重新验证时对 Zig server 都输出了
+`handshake_done=true echo_bytes=5`。server 会跨多个 Initial packet 重组有上限的
+ClientHello，逐个处理共包的 Initial/Handshake packet 后再消费 Handshake packet，并在对应
+key space 已丢弃后仅路由迟到的 long-header ACK 流量而不再解密；它也接受先于 stream payload
+到达的 1-RTT ACK/control packet。该 PEM 文件只是在 `localhost` 和 `127.0.0.1` 上使用的本地
+测试信任锚，不是部署凭据或公共 CA。
 
 ### 外部证书校验握手与 STREAM Echo 证据
 

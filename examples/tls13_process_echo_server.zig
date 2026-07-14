@@ -159,7 +159,20 @@ pub fn main(init: std.process.Init) !void {
         initial_progress = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
     }
     try require(initial_progress.handshake_keys_installed);
-    const server_initial = accepted_initial.response_datagram orelse return error.UnexpectedState;
+    // A large external ClientHello can span several Initial packets. The
+    // lifecycle's first poll is therefore allowed to be empty; after the
+    // reassembly loop, poll the same lifecycle-owned output path once more.
+    const server_initial = accepted_initial.response_datagram orelse
+        (try lifecycle.pollProtectedLongCryptoDatagramInSpace(
+            server_handle,
+            &connection,
+            .initial,
+            @intCast(initial_datagrams),
+            client_scid,
+            &server_scid,
+            &[_]u8{},
+            initial_secrets.server,
+        )) orelse return error.UnexpectedState;
     defer allocator.free(server_initial);
     try socket.send(io, &received_initial.from, server_initial);
 
@@ -180,14 +193,35 @@ pub fn main(init: std.process.Init) !void {
     var handshake_datagrams: usize = 0;
     while (!handshake_confirmed and handshake_datagrams < max_initial_datagrams) : (handshake_datagrams += 1) {
         const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-        const client_route = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
-            server_handle,
-            &connection,
-            server_path,
-            4 + @as(i64, @intCast(handshake_datagrams)),
-            received.data,
-        );
-        try require(client_route.connection_id == server_handle);
+        var datagram_offset: usize = 0;
+        var received_handshake = false;
+        while (datagram_offset < received.data.len) {
+            const packet_bytes = received.data[datagram_offset..];
+            const long_info = try protection.peekProtectedLongPacketInfo(packet_bytes);
+            const long_packet = packet_bytes[0..long_info.len];
+            switch (long_info.packet_type) {
+                .initial => {
+                    // Handshake keys prove the complete ClientHello was already
+                    // reassembled. A coalesced follow-up Initial can only carry
+                    // acknowledgements or a retransmission, so leave it
+                    // unconsumed and continue with the following long packet.
+                },
+                .handshake => {
+                    const client_route = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+                        server_handle,
+                        &connection,
+                        server_path,
+                        4 + @as(i64, @intCast(handshake_datagrams)),
+                        long_packet,
+                    );
+                    try require(client_route.connection_id == server_handle);
+                    received_handshake = true;
+                },
+                else => return error.InvalidPacket,
+            }
+            datagram_offset += long_info.len;
+        }
+        if (!received_handshake) continue;
         const handshake_progress = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
             server_handle,
             &connection,
@@ -232,16 +266,53 @@ pub fn main(init: std.process.Init) !void {
     }
     try require(sent_packets > 0);
 
-    const received_close = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-    const close_route = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
-        server_handle,
-        &connection,
-        server_path,
-        10,
-        received_close.data,
-    );
-    try require(close_route.connection_id == server_handle);
-    try require(connection.connectionState() == .draining);
+    // Independent clients can ACK in Initial, Handshake, or 1-RTT space before
+    // their CONNECTION_CLOSE. Keep routing those authenticated packets until
+    // the close is observed.
+    var close_received = false;
+    var close_datagrams: usize = 0;
+    while (!close_received and close_datagrams < max_initial_datagrams) : (close_datagrams += 1) {
+        const received = socket.receiveTimeout(io, &receive_buffer, recvTimeout()) catch |err| switch (err) {
+            error.Timeout => break,
+            else => return err,
+        };
+        const now_millis = 10 + @as(i64, @intCast(close_datagrams));
+        const close_route = if ((received.data[0] & 0x80) == 0)
+            try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+                server_handle,
+                &connection,
+                server_path,
+                now_millis,
+                received.data,
+            )
+        else blk: {
+            const long_info = try protection.peekProtectedLongPacketInfo(received.data);
+            const long_packet = received.data[0..long_info.len];
+            break :blk switch (long_info.packet_type) {
+                // Once the handshake is confirmed, late packets in discarded
+                // long-header spaces can be routed but must not be decrypted
+                // with retired keys. Wait for the 1-RTT close instead.
+                .initial, .handshake => try lifecycle.routeDatagram(server_path, long_packet),
+                else => return error.InvalidPacket,
+            };
+        };
+        try require(close_route.connection_id == server_handle);
+        close_received = connection.connectionState() == .draining;
+    }
+    if (!close_received) {
+        // Some clients terminate their local endpoint after the confirmed echo
+        // without awaiting a peer close. Emit one local close before retiring
+        // this one-shot server cleanly.
+        try connection.closeConnection(0, 0, "process echo complete");
+        const close_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &connection,
+            10 + @as(i64, @intCast(close_datagrams)),
+            client_scid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(close_packet);
+        try socket.send(io, &received_initial.from, close_packet);
+    }
     const server_drain_deadline = connection.closeDeadlineMillis() orelse return error.UnexpectedState;
     const server_retired = (try lifecycle.checkCloseTimeoutsAndRetireConnection(
         server_handle,

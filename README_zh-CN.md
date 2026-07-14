@@ -92,11 +92,24 @@ zig build run-initial-keys
 - `run-tls13-process-interop`：启动独立的 Zig client/server 进程，并验证真实 UDP
   STREAM echo。
 
-如需运行其它语言客户端示例，先执行
-`zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443`，再在
-`examples/interop/go_echo_client` 或 `examples/interop/rust_echo_client` 中运行命令，并传入
-仓库提供的本地测试信任锚 `examples/interop/testdata/quicz-echo-ca.pem`。两个示例都要求
-CA/SNI 输入并保持证书校验开启；精确命令和仅限本地测试的证书边界见传输任务矩阵。
+### Go 与 Rust 客户端互通探针
+
+先在一个终端启动一次性 Zig server：
+
+```bash
+zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443
+```
+
+再在另一个终端运行任一已验证的其它语言客户端：
+
+```bash
+(cd examples/interop/go_echo_client && go run . -addr 127.0.0.1:4443 -ca ../testdata/quicz-echo-ca.pem -server-name localhost)
+(cd examples/interop/rust_echo_client && cargo run -- 127.0.0.1:4443 ../testdata/quicz-echo-ca.pem localhost)
+```
+
+两个客户端都要求 CA 与 SNI 输入并保持证书校验开启，协商 `hq-interop`；只有证书校验后的
+STREAM echo 成功才会输出 `handshake_done=true echo_bytes=5`。该 PEM 文件仅是
+`localhost`/`127.0.0.1` 的本地测试信任锚，不是部署凭据或公共 CA。
 - `run-tls-openssl-backend-adapter`：OpenSSL-backed C TLS adapter 路径，覆盖本端
   transport parameters、第一段 TLS CRYPTO flight，以及 pair-transcript server
   transport-parameter、Handshake/1-RTT secret 和入站 CRYPTO 经 OpenSSL callback
