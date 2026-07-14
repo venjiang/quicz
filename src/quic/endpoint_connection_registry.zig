@@ -157,6 +157,30 @@ pub fn EndpointConnectionRegistry(
                 out,
             );
         }
+
+        /// Classify and process one installed-key datagram against the owned records.
+        ///
+        /// This retains the lifecycle's packet-space and close-propagation
+        /// behavior while eliminating caller-managed receive-view snapshots.
+        pub fn feedDatagramWithInstalledKeys(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            allocator: std.mem.Allocator,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!root.EndpointFeedInstalledKeyDatagramResult {
+            const views = try self.receiveViews(allocator);
+            defer allocator.free(views);
+            return lifecycle.feedDatagramWithInstalledKeysAcrossConnections(
+                views,
+                path,
+                now_millis,
+                datagram,
+                options,
+            );
+        }
     };
 }
 
@@ -210,6 +234,25 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
     var lifecycle = root.EndpointConnectionLifecycle.init(std.testing.allocator);
     defer lifecycle.deinit();
     try std.testing.expect((try registry.nextDeadline(&lifecycle, std.testing.allocator)) == null);
+
+    var endpoint_output: [64]u8 = undefined;
+    const feed = try registry.feedDatagramWithInstalledKeys(
+        &lifecycle,
+        std.testing.allocator,
+        .{
+            .local = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+            .remote = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
+        },
+        0,
+        &.{0x40},
+        .{
+            .space = .application,
+            .out = &endpoint_output,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &.{.v1},
+        },
+    );
+    try std.testing.expect(feed == .dropped);
 
     try registry.remove(7);
     try std.testing.expectEqual(@as(usize, 0), registry.count());
