@@ -17,6 +17,7 @@ by `build.zig`; `zig build --help` is the authoritative generated index.
 | `run-interop-client -- <host> <port> [testcase]` | `interop_client.zig` | QUIC-Interop-Runner-style client and local fallback probe. |
 | `run-interop-event-loopback -- [handshake|transfer|loss|congestion|persistent|key-update|path]` | `interop_event_loopback.zig` | TLS-owned UDP event-loop scenarios. |
 | Go client | `interop/go_echo_client/main.go` | quic-go client sending FIN streams 0 and 4 to the Zig server. |
+| Go server | `interop/go_echo_client/echo_server/main.go` | One-connection quic-go peer that generates a local CA PEM and echoes two FIN streams. |
 | Rust client | `interop/rust_echo_client/src/main.rs` | quinn/rustls client sending FIN streams 0 and 4 to the Zig server. |
 
 The Go/Rust clients require the local test CA and a running Zig server:
@@ -25,6 +26,14 @@ The Go/Rust clients require the local test CA and a running Zig server:
 zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443 2 concurrent-retry
 (cd examples/interop/go_echo_client && go run . -addr 127.0.0.1:4443 -ca ../testdata/quicz-echo-ca.pem -server-name localhost)
 (cd examples/interop/rust_echo_client && cargo run -- 127.0.0.1:4443 ../testdata/quicz-echo-ca.pem localhost)
+```
+
+For the external Zig client, start the independent Go peer in one terminal,
+then pass its generated CA PEM to the Zig client in another:
+
+```sh
+(cd examples/interop/go_echo_client && go run ./echo_server -addr 127.0.0.1:4433 -ca-out /absolute/path/to/go-echo-ca.pem)
+zig build run-interop-external-client -- 127.0.0.1 4433 /absolute/path/to/go-echo-ca.pem localhost
 ```
 
 ## Core transport state

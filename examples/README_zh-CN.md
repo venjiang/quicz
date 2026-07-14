@@ -16,6 +16,7 @@
 | `run-interop-client -- <host> <port> [testcase]` | `interop_client.zig` | QUIC-Interop-Runner 风格 client 与本地回退探针。 |
 | `run-interop-event-loopback -- [mode]` | `interop_event_loopback.zig` | handshake、transfer、loss、congestion、persistent、key-update、path 事件循环。 |
 | Go client | `interop/go_echo_client/main.go` | quic-go client 向 Zig server 发送 stream 0、4 的 FIN 数据。 |
+| Go server | `interop/go_echo_client/echo_server/main.go` | 一次性 quic-go peer，生成本地 CA PEM 并回显两条 FIN stream。 |
 | Rust client | `interop/rust_echo_client/src/main.rs` | quinn/rustls client 向 Zig server 发送 stream 0、4 的 FIN 数据。 |
 
 Go/Rust 使用本地测试 CA，先启动 server，再任选一个 client：
@@ -24,6 +25,13 @@ Go/Rust 使用本地测试 CA，先启动 server，再任选一个 client：
 zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443 2 concurrent-retry
 (cd examples/interop/go_echo_client && go run . -addr 127.0.0.1:4443 -ca ../testdata/quicz-echo-ca.pem -server-name localhost)
 (cd examples/interop/rust_echo_client && cargo run -- 127.0.0.1:4443 ../testdata/quicz-echo-ca.pem localhost)
+```
+
+使用外部 Zig client 时，在一个终端启动独立 Go peer，另一个终端使用它生成的 CA PEM：
+
+```sh
+(cd examples/interop/go_echo_client && go run ./echo_server -addr 127.0.0.1:4433 -ca-out /absolute/path/to/go-echo-ca.pem)
+zig build run-interop-external-client -- 127.0.0.1 4433 /absolute/path/to/go-echo-ca.pem localhost
 ```
 
 ## 核心 transport 状态

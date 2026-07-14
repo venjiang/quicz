@@ -193,11 +193,11 @@ ECDSA P-256 证书的本机独立服务端，命令均输出
 在完整长头包之后用全零尾部填充首个 UDP 响应；示例只在 UDP 边界丢弃这种精确的全零
 数据报尾部。任何非零尾部仍按普通受保护短头包处理。
 
-同一客户端在证书校验握手后会打开一个 bidirectional stream，发送带 FIN 的 `hello`，并要求
-收到匹配的五字节 echo 及对端 FIN。它已针对一个本机独立的 `quic-go` v0.59.0 echo server（使用调用方
-提供的 CA）输出
-`external_handshake_done=true certificate_verified=true alpn=hq-interop echo_bytes=5`。
-这证明外部 server 真实解析了受保护的 1-RTT STREAM、完成 echo 并关闭自己的发送侧，而不只是完成 TLS 握手。
+同一客户端在证书校验握手后会打开 stream 0 与 4，分别发送带 FIN 的 `hello`、`world`，并要求
+每条收到匹配 echo 与对端 FIN。仓库内的一次性 `quic-go` v0.59.0 fixture 会在运行时生成
+localhost CA PEM；Zig client 对该独立 peer 输出
+`external_handshake_done=true certificate_verified=true alpn=hq-interop echo_streams=2 echo_bytes=10`。
+这证明外部 server 真实解析受保护的 1-RTT multiplexed STREAM、完成 echo 并关闭发送侧，而不只是 TLS 握手。
 
 外部客户端还会在握手确认前接受一个有效的 v1 Retry：它以 original DCID 验证 Retry integrity tag，
 使用 Retry SCID 和重新派生的 Initial key 重发缓存的 ClientHello，并自动携带保存的 token。一个通过
