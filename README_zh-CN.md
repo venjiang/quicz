@@ -79,7 +79,7 @@ zig build run-tls13-process-interop
 
 UDP loopback 验证纯 Zig TLS 握手和 stream 路径；进程探针会通过 loopback UDP 运行
 独立构建的 Zig client/server。示例的用途和命令见
-[examples 指南](examples/README.md)；全部 build step 可用 `zig build --help` 查看。
+[examples 指南](examples/README_zh-CN.md)；全部 build step 可用 `zig build --help` 查看。
 
 ## Go 与 Rust 互通示例
 
@@ -98,7 +98,7 @@ zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443 2 concurrent-retry
 
 两个客户端均保持证书校验开启，只有在 stream 0 和 4 分别完成带 FIN 的 `hello`、`world`
 echo 后才会报告成功。仓库内 PEM 只是本地测试信任锚，不是部署凭据。完整步骤（包括外部
-Zig client）见 [examples 指南](examples/README.md)。
+Zig client）见 [examples 指南](examples/README_zh-CN.md)。
 
 ## 开发入口
 
