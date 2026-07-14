@@ -246,9 +246,15 @@ fn serveConcurrent(
                     std.debug.print("zig_process_server: connection={d} concurrent=true pto_serviced=true\n", .{due.deadline.connection_id});
                 }
                 if (due.pending_work.idle_retired != null or due.pending_work.close_retired != null) {
+                    const managed = connections.get(due.deadline.connection_id) orelse return error.UnknownConnectionId;
+                    const completed_connection = !retry_enabled or managed.retry_accepted;
                     try destroyManagedConnection(allocator, &connections, due.deadline.connection_id);
-                    completed += 1;
-                    std.debug.print("zig_process_server: connection={d} concurrent=true idle_cleanup=true\n", .{completed});
+                    if (completed_connection) {
+                        completed += 1;
+                        std.debug.print("zig_process_server: connection={d} concurrent=true idle_cleanup=true\n", .{completed});
+                    } else {
+                        std.debug.print("zig_process_server: connection={d} concurrent=true retry_expired=true\n", .{due.deadline.connection_id});
+                    }
                 }
                 continue;
             },
@@ -621,9 +627,15 @@ fn serveConcurrent(
                         deadline,
                     )) orelse return error.UnexpectedState;
                     try require(retired.routes_retired > 0);
-                    try destroyManagedConnection(allocator, &connections, managed.handle);
-                    completed += 1;
-                    std.debug.print("zig_process_server: connection={d} concurrent=true close_cleanup=true\n", .{completed});
+                    const completed_connection = !retry_enabled or managed.retry_accepted;
+                    const connection_handle = managed.handle;
+                    try destroyManagedConnection(allocator, &connections, connection_handle);
+                    if (completed_connection) {
+                        completed += 1;
+                        std.debug.print("zig_process_server: connection={d} concurrent=true close_cleanup=true\n", .{completed});
+                    } else {
+                        std.debug.print("zig_process_server: connection={d} concurrent=true retry_expired=true\n", .{connection_handle});
+                    }
                 }
             },
             .version_negotiation => |datagram| try socket.send(io, &received.from, datagram),

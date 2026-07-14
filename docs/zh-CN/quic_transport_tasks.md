@@ -134,6 +134,9 @@ ClientHello，然后报告 `retry_validated=true`。重新执行的证书校验 
 路径完成了五字节双向 FIN echo。静态 demo secret 与内存 replay filter 仍是有界本地 policy，不是生产 key
 storage 或分布式 replay protection。
 
+到达 idle deadline 但尚未验证的 Retry 条目只会退役自己的 route 和内存，不会计入已完成的
+accepted connection；因此不会在 `accepted_count` 达到请求总数之前提前结束有界 server。
+
 同一并发服务端通过 lifecycle-owned helper 接收 coalesced 的外部
 Initial/Handshake：它保留完整 UDP 长度以校验 Initial size，同时按编码边界认证每个
 long-header packet。随附的独立 Go 与 Rust client 都分别通过该服务端的有界 Retry 路径完成了

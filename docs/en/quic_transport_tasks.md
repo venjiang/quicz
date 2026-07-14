@@ -167,6 +167,11 @@ in-memory replay filter
 remain a bounded local policy, not production key storage or distributed replay
 protection.
 
+An unvalidated Retry entry that reaches its idle deadline retires only its
+routes and memory. It does not count as a completed accepted connection, so it
+cannot terminate the bounded server before `accepted_count` reaches its
+requested total.
+
 The same concurrent server accepts coalesced external Initial/Handshake input
 through a lifecycle-owned helper that retains the full UDP length for Initial
 size validation while authenticating each long-header packet at its encoded
