@@ -100,8 +100,10 @@ Common runnable examples:
   NEW_CONNECTION_ID + NEW_TOKEN + HANDSHAKE_DONE + PTO probe + recovery-timer
   service + protected close, all over loopback UDP with TLS-owned keys.
 - `run-tls13-process-interop`: starts separate Zig client and server processes
-  and proves two sequential real UDP STREAM echoes with lifecycle cleanup
-  between accepts. Set `QUICZ_PROCESS_INTEROP_CONNECTIONS=1` for one echo.
+  and proves concurrent real UDP STREAM echoes with lifecycle cleanup. Set
+  `QUICZ_PROCESS_INTEROP_CONNECTIONS=1` for one echo, or set
+  `QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=loss` to exercise the bounded
+  socket-loop PTO recovery probe.
 
 ### Go and Rust client probes
 

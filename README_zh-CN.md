@@ -89,9 +89,10 @@ zig build run-initial-keys
 - `run-tls13-lifecycle-loopback`：纯 Zig TLS 1.3 + `EndpointConnectionLifecycle`
   归属——完整握手 + STREAM echo + NEW_CONNECTION_ID + NEW_TOKEN +
   HANDSHAKE_DONE + PTO probe + recovery-timer service + protected close。
-- `run-tls13-process-interop`：启动独立的 Zig client/server 进程，验证两个连续的真实
-  UDP STREAM echo，并在两次 accept 间完成 lifecycle 清理。设置
-  `QUICZ_PROCESS_INTEROP_CONNECTIONS=1` 可只验证一次 echo。
+- `run-tls13-process-interop`：启动独立的 Zig client/server 进程，验证并发的真实
+  UDP STREAM echo 与 lifecycle 清理。设置 `QUICZ_PROCESS_INTEROP_CONNECTIONS=1`
+  可只验证一次 echo；设置 `QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=loss` 可运行有界
+  socket-loop PTO recovery 探针。
 
 ### Go 与 Rust 客户端互通探针
 

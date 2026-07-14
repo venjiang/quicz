@@ -1,6 +1,6 @@
 //! Pure-Zig TLS 1.3 QUIC client for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-client <server_host> <server_port> [connection_tag] [close|idle]
+//! Usage: quicz-tls13-process-echo-client <server_host> <server_port> [connection_tag] [close|idle|loss]
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -39,7 +39,8 @@ pub fn main(init: std.process.Init) !void {
         0;
     const completion_mode = args.next() orelse "close";
     const leave_idle = std.mem.eql(u8, completion_mode, "idle");
-    if (!leave_idle and !std.mem.eql(u8, completion_mode, "close")) return error.InvalidCompletionMode;
+    const drop_initial_responses = std.mem.eql(u8, completion_mode, "loss");
+    if (!leave_idle and !drop_initial_responses and !std.mem.eql(u8, completion_mode, "close")) return error.InvalidCompletionMode;
     var original_dcid = original_dcid_base;
     original_dcid[original_dcid.len - 1] = connection_tag;
     var client_scid = client_scid_base;
@@ -127,9 +128,14 @@ pub fn main(init: std.process.Init) !void {
 
     var stream_buffer: [128]u8 = undefined;
     var got_echo = false;
+    var dropped_responses: usize = 0;
     var received_packets: usize = 0;
-    while (received_packets < 4) : (received_packets += 1) {
+    while (received_packets < 12) : (received_packets += 1) {
         const received = socket.receiveTimeout(io, &receive_buffer, recvTimeout()) catch break;
+        if (drop_initial_responses and dropped_responses < 4) {
+            dropped_responses += 1;
+            continue;
+        }
         const stream_route = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
             client_handle,
             &connection,
@@ -145,6 +151,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     try require(got_echo);
+    if (drop_initial_responses) try require(dropped_responses == 4);
 
     if (leave_idle) {
         std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 idle_peer=true\n", .{connection_tag});
@@ -170,5 +177,9 @@ pub fn main(init: std.process.Init) !void {
     try require(connection.connectionState() == .closed);
     try require(lifecycle.routeCount() == 0);
 
-    std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 close_cleanup=true\n", .{connection_tag});
+    if (drop_initial_responses) {
+        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 pto_recovered=true close_cleanup=true\n", .{connection_tag});
+    } else {
+        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 close_cleanup=true\n", .{connection_tag});
+    }
 }

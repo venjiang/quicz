@@ -144,6 +144,15 @@ leaves both clients silent after their verified echo and proves each map entry
 is independently retired by its idle deadline (`idle_cleanup=true`). This is
 still a bounded test policy, not a production capacity or timeout policy.
 
+The same bounded path also has a deliberate local recovery proof. Running
+`QUICZ_PROCESS_INTEROP_CONNECTIONS=1 QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=loss zig build run-tls13-process-interop`
+makes the Zig client discard its first four post-handshake responses. The
+server's 100 ms initial RTT estimate keeps the recovery deadline ahead of the
+test-only idle deadline; the lifecycle services the resulting PTO
+(`pto_serviced=true`), retransmits the protected stream data, and the client
+reports `pto_recovered=true`. This verifies socket-loop recovery ordering for
+the bounded demo; it is not a production RTT or timeout policy.
+
 The same concurrent server accepts coalesced external Initial/Handshake input
 through a lifecycle-owned helper that retains the full UDP length for Initial
 size validation while authenticating each long-header packet at its encoded

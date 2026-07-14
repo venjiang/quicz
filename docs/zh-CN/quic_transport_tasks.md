@@ -119,6 +119,13 @@ idle timeout。执行
 会让两个 client 在验证 echo 后保持静默，并证明每个 map entry 都在自己的 idle deadline 被独立
 退役（`idle_cleanup=true`）。这仍是有界测试 policy，不是生产容量或 timeout policy。
 
+同一有界路径还包含一个刻意构造的本地 recovery 证明。执行
+`QUICZ_PROCESS_INTEROP_CONNECTIONS=1 QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=loss zig build run-tls13-process-interop`
+会让 Zig client 丢弃握手后的前四个响应。服务端使用 100 ms 的 initial RTT estimate，使 recovery
+deadline 早于仅供测试的 idle deadline；lifecycle 会 service 随后的 PTO（`pto_serviced=true`）、
+重传受保护的 stream 数据，client 随后报告 `pto_recovered=true`。这验证有界 demo 的 socket-loop
+recovery 排序，不构成生产 RTT 或 timeout policy。
+
 同一并发服务端通过 lifecycle-owned helper 接收 coalesced 的外部
 Initial/Handshake：它保留完整 UDP 长度以校验 Initial size，同时按编码边界认证每个
 long-header packet。随附的独立 Go 与 Rust client 均在两个并发 map entry 上完成了证书校验的

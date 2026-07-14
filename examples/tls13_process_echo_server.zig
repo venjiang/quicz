@@ -214,6 +214,9 @@ fn serveConcurrent(
                     try socket.send(io, &managed.peer_address, output.datagram);
                 }
                 if (due.drain.first_error) |drain_error| return drain_error;
+                if (due.deadline.kind == .recovery) {
+                    std.debug.print("zig_process_server: connection={d} concurrent=true pto_serviced=true\n", .{due.deadline.connection_id});
+                }
                 if (due.pending_work.idle_retired != null or due.pending_work.close_retired != null) {
                     try destroyManagedConnection(allocator, &connections, due.deadline.connection_id);
                     completed += 1;
@@ -245,6 +248,9 @@ fn serveConcurrent(
                     .initial_max_stream_data = 2048,
                     .initial_max_streams_bidi = 8,
                     .max_datagram_size = 8192,
+                    // Keep the local loss-recovery probe comfortably ahead of
+                    // the short test-only idle timeout in concurrent mode.
+                    .initial_rtt_ms = 100,
                     .max_idle_timeout_ms = process_idle_timeout_millis,
                 });
                 errdefer connection.deinit();
