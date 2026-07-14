@@ -9,7 +9,7 @@
 //! deadline 驱动事件循环，能处理 PTO 超时恢复，逼近真实网络行为。
 //!
 //! 命令行：interop_event_loopback [TESTCASE]
-//!   TESTCASE: handshake（默认）/ transfer / loss / congestion
+//!   TESTCASE: handshake（默认）/ transfer / loss / congestion / persistent
 //!
 //! 场景（本地 loopback 自测）：
 //!   handshake - 事件循环驱动 TLS 1.3 握手到两端 handshakeConfirmed
@@ -18,6 +18,8 @@
 //!               后的 packet-number gap 由 server 接收并 ACK，最终 transfer 成功
 //!   congestion - 丢弃首个 ack-eliciting 1-RTT PING，交付后续三个 PING，
 //!                用真实 sparse ACK 触发 client NewReno packet-threshold 降窗
+//!   persistent - 建立 RTT sample 后丢弃三个跨 persistent-congestion duration 的
+//!                PING，仅交付第四个，用真实 ACK 将 client cwnd 降到 minimum
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -38,13 +40,14 @@ const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
 const client_handle: u64 = 1;
 const server_handle: u64 = 2;
 
-const Testcase = enum { handshake, transfer, loss, congestion };
+const Testcase = enum { handshake, transfer, loss, congestion, persistent };
 
 fn parseTestcase(name: []const u8) Testcase {
     if (std.mem.eql(u8, name, "handshake")) return .handshake;
     if (std.mem.eql(u8, name, "transfer")) return .transfer;
     if (std.mem.eql(u8, name, "loss")) return .loss;
     if (std.mem.eql(u8, name, "congestion")) return .congestion;
+    if (std.mem.eql(u8, name, "persistent")) return .persistent;
     return .handshake;
 }
 
@@ -92,6 +95,8 @@ const Endpoint = struct {
     /// 丢弃下一份会增加 in-flight bytes 的 1-RTT 数据报。ACK-only 包不会
     /// 满足此条件，因此受控 loss 始终针对可被 NewReno 确认的包。
     drop_next_ack_eliciting_one_rtt_datagram: bool = false,
+    /// 受控 persistent-congestion 场景中需要丢弃的 ack-eliciting 1-RTT 包数。
+    drop_ack_eliciting_one_rtt_datagrams: usize = 0,
     dropped_application_packet_number: ?u64 = null,
 };
 
@@ -132,6 +137,31 @@ fn processRecv(ep: *Endpoint, data: []const u8, now: i64) void {
             data,
         ) catch return;
     }
+}
+
+/// 轮询一份受保护 1-RTT 数据报；除非当前受控丢包场景消费它，否则立即发送。
+/// 此路径刻意不 service recovery timer，调用方可为 persistent-loss 包赋予确定时间。
+fn pollOneRttAndSend(ep: *Endpoint, io: std.Io, now: i64) !bool {
+    const packet_number = ep.conn.nextPacketNumber(.application);
+    const in_flight_before = ep.conn.bytesInFlight(.application);
+    const dg = (ep.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        ep.handle,
+        ep.conn,
+        now,
+        ep.dcid,
+    ) catch null) orelse return false;
+    defer ep.allocator.free(dg);
+
+    const ack_eliciting = ep.conn.bytesInFlight(.application) > in_flight_before;
+    if (ack_eliciting and (ep.drop_next_ack_eliciting_one_rtt_datagram or ep.drop_ack_eliciting_one_rtt_datagrams != 0)) {
+        ep.drop_next_ack_eliciting_one_rtt_datagram = false;
+        if (ep.drop_ack_eliciting_one_rtt_datagrams != 0) ep.drop_ack_eliciting_one_rtt_datagrams -= 1;
+        if (ep.dropped_application_packet_number == null) ep.dropped_application_packet_number = packet_number;
+        return true;
+    }
+
+    try ep.socket.send(io, &ep.peer_socket.address, dg);
+    return true;
 }
 
 /// 驱动 TLS crypto + poll 三种空间输出，按 RFC 9001 顺序与 space 生命周期：
@@ -208,22 +238,7 @@ fn driveAndPoll(ep: *Endpoint, io: std.Io, now: i64, secrets: protection.Initial
     // poll 1-RTT 输出（HANDSHAKE_DONE / ACK / STREAM / PTO probe / 重传）。
     i = 0;
     while (i < 4) : (i += 1) {
-        const packet_number = ep.conn.nextPacketNumber(.application);
-        const in_flight_before = ep.conn.bytesInFlight(.application);
-        const dg = (ep.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
-            ep.handle,
-            ep.conn,
-            now,
-            ep.dcid,
-        ) catch null) orelse break;
-        defer ep.allocator.free(dg);
-        const ack_eliciting = ep.conn.bytesInFlight(.application) > in_flight_before;
-        if (ep.drop_next_ack_eliciting_one_rtt_datagram and ack_eliciting) {
-            ep.drop_next_ack_eliciting_one_rtt_datagram = false;
-            ep.dropped_application_packet_number = packet_number;
-            continue;
-        }
-        try ep.socket.send(io, &ep.peer_socket.address, dg);
+        if (!try pollOneRttAndSend(ep, io, now)) break;
     }
 }
 
@@ -340,7 +355,7 @@ pub fn main(init: std.process.Init) !void {
         .initial_max_streams_bidi = 8,
         .initial_rtt_ms = 100,
         // Keep the RFC 9002 minimum window below the initial window so the
-        // congestion testcase can observe a genuine NewReno reduction.
+        // congestion testcases can observe a genuine RFC 9002 reduction.
         .max_datagram_size = 1200,
     });
     defer client.deinit();
@@ -514,6 +529,79 @@ pub fn main(init: std.process.Init) !void {
         try require(client.bytesInFlight(.application) == 0);
         std.debug.print("newreno_loss=true dropped_packet={d} cwnd_before={d} cwnd_after={d}\n", .{
             dropped_packet_number,
+            initial_cwnd,
+            client.congestionWindow(.application),
+        });
+        return;
+    }
+
+    if (testcase == .persistent) {
+        // Establish an RTT sample before candidate-loss packets. RFC 9002 only
+        // considers packets sent after this sample for persistent congestion.
+        now += 10;
+        try client.sendPing();
+        try require(try pollOneRttAndSend(&client_ep, io, now));
+        const rtt_ping = try server_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+        processRecv(&server_ep, rtt_ping.data, now);
+        try require(server.pendingAckLargest(.application) == 0);
+
+        now += 100;
+        try driveAndPoll(&server_ep, io, now, secrets, &scratch);
+        var rtt_ack_packets: usize = 0;
+        while (rtt_ack_packets < 4 and client.sentPacketCount(.application) != 0) : (rtt_ack_packets += 1) {
+            const datagram = try client_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+            const route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+                client_handle,
+                &client,
+                client_path,
+                now,
+                datagram.data,
+            );
+            try require(route.connection_id == client_handle);
+        }
+        try require(client.sentPacketCount(.application) == 0);
+
+        const first_lost_packet_number = client.nextPacketNumber(.application);
+        const persistent_duration = client.recovery_state.persistentCongestionDurationMs();
+        const send_times = [_]i64{ now + 10, now + 1000, now + 1100, now + 1200 };
+        const initial_cwnd = client.congestionWindow(.application);
+        client_ep.drop_ack_eliciting_one_rtt_datagrams = 3;
+        for (send_times) |send_time| {
+            try client.sendPing();
+            try require(try pollOneRttAndSend(&client_ep, io, send_time));
+        }
+        try require(client_ep.dropped_application_packet_number == first_lost_packet_number);
+
+        const final_ping = try server_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+        processRecv(&server_ep, final_ping.data, send_times[3]);
+        try require(server.pendingAckLargest(.application) == first_lost_packet_number + 3);
+        try require(server.nextPeerPacketNumber(.application) == first_lost_packet_number + 4);
+
+        now = send_times[3] + 100;
+        try driveAndPoll(&server_ep, io, now, secrets, &scratch);
+        var persistent_ack_packets: usize = 0;
+        while (persistent_ack_packets < 4 and client.sentPacketCount(.application) != 0) : (persistent_ack_packets += 1) {
+            const datagram = try client_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+            const route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+                client_handle,
+                &client,
+                client_path,
+                now,
+                datagram.data,
+            );
+            try require(route.connection_id == client_handle);
+        }
+
+        const minimum_cwnd = quicz.recovery.minimumCongestionWindow(1200);
+        try require(client.sentPacketCount(.application) == 0);
+        try require(client.bytesInFlight(.application) == 0);
+        try require(client.congestionWindow(.application) == minimum_cwnd);
+        try require(client.congestionWindow(.application) < initial_cwnd);
+        std.debug.print("persistent_congestion=true first_lost_packet={d} duration_ms={d} rtt_ack_packets={d} persistent_ack_packets={d} cwnd_before={d} cwnd_after={d}\n", .{
+            first_lost_packet_number,
+            persistent_duration,
+            rtt_ack_packets,
+            persistent_ack_packets,
             initial_cwnd,
             client.congestionWindow(.application),
         });
