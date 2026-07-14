@@ -76,6 +76,9 @@ func main() {
 		echoBytes += len(payload)
 	}
 	log.Printf("go_quic_echo_server: handshake_done=true echo_streams=2 echo_bytes=%d", echoBytes)
+	// Keep the connection active long enough for the peer to receive both FIN
+	// terminated echoes before this one-connection fixture emits its close.
+	time.Sleep(250 * time.Millisecond)
 }
 
 func localhostCertificate() (tls.Certificate, []byte, error) {

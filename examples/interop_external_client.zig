@@ -9,9 +9,6 @@
 const std = @import("std");
 const quicz = @import("quicz");
 
-const Connection = quicz.Connection;
-const Tls13Backend = quicz.tls13_backend.Tls13Backend;
-const protection = quicz.protection;
 const echo_payloads = [_][]const u8{ "hello", "world" };
 const echo_total_bytes: usize = 10;
 
@@ -38,52 +35,8 @@ fn nowMillis(io: std.Io) i64 {
     return std.Io.Clock.awake.now(io).toMilliseconds();
 }
 
-/// Some peers pad a server Initial UDP datagram to 1200 bytes after the encoded
-/// long packet. This is neither a QUIC long nor short packet, so discard only
-/// an all-zero tail at this UDP integration boundary.
-fn isZeroOnlyDatagramPadding(datagram_tail: []const u8) bool {
-    return datagram_tail.len > 0 and std.mem.allEqual(u8, datagram_tail, 0);
-}
-
 fn require(condition: bool) !void {
     if (!condition) return error.UnexpectedState;
-}
-
-fn isRetryDatagram(datagram: []const u8) bool {
-    if (datagram.len < 5 or (datagram[0] & 0x80) == 0 or (datagram[0] & 0x40) == 0) return false;
-    const version: quicz.packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
-    const type_bits: u2 = @intCast((datagram[0] >> 4) & 0x03);
-    return quicz.packet.longHeaderPacketTypeFromBits(version, type_bits) == .retry;
-}
-
-fn processServerLongDatagram(
-    connection: *Connection,
-    backend: *Tls13Backend,
-    scratch: []u8,
-    initial_keys: protection.Aes128PacketProtectionKeys,
-    now_millis: i64,
-    datagram: []const u8,
-) !usize {
-    var offset: usize = 0;
-    while (offset < datagram.len and (datagram[offset] & 0x80) != 0) {
-        const info = try protection.peekProtectedLongPacketInfo(datagram[offset..]);
-        const packet_end = std.math.add(usize, offset, info.len) catch return error.InvalidPacket;
-        if (packet_end > datagram.len) return error.InvalidPacket;
-        const packet = datagram[offset..packet_end];
-        switch (info.packet_type) {
-            .initial => {
-                try connection.processProtectedLongDatagramInSpace(.initial, now_millis, initial_keys, packet);
-                _ = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), scratch);
-            },
-            .handshake => {
-                try connection.processProtectedHandshakeDatagramWithInstalledKeys(now_millis, packet);
-                _ = try connection.driveCryptoBackendInSpace(.handshake, backend.cryptoBackend(), scratch);
-            },
-            .zero_rtt, .retry => return error.UnsupportedPacketType,
-        }
-        offset = packet_end;
-    }
-    return offset;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -115,96 +68,47 @@ pub fn main(init: std.process.Init) !void {
     try ca_bundle.addCertsFromFilePathAbsolute(allocator, io, now, ca_pem);
 
     const alpn = [_][]const u8{"hq-interop"};
-    const initial_secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
-    var connection = try Connection.init(allocator, .client, .{
-        .initial_max_data = 8192,
-        .initial_max_stream_data = 2048,
-        .initial_max_streams_bidi = 8,
-        .max_datagram_size = 8192,
-    });
-    defer connection.deinit();
-    try connection.setLocalInitialSourceConnectionId(&client_scid);
-
-    var backend = Tls13Backend.initClient(.{
-        .alpn = &alpn,
-        .server_name = server_name,
-        .skip_cert_verify = false,
-        .now_sec = now.toSeconds(),
-        .ca_bundle = &ca_bundle,
-    });
+    var transport = try quicz.Tls13ClientTransport.init(
+        allocator,
+        .{
+            .initial_max_data = 8192,
+            .initial_max_stream_data = 2048,
+            .initial_max_streams_bidi = 8,
+            .max_datagram_size = 8192,
+        },
+        .{
+            .alpn = &alpn,
+            .server_name = server_name,
+            .skip_cert_verify = false,
+            .now_sec = now.toSeconds(),
+            .ca_bundle = &ca_bundle,
+        },
+        original_dcid,
+        client_scid,
+    );
+    defer transport.deinit();
+    const connection = &transport.connection;
     var scratch: [8192]u8 = undefined;
     var receive_buffer: [8192]u8 = undefined;
 
-    _ = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
-    const client_initial = (try connection.pollProtectedLongCryptoDatagramInSpace(
-        .initial,
-        nowMillis(io),
-        &original_dcid,
-        &client_scid,
-        &[_]u8{},
-        initial_secrets.client,
-    )) orelse return error.UnexpectedState;
+    const client_initial = try transport.begin(nowMillis(io), &scratch);
     defer allocator.free(client_initial);
     try socket.send(io, &server_address, client_initial);
 
     var sent_finished = false;
-    var received_retry = false;
-    var server_initial_keys = initial_secrets.server;
     var datagrams_received: usize = 0;
     while (datagrams_received < 8 and !connection.handshakeConfirmed()) : (datagrams_received += 1) {
         const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-        const now_millis = nowMillis(io);
-        if (isRetryDatagram(received.data)) {
-            if (received_retry) return error.DuplicateRetry;
-            try connection.processRetryDatagram(now_millis, &original_dcid, received.data);
-            const retry_scid = connection.retrySourceConnectionId() orelse return error.MissingPeerConnectionId;
-            const retry_secrets = try protection.deriveInitialSecrets(.v1, retry_scid);
-            backend.retryReceived();
-            try connection.resetInitialCryptoSendForRetry();
-            _ = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
-            const retry_initial = (try connection.pollProtectedLongCryptoDatagramInSpace(
-                .initial,
-                now_millis,
-                retry_scid,
-                &client_scid,
-                &[_]u8{},
-                retry_secrets.client,
-            )) orelse return error.UnexpectedState;
+        const progress = try transport.receive(nowMillis(io), &scratch, received.data);
+        if (progress.outbound_initial) |retry_initial| {
             defer allocator.free(retry_initial);
             try socket.send(io, &server_address, retry_initial);
-            received_retry = true;
-            server_initial_keys = retry_secrets.server;
             continue;
         }
-        if ((received.data[0] & 0x80) != 0) {
-            const long_packet_bytes = try processServerLongDatagram(
-                &connection,
-                &backend,
-                &scratch,
-                server_initial_keys,
-                now_millis,
-                received.data,
-            );
-            if (long_packet_bytes < received.data.len) {
-                const datagram_tail = received.data[long_packet_bytes..];
-                if (!isZeroOnlyDatagramPadding(datagram_tail)) {
-                    try connection.processProtectedShortDatagramWithInstalledKeys(
-                        now_millis,
-                        client_scid.len,
-                        datagram_tail,
-                    );
-                }
-            }
-            if (!sent_finished) {
-                const server_scid = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
-                if (try connection.pollProtectedHandshakeDatagramWithInstalledKeys(nowMillis(io), server_scid, &client_scid)) |client_finished| {
-                    defer allocator.free(client_finished);
-                    try socket.send(io, &server_address, client_finished);
-                    sent_finished = true;
-                }
-            }
-        } else {
-            try connection.processProtectedShortDatagramWithInstalledKeys(now_millis, client_scid.len, received.data);
+        if (progress.outbound_handshake) |client_finished| {
+            defer allocator.free(client_finished);
+            try socket.send(io, &server_address, client_finished);
+            sent_finished = true;
         }
     }
 
@@ -258,40 +162,15 @@ pub fn main(init: std.process.Init) !void {
             },
             else => return err,
         };
-        const now_millis = nowMillis(io);
-        var processed_application_datagram = false;
-        if ((received.data[0] & 0x80) != 0) {
-            const long_packet_bytes = try processServerLongDatagram(
-                &connection,
-                &backend,
-                &scratch,
-                server_initial_keys,
-                now_millis,
-                received.data,
-            );
-            if (long_packet_bytes < received.data.len) {
-                const datagram_tail = received.data[long_packet_bytes..];
-                if (!isZeroOnlyDatagramPadding(datagram_tail)) {
-                    try connection.processProtectedShortDatagramWithInstalledKeys(
-                        now_millis,
-                        client_scid.len,
-                        datagram_tail,
-                    );
-                    processed_application_datagram = true;
-                }
-            }
-        } else {
-            try connection.processProtectedShortDatagramWithInstalledKeys(
-                now_millis,
-                client_scid.len,
-                received.data,
-            );
-            processed_application_datagram = true;
+        const progress = try transport.receive(nowMillis(io), &scratch, received.data);
+        if (progress.outbound_handshake) |client_finished| {
+            defer allocator.free(client_finished);
+            try socket.send(io, &server_address, client_finished);
         }
         // Server Initial/Handshake retransmissions can arrive while the
         // application STREAM is lost. They do not acknowledge 1-RTT data and
         // must not consume the bounded application receive budget before PTO.
-        if (!processed_application_datagram) continue;
+        if (!progress.application_processed) continue;
         received_application_datagrams += 1;
         inline for (stream_ids, echo_payloads, 0..) |stream_id, payload, index| {
             if (try connection.recvOnStream(stream_id, &stream_buffer)) |echoed_len| {
@@ -307,18 +186,4 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.allEqual(bool, &got_echo, true)) return error.MissingStreamEcho;
     if (!std.mem.allEqual(bool, &got_echo_fin, true)) return error.MissingStreamFin;
     std.debug.print("external_handshake_done=true certificate_verified=true alpn=hq-interop echo_streams=2 echo_bytes={d} pto_recovered={}\n", .{ echo_total_bytes, pto_recovered });
-}
-
-test "zero-only datagram padding is isolated from a short packet" {
-    try std.testing.expect(isZeroOnlyDatagramPadding(&[_]u8{ 0, 0, 0 }));
-    try std.testing.expect(!isZeroOnlyDatagramPadding(&[_]u8{}));
-    try std.testing.expect(!isZeroOnlyDatagramPadding(&[_]u8{ 0x40, 0 }));
-}
-
-test "Retry detector accepts only a v1 Retry header" {
-    const retry = [_]u8{ 0xf0, 0, 0, 0, 1 };
-    const initial = [_]u8{ 0xc0, 0, 0, 0, 1 };
-    try std.testing.expect(isRetryDatagram(&retry));
-    try std.testing.expect(!isRetryDatagram(&initial));
-    try std.testing.expect(!isRetryDatagram(&[_]u8{ 0xf0, 0, 0, 0 }));
 }
