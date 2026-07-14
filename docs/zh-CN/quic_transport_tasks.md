@@ -56,6 +56,11 @@ version-information 原语）：
 | qlog、PMTU discovery、GSO/GRO、高级 congestion selection | transport loop 可用后的运维/性能扩展。 | Deferred 或未实现。 |
 | 外部互通 | 声称第一轮可用 transport 里程碑前必须具备。 | 部分完成：客户端专用二进制已与两个来自不同实现家族的本机独立服务端完成证书校验的 QUIC/TLS 握手，并通过强制 Retry 的 `quic-go` v0.59.0 server、以及另一次由 peer 丢弃一个 post-handshake 1-RTT 包以触发 PTO recovery 的运行完成证书校验的双向 STREAM FIN echo；Go 与 Rust 客户端已和本地 Zig server 完成证书校验的双向 STREAM FIN echo，包含有界 Retry 路径。version negotiation、更广泛的服务端和应用层场景尚未验证。 |
 
+并发纯 Zig server 现经由其拥有的 `EndpointConnectionRegistry` 分发已路由的
+1-RTT short packet，涵盖 lifecycle route lookup、installed-key 接收和
+stateless-reset 处理。Initial/Handshake TLS 驱动仍是显式 server 路径，因此这只是
+endpoint ownership 的增量证据，并非完整生产级 event loop。
+
 ### Packet number 重排证据
 
 受保护 long-header 与 1-RTT short-packet 接收路径都会保留有界的已收 packet

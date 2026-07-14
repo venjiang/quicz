@@ -579,13 +579,25 @@ fn serveConcurrent(
                     continue;
                 }
 
-                _ = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
-                    managed.handle,
-                    &managed.connection,
+                const application_feed = try connections.feedDatagramWithInstalledKeys(
+                    &lifecycle,
+                    allocator,
                     path,
                     now_millis,
                     received.data,
+                    .{
+                        .space = .application,
+                        .out = &endpoint_output,
+                        .unpredictable_prefix = &[_]u8{},
+                        .supported_versions = &[_]quic_packet.Version{.v1},
+                    },
                 );
+                const application_route = switch (application_feed) {
+                    .routed => |application_route| application_route,
+                    .dropped => continue,
+                    else => return error.InvalidPacket,
+                };
+                try require(application_route.connection_id == managed.handle);
                 var queued_echo = false;
                 inline for (echo_stream_ids, echo_payloads, 0..) |stream_id, payload, index| {
                     if (!managed.request_received[index]) {

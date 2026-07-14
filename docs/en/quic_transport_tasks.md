@@ -62,6 +62,12 @@ packet/key/token and RFC 9368 version-information primitives:
 | qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
 | External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes certificate-verified QUIC/TLS handshakes with two independently implemented local servers, plus certificate-verified bidirectional STREAM FIN echoes through a `quic-go` v0.59.0 server that forces Retry and a separate run whose peer drops one post-handshake 1-RTT packet for PTO recovery; Go and Rust clients complete certificate-verified bidirectional STREAM FIN echoes against the local Zig server, including its bounded Retry path. Version negotiation, broader server, and application-protocol scenarios remain unproven. |
 
+The concurrent pure-Zig server now dispatches routed 1-RTT short packets through
+its owned `EndpointConnectionRegistry`, including lifecycle route lookup,
+installed-key receive, and stateless-reset handling. Initial/Handshake TLS
+driving remains an explicit server path, so this is evidence of incremental
+endpoint ownership rather than a complete production event loop.
+
 ### Packet-number reordering evidence
 
 Protected long-header and 1-RTT short-packet receive paths retain a bounded
