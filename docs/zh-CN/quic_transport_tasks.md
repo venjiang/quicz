@@ -65,7 +65,8 @@ packets and encode ACK gaps`、`protected long datagram bridge accepts a
 retransmitted Handshake packet number` 与 `processProtectedShortDatagram
 acknowledges reordered packets with ACK ranges` 测试分别覆盖 range 合并、long-header
 重传、重复包拒绝和 ACK 编码。`zig build run-interop-event-loopback -- loss` 会丢弃首个
-client 1-RTT STREAM datagram，并验证 PTO 驱动重传和成功 transfer（`pto_recovered=true`）。
+client 1-RTT 带 FIN 的 STREAM datagram，并验证 PTO 驱动重传和成功的双向 FIN transfer
+（`pto_recovered=true`）。
 
 `zig build run-interop-event-loopback -- congestion` 在同一纯 Zig TLS-owned UDP
 事件循环中执行受控的 NewReno loss exchange：丢弃首个 ack-eliciting 1-RTT PING，投递
@@ -764,7 +765,7 @@ close 和 route cleanup 事件。
 
 ### 1-RTT 包号乱序证据
 
-受保护的 1-RTT short-packet 接收路径现维护有界的已接收包号区间历史：可接受已认证的前向间隙和延迟到达的包，在 frame 副作用前拒绝重复包，并为非连续接收生成 ACK range。`received packet ranges merge reordered packets and encode ACK gaps` 与 `processProtectedShortDatagram acknowledges reordered packets with ACK ranges` 覆盖区间合并、重复包拒绝和 ACK 编码。`zig build run-interop-event-loopback -- loss` 会真实丢弃首个 client 1-RTT STREAM datagram，随后验证 PTO 驱动重传和成功传输（`pto_recovered=true`）。
+受保护的 1-RTT short-packet 接收路径现维护有界的已接收包号区间历史：可接受已认证的前向间隙和延迟到达的包，在 frame 副作用前拒绝重复包，并为非连续接收生成 ACK range。`received packet ranges merge reordered packets and encode ACK gaps` 与 `processProtectedShortDatagram acknowledges reordered packets with ACK ranges` 覆盖区间合并、重复包拒绝和 ACK 编码。`zig build run-interop-event-loopback -- loss` 会真实丢弃首个 client 1-RTT 带 FIN 的 STREAM datagram，随后验证 PTO 驱动重传和成功的双向 FIN 传输（`pto_recovered=true`）。
 
 以上仅是有界的 1-RTT short-packet 证据。Initial 和 Handshake 接收路径仍保持当前的有序规则，尚未记录外部 server 互通结果。
 

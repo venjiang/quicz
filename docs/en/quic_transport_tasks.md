@@ -73,8 +73,9 @@ accepts a retransmitted Handshake packet number`, and
 `processProtectedShortDatagram acknowledges reordered packets with ACK ranges`
 tests cover range merging, long-header retransmission, duplicate rejection, and
 ACK encoding. `zig build run-interop-event-loopback -- loss` drops the first
-client 1-RTT STREAM datagram, then verifies PTO-driven retransmission and a
-successful transfer (`pto_recovered=true`).
+client 1-RTT FIN-terminated STREAM datagram, then verifies PTO-driven
+retransmission and a successful bidirectional FIN transfer
+(`pto_recovered=true`).
 
 `zig build run-interop-event-loopback -- congestion` extends the same pure-Zig
 TLS-owned UDP event loop with a controlled NewReno loss exchange: it drops the

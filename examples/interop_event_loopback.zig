@@ -867,10 +867,10 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // ─── transfer / loss：开 bidirectional stream，发数据，收 echo ───
+    // ─── transfer / loss：开 bidirectional stream，双向 FIN 后收 echo ───
     const payload = "quicz-interop-event-loop-payload";
     const stream_id = try client.openStream();
-    try client.sendOnStream(stream_id, payload, false);
+    try client.sendOnStream(stream_id, payload, true);
     if (testcase == .loss) {
         client_ep.drop_next_ack_eliciting_one_rtt_datagram = true;
     }
@@ -878,26 +878,40 @@ pub fn main(init: std.process.Init) !void {
     try driveAndPoll(&client_ep, io, now, secrets, &scratch);
 
     var got_echo = false;
+    var got_echo_fin = false;
+    var got_request = false;
+    var sent_echo = false;
     var echo_len: usize = 0;
     var stream_buf: [256]u8 = undefined;
     {
         var iters: usize = 0;
         while (iters < 2000) : (iters += 1) {
-            if (got_echo) break;
+            if (got_echo_fin) break;
             try stepEventLoop(io, &client_ep, &server_ep, &now, secrets, &scratch, &recv_buf, &pto_fired);
-            // server 收到 STREAM 后 echo 回 client。
-            if ((try server.recvOnStream(stream_id, &stream_buf))) |n| {
-                try server.sendOnStream(stream_id, stream_buf[0..n], false);
-                try driveAndPoll(&server_ep, io, now, secrets, &scratch);
+            // server 在完整消费请求 FIN 后才用 FIN 回显。
+            if (!got_request) {
+                if ((try server.recvOnStream(stream_id, &stream_buf))) |n| {
+                    try require(std.mem.eql(u8, stream_buf[0..n], payload));
+                    got_request = true;
+                }
             }
-            // client 收 echo。
+            if (got_request and !sent_echo and try server.recvStreamFinished(stream_id)) {
+                try server.sendOnStream(stream_id, payload, true);
+                try driveAndPoll(&server_ep, io, now, secrets, &scratch);
+                sent_echo = true;
+            }
+            // client 收 echo，并确认对端 FIN 已被完整消费。
             if ((try client.recvOnStream(stream_id, &stream_buf))) |n| {
                 got_echo = true;
                 echo_len = n;
             }
+            if (got_echo and try client.recvStreamFinished(stream_id)) {
+                got_echo_fin = true;
+            }
         }
     }
     try require(got_echo);
+    try require(got_echo_fin);
     try require(std.mem.eql(u8, stream_buf[0..echo_len], payload));
 
     if (testcase == .loss) {
