@@ -9,7 +9,7 @@
 //! deadline 驱动事件循环，能处理 PTO 超时恢复，逼近真实网络行为。
 //!
 //! 命令行：interop_event_loopback [TESTCASE]
-//!   TESTCASE: handshake（默认）/ transfer / loss / congestion / persistent / key-update
+//!   TESTCASE: handshake（默认）/ transfer / loss / congestion / persistent / key-update / path
 //!
 //! 场景（本地 loopback 自测）：
 //!   handshake - 事件循环驱动 TLS 1.3 握手到两端 handshakeConfirmed
@@ -22,6 +22,8 @@
 //!                PING，仅交付第四个，用真实 ACK 将 client cwnd 降到 minimum
 //!   key-update - TLS-owned 1-RTT 两次 key phase 轮转，首轮 ACK 解锁下一轮，
 //!                endpoint key-discard deadline 到期后拒绝旧 key 重放包
+//!   path      - TLS-owned 1-RTT PATH_CHALLENGE/PATH_RESPONSE 经新 UDP tuple
+//!                验证后，由 server endpoint lifecycle 提交路由迁移
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -43,7 +45,7 @@ const client_handle: u64 = 1;
 const server_handle: u64 = 2;
 const max_key_update_datagrams: usize = 64;
 
-const Testcase = enum { handshake, transfer, loss, congestion, persistent, key_update };
+const Testcase = enum { handshake, transfer, loss, congestion, persistent, key_update, path };
 
 fn parseTestcase(name: []const u8) Testcase {
     if (std.mem.eql(u8, name, "handshake")) return .handshake;
@@ -52,6 +54,7 @@ fn parseTestcase(name: []const u8) Testcase {
     if (std.mem.eql(u8, name, "congestion")) return .congestion;
     if (std.mem.eql(u8, name, "persistent")) return .persistent;
     if (std.mem.eql(u8, name, "key-update")) return .key_update;
+    if (std.mem.eql(u8, name, "path")) return .path;
     return .handshake;
 }
 
@@ -368,9 +371,14 @@ pub fn main(init: std.process.Init) !void {
     var server_addr = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
     var server_socket = try server_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer server_socket.close(io);
+    var migrated_client_addr = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var migrated_client_socket = try migrated_client_addr.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer migrated_client_socket.close(io);
 
     const client_path = try udp4Tuple(client_socket.address, server_socket.address);
     const server_path = try udp4Tuple(server_socket.address, client_socket.address);
+    const migrated_client_path = try udp4Tuple(migrated_client_socket.address, server_socket.address);
+    const migrated_server_path = try udp4Tuple(server_socket.address, migrated_client_socket.address);
 
     // ─── crypto material + Initial secrets ───
     const seed = [_]u8{0x55} ** 32;
@@ -425,13 +433,13 @@ pub fn main(init: std.process.Init) !void {
     var server_lifecycle = EndpointConnectionLifecycle.init(allocator);
     defer server_lifecycle.deinit();
     try client_lifecycle.registerConnectionId(client_handle, &client_scid, client_path, .{
-        .active_migration_disabled = true,
+        .active_migration_disabled = testcase != .path,
     });
     try server_lifecycle.registerConnectionId(server_handle, &original_dcid, server_path, .{
-        .active_migration_disabled = true,
+        .active_migration_disabled = testcase != .path,
     });
     try server_lifecycle.registerConnectionId(server_handle, &server_scid, server_path, .{
-        .active_migration_disabled = true,
+        .active_migration_disabled = testcase != .path,
     });
 
     var client_ep = Endpoint{
@@ -785,6 +793,76 @@ pub fn main(init: std.process.Init) !void {
             server.peerOneRttKeyUpdateCount().?,
             key_discard_deadline,
             stale_rejected,
+        });
+        return;
+    }
+
+    if (testcase == .path) {
+        // Clear handshake ACK/HANDSHAKE_DONE output so the next client packet
+        // on the new tuple is exactly the PATH_RESPONSE below.
+        try drainReadyOutput(io, &client_ep, &server_ep, now, secrets, &scratch, &recv_buf);
+        now += 1;
+
+        // A locally initiated migration changes the client's inbound tuple
+        // before it receives the server's challenge. The server remains on the
+        // old route until authenticated PATH_RESPONSE consumes its challenge.
+        try require(migrated_client_socket.address.getPort() != client_socket.address.getPort());
+        const client_route = try client_lifecycle.updateRoutePathAndResetSpinBit(
+            &client_scid,
+            client_path,
+            migrated_client_path,
+            &client,
+        );
+        try require(!client_route.path_changed);
+
+        const challenge_data = [_]u8{ 0x73, 0x9d, 0x11, 0x56, 0xca, 0xfe, 0x80, 0x01 };
+        try server.sendPathChallenge(challenge_data);
+        const challenge = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &server,
+            now,
+            &client_scid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(challenge);
+        try require(server.outstandingPathChallengeCount() == 1);
+        try server_socket.send(io, &migrated_client_socket.address, challenge);
+
+        const challenge_received = try migrated_client_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+        const client_result = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(
+            client_handle,
+            &client,
+            migrated_client_path,
+            now,
+            challenge_received.data,
+        );
+        try require(!client_result.path_changed);
+
+        const response = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            client_handle,
+            &client,
+            now + 1,
+            &server_scid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(response);
+        try migrated_client_socket.send(io, &server_socket.address, response);
+
+        const response_received = try server_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+        const server_result = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndUpdatePathOrClose(
+            server_handle,
+            &server,
+            migrated_server_path,
+            now + 1,
+            response_received.data,
+        );
+        try require(server_result.route.path_changed);
+        const updated_route = server_result.updated_route orelse return error.UnexpectedState;
+        try require(!updated_route.path_changed);
+        try require(server.outstandingPathChallengeCount() == 0);
+        try require(!(try server_lifecycle.routeDatagram(migrated_server_path, response_received.data)).path_changed);
+
+        std.debug.print("tls_path_validation=true old_client_port={} new_client_port={} server_route_updated=true\n", .{
+            client_socket.address.getPort(),
+            migrated_client_socket.address.getPort(),
         });
         return;
     }
