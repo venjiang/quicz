@@ -6,6 +6,25 @@ port=${QUICZ_PROCESS_INTEROP_PORT:-4443}
 connections=${QUICZ_PROCESS_INTEROP_CONNECTIONS:-2}
 mode=${QUICZ_PROCESS_INTEROP_MODE:-concurrent}
 client_completion=${QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION:-close}
+retry=${QUICZ_PROCESS_INTEROP_RETRY:-false}
+case "$retry" in
+    false|0)
+        server_mode=$mode
+        client_retry=none
+        ;;
+    true|1)
+        if [ "$mode" != concurrent ]; then
+            echo "Retry process interop requires concurrent mode" >&2
+            exit 2
+        fi
+        server_mode=concurrent-retry
+        client_retry=retry
+        ;;
+    *)
+        echo "QUICZ_PROCESS_INTEROP_RETRY must be true or false" >&2
+        exit 2
+        ;;
+esac
 server_log=$(mktemp)
 client_log=$(mktemp)
 server_pid=
@@ -24,7 +43,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-./zig-out/bin/quicz-tls13-process-echo-server "$host" "$port" "$connections" "$mode" >"$server_log" 2>&1 &
+./zig-out/bin/quicz-tls13-process-echo-server "$host" "$port" "$connections" "$server_mode" >"$server_log" 2>&1 &
 server_pid=$!
 
 ready=false
@@ -49,9 +68,9 @@ fi
 client_index=0
 while [ "$client_index" -lt "$connections" ]; do
     if [ "$mode" = sequential ]; then
-        ./zig-out/bin/quicz-tls13-process-echo-client "$host" "$port" "$client_index" "$client_completion" >>"$client_log" 2>&1
+        ./zig-out/bin/quicz-tls13-process-echo-client "$host" "$port" "$client_index" "$client_completion" "$client_retry" >>"$client_log" 2>&1
     else
-        ./zig-out/bin/quicz-tls13-process-echo-client "$host" "$port" "$client_index" "$client_completion" >>"$client_log" 2>&1 &
+        ./zig-out/bin/quicz-tls13-process-echo-client "$host" "$port" "$client_index" "$client_completion" "$client_retry" >>"$client_log" 2>&1 &
         client_pids="${client_pids:-} $!"
     fi
     client_index=$((client_index + 1))

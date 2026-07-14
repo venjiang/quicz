@@ -1,6 +1,6 @@
 //! Pure-Zig TLS 1.3 QUIC echo server for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [connections] [sequential|concurrent]
+//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [connections] [sequential|concurrent|concurrent-retry]
 //! Concurrent mode accepts and routes the requested number of loopback
 //! connections through one UDP socket and one endpoint lifecycle owner. It
 //! waits on the lifecycle's earliest deadline and retires idle connections.
@@ -14,10 +14,14 @@ const Tls13Backend = quicz.tls13_backend.Tls13Backend;
 const endpoint = quicz.endpoint;
 const quic_packet = quicz.packet;
 const protection = quicz.protection;
+const address_validation_token = quicz.address_validation_token;
 
 const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
 const max_initial_datagrams: usize = 4;
 const process_idle_timeout_millis: u64 = 1000;
+const retry_token_lifetime_millis: u64 = 10_000;
+const retry_token_secret = [_]u8{0x73} ** address_validation_token.secret_len;
+const max_retry_datagram_size: usize = 256;
 // Local test-only P-256 certificate for localhost and 127.0.0.1. Its PEM
 // trust anchor is in examples/interop/testdata/quicz-echo-ca.pem so the Go
 // and Rust client examples can exercise ordinary certificate validation.
@@ -96,10 +100,18 @@ const ManagedProcessConnection = struct {
     client_scid_len: usize = 0,
     original_dcid: [20]u8 = undefined,
     original_dcid_len: usize = 0,
+    retry_datagram: [max_retry_datagram_size]u8 = undefined,
+    retry_datagram_len: usize = 0,
+    retry_validated: bool = false,
+    retry_accepted: bool = false,
     echoed: bool = false,
 
     fn clientScid(self: *const ManagedProcessConnection) []const u8 {
         return self.client_scid[0..self.client_scid_len];
+    }
+
+    fn retryDatagram(self: *const ManagedProcessConnection) []const u8 {
+        return self.retry_datagram[0..self.retry_datagram_len];
     }
 
     fn deinit(self: *ManagedProcessConnection) void {
@@ -109,6 +121,18 @@ const ManagedProcessConnection = struct {
 
 fn processServerScid(handle: u64) [4]u8 {
     return .{ 0x31, 0x32, @truncate(handle >> 8), @truncate(handle) };
+}
+
+fn retryTokenNonce(handle: u64) address_validation_token.Nonce {
+    var nonce = [_]u8{0xa7} ** address_validation_token.nonce_len;
+    var value = handle;
+    var index = nonce.len;
+    while (index > 0) {
+        index -= 1;
+        nonce[index] = @truncate(value);
+        value >>= 8;
+    }
+    return nonce;
 }
 
 fn serverPath(bind_address: std.Io.net.IpAddress, peer_address: std.Io.net.IpAddress) !endpoint.Udp4Tuple {
@@ -168,10 +192,13 @@ fn serveConcurrent(
     socket: *std.Io.net.Socket,
     bind_address: std.Io.net.IpAddress,
     connection_count: usize,
+    retry_enabled: bool,
 ) !void {
     const alpn = [_][]const u8{"hq-interop"};
     var lifecycle = EndpointConnectionLifecycle.init(allocator);
     defer lifecycle.deinit();
+    var address_validation = endpoint.AddressValidationPolicy.init(allocator, retry_token_secret, .{});
+    defer address_validation.deinit();
     var connections = std.AutoHashMap(u64, *ManagedProcessConnection).init(allocator);
     defer {
         var iterator = connections.valueIterator();
@@ -188,7 +215,7 @@ fn serveConcurrent(
     var accepted_count: usize = 0;
     var completed: usize = 0;
 
-    while (completed < connection_count) {
+    receive_loop: while (completed < connection_count) {
         const next_deadline = next: {
             const deadline_views = try collectDeadlineViews(allocator, &connections);
             defer allocator.free(deadline_views);
@@ -237,9 +264,22 @@ fn serveConcurrent(
         );
         switch (action) {
             .accept_initial => |initial_accept| {
-                if (accepted_count >= connection_count) return error.ConnectionLimitReached;
                 const initial_info = try protection.peekProtectedLongPacketInfo(received.data);
                 if (initial_info.packet_type != .initial) return error.InvalidPacket;
+                if (retry_enabled) {
+                    if (connections.count() >= connection_count) {
+                        var pending = connections.valueIterator();
+                        while (pending.next()) |managed| {
+                            if (managed.*.retry_datagram_len == 0 or
+                                !std.mem.eql(u8, managed.*.original_dcid[0..managed.*.original_dcid_len], initial_info.dcid) or
+                                !std.meta.eql(managed.*.peer_address, received.from)) continue;
+                            try socket.send(io, &managed.*.peer_address, managed.*.retryDatagram());
+                            std.debug.print("zig_process_server: connection={d} concurrent=true retry_reissued=true\n", .{managed.*.handle});
+                            continue :receive_loop;
+                        }
+                        return error.ConnectionLimitReached;
+                    }
+                } else if (accepted_count >= connection_count) return error.ConnectionLimitReached;
 
                 const managed = try allocator.create(ManagedProcessConnection);
                 errdefer allocator.destroy(managed);
@@ -274,6 +314,39 @@ fn serveConcurrent(
                 if (initial_info.dcid.len > managed.original_dcid.len) return error.InvalidConnectionIdLength;
                 @memcpy(managed.original_dcid[0..initial_info.dcid.len], initial_info.dcid);
                 managed.original_dcid_len = initial_info.dcid.len;
+
+                if (retry_enabled) {
+                    if (initial_accept.source_connection_id.len > managed.client_scid.len) return error.InvalidConnectionIdLength;
+                    @memcpy(managed.client_scid[0..initial_accept.source_connection_id.len], initial_accept.source_connection_id);
+                    managed.client_scid_len = initial_accept.source_connection_id.len;
+                    const token = try address_validation.issueTokenForPathForVersion(
+                        allocator,
+                        .retry,
+                        initial_info.version,
+                        now_millis,
+                        retry_token_lifetime_millis,
+                        path,
+                        retryTokenNonce(handle),
+                    );
+                    defer allocator.free(token);
+                    const retry_datagram = try managed.connection.issueRetryDatagram(
+                        now_millis,
+                        initial_info.dcid,
+                        initial_accept.source_connection_id,
+                        &managed.server_scid,
+                        token,
+                    );
+                    defer allocator.free(retry_datagram);
+                    if (retry_datagram.len > managed.retry_datagram.len) return error.InvalidPacket;
+                    @memcpy(managed.retry_datagram[0..retry_datagram.len], retry_datagram);
+                    managed.retry_datagram_len = retry_datagram.len;
+                    try lifecycle.registerConnectionId(handle, initial_info.dcid, path, .{ .active_migration_disabled = true });
+                    _ = try lifecycle.switchInitialDestinationConnectionIdAfterRetry(initial_info.dcid, &managed.server_scid, path);
+                    try connections.put(handle, managed);
+                    try socket.send(io, &managed.peer_address, retry_datagram);
+                    std.debug.print("zig_process_server: connection={d} concurrent=true retry_issued=true\n", .{handle});
+                    continue;
+                }
 
                 var scratch: [8192]u8 = undefined;
                 const accepted = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram(
@@ -319,6 +392,66 @@ fn serveConcurrent(
             },
             .routed => |route| {
                 const managed = connections.get(route.connection_id) orelse return error.UnknownConnectionId;
+                if (retry_enabled and managed.connection.pendingRetryTokenCount() != 0) {
+                    const retry_info = try protection.peekProtectedLongPacketInfo(received.data);
+                    if (retry_info.packet_type != .initial) return error.InvalidPacket;
+                    const retry_initial = try lifecycle.processRetryValidatedProtectedInitialDatagram(
+                        &address_validation,
+                        managed.handle,
+                        &managed.connection,
+                        now_millis,
+                        path,
+                        received.data,
+                        &[_]quic_packet.Version{.v1},
+                    );
+                    managed.retry_datagram_len = 0;
+                    var retry_scratch: [8192]u8 = undefined;
+                    const retry_progress = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+                        managed.handle,
+                        &managed.connection,
+                        .initial,
+                        managed.backend.cryptoBackend(),
+                        &retry_scratch,
+                    );
+                    managed.retry_validated = true;
+                    if (!retry_progress.handshake_keys_installed) continue;
+                    const retry_secrets = try protection.deriveInitialSecrets(
+                        retry_initial.initial_accept.version,
+                        retry_initial.initial_accept.original_destination_connection_id,
+                    );
+                    const server_initial = (try lifecycle.pollProtectedLongCryptoDatagramInSpace(
+                        managed.handle,
+                        &managed.connection,
+                        .initial,
+                        now_millis,
+                        managed.clientScid(),
+                        &managed.server_scid,
+                        &[_]u8{},
+                        retry_secrets.server,
+                    )) orelse return error.UnexpectedState;
+                    defer allocator.free(server_initial);
+                    try socket.send(io, &managed.peer_address, server_initial);
+                    _ = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+                        managed.handle,
+                        &managed.connection,
+                        .handshake,
+                        managed.backend.cryptoBackend(),
+                        &retry_scratch,
+                    );
+                    const server_handshake = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+                        managed.handle,
+                        &managed.connection,
+                        now_millis,
+                        managed.clientScid(),
+                        &managed.server_scid,
+                    )) orelse return error.UnexpectedState;
+                    defer allocator.free(server_handshake);
+                    try socket.send(io, &managed.peer_address, server_handshake);
+                    accepted_count += 1;
+                    managed.retry_accepted = true;
+                    std.debug.print("zig_process_server: connection={d} concurrent=true retry_validated=true\n", .{managed.handle});
+                    continue;
+                }
                 if ((received.data[0] & 0x80) != 0) {
                     if (managed.connection.handshakeConfirmed()) {
                         // Independent clients can retransmit Initial or
@@ -334,12 +467,16 @@ fn serveConcurrent(
                         first_long_info.len < received.data.len and
                         managed.connection.hasHandshakeProtectionKeys())
                     {
+                        const initial_destination_connection_id = if (managed.retry_validated)
+                            managed.server_scid[0..]
+                        else
+                            managed.original_dcid[0..managed.original_dcid_len];
                         _ = try lifecycle.processRoutedProtectedLongDatagramWithInstalledHandshakeKeys(
                             managed.handle,
                             &managed.connection,
                             path,
                             now_millis,
-                            managed.original_dcid[0..managed.original_dcid_len],
+                            initial_destination_connection_id,
                             received.data,
                         );
                         var coalesced_scratch: [8192]u8 = undefined;
@@ -359,12 +496,16 @@ fn serveConcurrent(
                         const long_packet = packet_bytes[0..long_info.len];
                         switch (long_info.packet_type) {
                             .initial => {
+                                const initial_destination_connection_id = if (managed.retry_validated)
+                                    managed.server_scid[0..]
+                                else
+                                    managed.original_dcid[0..managed.original_dcid_len];
                                 _ = try lifecycle.processRoutedProtectedInitialDatagram(
                                     managed.handle,
                                     &managed.connection,
                                     path,
                                     now_millis,
-                                    managed.original_dcid[0..managed.original_dcid_len],
+                                    initial_destination_connection_id,
                                     long_packet,
                                 );
                                 var initial_scratch: [8192]u8 = undefined;
@@ -378,7 +519,7 @@ fn serveConcurrent(
                                 if (initial_progress.handshake_keys_installed) {
                                     const initial_secrets = try protection.deriveInitialSecrets(
                                         long_info.version,
-                                        managed.original_dcid[0..managed.original_dcid_len],
+                                        initial_destination_connection_id,
                                     );
                                     if (try lifecycle.pollProtectedLongCryptoDatagramInSpace(
                                         managed.handle,
@@ -409,6 +550,11 @@ fn serveConcurrent(
                                     )) |datagram| {
                                         defer allocator.free(datagram);
                                         try socket.send(io, &managed.peer_address, datagram);
+                                    }
+                                    if (retry_enabled and managed.retry_validated and !managed.retry_accepted) {
+                                        accepted_count += 1;
+                                        managed.retry_accepted = true;
+                                        std.debug.print("zig_process_server: connection={d} concurrent=true retry_validated=true\n", .{managed.handle});
                                     }
                                 }
                             },
@@ -505,7 +651,10 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("zig_process_server: listening={s}:{d} connections={d} mode={s}\n", .{ bind_host, bind_port, connection_count, mode });
 
     if (std.mem.eql(u8, mode, "concurrent")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, connection_count);
+        return serveConcurrent(allocator, io, &socket, bind_address, connection_count, false);
+    }
+    if (std.mem.eql(u8, mode, "concurrent-retry")) {
+        return serveConcurrent(allocator, io, &socket, bind_address, connection_count, true);
     }
     if (!std.mem.eql(u8, mode, "sequential")) return error.InvalidMode;
 

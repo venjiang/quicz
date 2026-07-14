@@ -153,6 +153,18 @@ test-only idle deadline; the lifecycle services the resulting PTO
 reports `pto_recovered=true`. This verifies socket-loop recovery ordering for
 the bounded demo; it is not a production RTT or timeout policy.
 
+`QUICZ_PROCESS_INTEROP_RETRY=true zig build run-tls13-process-interop` enables
+the concurrent server's bounded Retry path. It issues a path- and v1-bound,
+single-use address-validation token, retains and reissues the same Retry for a
+retransmitted tokenless Initial, and accepts a follow-up Initial only after
+the lifecycle validates and consumes that token. The Zig client resets only
+its Initial send state, re-emits the cached ClientHello with the Retry SCID and
+derived Initial keys, then reports `retry_validated=true`. Fresh
+certificate-verified Go and Rust client runs also completed the five-byte echo
+through this Retry path. The static demo secret and in-memory replay filter
+remain a bounded local policy, not production key storage or distributed replay
+protection.
+
 The same concurrent server accepts coalesced external Initial/Handshake input
 through a lifecycle-owned helper that retains the full UDP length for Initial
 size validation while authenticating each long-header packet at its encoded

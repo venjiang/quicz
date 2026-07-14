@@ -1,6 +1,6 @@
 //! Pure-Zig TLS 1.3 QUIC client for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-client <server_host> <server_port> [connection_tag] [close|idle|loss]
+//! Usage: quicz-tls13-process-echo-client <server_host> <server_port> [connection_tag] [close|idle|loss] [none|retry]
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -10,6 +10,13 @@ const EndpointConnectionLifecycle = quicz.EndpointConnectionLifecycle;
 const Tls13Backend = quicz.tls13_backend.Tls13Backend;
 const endpoint = quicz.endpoint;
 const protection = quicz.protection;
+
+fn isRetryDatagram(datagram: []const u8) bool {
+    if (datagram.len < 5 or (datagram[0] & 0x80) == 0 or (datagram[0] & 0x40) == 0) return false;
+    const version: quicz.packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
+    const type_bits: u2 = @intCast((datagram[0] >> 4) & 0x03);
+    return quicz.packet.longHeaderPacketTypeFromBits(version, type_bits) == .retry;
+}
 
 const original_dcid_base = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
 const client_scid_base = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
@@ -41,6 +48,9 @@ pub fn main(init: std.process.Init) !void {
     const leave_idle = std.mem.eql(u8, completion_mode, "idle");
     const drop_initial_responses = std.mem.eql(u8, completion_mode, "loss");
     if (!leave_idle and !drop_initial_responses and !std.mem.eql(u8, completion_mode, "close")) return error.InvalidCompletionMode;
+    const retry_mode = args.next() orelse "none";
+    const expect_retry = std.mem.eql(u8, retry_mode, "retry");
+    if (!expect_retry and !std.mem.eql(u8, retry_mode, "none")) return error.InvalidRetryMode;
     var original_dcid = original_dcid_base;
     original_dcid[original_dcid.len - 1] = connection_tag;
     var client_scid = client_scid_base;
@@ -89,8 +99,33 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(client_initial);
     try socket.send(io, &server_address, client_initial);
 
-    const received_initial = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-    try connection.processProtectedLongDatagramInSpace(.initial, 2, initial_secrets.server, received_initial.data);
+    var received_initial = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+    if (isRetryDatagram(received_initial.data)) {
+        if (!expect_retry) return error.UnexpectedRetry;
+        const retry_route = try lifecycle.routeDatagram(client_path, received_initial.data);
+        try require(retry_route.connection_id == client_handle);
+        try connection.processRetryDatagram(2, &original_dcid, received_initial.data);
+        const retry_scid = connection.retrySourceConnectionId() orelse return error.MissingPeerConnectionId;
+        const retry_secrets = try protection.deriveInitialSecrets(.v1, retry_scid);
+        backend.retryReceived();
+        try connection.resetInitialCryptoSendForRetry();
+        _ = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
+        const retry_initial = (try connection.pollProtectedLongCryptoDatagramInSpace(
+            .initial,
+            2,
+            retry_scid,
+            &client_scid,
+            &[_]u8{},
+            retry_secrets.client,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(retry_initial);
+        try socket.send(io, &server_address, retry_initial);
+        received_initial = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+        try connection.processProtectedLongDatagramInSpace(.initial, 3, retry_secrets.server, received_initial.data);
+    } else {
+        if (expect_retry) return error.MissingRetry;
+        try connection.processProtectedLongDatagramInSpace(.initial, 2, initial_secrets.server, received_initial.data);
+    }
     _ = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
     const server_scid = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
 
@@ -99,7 +134,7 @@ pub fn main(init: std.process.Init) !void {
         client_handle,
         &connection,
         client_path,
-        3,
+        4,
         received_handshake.data,
     );
     try require(handshake_route.connection_id == client_handle);
@@ -113,7 +148,7 @@ pub fn main(init: std.process.Init) !void {
     try require(handshake_progress.outbound_bytes > 0);
     try require(handshake_progress.handshake_confirmed);
     const client_finished = (try connection.pollProtectedHandshakeDatagramWithInstalledKeys(
-        4,
+        5,
         server_scid,
         &client_scid,
     )) orelse return error.UnexpectedState;
@@ -122,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
 
     const stream_id = try connection.openStream();
     try connection.sendOnStream(stream_id, "hello", false);
-    const stream_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(client_handle, &connection, 5, server_scid)) orelse return error.UnexpectedState;
+    const stream_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(client_handle, &connection, 6, server_scid)) orelse return error.UnexpectedState;
     defer allocator.free(stream_packet);
     try socket.send(io, &server_address, stream_packet);
 
@@ -140,7 +175,7 @@ pub fn main(init: std.process.Init) !void {
             client_handle,
             &connection,
             client_path,
-            6 + @as(i64, @intCast(received_packets)),
+            7 + @as(i64, @intCast(received_packets)),
             received.data,
         );
         try require(stream_route.connection_id == client_handle);
@@ -162,7 +197,7 @@ pub fn main(init: std.process.Init) !void {
     const close_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
         client_handle,
         &connection,
-        10,
+        20,
         server_scid,
     )) orelse return error.UnexpectedState;
     defer allocator.free(close_packet);
@@ -178,7 +213,13 @@ pub fn main(init: std.process.Init) !void {
     try require(lifecycle.routeCount() == 0);
 
     if (drop_initial_responses) {
-        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 pto_recovered=true close_cleanup=true\n", .{connection_tag});
+        if (expect_retry) {
+            std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 pto_recovered=true retry_validated=true close_cleanup=true\n", .{connection_tag});
+        } else {
+            std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 pto_recovered=true close_cleanup=true\n", .{connection_tag});
+        }
+    } else if (expect_retry) {
+        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 retry_validated=true close_cleanup=true\n", .{connection_tag});
     } else {
         std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 close_cleanup=true\n", .{connection_tag});
     }

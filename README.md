@@ -103,15 +103,16 @@ Common runnable examples:
   and proves concurrent real UDP STREAM echoes with lifecycle cleanup. Set
   `QUICZ_PROCESS_INTEROP_CONNECTIONS=1` for one echo, or set
   `QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=loss` to exercise the bounded
-  socket-loop PTO recovery probe.
+  socket-loop PTO recovery probe. Set `QUICZ_PROCESS_INTEROP_RETRY=true` to
+  run the path-bound Retry and ClientHello retransmission path.
 
 ### Go and Rust client probes
 
-Start the sequential Zig server in one terminal (the optional final argument is
-the number of accepted connections):
+Start the concurrent Retry-capable Zig server in one terminal (the optional
+final argument is the number of accepted connections):
 
 ```bash
-zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443 2
+zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443 2 concurrent-retry
 ```
 
 Then run either verified external-language client in another terminal:

@@ -92,14 +92,15 @@ zig build run-initial-keys
 - `run-tls13-process-interop`：启动独立的 Zig client/server 进程，验证并发的真实
   UDP STREAM echo 与 lifecycle 清理。设置 `QUICZ_PROCESS_INTEROP_CONNECTIONS=1`
   可只验证一次 echo；设置 `QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=loss` 可运行有界
-  socket-loop PTO recovery 探针。
+  socket-loop PTO recovery 探针；设置 `QUICZ_PROCESS_INTEROP_RETRY=true` 可运行路径绑定
+  Retry 和 ClientHello 重传路径。
 
 ### Go 与 Rust 客户端互通探针
 
-先在一个终端启动顺序 Zig server（可选的最后一个参数是接受连接数）：
+先在一个终端启动支持 Retry 的并发 Zig server（可选的最后一个参数是接受连接数）：
 
 ```bash
-zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443 2
+zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443 2 concurrent-retry
 ```
 
 再在另一个终端运行任一已验证的其它语言客户端：
