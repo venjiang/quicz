@@ -65,8 +65,8 @@ packet/key/token and RFC 9368 version-information primitives:
 The concurrent pure-Zig server now dispatches routed 1-RTT short packets through
 its owned `EndpointConnectionRegistry`, including lifecycle route lookup,
 installed-key receive, and stateless-reset handling. Initial/Handshake TLS
-driving remains explicit for Initial; routed Handshake receive, TLS progress,
-and bounded protected-output draining run as one lifecycle operation. This is
+driving runs as one lifecycle operation for routed Initial and Handshake input,
+with bounded protected-output draining. This is
 incremental endpoint ownership rather than a complete production event loop.
 
 ### Packet-number reordering evidence

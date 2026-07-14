@@ -497,40 +497,35 @@ fn serveConcurrent(
                                     managed.server_scid[0..]
                                 else
                                     managed.original_dcid[0..managed.original_dcid_len];
-                                _ = try lifecycle.processRoutedProtectedInitialDatagram(
-                                    managed.handle,
-                                    &managed.connection,
-                                    path,
-                                    now_millis,
+                                const initial_secrets = try protection.deriveInitialSecrets(
+                                    long_info.version,
                                     initial_destination_connection_id,
-                                    long_packet,
                                 );
+                                var initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                                 var initial_scratch: [8192]u8 = undefined;
-                                const initial_progress = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+                                const initial = try lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
                                     managed.handle,
                                     &managed.connection,
                                     .initial,
+                                    path,
+                                    now_millis,
+                                    initial_secrets.client,
+                                    long_packet,
                                     managed.backend.cryptoBackend(),
                                     &initial_scratch,
+                                    managed.clientScid(),
+                                    &managed.server_scid,
+                                    &[_]u8{},
+                                    initial_secrets.server,
+                                    &initial_outputs,
                                 );
-                                if (initial_progress.handshake_keys_installed) {
-                                    const initial_secrets = try protection.deriveInitialSecrets(
-                                        long_info.version,
-                                        initial_destination_connection_id,
-                                    );
-                                    if (try lifecycle.pollProtectedLongCryptoDatagramInSpace(
-                                        managed.handle,
-                                        &managed.connection,
-                                        .initial,
-                                        now_millis,
-                                        managed.clientScid(),
-                                        &managed.server_scid,
-                                        &[_]u8{},
-                                        initial_secrets.server,
-                                    )) |datagram| {
-                                        defer allocator.free(datagram);
-                                        try socket.send(io, &managed.peer_address, datagram);
-                                    }
+                                try require(initial.route.connection_id == managed.handle);
+                                for (initial_outputs[0..initial.backend.drain.datagrams_written]) |output| {
+                                    defer allocator.free(output.datagram);
+                                    try socket.send(io, &managed.peer_address, output.datagram);
+                                }
+                                if (initial.backend.drain.first_error) |drain_error| return drain_error;
+                                if (initial.backend.backend.handshake_keys_installed) {
                                     _ = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
                                         managed.handle,
                                         &managed.connection,
