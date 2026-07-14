@@ -126,9 +126,10 @@ client registers its SCID route after binding its UDP socket. On both peers,
 the subsequent Handshake and 1-RTT STREAM receive/send steps use those
 registered routes and lifecycle timer refresh. By default the reproducible
 command starts two tagged client processes concurrently. The server keeps
-their caller-owned `Connection` and `Tls13Backend` values in a bounded handle
-map and uses one `EndpointConnectionLifecycle` to classify and route every
-datagram on one UDP socket. The distinct client tags prevent Initial DCID and
+each `Connection` and its `Tls13Backend` record in the bounded,
+endpoint-owned `EndpointConnectionRegistry`, and uses one
+`EndpointConnectionLifecycle` to classify and route every datagram on one UDP
+socket. The distinct client tags prevent Initial DCID and
 SCID collisions. After each matching FIN-terminated echo, the client sends a protected
 `CONNECTION_CLOSE`; the server processes it through that connection's route,
 enters draining, and retires only that handle's routes at the close deadline

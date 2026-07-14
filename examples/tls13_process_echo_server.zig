@@ -122,7 +122,25 @@ const ManagedProcessConnection = struct {
     fn deinit(self: *ManagedProcessConnection) void {
         self.connection.deinit();
     }
+
+    fn connectionRef(self: *ManagedProcessConnection) *Connection {
+        return &self.connection;
+    }
+
+    fn destinationConnectionId(self: *const ManagedProcessConnection) []const u8 {
+        return self.clientScid();
+    }
+
+    fn sourceConnectionId(self: *const ManagedProcessConnection) []const u8 {
+        return &self.server_scid;
+    }
 };
+
+const ProcessConnectionRegistry = quicz.EndpointConnectionRegistry(
+    ManagedProcessConnection,
+    ManagedProcessConnection.connectionRef,
+    ManagedProcessConnection.deinit,
+);
 
 fn processServerScid(handle: u64) [4]u8 {
     return .{ 0x31, 0x32, @truncate(handle >> 8), @truncate(handle) };
@@ -149,46 +167,27 @@ fn serverPath(bind_address: std.Io.net.IpAddress, peer_address: std.Io.net.IpAdd
 
 fn collectDeadlineViews(
     allocator: std.mem.Allocator,
-    connections: *const std.AutoHashMap(u64, *ManagedProcessConnection),
+    connections: *ProcessConnectionRegistry,
 ) ![]quicz.EndpointConnectionView {
-    const views = try allocator.alloc(quicz.EndpointConnectionView, connections.count());
-    var iterator = connections.valueIterator();
-    var index: usize = 0;
-    while (iterator.next()) |managed| : (index += 1) {
-        views[index] = .{
-            .connection_id = managed.*.handle,
-            .connection = &managed.*.connection,
-        };
-    }
-    return views;
+    return connections.deadlineViews(allocator);
 }
 
 fn collectPollViews(
     allocator: std.mem.Allocator,
-    connections: *std.AutoHashMap(u64, *ManagedProcessConnection),
+    connections: *ProcessConnectionRegistry,
 ) ![]quicz.EndpointConnectionPollView {
-    const views = try allocator.alloc(quicz.EndpointConnectionPollView, connections.count());
-    var iterator = connections.valueIterator();
-    var index: usize = 0;
-    while (iterator.next()) |managed| : (index += 1) {
-        views[index] = .{
-            .connection_id = managed.*.handle,
-            .connection = &managed.*.connection,
-            .destination_connection_id = managed.*.clientScid(),
-            .source_connection_id = &managed.*.server_scid,
-        };
-    }
-    return views;
+    return connections.pollViews(
+        allocator,
+        ManagedProcessConnection.destinationConnectionId,
+        ManagedProcessConnection.sourceConnectionId,
+    );
 }
 
 fn destroyManagedConnection(
-    allocator: std.mem.Allocator,
-    connections: *std.AutoHashMap(u64, *ManagedProcessConnection),
+    connections: *ProcessConnectionRegistry,
     handle: u64,
 ) !void {
-    const removed = connections.fetchRemove(handle) orelse return error.UnknownConnectionId;
-    removed.value.deinit();
-    allocator.destroy(removed.value);
+    try connections.remove(handle);
 }
 
 fn serveConcurrent(
@@ -209,15 +208,8 @@ fn serveConcurrent(
     defer lifecycle.deinit();
     var address_validation = endpoint.AddressValidationPolicy.init(allocator, retry_token_secret, .{});
     defer address_validation.deinit();
-    var connections = std.AutoHashMap(u64, *ManagedProcessConnection).init(allocator);
-    defer {
-        var iterator = connections.valueIterator();
-        while (iterator.next()) |managed| {
-            managed.*.deinit();
-            allocator.destroy(managed.*);
-        }
-        connections.deinit();
-    }
+    var connections = ProcessConnectionRegistry.init(allocator);
+    defer connections.deinit();
 
     var receive_buffer: [2048]u8 = undefined;
     var endpoint_output: [128]u8 = undefined;
@@ -257,7 +249,7 @@ fn serveConcurrent(
                 if (due.pending_work.idle_retired != null or due.pending_work.close_retired != null) {
                     const managed = connections.get(due.deadline.connection_id) orelse return error.UnknownConnectionId;
                     const completed_connection = !retry_enabled or managed.retry_accepted;
-                    try destroyManagedConnection(allocator, &connections, due.deadline.connection_id);
+                    try destroyManagedConnection(&connections, due.deadline.connection_id);
                     if (completed_connection) {
                         completed += 1;
                         std.debug.print("zig_process_server: connection={d} concurrent=true idle_cleanup=true\n", .{completed});
@@ -297,9 +289,20 @@ fn serveConcurrent(
                     }
                 } else if (connections.count() >= max_active_connections) return error.ConnectionLimitReached;
 
+                const handle = next_handle;
+                next_handle += 1;
                 const managed = try allocator.create(ManagedProcessConnection);
-                errdefer allocator.destroy(managed);
-                var connection = try Connection.init(allocator, .server, .{
+                var managed_initialized = false;
+                var managed_adopted = false;
+                errdefer {
+                    if (managed_adopted) {
+                        connections.remove(handle) catch {};
+                    } else {
+                        if (managed_initialized) managed.deinit();
+                        allocator.destroy(managed);
+                    }
+                }
+                const connection = try Connection.init(allocator, .server, .{
                     .initial_max_data = 8192,
                     .initial_max_stream_data = 2048,
                     .initial_max_streams_bidi = 8,
@@ -309,9 +312,6 @@ fn serveConcurrent(
                     .initial_rtt_ms = 100,
                     .max_idle_timeout_ms = process_idle_timeout_millis,
                 });
-                errdefer connection.deinit();
-                const handle = next_handle;
-                next_handle += 1;
                 managed.* = .{
                     .handle = handle,
                     .connection = connection,
@@ -324,7 +324,7 @@ fn serveConcurrent(
                     .peer_address = received.from,
                     .server_scid = processServerScid(handle),
                 };
-                errdefer managed.deinit();
+                managed_initialized = true;
                 try managed.connection.validatePeerAddress();
                 try managed.connection.setLocalInitialSourceConnectionId(&managed.server_scid);
                 if (initial_info.dcid.len > managed.original_dcid.len) return error.InvalidConnectionIdLength;
@@ -358,7 +358,8 @@ fn serveConcurrent(
                     managed.retry_datagram_len = retry_datagram.len;
                     try lifecycle.registerConnectionId(handle, initial_info.dcid, path, .{ .active_migration_disabled = true });
                     _ = try lifecycle.switchInitialDestinationConnectionIdAfterRetry(initial_info.dcid, &managed.server_scid, path);
-                    try connections.put(handle, managed);
+                    try connections.adopt(handle, managed);
+                    managed_adopted = true;
                     try socket.send(io, &managed.peer_address, retry_datagram);
                     std.debug.print("zig_process_server: connection={d} concurrent=true retry_issued=true\n", .{handle});
                     continue;
@@ -380,7 +381,8 @@ fn serveConcurrent(
                 if (peer_scid.len > managed.client_scid.len) return error.InvalidConnectionIdLength;
                 @memcpy(managed.client_scid[0..peer_scid.len], peer_scid);
                 managed.client_scid_len = peer_scid.len;
-                try connections.put(handle, managed);
+                try connections.adopt(handle, managed);
+                managed_adopted = true;
                 accepted_count += 1;
                 if (accepted.response_datagram) |datagram| {
                     defer allocator.free(datagram);
@@ -645,7 +647,7 @@ fn serveConcurrent(
                     try require(retired.routes_retired > 0);
                     const completed_connection = !retry_enabled or managed.retry_accepted;
                     const connection_handle = managed.handle;
-                    try destroyManagedConnection(allocator, &connections, connection_handle);
+                    try destroyManagedConnection(&connections, connection_handle);
                     if (completed_connection) {
                         completed += 1;
                         std.debug.print("zig_process_server: connection={d} concurrent=true close_cleanup=true\n", .{completed});

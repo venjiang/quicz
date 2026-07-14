@@ -268,6 +268,12 @@ pub const EndpointCryptoBackendDriveView = struct {
 const endpoint_lifecycle_module = @import("quic/endpoint_lifecycle.zig");
 pub const EndpointConnectionLifecycle = endpoint_lifecycle_module.EndpointConnectionLifecycle;
 
+const endpoint_connection_registry_module = @import("quic/endpoint_connection_registry.zig");
+pub const EndpointConnectionRegistry = endpoint_connection_registry_module.EndpointConnectionRegistry;
+test {
+    _ = endpoint_connection_registry_module;
+}
+
 const connection_module = @import("quic/connection.zig");
 pub const Connection = connection_module.Connection;
 pub const QuicConnection = connection_module.Connection;
