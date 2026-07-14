@@ -60,7 +60,7 @@ packet/key/token and RFC 9368 version-information primitives:
 | HTTP/3 and QPACK | Application-layer work after the transport is interoperable. | Deferred. |
 | QUIC v2 and RFC 9368 compatible version negotiation | Optional extension unless a selected interop target requires it. | Partial primitives exist; full behavior is deferred. |
 | qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
-| External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes certificate-verified QUIC/TLS handshakes with two independently implemented local servers, plus a certificate-verified bidirectional STREAM FIN echo through a `quic-go` v0.59.0 server that forces Retry; Go and Rust clients complete certificate-verified bidirectional STREAM FIN echoes against the local Zig server, including its bounded Retry path. Loss/recovery, version negotiation, broader server, and application-protocol scenarios remain unproven. |
+| External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes certificate-verified QUIC/TLS handshakes with two independently implemented local servers, plus certificate-verified bidirectional STREAM FIN echoes through a `quic-go` v0.59.0 server that forces Retry and a separate run whose peer drops one post-handshake 1-RTT packet for PTO recovery; Go and Rust clients complete certificate-verified bidirectional STREAM FIN echoes against the local Zig server, including its bounded Retry path. Version negotiation, broader server, and application-protocol scenarios remain unproven. |
 
 ### Packet-number reordering evidence
 
@@ -244,9 +244,18 @@ server using `Transport.VerifySourceAddress` to force Retry completed the same
 certificate-verified FIN echo. This is real peer-driven Retry behavior, not a
 local token fixture.
 
-This is still a narrow external interop proof. Loss/recovery, version
-negotiation, broader server behavior, and application-protocol interoperability
-remain required before the milestone can be considered complete.
+Its application receive loop uses the monotonic clock and the connection's next
+loss-detection deadline, rather than a packet-count clock. A separate
+`quic-go` v0.59.0 server wrapper dropped the first post-handshake short-header
+packet at the UDP boundary, then printed
+`dropped_first_one_rtt=true` and `echoed_bytes=5 response_fin=true`; the Zig
+client reported `pto_recovered=true` with the same certificate verification and
+FIN echo. This proves one external peer-driven 1-RTT STREAM-loss/PTO
+retransmission path, not only local loss simulation.
+
+This is still a narrow external interop proof. Version negotiation, broader
+server behavior, and application-protocol interoperability remain required
+before the milestone can be considered complete.
 
 ## RFC Coverage Status
 

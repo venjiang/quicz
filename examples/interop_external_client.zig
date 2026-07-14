@@ -20,6 +20,22 @@ fn recvTimeout() std.Io.Timeout {
     } };
 }
 
+fn recvTimeoutForDeadline(io: std.Io, deadline_millis: ?i64) std.Io.Timeout {
+    const now_millis = std.Io.Clock.awake.now(io).toMilliseconds();
+    const timeout_millis = if (deadline_millis) |deadline|
+        @max(@as(i64, 0), deadline - now_millis)
+    else
+        2_000;
+    return .{ .duration = .{
+        .clock = .awake,
+        .raw = std.Io.Duration.fromMilliseconds(timeout_millis),
+    } };
+}
+
+fn nowMillis(io: std.Io) i64 {
+    return std.Io.Clock.awake.now(io).toMilliseconds();
+}
+
 /// Some peers pad a server Initial UDP datagram to 1200 bytes after the encoded
 /// long packet. This is neither a QUIC long nor short packet, so discard only
 /// an all-zero tail at this UDP integration boundary.
@@ -120,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
     _ = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
     const client_initial = (try connection.pollProtectedLongCryptoDatagramInSpace(
         .initial,
-        1,
+        nowMillis(io),
         &original_dcid,
         &client_scid,
         &[_]u8{},
@@ -135,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
     var datagrams_received: usize = 0;
     while (datagrams_received < 8 and !connection.handshakeConfirmed()) : (datagrams_received += 1) {
         const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-        const now_millis = @as(i64, @intCast(2 + datagrams_received));
+        const now_millis = nowMillis(io);
         if (isRetryDatagram(received.data)) {
             if (received_retry) return error.DuplicateRetry;
             try connection.processRetryDatagram(now_millis, &original_dcid, received.data);
@@ -179,7 +195,7 @@ pub fn main(init: std.process.Init) !void {
             }
             if (!sent_finished) {
                 const server_scid = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
-                if (try connection.pollProtectedHandshakeDatagramWithInstalledKeys(now_millis + 1, server_scid, &client_scid)) |client_finished| {
+                if (try connection.pollProtectedHandshakeDatagramWithInstalledKeys(nowMillis(io), server_scid, &client_scid)) |client_finished| {
                     defer allocator.free(client_finished);
                     try socket.send(io, &server_address, client_finished);
                     sent_finished = true;
@@ -201,7 +217,7 @@ pub fn main(init: std.process.Init) !void {
     var sent_application_datagrams: usize = 0;
     while (sent_application_datagrams < 4) : (sent_application_datagrams += 1) {
         const datagram = (try connection.pollProtectedShortDatagramWithInstalledKeys(
-            20 + @as(i64, @intCast(sent_application_datagrams)),
+            nowMillis(io),
             peer_connection_id,
         )) orelse break;
         defer allocator.free(datagram);
@@ -210,11 +226,36 @@ pub fn main(init: std.process.Init) !void {
 
     var stream_buffer: [128]u8 = undefined;
     var received_application_datagrams: usize = 0;
+    var recovery_timer_services: usize = 0;
     var got_echo = false;
     var got_echo_fin = false;
-    while (received_application_datagrams < 8) : (received_application_datagrams += 1) {
-        const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-        const now_millis = 30 + @as(i64, @intCast(received_application_datagrams));
+    var pto_recovered = false;
+    while (received_application_datagrams < 8 and recovery_timer_services < 4) {
+        const next_recovery_deadline = if (connection.lossDetectionTimerDeadlineMillis()) |deadline|
+            deadline.deadline_millis
+        else
+            null;
+        const received = socket.receiveTimeout(io, &receive_buffer, recvTimeoutForDeadline(io, next_recovery_deadline)) catch |err| switch (err) {
+            error.Timeout => {
+                const serviced = (try connection.serviceLossDetectionTimer(nowMillis(io))) orelse continue;
+                recovery_timer_services += 1;
+                if (serviced.kind == .pto) pto_recovered = true;
+
+                var retransmission_count: usize = 0;
+                while (retransmission_count < 4) : (retransmission_count += 1) {
+                    const retransmission = (try connection.pollProtectedShortDatagramWithInstalledKeys(
+                        nowMillis(io),
+                        peer_connection_id,
+                    )) orelse break;
+                    defer allocator.free(retransmission);
+                    try socket.send(io, &server_address, retransmission);
+                }
+                continue;
+            },
+            else => return err,
+        };
+        const now_millis = nowMillis(io);
+        var processed_application_datagram = false;
         if ((received.data[0] & 0x80) != 0) {
             const long_packet_bytes = try processServerLongDatagram(
                 &connection,
@@ -232,6 +273,7 @@ pub fn main(init: std.process.Init) !void {
                         client_scid.len,
                         datagram_tail,
                     );
+                    processed_application_datagram = true;
                 }
             }
         } else {
@@ -240,7 +282,13 @@ pub fn main(init: std.process.Init) !void {
                 client_scid.len,
                 received.data,
             );
+            processed_application_datagram = true;
         }
+        // Server Initial/Handshake retransmissions can arrive while the
+        // application STREAM is lost. They do not acknowledge 1-RTT data and
+        // must not consume the bounded application receive budget before PTO.
+        if (!processed_application_datagram) continue;
+        received_application_datagrams += 1;
         if (try connection.recvOnStream(stream_id, &stream_buffer)) |echoed_len| {
             try require(std.mem.eql(u8, stream_buffer[0..echoed_len], "hello"));
             got_echo = true;
@@ -252,7 +300,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (!got_echo) return error.MissingStreamEcho;
     if (!got_echo_fin) return error.MissingStreamFin;
-    std.debug.print("external_handshake_done=true certificate_verified=true alpn=hq-interop echo_bytes=5\n", .{});
+    std.debug.print("external_handshake_done=true certificate_verified=true alpn=hq-interop echo_bytes=5 pto_recovered={}\n", .{pto_recovered});
 }
 
 test "zero-only datagram padding is isolated from a short packet" {

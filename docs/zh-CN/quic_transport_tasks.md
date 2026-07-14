@@ -54,7 +54,7 @@ version-information 原语）：
 | HTTP/3 和 QPACK | transport 可互通后再做的应用层工作。 | Deferred。 |
 | QUIC v2 和 RFC 9368 compatible version negotiation | 可选扩展，除非选定互通目标要求。 | 已有部分 primitive；完整行为 deferred。 |
 | qlog、PMTU discovery、GSO/GRO、高级 congestion selection | transport loop 可用后的运维/性能扩展。 | Deferred 或未实现。 |
-| 外部互通 | 声称第一轮可用 transport 里程碑前必须具备。 | 部分完成：客户端专用二进制已与两个来自不同实现家族的本机独立服务端完成证书校验的 QUIC/TLS 握手，并通过强制 Retry 的 `quic-go` v0.59.0 server 完成证书校验的双向 STREAM FIN echo；Go 与 Rust 客户端已和本地 Zig server 完成证书校验的双向 STREAM FIN echo，包含有界 Retry 路径。loss/recovery、version negotiation、更广泛的服务端和应用层场景尚未验证。 |
+| 外部互通 | 声称第一轮可用 transport 里程碑前必须具备。 | 部分完成：客户端专用二进制已与两个来自不同实现家族的本机独立服务端完成证书校验的 QUIC/TLS 握手，并通过强制 Retry 的 `quic-go` v0.59.0 server、以及另一次由 peer 丢弃一个 post-handshake 1-RTT 包以触发 PTO recovery 的运行完成证书校验的双向 STREAM FIN echo；Go 与 Rust 客户端已和本地 Zig server 完成证书校验的双向 STREAM FIN echo，包含有界 Retry 路径。version negotiation、更广泛的服务端和应用层场景尚未验证。 |
 
 ### Packet number 重排证据
 
@@ -190,7 +190,14 @@ ECDSA P-256 证书的本机独立服务端，命令均输出
 `Transport.VerifySourceAddress` 强制 Retry 的独立 `quic-go` v0.59.0 server 完成了同样的证书校验
 双向 FIN echo。这是由真实 peer 驱动的 Retry 行为，不是本地 token fixture。
 
-这仍只是窄范围的外部互通证据。loss/recovery、version negotiation、更广泛的服务端
+其应用接收循环使用单调时钟和 connection 的下一个 loss-detection deadline，而不是 packet-count
+时钟。一个独立 `quic-go` v0.59.0 server wrapper 在 UDP 边界丢弃首个 post-handshake
+short-header packet，随后输出 `dropped_first_one_rtt=true` 与
+`echoed_bytes=5 response_fin=true`；Zig client 在保持相同证书校验和 FIN echo 的同时输出
+`pto_recovered=true`。这证明了一个由真实外部 peer 驱动的 1-RTT STREAM 丢包/PTO 重传路径，
+而不只是本地 loss simulation。
+
+这仍只是窄范围的外部互通证据。version negotiation、更广泛的服务端
 行为和应用层协议互通仍需验证，里程碑不能据此视为完成。
 
 ## RFC 覆盖状态
