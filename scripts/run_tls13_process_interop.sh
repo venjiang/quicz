@@ -5,6 +5,7 @@ host=127.0.0.1
 port=${QUICZ_PROCESS_INTEROP_PORT:-4443}
 connections=${QUICZ_PROCESS_INTEROP_CONNECTIONS:-2}
 mode=${QUICZ_PROCESS_INTEROP_MODE:-concurrent}
+client_completion=${QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION:-close}
 server_log=$(mktemp)
 client_log=$(mktemp)
 server_pid=
@@ -48,9 +49,9 @@ fi
 client_index=0
 while [ "$client_index" -lt "$connections" ]; do
     if [ "$mode" = sequential ]; then
-        ./zig-out/bin/quicz-tls13-process-echo-client "$host" "$port" "$client_index" >>"$client_log" 2>&1
+        ./zig-out/bin/quicz-tls13-process-echo-client "$host" "$port" "$client_index" "$client_completion" >>"$client_log" 2>&1
     else
-        ./zig-out/bin/quicz-tls13-process-echo-client "$host" "$port" "$client_index" >>"$client_log" 2>&1 &
+        ./zig-out/bin/quicz-tls13-process-echo-client "$host" "$port" "$client_index" "$client_completion" >>"$client_log" 2>&1 &
         client_pids="${client_pids:-} $!"
     fi
     client_index=$((client_index + 1))

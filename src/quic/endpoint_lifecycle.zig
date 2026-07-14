@@ -1164,6 +1164,47 @@ pub const EndpointConnectionLifecycle = struct {
         return route;
     }
 
+    /// Route and process a coalesced Initial/Handshake UDP datagram after
+    /// Handshake keys are installed.
+    ///
+    /// The full UDP datagram is preserved for RFC 9000 Initial minimum-size
+    /// validation while `Connection` authenticates each encoded long packet at
+    /// its own boundary. The caller supplies the Original DCID so Initial keys
+    /// remain tied to the client-selected first-flight destination CID.
+    pub fn processRoutedProtectedLongDatagramWithInstalledHandshakeKeys(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        original_destination_connection_id: []const u8,
+        datagram: []const u8,
+    ) EndpointProtectedInitialError!endpoint.RouteResult {
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
+
+        const info = protection.peekProtectedLongPacketInfo(datagram) catch return error.InvalidPacket;
+        if (info.packet_type != .initial) return error.InvalidPacket;
+        const initial_secrets = protection.deriveInitialSecrets(
+            info.version,
+            original_destination_connection_id,
+        ) catch return error.InvalidPacket;
+        const initial_keys = switch (connection.side) {
+            .client => initial_secrets.server,
+            .server => initial_secrets.client,
+        };
+        _ = connection.processProtectedLongDatagramWithInstalledHandshakeKeys(
+            now_millis,
+            initial_keys,
+            datagram,
+        ) catch |err| {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return err;
+        };
+        try self.armRecoveryTimerFromConnection(connection_id, connection);
+        return route;
+    }
+
     /// Accept a Retry follow-up Initial on an already-switched endpoint route.
     ///
     /// This helper keeps the server Retry follow-up receive path on the

@@ -1,6 +1,6 @@
 //! Pure-Zig TLS 1.3 QUIC client for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-client <server_host> <server_port> [connection_tag]
+//! Usage: quicz-tls13-process-echo-client <server_host> <server_port> [connection_tag] [close|idle]
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -37,6 +37,9 @@ pub fn main(init: std.process.Init) !void {
         try std.fmt.parseInt(u8, raw_tag, 10)
     else
         0;
+    const completion_mode = args.next() orelse "close";
+    const leave_idle = std.mem.eql(u8, completion_mode, "idle");
+    if (!leave_idle and !std.mem.eql(u8, completion_mode, "close")) return error.InvalidCompletionMode;
     var original_dcid = original_dcid_base;
     original_dcid[original_dcid.len - 1] = connection_tag;
     var client_scid = client_scid_base;
@@ -142,6 +145,11 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     try require(got_echo);
+
+    if (leave_idle) {
+        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 idle_peer=true\n", .{connection_tag});
+        return;
+    }
 
     try connection.closeConnection(0, 0, "process echo complete");
     const close_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(

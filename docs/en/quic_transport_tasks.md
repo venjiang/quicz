@@ -134,6 +134,24 @@ enters draining, and retires only that handle's routes at the close deadline
 connection count and exits only after every accepted connection is retired.
 `sequential` remains available as an explicit compatibility mode.
 
+The concurrent path reads the monotonic `awake` clock, waits only until
+`nextDeadlineAcrossConnections()`'s earliest lifecycle deadline, and services
+that deadline with the lifecycle's bounded output drain before returning to
+receive. The local process server advertises a 1000 ms idle timeout solely for
+this focused proof. Running
+`QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=idle zig build run-tls13-process-interop`
+leaves both clients silent after their verified echo and proves each map entry
+is independently retired by its idle deadline (`idle_cleanup=true`). This is
+still a bounded test policy, not a production capacity or timeout policy.
+
+The same concurrent server accepts coalesced external Initial/Handshake input
+through a lifecycle-owned helper that retains the full UDP length for Initial
+size validation while authenticating each long-header packet at its encoded
+boundary. The supplied independent Go and Rust clients both completed their
+certificate-verified five-byte echo against two concurrent map entries; the
+server independently reclaimed the Go connection after protected close and the
+Rust connection by its idle deadline.
+
 This is a local Zig-to-Zig integration gate, not external interoperability.
 It uses the local deterministic test certificate with client certificate
 verification disabled; it does not substitute for the certificate-verified
@@ -233,20 +251,21 @@ The focused evidence now includes certificate-verified external STREAM echo,
 TLS-owned PTO retransmission plus controlled NewReno and persistent-congestion
 responses, TLS-owned Retry resumption, stateless-reset handling,
 PATH_CHALLENGE/PATH_RESPONSE route migration, and a bounded two-client
-concurrent process server with one UDP socket and lifecycle owner. The RFC
-rows remain `Partial`: that server is a finite local proof, not an unbounded
-production endpoint policy; broader TLS-owned client/server policy, 0-RTT
-replay policy, and wider external behavior are still unproven.
+concurrent process server with one UDP socket, one lifecycle owner, and
+monotonic-deadline idle cleanup. The RFC rows remain `Partial`: that server is
+a finite local proof, not an unbounded production endpoint policy; broader
+TLS-owned client/server policy, 0-RTT replay policy, and wider external
+behavior are still unproven.
 
 The main task remains the IETF QUIC transport implementation. The next stage
 turns the bounded demo ownership proof into a production endpoint-owned
 connection map and event loop while preserving the established pure-Zig TLS
 path and external interop evidence. The remaining acceptance criteria are
-long-lived connection capacity and timeout policy, lifecycle-owned
-receive/send/timer/close routing for all active connections, bounded resources
-and route retirement beyond a fixed test count, and a reproducible broader
-multi-connection smoke test. This is a production ownership boundary and must
-not weaken the established evidence.
+long-lived production capacity and timeout policy, lifecycle-owned
+receive/send/timer/close routing for all active connections beyond the bounded
+test map, bounded resources and route retirement beyond a fixed test count,
+and a reproducible broader multi-connection smoke test. This is a production
+ownership boundary and must not weaken the established evidence.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first

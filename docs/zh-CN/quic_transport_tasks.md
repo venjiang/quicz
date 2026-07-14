@@ -111,6 +111,19 @@ datagram，并在有界 handle map 中保留每条 caller-owned `Connection` 与
 只退役该 handle 的 route（`close_cleanup=true`）。有界 map 会拒绝超过请求总数的连接，且
 仅在每条已接受连接都退役后退出。`sequential` 仍作为显式兼容模式保留。
 
+并发路径读取单调 `awake` clock，只等待
+`nextDeadlineAcrossConnections()` 选出的最早 lifecycle deadline，并在下一次 receive 前通过
+lifecycle 的有界 output drain 处理该 deadline。本地进程服务端仅为这项聚焦证明通告 1000 ms
+idle timeout。执行
+`QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=idle zig build run-tls13-process-interop`
+会让两个 client 在验证 echo 后保持静默，并证明每个 map entry 都在自己的 idle deadline 被独立
+退役（`idle_cleanup=true`）。这仍是有界测试 policy，不是生产容量或 timeout policy。
+
+同一并发服务端通过 lifecycle-owned helper 接收 coalesced 的外部
+Initial/Handshake：它保留完整 UDP 长度以校验 Initial size，同时按编码边界认证每个
+long-header packet。随附的独立 Go 与 Rust client 均在两个并发 map entry 上完成了证书校验的
+五字节 echo；服务端分别在 Go 的 protected close 后和 Rust 的 idle deadline 后独立回收连接。
+
 这是本地 Zig 到 Zig 的集成门槛，不是外部互通。它使用本地确定性测试证书，客户端
 关闭证书校验；它不能替代下方的证书校验外部互通证据。
 
@@ -192,16 +205,16 @@ HANDSHAKE_DONE、protected close、PTO probe 与 recovery-timer service——全
 现有聚焦证据已经包含证书校验的外部 STREAM echo、TLS-owned PTO 重传与受控的
 NewReno/persistent-congestion 响应、TLS-owned Retry 重试、stateless reset 处理、
 PATH_CHALLENGE/PATH_RESPONSE 驱动的 route migration，以及单 UDP socket、单 lifecycle
-owner 的有界双 client 并发进程服务端。RFC 行仍保持 `Partial`：该服务端只是有限的本地
-证明，不是无限期生产 endpoint policy；更广泛的 TLS-owned client/server policy、0-RTT
-replay policy 和更宽的外部行为仍未证明。
+owner、具备单调 deadline idle cleanup 的有界双 client 并发进程服务端。RFC 行仍保持
+`Partial`：该服务端只是有限的本地证明，不是无限期生产 endpoint policy；更广泛的
+TLS-owned client/server policy、0-RTT replay policy 和更宽的外部行为仍未证明。
 
 主线任务仍是 IETF QUIC transport 实现。下一阶段将有界 demo ownership 证明推进为生产级
 endpoint-owned connection map 和 event loop，同时保持已验证的纯 Zig TLS 路径与外部互通
-证据。剩余验收条件是：长生命周期的连接容量和 timeout policy、所有 active connection
-由 lifecycle 统一完成 receive/send/timer/close routing、超出固定测试数量后的有界资源与
-route retirement，以及更广泛可复现的多连接 smoke test。这是生产 ownership 边界，不得
-削弱既有证据。
+证据。剩余验收条件是：长生命周期的生产容量和 timeout policy、超出有界测试 map 的所有
+active connection 由 lifecycle 统一完成 receive/send/timer/close routing、超出固定测试数量
+后的有界资源与 route retirement，以及更广泛可复现的多连接 smoke test。这是生产 ownership
+边界，不得削弱既有证据。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、
