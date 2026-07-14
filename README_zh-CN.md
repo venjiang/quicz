@@ -96,9 +96,9 @@ zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443 2 concurrent-retry
 (cd examples/interop/rust_echo_client && cargo run -- 127.0.0.1:4443 ../testdata/quicz-echo-ca.pem localhost)
 ```
 
-两个客户端均保持证书校验开启，只有在 `hq-interop` stream echo 和对端 FIN 完成后才会
-报告成功。仓库内 PEM 只是本地测试信任锚，不是部署凭据。完整步骤（包括外部 Zig client）
-见 [examples 指南](examples/README.md)。
+两个客户端均保持证书校验开启，只有在 stream 0 和 4 分别完成带 FIN 的 `hello`、`world`
+echo 后才会报告成功。仓库内 PEM 只是本地测试信任锚，不是部署凭据。完整步骤（包括外部
+Zig client）见 [examples 指南](examples/README.md)。
 
 ## 开发入口
 

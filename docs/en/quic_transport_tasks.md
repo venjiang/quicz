@@ -117,8 +117,8 @@ external server interoperability evidence.
 `quicz-tls13-process-echo-server` and `quicz-tls13-process-echo-client` as
 separate processes. They use real loopback UDP sockets, complete the pure-Zig
 TLS-owned Initial/Handshake/1-RTT sequence, observe each peer's Initial source
-connection ID, and exchange a FIN-terminated bidirectional STREAM echo
-(`echo_bytes=5`). The
+connection ID, and independently exchange FIN-terminated bidirectional STREAM
+echoes on streams 0 and 4 (`echo_streams=2 echo_bytes=10`). The
 server classifies and accepts its first Initial through
 `EndpointConnectionLifecycle`, registering its Original DCID and server SCID
 routes only after authentication before TLS produces the first response. The
@@ -179,8 +179,8 @@ retransmitted tokenless Initial, and accepts a follow-up Initial only after
 the lifecycle validates and consumes that token. The Zig client resets only
 its Initial send state, re-emits the cached ClientHello with the Retry SCID and
 derived Initial keys, then reports `retry_validated=true`. Fresh
-certificate-verified Go and Rust client runs also completed the five-byte
-bidirectional FIN echo through this Retry path. The static demo secret and
+certificate-verified Go and Rust client runs also completed the two-stream,
+ten-byte bidirectional FIN echo through this Retry path. The static demo secret and
 in-memory replay filter
 remain a bounded local policy, not production key storage or distributed replay
 protection.
@@ -194,7 +194,7 @@ The same concurrent server accepts coalesced external Initial/Handshake input
 through a lifecycle-owned helper that retains the full UDP length for Initial
 size validation while authenticating each long-header packet at its encoded
 boundary. The supplied independent Go and Rust clients each completed a fresh
-certificate-verified five-byte bidirectional FIN echo against this server's
+certificate-verified two-stream, ten-byte bidirectional FIN echo against this server's
 bounded Retry path. The server reclaimed the Go connection after protected
 close and the Rust connection by its idle deadline.
 
@@ -208,8 +208,9 @@ external evidence below.
 `examples/interop/go_echo_client` and `examples/interop/rust_echo_client`
 are independent QUIC clients for the one-shot Zig echo server. Each requires a
 caller-supplied PEM trust anchor and SNI, keeps certificate verification
-enabled, negotiates `hq-interop`, sends a FIN-terminated `hello` on stream 0,
-and requires the five-byte echo and its FIN before reporting success. The
+enabled, negotiates `hq-interop`, and independently sends FIN-terminated
+`hello` on stream 0 and `world` on stream 4. Each requires its matching echo
+and FIN before reporting success. The
 repository-local development
 commands are:
 
@@ -219,8 +220,8 @@ zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443
 (cd examples/interop/rust_echo_client && cargo run -- 127.0.0.1:4443 ../testdata/quicz-echo-ca.pem localhost)
 ```
 
-Both clients reported `handshake_done=true echo_bytes=5` after verifying the
-bidirectional STREAM FIN exchange against the Zig server when rerun on
+Both clients reported `handshake_done=true echo_streams=2 echo_bytes=10` after
+verifying both bidirectional STREAM FIN exchanges against the Zig server when rerun on
 2026-07-14. The server reassembles a bounded ClientHello
 across Initial packets, iterates coalesced Initial/Handshake packets before
 consuming the Handshake packet, and routes late long-header ACK traffic without

@@ -18,10 +18,14 @@ const address_validation_token = quicz.address_validation_token;
 
 const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
 const max_initial_datagrams: usize = 4;
+const max_application_datagrams: usize = 16;
 const process_idle_timeout_millis: u64 = 1000;
 const retry_token_lifetime_millis: u64 = 10_000;
 const retry_token_secret = [_]u8{0x73} ** address_validation_token.secret_len;
 const max_retry_datagram_size: usize = 256;
+const echo_stream_ids = [_]u64{ 0, 4 };
+const echo_payloads = [_][]const u8{ "hello", "world" };
+const echo_total_bytes: usize = 10;
 // Local test-only P-256 certificate for localhost and 127.0.0.1. Its PEM
 // trust anchor is in examples/interop/testdata/quicz-echo-ca.pem so the Go
 // and Rust client examples can exercise ordinary certificate validation.
@@ -104,8 +108,8 @@ const ManagedProcessConnection = struct {
     retry_datagram_len: usize = 0,
     retry_validated: bool = false,
     retry_accepted: bool = false,
-    request_received: bool = false,
-    echoed: bool = false,
+    request_received: [echo_stream_ids.len]bool = .{ false, false },
+    echoed: [echo_stream_ids.len]bool = .{ false, false },
 
     fn clientScid(self: *const ManagedProcessConnection) []const u8 {
         return self.client_scid[0..self.client_scid_len];
@@ -601,28 +605,35 @@ fn serveConcurrent(
                     now_millis,
                     received.data,
                 );
-                if (!managed.echoed) {
-                    var stream_buffer: [128]u8 = undefined;
-                    if (try managed.connection.recvOnStream(0, &stream_buffer)) |echo_len| {
-                        try require(std.mem.eql(u8, stream_buffer[0..echo_len], "hello"));
-                        managed.request_received = true;
-                    }
-                    if (managed.request_received and try managed.connection.recvStreamFinished(0)) {
-                        try managed.connection.sendOnStream(0, "hello", true);
-                        var sent_packets: usize = 0;
-                        while (sent_packets < max_initial_datagrams) : (sent_packets += 1) {
-                            const echo_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
-                                managed.handle,
-                                &managed.connection,
-                                now_millis + @as(i64, @intCast(sent_packets)),
-                                managed.clientScid(),
-                            )) orelse break;
-                            defer allocator.free(echo_packet);
-                            try socket.send(io, &managed.peer_address, echo_packet);
+                var queued_echo = false;
+                inline for (echo_stream_ids, echo_payloads, 0..) |stream_id, payload, index| {
+                    if (!managed.request_received[index]) {
+                        var stream_buffer: [128]u8 = undefined;
+                        if (try managed.connection.recvOnStream(stream_id, &stream_buffer)) |echo_len| {
+                            try require(std.mem.eql(u8, stream_buffer[0..echo_len], payload));
+                            try require(try managed.connection.recvStreamFinished(stream_id));
+                            managed.request_received[index] = true;
                         }
-                        try require(sent_packets > 0);
-                        managed.echoed = true;
                     }
+                    if (managed.request_received[index] and !managed.echoed[index]) {
+                        try managed.connection.sendOnStream(stream_id, payload, true);
+                        managed.echoed[index] = true;
+                        queued_echo = true;
+                    }
+                }
+                if (queued_echo) {
+                    var sent_packets: usize = 0;
+                    while (sent_packets < max_initial_datagrams) : (sent_packets += 1) {
+                        const echo_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                            managed.handle,
+                            &managed.connection,
+                            now_millis + @as(i64, @intCast(sent_packets)),
+                            managed.clientScid(),
+                        )) orelse break;
+                        defer allocator.free(echo_packet);
+                        try socket.send(io, &managed.peer_address, echo_packet);
+                    }
+                    try require(sent_packets > 0);
                 }
                 if (managed.connection.connectionState() == .draining) {
                     const deadline = managed.connection.closeDeadlineMillis() orelse return error.UnexpectedState;
@@ -840,11 +851,10 @@ pub fn main(init: std.process.Init) !void {
         try require(handshake_confirmed);
         try require(connection.handshakeConfirmed());
 
-        var stream_buffer: [128]u8 = undefined;
-        var request_received = false;
-        var request_finished = false;
+        var request_received: [echo_stream_ids.len]bool = .{ false, false };
+        var echoed: [echo_stream_ids.len]bool = .{ false, false };
         var application_datagrams: usize = 0;
-        while (!request_finished and application_datagrams < max_initial_datagrams) : (application_datagrams += 1) {
+        while (application_datagrams < max_application_datagrams) : (application_datagrams += 1) {
             const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
             const stream_route = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
                 server_handle,
@@ -854,28 +864,40 @@ pub fn main(init: std.process.Init) !void {
                 received.data,
             );
             try require(stream_route.connection_id == server_handle);
-            if (try connection.recvOnStream(0, &stream_buffer)) |received_len| {
-                try require(std.mem.eql(u8, stream_buffer[0..received_len], "hello"));
-                request_received = true;
+            var queued_echo = false;
+            inline for (echo_stream_ids, echo_payloads, 0..) |stream_id, payload, index| {
+                if (!request_received[index]) {
+                    var stream_buffer: [128]u8 = undefined;
+                    if (try connection.recvOnStream(stream_id, &stream_buffer)) |received_len| {
+                        try require(std.mem.eql(u8, stream_buffer[0..received_len], payload));
+                        try require(try connection.recvStreamFinished(stream_id));
+                        request_received[index] = true;
+                    }
+                }
+                if (request_received[index] and !echoed[index]) {
+                    try connection.sendOnStream(stream_id, payload, true);
+                    echoed[index] = true;
+                    queued_echo = true;
+                }
             }
-            request_finished = request_received and try connection.recvStreamFinished(0);
+            if (queued_echo) {
+                var sent_packets: usize = 0;
+                while (sent_packets < 4) : (sent_packets += 1) {
+                    const packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                        server_handle,
+                        &connection,
+                        6 + @as(i64, @intCast(application_datagrams + sent_packets)),
+                        client_scid,
+                    )) orelse break;
+                    defer allocator.free(packet);
+                    try socket.send(io, &received_initial.from, packet);
+                }
+                try require(sent_packets > 0);
+            }
+            if (std.mem.allEqual(bool, &echoed, true)) break;
         }
-        if (!request_received) return error.MissingStreamData;
-        if (!request_finished) return error.MissingStreamFin;
-        try connection.sendOnStream(0, "hello", true);
-
-        var sent_packets: usize = 0;
-        while (sent_packets < 4) : (sent_packets += 1) {
-            const packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
-                server_handle,
-                &connection,
-                6 + @as(i64, @intCast(sent_packets)),
-                client_scid,
-            )) orelse break;
-            defer allocator.free(packet);
-            try socket.send(io, &received_initial.from, packet);
-        }
-        try require(sent_packets > 0);
+        if (!std.mem.allEqual(bool, &request_received, true)) return error.MissingStreamData;
+        if (!std.mem.allEqual(bool, &echoed, true)) return error.MissingStreamFin;
 
         // Independent clients can ACK in Initial, Handshake, or 1-RTT space before
         // their CONNECTION_CLOSE. Keep routing those authenticated packets until
@@ -934,7 +956,7 @@ pub fn main(init: std.process.Init) !void {
         try require(connection.connectionState() == .closed);
         try require(lifecycle.routeCount() == 0);
 
-        std.debug.print("zig_process_server: connection={d} handshake_done=true echo_bytes=5 close_cleanup=true\n", .{connection_index + 1});
+        std.debug.print("zig_process_server: connection={d} handshake_done=true echo_streams=2 echo_bytes={d} close_cleanup=true\n", .{ connection_index + 1, echo_total_bytes });
     }
     std.debug.print("zig_process_server: accepted_connections={d} complete=true\n", .{completion_target});
 }

@@ -103,9 +103,10 @@ Run either independently implemented client with the local test CA:
 ```
 
 Both clients keep certificate verification enabled and report success only
-after the `hq-interop` stream echo and peer FIN. The included PEM is a local
-test trust anchor, not a deployment credential. The full setup, including the
-external Zig client, is in [the examples guide](examples/README.md).
+after separate FIN-terminated `hello` and `world` echoes on streams 0 and 4.
+The included PEM is a local test trust anchor, not a deployment credential.
+The full setup, including the external Zig client, is in
+[the examples guide](examples/README.md).
 
 ## Development map
 

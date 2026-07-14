@@ -51,8 +51,9 @@ Run either independent client:
 ```
 
 They require ALPN `hq-interop`, validate the server certificate using the
-included local test CA, and require an echoed, FIN-terminated stream. The PEM
-is only a test trust anchor.
+included local test CA, and independently finish `hello` on stream 0 and
+`world` on stream 4 before requiring both echoed FINs. The PEM is only a test
+trust anchor.
 
 ### Zig client against another QUIC server
 
@@ -113,8 +114,8 @@ zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443 2 concurrent-retry
 (cd examples/interop/rust_echo_client && cargo run -- 127.0.0.1:4443 ../testdata/quicz-echo-ca.pem localhost)
 ```
 
-它们要求协商 `hq-interop` ALPN，用仓库内本地测试 CA 校验证书，并要求收到带 FIN 的
-echo stream。PEM 只用于测试信任。
+它们要求协商 `hq-interop` ALPN，用仓库内本地测试 CA 校验证书；stream 0 的 `hello` 和
+stream 4 的 `world` 都必须独立完成 echo 与 FIN。PEM 只用于测试信任。
 
 ### 用 Zig client 连接其他 QUIC server
 

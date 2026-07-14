@@ -39,7 +39,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         usage();
     }
 
-    let bind_addr: SocketAddr = "[::]:0".parse()?;
+    let bind_addr: SocketAddr = if server_addr.is_ipv4() {
+        "0.0.0.0:0".parse()?
+    } else {
+        "[::]:0".parse()?
+    };
     let mut endpoint = Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(client_config(&ca_path)?);
 
@@ -48,23 +52,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         endpoint.connect(server_addr, &server_name)?,
     )
     .await??;
-    let (mut send, mut recv) = connection.open_bi().await?;
-    send.write_all(b"hello").await?;
-    send.finish()?;
+    let mut echo_bytes = 0_usize;
+    for payload in [b"hello", b"world"] {
+        let (mut send, mut recv) = connection.open_bi().await?;
+        send.write_all(payload).await?;
+        send.finish()?;
 
-    let mut echoed = [0_u8; 5];
-    recv.read_exact(&mut echoed).await?;
-    if echoed != *b"hello" {
-        return Err(format!("unexpected echo {echoed:?}").into());
-    }
-    if recv.read_chunk(1, true).await?.is_some() {
-        return Err("expected echo stream FIN after hello".into());
+        let mut echoed = [0_u8; 5];
+        recv.read_exact(&mut echoed).await?;
+        if echoed != *payload {
+            return Err(format!("unexpected echo {echoed:?}").into());
+        }
+        if recv.read_chunk(1, true).await?.is_some() {
+            return Err("expected echo stream FIN".into());
+        }
+        echo_bytes += echoed.len();
     }
 
-    println!(
-        "rust_quic_echo_client: handshake_done=true echo_bytes={}",
-        echoed.len()
-    );
+    println!("rust_quic_echo_client: handshake_done=true echo_streams=2 echo_bytes={echo_bytes}");
     connection.close(0_u32.into(), b"example complete");
     endpoint.wait_idle().await;
     Ok(())

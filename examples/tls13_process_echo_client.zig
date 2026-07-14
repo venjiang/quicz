@@ -20,6 +20,8 @@ fn isRetryDatagram(datagram: []const u8) bool {
 
 const original_dcid_base = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
 const client_scid_base = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+const echo_payloads = [_][]const u8{ "hello", "world" };
+const echo_total_bytes: usize = 10;
 
 fn recvTimeout() std.Io.Timeout {
     return .{ .duration = .{
@@ -155,18 +157,30 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(client_finished);
     try socket.send(io, &server_address, client_finished);
 
-    const stream_id = try connection.openStream();
-    try connection.sendOnStream(stream_id, "hello", true);
-    const stream_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(client_handle, &connection, 6, server_scid)) orelse return error.UnexpectedState;
-    defer allocator.free(stream_packet);
-    try socket.send(io, &server_address, stream_packet);
+    var stream_ids: [echo_payloads.len]u64 = undefined;
+    for (echo_payloads, 0..) |payload, index| {
+        stream_ids[index] = try connection.openStream();
+        try connection.sendOnStream(stream_ids[index], payload, true);
+    }
+    var sent_application_packets: usize = 0;
+    while (sent_application_packets < 4) : (sent_application_packets += 1) {
+        const stream_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            client_handle,
+            &connection,
+            6 + @as(i64, @intCast(sent_application_packets)),
+            server_scid,
+        )) orelse break;
+        defer allocator.free(stream_packet);
+        try socket.send(io, &server_address, stream_packet);
+    }
+    try require(sent_application_packets > 0);
 
     var stream_buffer: [128]u8 = undefined;
-    var got_echo = false;
-    var got_echo_fin = false;
+    var got_echo: [echo_payloads.len]bool = .{ false, false };
+    var got_echo_fin: [echo_payloads.len]bool = .{ false, false };
     var dropped_responses: usize = 0;
     var received_packets: usize = 0;
-    while (received_packets < 12) : (received_packets += 1) {
+    while (received_packets < 16) : (received_packets += 1) {
         const received = socket.receiveTimeout(io, &receive_buffer, recvTimeout()) catch break;
         if (drop_initial_responses and dropped_responses < 4) {
             dropped_responses += 1;
@@ -180,21 +194,23 @@ pub fn main(init: std.process.Init) !void {
             received.data,
         );
         try require(stream_route.connection_id == client_handle);
-        if (try connection.recvOnStream(stream_id, &stream_buffer)) |echoed_len| {
-            try require(std.mem.eql(u8, stream_buffer[0..echoed_len], "hello"));
-            got_echo = true;
+        inline for (stream_ids, echo_payloads, 0..) |stream_id, payload, index| {
+            if (try connection.recvOnStream(stream_id, &stream_buffer)) |echoed_len| {
+                try require(std.mem.eql(u8, stream_buffer[0..echoed_len], payload));
+                got_echo[index] = true;
+            }
+            if (got_echo[index] and try connection.recvStreamFinished(stream_id)) {
+                got_echo_fin[index] = true;
+            }
         }
-        if (got_echo and try connection.recvStreamFinished(stream_id)) {
-            got_echo_fin = true;
-            break;
-        }
+        if (std.mem.allEqual(bool, &got_echo_fin, true)) break;
     }
-    try require(got_echo);
-    try require(got_echo_fin);
+    try require(std.mem.allEqual(bool, &got_echo, true));
+    try require(std.mem.allEqual(bool, &got_echo_fin, true));
     if (drop_initial_responses) try require(dropped_responses == 4);
 
     if (leave_idle) {
-        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 idle_peer=true\n", .{connection_tag});
+        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_streams=2 echo_bytes={d} idle_peer=true\n", .{ connection_tag, echo_total_bytes });
         return;
     }
 
@@ -219,13 +235,13 @@ pub fn main(init: std.process.Init) !void {
 
     if (drop_initial_responses) {
         if (expect_retry) {
-            std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 pto_recovered=true retry_validated=true close_cleanup=true\n", .{connection_tag});
+            std.debug.print("zig_process_client: tag={d} handshake_done=true echo_streams=2 echo_bytes={d} pto_recovered=true retry_validated=true close_cleanup=true\n", .{ connection_tag, echo_total_bytes });
         } else {
-            std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 pto_recovered=true close_cleanup=true\n", .{connection_tag});
+            std.debug.print("zig_process_client: tag={d} handshake_done=true echo_streams=2 echo_bytes={d} pto_recovered=true close_cleanup=true\n", .{ connection_tag, echo_total_bytes });
         }
     } else if (expect_retry) {
-        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 retry_validated=true close_cleanup=true\n", .{connection_tag});
+        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_streams=2 echo_bytes={d} retry_validated=true close_cleanup=true\n", .{ connection_tag, echo_total_bytes });
     } else {
-        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 close_cleanup=true\n", .{connection_tag});
+        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_streams=2 echo_bytes={d} close_cleanup=true\n", .{ connection_tag, echo_total_bytes });
     }
 }
