@@ -180,10 +180,10 @@ ECDSA P-256 证书的本机独立服务端，命令均输出
 数据报尾部。任何非零尾部仍按普通受保护短头包处理。
 
 同一客户端在证书校验握手后会打开一个 bidirectional stream，发送带 FIN 的 `hello`，并要求
-收到匹配的五字节 echo。它已针对一个本机独立的 `quic-go` v0.59.0 echo server（使用调用方
+收到匹配的五字节 echo 及对端 FIN。它已针对一个本机独立的 `quic-go` v0.59.0 echo server（使用调用方
 提供的 CA）输出
 `external_handshake_done=true certificate_verified=true alpn=hq-interop echo_bytes=5`。
-这证明外部 server 真实解析了受保护的 1-RTT STREAM 并完成 echo，而不只是完成 TLS 握手。
+这证明外部 server 真实解析了受保护的 1-RTT STREAM、完成 echo 并关闭自己的发送侧，而不只是完成 TLS 握手。
 
 这仍只是窄范围的外部互通证据。Retry、loss/recovery、version negotiation、更广泛的服务端
 行为和应用层协议互通仍需验证，里程碑不能据此视为完成。

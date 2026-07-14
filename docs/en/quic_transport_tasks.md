@@ -230,11 +230,11 @@ short-header processing.
 
 After the certificate-verified handshake, the same client opens one
 bidirectional stream, sends a FIN-terminated `hello`, and requires the
-matching five-byte echo. Against a local independent `quic-go` v0.59.0 echo
-server with the supplied CA, it reported
+matching five-byte echo followed by the peer FIN. Against a local independent
+`quic-go` v0.59.0 echo server with the supplied CA, it reported
 `external_handshake_done=true certificate_verified=true alpn=hq-interop echo_bytes=5`.
-This validates an external server's protected 1-RTT STREAM parsing and echo,
-not merely the TLS handshake.
+This validates an external server's protected 1-RTT STREAM parsing, echo, and
+terminal send-side close, not merely the TLS handshake.
 
 This is still a narrow external interop proof. Retry, loss/recovery, version
 negotiation, broader server behavior, and application-protocol interoperability

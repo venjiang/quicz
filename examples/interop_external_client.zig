@@ -180,6 +180,7 @@ pub fn main(init: std.process.Init) !void {
     var stream_buffer: [128]u8 = undefined;
     var received_application_datagrams: usize = 0;
     var got_echo = false;
+    var got_echo_fin = false;
     while (received_application_datagrams < 8) : (received_application_datagrams += 1) {
         const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
         const now_millis = 30 + @as(i64, @intCast(received_application_datagrams));
@@ -212,10 +213,14 @@ pub fn main(init: std.process.Init) !void {
         if (try connection.recvOnStream(stream_id, &stream_buffer)) |echoed_len| {
             try require(std.mem.eql(u8, stream_buffer[0..echoed_len], "hello"));
             got_echo = true;
+        }
+        if (got_echo and try connection.recvStreamFinished(stream_id)) {
+            got_echo_fin = true;
             break;
         }
     }
     if (!got_echo) return error.MissingStreamEcho;
+    if (!got_echo_fin) return error.MissingStreamFin;
     std.debug.print("external_handshake_done=true certificate_verified=true alpn=hq-interop echo_bytes=5\n", .{});
 }
 
