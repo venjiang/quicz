@@ -23,9 +23,57 @@ transport milestone.
 The authoritative status and evidence are in the
 [transport task matrix](docs/en/quic_transport_tasks.md).
 
-## Quick start
+## Quick start: use the library
 
-Use Zig **0.16.0**.
+Use Zig **0.16.0**. Add `quicz` to an application's `build.zig.zon` (a local
+checkout is useful while the package is experimental):
+
+```zig
+.dependencies = .{
+    .quicz = .{ .path = "../quicz" },
+},
+```
+
+Then expose the dependency to the executable in `build.zig`:
+
+```zig
+const quicz_dep = b.dependency("quicz", .{
+    .target = target,
+    .optimize = optimize,
+});
+exe.root_module.addImport("quicz", quicz_dep.module("quicz"));
+```
+
+The smallest state-and-frame use looks like this:
+
+```zig
+const std = @import("std");
+const quicz = @import("quicz");
+
+pub fn main() !void {
+    var connection = try quicz.Connection.init(std.heap.page_allocator, .client, .{
+        .initial_max_data = 65_536,
+        .initial_max_stream_data = 65_536,
+        .initial_max_streams_bidi = 16,
+    });
+    defer connection.deinit();
+
+    const stream_id = try connection.openStream();
+    try connection.sendOnStream(stream_id, "hello", true);
+
+    var frame_buffer: [1350]u8 = undefined;
+    const frame_payload = (try connection.pollTx(0, &frame_buffer)) orelse
+        return error.NoPendingFrame;
+    _ = frame_payload;
+}
+```
+
+`pollTx` returns pending QUIC frame payload for the connection state machine;
+it is not a protected UDP datagram. For a TLS-owned, protected UDP transport
+loop, start from [`tls13_udp_loopback.zig`](examples/tls13_udp_loopback.zig)
+or the separate-process echo programs described below.
+
+## Build and run
 
 ```sh
 zig build
@@ -34,15 +82,10 @@ zig build run-tls13-udp-loopback
 zig build run-tls13-process-interop
 ```
 
-`run-tls13-udp-loopback` verifies the pure-Zig TLS-owned UDP handshake and
-stream path. `run-tls13-process-interop` runs independently built Zig client
-and server processes over loopback UDP.
-
-For all available checks and examples:
-
-```sh
-zig build --help
-```
+The UDP loopback verifies the pure-Zig TLS handshake and stream path.
+The process probe runs independent Zig client and server processes over
+loopback UDP. See [the examples guide](examples/README.md) for a curated
+catalogue, intent, and commands; `zig build --help` lists every build step.
 
 ## Go and Rust interoperability examples
 
@@ -61,7 +104,8 @@ Run either independently implemented client with the local test CA:
 
 Both clients keep certificate verification enabled and report success only
 after the `hq-interop` stream echo and peer FIN. The included PEM is a local
-test trust anchor, not a deployment credential.
+test trust anchor, not a deployment credential. The full setup, including the
+external Zig client, is in [the examples guide](examples/README.md).
 
 ## Development map
 

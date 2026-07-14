@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Shared quicz module (library logic lives in src/lib.zig)
-    const quicz_mod = b.createModule(.{
+    const quicz_mod = b.addModule("quicz", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
