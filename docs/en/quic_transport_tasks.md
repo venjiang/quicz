@@ -107,11 +107,12 @@ server classifies and accepts its first Initial through
 routes only after authentication before TLS produces the first response. The
 client registers its SCID route after binding its UDP socket. On both peers,
 the subsequent Handshake and 1-RTT STREAM receive/send steps use those
-registered routes and lifecycle timer refresh. The server serves one test
-connection and exits, making the command reproducible. After the matching
-echo, the client sends a protected `CONNECTION_CLOSE`; the server routes it,
-enters draining, and both lifecycle owners retire their routes at the close
-deadline (`close_cleanup=true`).
+registered routes and lifecycle timer refresh. By default the reproducible
+command makes the server accept two sequential test connections on one UDP
+socket. After each matching echo, the client sends a protected
+`CONNECTION_CLOSE`; the server routes it, enters draining, retires every route
+at the close deadline (`close_cleanup=true`), then accepts and authenticates a
+fresh Initial without reusing the preceding connection or TLS state.
 
 This is a local Zig-to-Zig integration gate, not external interoperability.
 It uses the local deterministic test certificate with client certificate

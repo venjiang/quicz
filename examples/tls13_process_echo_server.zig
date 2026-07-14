@@ -1,7 +1,8 @@
-//! One-shot pure-Zig TLS 1.3 QUIC echo server for local process interoperability.
+//! Sequential pure-Zig TLS 1.3 QUIC echo server for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port>
-//! The server accepts one loopback test connection, echoes stream 0, then exits.
+//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [connections]
+//! The server accepts the requested number of sequential loopback connections,
+//! echoes stream 0 for each, retires its lifecycle state, then exits.
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -75,253 +76,261 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next();
     const bind_host = args.next() orelse return error.MissingArgs;
     const bind_port = try std.fmt.parseInt(u16, args.next() orelse return error.MissingArgs, 10);
+    const connection_count = if (args.next()) |raw_count|
+        try std.fmt.parseInt(usize, raw_count, 10)
+    else
+        1;
+    if (connection_count == 0) return error.InvalidConnectionCount;
     const bind_address = try std.Io.net.IpAddress.parseIp4(bind_host, bind_port);
     var socket = try bind_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
-    std.debug.print("zig_process_server: listening={s}:{d}\n", .{ bind_host, bind_port });
+    std.debug.print("zig_process_server: listening={s}:{d} connections={d}\n", .{ bind_host, bind_port, connection_count });
 
     const alpn = [_][]const u8{"hq-interop"};
-    var connection = try Connection.init(allocator, .server, .{
-        .initial_max_data = 8192,
-        .initial_max_stream_data = 2048,
-        .initial_max_streams_bidi = 8,
-        .max_datagram_size = 8192,
-    });
-    defer connection.deinit();
-    try connection.validatePeerAddress();
-    try connection.setLocalInitialSourceConnectionId(&server_scid);
+    for (0..connection_count) |connection_index| {
+        var connection = try Connection.init(allocator, .server, .{
+            .initial_max_data = 8192,
+            .initial_max_stream_data = 2048,
+            .initial_max_streams_bidi = 8,
+            .max_datagram_size = 8192,
+        });
+        defer connection.deinit();
+        try connection.validatePeerAddress();
+        try connection.setLocalInitialSourceConnectionId(&server_scid);
 
-    var backend = Tls13Backend.initServer(.{
-        .alpn = &alpn,
-        .cert_chain_der = &.{&certificate_der},
-        .private_key_bytes = &server_private_key,
-        .private_key_algorithm = .ecdsa_p256_sha256,
-    });
-    var scratch: [8192]u8 = undefined;
-    var receive_buffer: [2048]u8 = undefined;
+        var backend = Tls13Backend.initServer(.{
+            .alpn = &alpn,
+            .cert_chain_der = &.{&certificate_der},
+            .private_key_bytes = &server_private_key,
+            .private_key_algorithm = .ecdsa_p256_sha256,
+        });
+        var scratch: [8192]u8 = undefined;
+        var receive_buffer: [2048]u8 = undefined;
 
-    // The endpoint owns acceptance and route registration. Connection and TLS
-    // storage remain local to this one-shot process server.
-    const server_handle: u64 = 1;
-    var lifecycle = EndpointConnectionLifecycle.init(allocator);
-    defer lifecycle.deinit();
+        // The endpoint owns acceptance and route registration. Connection and TLS
+        // storage are freshly allocated for each accepted connection.
+        const server_handle: u64 = 1;
+        var lifecycle = EndpointConnectionLifecycle.init(allocator);
+        defer lifecycle.deinit();
 
-    const received_initial = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-    const server_path = endpoint.Udp4Tuple{
-        .local = endpoint.Udp4Address.init(bind_address.ip4.bytes, bind_address.ip4.port),
-        .remote = endpoint.Udp4Address.init(received_initial.from.ip4.bytes, received_initial.from.ip4.port),
-    };
-    var endpoint_output: [128]u8 = undefined;
-    const initial_accept = switch (try lifecycle.feedDatagram(
-        &endpoint_output,
-        server_path,
-        received_initial.data,
-        &[_]u8{},
-        &[_]quic_packet.Version{.v1},
-    )) {
-        .accept_initial => |value| value,
-        else => return error.InvalidPacket,
-    };
-    const initial_info = try protection.peekProtectedLongPacketInfo(received_initial.data);
-    var original_dcid: [20]u8 = undefined;
-    @memcpy(original_dcid[0..initial_info.dcid.len], initial_info.dcid);
-    const initial_secrets = try protection.deriveInitialSecrets(initial_info.version, initial_info.dcid);
-    const accepted_initial = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram(
-        server_handle,
-        &connection,
-        1,
-        initial_accept,
-        &server_scid,
-        received_initial.data,
-        .{ .active_migration_disabled = true },
-        backend.cryptoBackend(),
-        &scratch,
-    );
-    // The accept metadata borrows the UDP receive buffer, which subsequent
-    // receives reuse. Keep the peer CID from Connection-owned state for the
-    // later 1-RTT echo destination.
-    const client_scid = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
-
-    // A client may split its ClientHello across Initial packets or retransmit
-    // an Initial before the server can emit a response. Keep using Connection's
-    // authenticated CRYPTO reassembly until TLS derives Handshake keys, while
-    // accepting only the original client's Initial DCID.
-    var initial_progress = accepted_initial.backend;
-    var initial_datagrams: usize = 1;
-    while (!initial_progress.handshake_keys_installed and initial_datagrams < max_initial_datagrams) : (initial_datagrams += 1) {
-        const next_initial = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-        const next_info = try protection.peekProtectedLongPacketInfo(next_initial.data);
-        if (next_info.packet_type != .initial) return error.InvalidPacket;
-        if (next_info.version != initial_info.version or !std.mem.eql(u8, next_info.dcid, original_dcid[0..initial_info.dcid.len])) {
-            return error.InvalidPacket;
-        }
-        try connection.processProtectedLongDatagramInSpace(.initial, 1, initial_secrets.client, next_initial.data);
-        initial_progress = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
-    }
-    try require(initial_progress.handshake_keys_installed);
-    // A large external ClientHello can span several Initial packets. The
-    // lifecycle's first poll is therefore allowed to be empty; after the
-    // reassembly loop, poll the same lifecycle-owned output path once more.
-    const server_initial = accepted_initial.response_datagram orelse
-        (try lifecycle.pollProtectedLongCryptoDatagramInSpace(
-            server_handle,
-            &connection,
-            .initial,
-            @intCast(initial_datagrams),
-            client_scid,
-            &server_scid,
+        const received_initial = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+        const server_path = endpoint.Udp4Tuple{
+            .local = endpoint.Udp4Address.init(bind_address.ip4.bytes, bind_address.ip4.port),
+            .remote = endpoint.Udp4Address.init(received_initial.from.ip4.bytes, received_initial.from.ip4.port),
+        };
+        var endpoint_output: [128]u8 = undefined;
+        const initial_accept = switch (try lifecycle.feedDatagram(
+            &endpoint_output,
+            server_path,
+            received_initial.data,
             &[_]u8{},
-            initial_secrets.server,
-        )) orelse return error.UnexpectedState;
-    defer allocator.free(server_initial);
-    try socket.send(io, &received_initial.from, server_initial);
-
-    _ = try connection.driveCryptoBackendInSpace(.handshake, backend.cryptoBackend(), &scratch);
-    const server_handshake = (try connection.pollProtectedHandshakeDatagramWithInstalledKeys(
-        3,
-        client_scid,
-        &server_scid,
-    )) orelse return error.UnexpectedState;
-    defer allocator.free(server_handshake);
-    try socket.send(io, &received_initial.from, server_handshake);
-
-    // Clients may ACK the server Initial before sending Client Finished. Keep
-    // consuming a bounded number of coalesced long-header datagrams until the
-    // TLS backend reports completion instead of assuming the next packet is
-    // necessarily a Handshake CRYPTO packet.
-    var handshake_confirmed = false;
-    var handshake_datagrams: usize = 0;
-    while (!handshake_confirmed and handshake_datagrams < max_initial_datagrams) : (handshake_datagrams += 1) {
-        const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-        var datagram_offset: usize = 0;
-        var received_handshake = false;
-        while (datagram_offset < received.data.len) {
-            const packet_bytes = received.data[datagram_offset..];
-            const long_info = try protection.peekProtectedLongPacketInfo(packet_bytes);
-            const long_packet = packet_bytes[0..long_info.len];
-            switch (long_info.packet_type) {
-                .initial => {
-                    // Handshake keys prove the complete ClientHello was already
-                    // reassembled. A coalesced follow-up Initial can only carry
-                    // acknowledgements or a retransmission, so leave it
-                    // unconsumed and continue with the following long packet.
-                },
-                .handshake => {
-                    const client_route = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
-                        server_handle,
-                        &connection,
-                        server_path,
-                        4 + @as(i64, @intCast(handshake_datagrams)),
-                        long_packet,
-                    );
-                    try require(client_route.connection_id == server_handle);
-                    received_handshake = true;
-                },
-                else => return error.InvalidPacket,
-            }
-            datagram_offset += long_info.len;
-        }
-        if (!received_handshake) continue;
-        const handshake_progress = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+            &[_]quic_packet.Version{.v1},
+        )) {
+            .accept_initial => |value| value,
+            else => return error.InvalidPacket,
+        };
+        const initial_info = try protection.peekProtectedLongPacketInfo(received_initial.data);
+        var original_dcid: [20]u8 = undefined;
+        @memcpy(original_dcid[0..initial_info.dcid.len], initial_info.dcid);
+        const initial_secrets = try protection.deriveInitialSecrets(initial_info.version, initial_info.dcid);
+        const accepted_initial = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram(
             server_handle,
             &connection,
-            .handshake,
+            1,
+            initial_accept,
+            &server_scid,
+            received_initial.data,
+            .{ .active_migration_disabled = true },
             backend.cryptoBackend(),
             &scratch,
         );
-        handshake_confirmed = handshake_progress.handshake_confirmed;
-    }
-    try require(handshake_confirmed);
-    try require(connection.handshakeConfirmed());
+        // The accept metadata borrows the UDP receive buffer, which subsequent
+        // receives reuse. Keep the peer CID from Connection-owned state for the
+        // later 1-RTT echo destination.
+        const client_scid = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
 
-    var stream_buffer: [128]u8 = undefined;
-    var echoed_len: ?usize = null;
-    var application_datagrams: usize = 0;
-    while (echoed_len == null and application_datagrams < max_initial_datagrams) : (application_datagrams += 1) {
-        const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-        const stream_route = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
-            server_handle,
-            &connection,
-            server_path,
-            5 + @as(i64, @intCast(application_datagrams)),
-            received.data,
-        );
-        try require(stream_route.connection_id == server_handle);
-        echoed_len = try connection.recvOnStream(0, &stream_buffer);
-    }
-    const echo_len = echoed_len orelse return error.MissingStreamData;
-    try require(std.mem.eql(u8, stream_buffer[0..echo_len], "hello"));
-    try connection.sendOnStream(0, stream_buffer[0..echo_len], false);
+        // A client may split its ClientHello across Initial packets or retransmit
+        // an Initial before the server can emit a response. Keep using Connection's
+        // authenticated CRYPTO reassembly until TLS derives Handshake keys, while
+        // accepting only the original client's Initial DCID.
+        var initial_progress = accepted_initial.backend;
+        var initial_datagrams: usize = 1;
+        while (!initial_progress.handshake_keys_installed and initial_datagrams < max_initial_datagrams) : (initial_datagrams += 1) {
+            const next_initial = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+            const next_info = try protection.peekProtectedLongPacketInfo(next_initial.data);
+            if (next_info.packet_type != .initial) return error.InvalidPacket;
+            if (next_info.version != initial_info.version or !std.mem.eql(u8, next_info.dcid, original_dcid[0..initial_info.dcid.len])) {
+                return error.InvalidPacket;
+            }
+            try connection.processProtectedLongDatagramInSpace(.initial, 1, initial_secrets.client, next_initial.data);
+            initial_progress = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
+        }
+        try require(initial_progress.handshake_keys_installed);
+        // A large external ClientHello can span several Initial packets. The
+        // lifecycle's first poll is therefore allowed to be empty; after the
+        // reassembly loop, poll the same lifecycle-owned output path once more.
+        const server_initial = accepted_initial.response_datagram orelse
+            (try lifecycle.pollProtectedLongCryptoDatagramInSpace(
+                server_handle,
+                &connection,
+                .initial,
+                @intCast(initial_datagrams),
+                client_scid,
+                &server_scid,
+                &[_]u8{},
+                initial_secrets.server,
+            )) orelse return error.UnexpectedState;
+        defer allocator.free(server_initial);
+        try socket.send(io, &received_initial.from, server_initial);
 
-    var sent_packets: usize = 0;
-    while (sent_packets < 4) : (sent_packets += 1) {
-        const packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
-            server_handle,
-            &connection,
-            6 + @as(i64, @intCast(sent_packets)),
+        _ = try connection.driveCryptoBackendInSpace(.handshake, backend.cryptoBackend(), &scratch);
+        const server_handshake = (try connection.pollProtectedHandshakeDatagramWithInstalledKeys(
+            3,
             client_scid,
-        )) orelse break;
-        defer allocator.free(packet);
-        try socket.send(io, &received_initial.from, packet);
-    }
-    try require(sent_packets > 0);
+            &server_scid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(server_handshake);
+        try socket.send(io, &received_initial.from, server_handshake);
 
-    // Independent clients can ACK in Initial, Handshake, or 1-RTT space before
-    // their CONNECTION_CLOSE. Keep routing those authenticated packets until
-    // the close is observed.
-    var close_received = false;
-    var close_datagrams: usize = 0;
-    while (!close_received and close_datagrams < max_initial_datagrams) : (close_datagrams += 1) {
-        const received = socket.receiveTimeout(io, &receive_buffer, recvTimeout()) catch |err| switch (err) {
-            error.Timeout => break,
-            else => return err,
-        };
-        const now_millis = 10 + @as(i64, @intCast(close_datagrams));
-        const close_route = if ((received.data[0] & 0x80) == 0)
-            try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+        // Clients may ACK the server Initial before sending Client Finished. Keep
+        // consuming a bounded number of coalesced long-header datagrams until the
+        // TLS backend reports completion instead of assuming the next packet is
+        // necessarily a Handshake CRYPTO packet.
+        var handshake_confirmed = false;
+        var handshake_datagrams: usize = 0;
+        while (!handshake_confirmed and handshake_datagrams < max_initial_datagrams) : (handshake_datagrams += 1) {
+            const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+            var datagram_offset: usize = 0;
+            var received_handshake = false;
+            while (datagram_offset < received.data.len) {
+                const packet_bytes = received.data[datagram_offset..];
+                const long_info = try protection.peekProtectedLongPacketInfo(packet_bytes);
+                const long_packet = packet_bytes[0..long_info.len];
+                switch (long_info.packet_type) {
+                    .initial => {
+                        // Handshake keys prove the complete ClientHello was already
+                        // reassembled. A coalesced follow-up Initial can only carry
+                        // acknowledgements or a retransmission, so leave it
+                        // unconsumed and continue with the following long packet.
+                    },
+                    .handshake => {
+                        const client_route = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+                            server_handle,
+                            &connection,
+                            server_path,
+                            4 + @as(i64, @intCast(handshake_datagrams)),
+                            long_packet,
+                        );
+                        try require(client_route.connection_id == server_handle);
+                        received_handshake = true;
+                    },
+                    else => return error.InvalidPacket,
+                }
+                datagram_offset += long_info.len;
+            }
+            if (!received_handshake) continue;
+            const handshake_progress = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+                server_handle,
+                &connection,
+                .handshake,
+                backend.cryptoBackend(),
+                &scratch,
+            );
+            handshake_confirmed = handshake_progress.handshake_confirmed;
+        }
+        try require(handshake_confirmed);
+        try require(connection.handshakeConfirmed());
+
+        var stream_buffer: [128]u8 = undefined;
+        var echoed_len: ?usize = null;
+        var application_datagrams: usize = 0;
+        while (echoed_len == null and application_datagrams < max_initial_datagrams) : (application_datagrams += 1) {
+            const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+            const stream_route = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
                 server_handle,
                 &connection,
                 server_path,
-                now_millis,
+                5 + @as(i64, @intCast(application_datagrams)),
                 received.data,
-            )
-        else blk: {
-            const long_info = try protection.peekProtectedLongPacketInfo(received.data);
-            const long_packet = received.data[0..long_info.len];
-            break :blk switch (long_info.packet_type) {
-                // Once the handshake is confirmed, late packets in discarded
-                // long-header spaces can be routed but must not be decrypted
-                // with retired keys. Wait for the 1-RTT close instead.
-                .initial, .handshake => try lifecycle.routeDatagram(server_path, long_packet),
-                else => return error.InvalidPacket,
+            );
+            try require(stream_route.connection_id == server_handle);
+            echoed_len = try connection.recvOnStream(0, &stream_buffer);
+        }
+        const echo_len = echoed_len orelse return error.MissingStreamData;
+        try require(std.mem.eql(u8, stream_buffer[0..echo_len], "hello"));
+        try connection.sendOnStream(0, stream_buffer[0..echo_len], false);
+
+        var sent_packets: usize = 0;
+        while (sent_packets < 4) : (sent_packets += 1) {
+            const packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                server_handle,
+                &connection,
+                6 + @as(i64, @intCast(sent_packets)),
+                client_scid,
+            )) orelse break;
+            defer allocator.free(packet);
+            try socket.send(io, &received_initial.from, packet);
+        }
+        try require(sent_packets > 0);
+
+        // Independent clients can ACK in Initial, Handshake, or 1-RTT space before
+        // their CONNECTION_CLOSE. Keep routing those authenticated packets until
+        // the close is observed.
+        var close_received = false;
+        var close_datagrams: usize = 0;
+        while (!close_received and close_datagrams < max_initial_datagrams) : (close_datagrams += 1) {
+            const received = socket.receiveTimeout(io, &receive_buffer, recvTimeout()) catch |err| switch (err) {
+                error.Timeout => break,
+                else => return err,
             };
-        };
-        try require(close_route.connection_id == server_handle);
-        close_received = connection.connectionState() == .draining;
-    }
-    if (!close_received) {
-        // Some clients terminate their local endpoint after the confirmed echo
-        // without awaiting a peer close. Emit one local close before retiring
-        // this one-shot server cleanly.
-        try connection.closeConnection(0, 0, "process echo complete");
-        const close_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            const now_millis = 10 + @as(i64, @intCast(close_datagrams));
+            const close_route = if ((received.data[0] & 0x80) == 0)
+                try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+                    server_handle,
+                    &connection,
+                    server_path,
+                    now_millis,
+                    received.data,
+                )
+            else blk: {
+                const long_info = try protection.peekProtectedLongPacketInfo(received.data);
+                const long_packet = received.data[0..long_info.len];
+                break :blk switch (long_info.packet_type) {
+                    // Once the handshake is confirmed, late packets in discarded
+                    // long-header spaces can be routed but must not be decrypted
+                    // with retired keys. Wait for the 1-RTT close instead.
+                    .initial, .handshake => try lifecycle.routeDatagram(server_path, long_packet),
+                    else => return error.InvalidPacket,
+                };
+            };
+            try require(close_route.connection_id == server_handle);
+            close_received = connection.connectionState() == .draining;
+        }
+        if (!close_received) {
+            // Some clients terminate their local endpoint after the confirmed echo
+            // without awaiting a peer close. Emit one local close before retiring
+            // this one-shot server cleanly.
+            try connection.closeConnection(0, 0, "process echo complete");
+            const close_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                server_handle,
+                &connection,
+                10 + @as(i64, @intCast(close_datagrams)),
+                client_scid,
+            )) orelse return error.UnexpectedState;
+            defer allocator.free(close_packet);
+            try socket.send(io, &received_initial.from, close_packet);
+        }
+        const server_drain_deadline = connection.closeDeadlineMillis() orelse return error.UnexpectedState;
+        const server_retired = (try lifecycle.checkCloseTimeoutsAndRetireConnection(
             server_handle,
             &connection,
-            10 + @as(i64, @intCast(close_datagrams)),
-            client_scid,
+            server_drain_deadline,
         )) orelse return error.UnexpectedState;
-        defer allocator.free(close_packet);
-        try socket.send(io, &received_initial.from, close_packet);
-    }
-    const server_drain_deadline = connection.closeDeadlineMillis() orelse return error.UnexpectedState;
-    const server_retired = (try lifecycle.checkCloseTimeoutsAndRetireConnection(
-        server_handle,
-        &connection,
-        server_drain_deadline,
-    )) orelse return error.UnexpectedState;
-    try require(server_retired.routes_retired > 0);
-    try require(connection.connectionState() == .closed);
-    try require(lifecycle.routeCount() == 0);
+        try require(server_retired.routes_retired > 0);
+        try require(connection.connectionState() == .closed);
+        try require(lifecycle.routeCount() == 0);
 
-    std.debug.print("zig_process_server: handshake_done=true echo_bytes={d} close_cleanup=true\n", .{echo_len});
+        std.debug.print("zig_process_server: connection={d} handshake_done=true echo_bytes={d} close_cleanup=true\n", .{ connection_index + 1, echo_len });
+    }
+    std.debug.print("zig_process_server: accepted_connections={d} complete=true\n", .{connection_count});
 }
