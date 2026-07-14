@@ -123,13 +123,16 @@ routes only after authentication before TLS produces the first response. The
 client registers its SCID route after binding its UDP socket. On both peers,
 the subsequent Handshake and 1-RTT STREAM receive/send steps use those
 registered routes and lifecycle timer refresh. By default the reproducible
-command makes the server accept two sequential test connections on one UDP
-socket. The integration script gives each process client a distinct tag, so
-its Initial DCID and SCID do not collide with another connection. After each
-matching echo, the client sends a protected
-`CONNECTION_CLOSE`; the server routes it, enters draining, retires every route
-at the close deadline (`close_cleanup=true`), then accepts and authenticates a
-fresh Initial without reusing the preceding connection or TLS state.
+command starts two tagged client processes concurrently. The server keeps
+their caller-owned `Connection` and `Tls13Backend` values in a bounded handle
+map and uses one `EndpointConnectionLifecycle` to classify and route every
+datagram on one UDP socket. The distinct client tags prevent Initial DCID and
+SCID collisions. After each matching echo, the client sends a protected
+`CONNECTION_CLOSE`; the server processes it through that connection's route,
+enters draining, and retires only that handle's routes at the close deadline
+(`close_cleanup=true`). The bounded map rejects more than its requested total
+connection count and exits only after every accepted connection is retired.
+`sequential` remains available as an explicit compatibility mode.
 
 This is a local Zig-to-Zig integration gate, not external interoperability.
 It uses the local deterministic test certificate with client certificate
@@ -228,20 +231,22 @@ PTO probe, and recovery-timer service — all without mock keys or OpenSSL.
 
 The focused evidence now includes certificate-verified external STREAM echo,
 TLS-owned PTO retransmission plus controlled NewReno and persistent-congestion
-responses, TLS-owned Retry resumption, stateless-reset handling, and
-PATH_CHALLENGE/PATH_RESPONSE route migration. These are deliberately scoped
-single-connection proofs. The RFC rows remain `Partial`: a production endpoint
-connection map, broader TLS-owned client/server policy, 0-RTT replay policy,
-and wider external behavior are still unproven.
+responses, TLS-owned Retry resumption, stateless-reset handling,
+PATH_CHALLENGE/PATH_RESPONSE route migration, and a bounded two-client
+concurrent process server with one UDP socket and lifecycle owner. The RFC
+rows remain `Partial`: that server is a finite local proof, not an unbounded
+production endpoint policy; broader TLS-owned client/server policy, 0-RTT
+replay policy, and wider external behavior are still unproven.
 
-The main task remains the IETF QUIC transport implementation. The next-stage
-priority is a production endpoint-owned connection map and event loop, while
-keeping the established pure-Zig TLS path and external interop evidence intact.
-The remaining acceptance criteria are concurrent connection ownership on one
-UDP socket, lifecycle-owned receive/send/timer/close routing for every active
-connection, bounded resource and route retirement, and a reproducible
-multi-connection smoke test. This is a production-ownership boundary, not a
-reason to weaken the existing single-connection evidence.
+The main task remains the IETF QUIC transport implementation. The next stage
+turns the bounded demo ownership proof into a production endpoint-owned
+connection map and event loop while preserving the established pure-Zig TLS
+path and external interop evidence. The remaining acceptance criteria are
+long-lived connection capacity and timeout policy, lifecycle-owned
+receive/send/timer/close routing for all active connections, bounded resources
+and route retirement beyond a fixed test count, and a reproducible broader
+multi-connection smoke test. This is a production ownership boundary and must
+not weaken the established evidence.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first

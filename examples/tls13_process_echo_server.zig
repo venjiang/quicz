@@ -1,8 +1,8 @@
-//! Sequential pure-Zig TLS 1.3 QUIC echo server for local process interoperability.
+//! Pure-Zig TLS 1.3 QUIC echo server for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [connections]
-//! The server accepts the requested number of sequential loopback connections,
-//! echoes stream 0 for each, retires its lifecycle state, then exits.
+//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [connections] [sequential|concurrent]
+//! Concurrent mode accepts and routes the requested number of loopback
+//! connections through one UDP socket and one endpoint lifecycle owner.
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -68,6 +68,282 @@ fn require(condition: bool) !void {
     if (!condition) return error.UnexpectedState;
 }
 
+const ManagedProcessConnection = struct {
+    handle: u64,
+    connection: Connection,
+    backend: Tls13Backend,
+    peer_address: std.Io.net.IpAddress,
+    server_scid: [4]u8,
+    client_scid: [20]u8 = undefined,
+    client_scid_len: usize = 0,
+    original_dcid: [20]u8 = undefined,
+    original_dcid_len: usize = 0,
+    echoed: bool = false,
+
+    fn clientScid(self: *const ManagedProcessConnection) []const u8 {
+        return self.client_scid[0..self.client_scid_len];
+    }
+
+    fn deinit(self: *ManagedProcessConnection) void {
+        self.connection.deinit();
+    }
+};
+
+fn processServerScid(handle: u64) [4]u8 {
+    return .{ 0x31, 0x32, @truncate(handle >> 8), @truncate(handle) };
+}
+
+fn serverPath(bind_address: std.Io.net.IpAddress, peer_address: std.Io.net.IpAddress) !endpoint.Udp4Tuple {
+    return .{
+        .local = endpoint.Udp4Address.init(bind_address.ip4.bytes, bind_address.ip4.port),
+        .remote = endpoint.Udp4Address.init(peer_address.ip4.bytes, peer_address.ip4.port),
+    };
+}
+
+fn serveConcurrent(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    socket: *std.Io.net.Socket,
+    bind_address: std.Io.net.IpAddress,
+    connection_count: usize,
+) !void {
+    const alpn = [_][]const u8{"hq-interop"};
+    var lifecycle = EndpointConnectionLifecycle.init(allocator);
+    defer lifecycle.deinit();
+    var connections = std.AutoHashMap(u64, *ManagedProcessConnection).init(allocator);
+    defer {
+        var iterator = connections.valueIterator();
+        while (iterator.next()) |managed| {
+            managed.*.deinit();
+            allocator.destroy(managed.*);
+        }
+        connections.deinit();
+    }
+
+    var receive_buffer: [2048]u8 = undefined;
+    var endpoint_output: [128]u8 = undefined;
+    var next_handle: u64 = 1;
+    var accepted_count: usize = 0;
+    var completed: usize = 0;
+    var now_millis: i64 = 1;
+
+    while (completed < connection_count) : (now_millis += 1) {
+        const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
+        const path = try serverPath(bind_address, received.from);
+        const action = try lifecycle.feedDatagram(
+            &endpoint_output,
+            path,
+            received.data,
+            &[_]u8{},
+            &[_]quic_packet.Version{.v1},
+        );
+        switch (action) {
+            .accept_initial => |initial_accept| {
+                if (accepted_count >= connection_count) return error.ConnectionLimitReached;
+                const initial_info = try protection.peekProtectedLongPacketInfo(received.data);
+                if (initial_info.packet_type != .initial) return error.InvalidPacket;
+
+                const managed = try allocator.create(ManagedProcessConnection);
+                errdefer allocator.destroy(managed);
+                var connection = try Connection.init(allocator, .server, .{
+                    .initial_max_data = 8192,
+                    .initial_max_stream_data = 2048,
+                    .initial_max_streams_bidi = 8,
+                    .max_datagram_size = 8192,
+                });
+                errdefer connection.deinit();
+                const handle = next_handle;
+                next_handle += 1;
+                managed.* = .{
+                    .handle = handle,
+                    .connection = connection,
+                    .backend = Tls13Backend.initServer(.{
+                        .alpn = &alpn,
+                        .cert_chain_der = &.{&certificate_der},
+                        .private_key_bytes = &server_private_key,
+                        .private_key_algorithm = .ecdsa_p256_sha256,
+                    }),
+                    .peer_address = received.from,
+                    .server_scid = processServerScid(handle),
+                };
+                errdefer managed.deinit();
+                try managed.connection.validatePeerAddress();
+                try managed.connection.setLocalInitialSourceConnectionId(&managed.server_scid);
+                if (initial_info.dcid.len > managed.original_dcid.len) return error.InvalidConnectionIdLength;
+                @memcpy(managed.original_dcid[0..initial_info.dcid.len], initial_info.dcid);
+                managed.original_dcid_len = initial_info.dcid.len;
+
+                var scratch: [8192]u8 = undefined;
+                const accepted = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram(
+                    handle,
+                    &managed.connection,
+                    now_millis,
+                    initial_accept,
+                    &managed.server_scid,
+                    received.data,
+                    .{ .active_migration_disabled = true },
+                    managed.backend.cryptoBackend(),
+                    &scratch,
+                );
+                const peer_scid = managed.connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
+                if (peer_scid.len > managed.client_scid.len) return error.InvalidConnectionIdLength;
+                @memcpy(managed.client_scid[0..peer_scid.len], peer_scid);
+                managed.client_scid_len = peer_scid.len;
+                try connections.put(handle, managed);
+                accepted_count += 1;
+                if (accepted.response_datagram) |datagram| {
+                    defer allocator.free(datagram);
+                    try socket.send(io, &managed.peer_address, datagram);
+                }
+                if (accepted.backend.handshake_keys_installed) {
+                    _ = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+                        handle,
+                        &managed.connection,
+                        .handshake,
+                        managed.backend.cryptoBackend(),
+                        &scratch,
+                    );
+                    if (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+                        handle,
+                        &managed.connection,
+                        now_millis,
+                        managed.clientScid(),
+                        &managed.server_scid,
+                    )) |datagram| {
+                        defer allocator.free(datagram);
+                        try socket.send(io, &managed.peer_address, datagram);
+                    }
+                }
+            },
+            .routed => |route| {
+                const managed = connections.get(route.connection_id) orelse return error.UnknownConnectionId;
+                if ((received.data[0] & 0x80) != 0) {
+                    const long_info = try protection.peekProtectedLongPacketInfo(received.data);
+                    if (long_info.packet_type == .initial) {
+                        _ = try lifecycle.processRoutedProtectedInitialDatagram(
+                            managed.handle,
+                            &managed.connection,
+                            path,
+                            now_millis,
+                            managed.original_dcid[0..managed.original_dcid_len],
+                            received.data,
+                        );
+                        var initial_scratch: [8192]u8 = undefined;
+                        const initial_progress = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+                            managed.handle,
+                            &managed.connection,
+                            .initial,
+                            managed.backend.cryptoBackend(),
+                            &initial_scratch,
+                        );
+                        if (initial_progress.handshake_keys_installed) {
+                            const initial_secrets = try protection.deriveInitialSecrets(
+                                long_info.version,
+                                managed.original_dcid[0..managed.original_dcid_len],
+                            );
+                            if (try lifecycle.pollProtectedLongCryptoDatagramInSpace(
+                                managed.handle,
+                                &managed.connection,
+                                .initial,
+                                now_millis,
+                                managed.clientScid(),
+                                &managed.server_scid,
+                                &[_]u8{},
+                                initial_secrets.server,
+                            )) |datagram| {
+                                defer allocator.free(datagram);
+                                try socket.send(io, &managed.peer_address, datagram);
+                            }
+                            _ = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+                                managed.handle,
+                                &managed.connection,
+                                .handshake,
+                                managed.backend.cryptoBackend(),
+                                &initial_scratch,
+                            );
+                            if (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
+                                managed.handle,
+                                &managed.connection,
+                                now_millis,
+                                managed.clientScid(),
+                                &managed.server_scid,
+                            )) |datagram| {
+                                defer allocator.free(datagram);
+                                try socket.send(io, &managed.peer_address, datagram);
+                            }
+                        }
+                        continue;
+                    }
+                    if (long_info.packet_type != .handshake) continue;
+                    _ = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+                        managed.handle,
+                        &managed.connection,
+                        path,
+                        now_millis,
+                        received.data,
+                    );
+                    var scratch: [8192]u8 = undefined;
+                    _ = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+                        managed.handle,
+                        &managed.connection,
+                        .handshake,
+                        managed.backend.cryptoBackend(),
+                        &scratch,
+                    );
+                    continue;
+                }
+
+                _ = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+                    managed.handle,
+                    &managed.connection,
+                    path,
+                    now_millis,
+                    received.data,
+                );
+                if (!managed.echoed) {
+                    var stream_buffer: [128]u8 = undefined;
+                    if (try managed.connection.recvOnStream(0, &stream_buffer)) |echo_len| {
+                        try require(std.mem.eql(u8, stream_buffer[0..echo_len], "hello"));
+                        try managed.connection.sendOnStream(0, stream_buffer[0..echo_len], false);
+                        var sent_packets: usize = 0;
+                        while (sent_packets < max_initial_datagrams) : (sent_packets += 1) {
+                            const echo_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                                managed.handle,
+                                &managed.connection,
+                                now_millis + @as(i64, @intCast(sent_packets)),
+                                managed.clientScid(),
+                            )) orelse break;
+                            defer allocator.free(echo_packet);
+                            try socket.send(io, &managed.peer_address, echo_packet);
+                        }
+                        try require(sent_packets > 0);
+                        managed.echoed = true;
+                    }
+                }
+                if (managed.connection.connectionState() == .draining) {
+                    const deadline = managed.connection.closeDeadlineMillis() orelse return error.UnexpectedState;
+                    const retired = (try lifecycle.checkCloseTimeoutsAndRetireConnection(
+                        managed.handle,
+                        &managed.connection,
+                        deadline,
+                    )) orelse return error.UnexpectedState;
+                    try require(retired.routes_retired > 0);
+                    _ = connections.remove(managed.handle);
+                    managed.deinit();
+                    allocator.destroy(managed);
+                    completed += 1;
+                    std.debug.print("zig_process_server: connection={d} concurrent=true close_cleanup=true\n", .{completed});
+                }
+            },
+            .version_negotiation => |datagram| try socket.send(io, &received.from, datagram),
+            .stateless_reset => |datagram| try socket.send(io, &received.from, datagram),
+            .dropped => {},
+        }
+    }
+    try require(accepted_count == connection_count);
+    std.debug.print("zig_process_server: accepted_connections={d} concurrent=true complete=true\n", .{accepted_count});
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -81,10 +357,16 @@ pub fn main(init: std.process.Init) !void {
     else
         1;
     if (connection_count == 0) return error.InvalidConnectionCount;
+    const mode = args.next() orelse "sequential";
     const bind_address = try std.Io.net.IpAddress.parseIp4(bind_host, bind_port);
     var socket = try bind_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
-    std.debug.print("zig_process_server: listening={s}:{d} connections={d}\n", .{ bind_host, bind_port, connection_count });
+    std.debug.print("zig_process_server: listening={s}:{d} connections={d} mode={s}\n", .{ bind_host, bind_port, connection_count, mode });
+
+    if (std.mem.eql(u8, mode, "concurrent")) {
+        return serveConcurrent(allocator, io, &socket, bind_address, connection_count);
+    }
+    if (!std.mem.eql(u8, mode, "sequential")) return error.InvalidMode;
 
     const alpn = [_][]const u8{"hq-interop"};
     for (0..connection_count) |connection_index| {

@@ -103,11 +103,13 @@ bidirectional STREAM echo（`echo_bytes=5`）。服务端通过
 `EndpointConnectionLifecycle` 分类并接受首个 Initial；只有认证成功后才注册
 Original DCID 与 server SCID route，然后由 TLS 产生第一份响应。客户端在绑定 UDP
 socket 后注册自己的 SCID route。两端后续 Handshake 与 1-RTT STREAM 的收发都会使用
-这些已注册 route 和 lifecycle timer refresh。该可复现命令默认让服务端在同一 UDP socket
-上顺序接受两个测试连接；脚本为每个 client process 指定不同 tag，使 Initial DCID 和 SCID
-不会与另一连接冲突。每个 echo 匹配后，客户端都会发送受保护的
-`CONNECTION_CLOSE`，服务端通过 route 处理它并进入 draining，在 close deadline 退役所有
-route（`close_cleanup=true`），随后认证新的 Initial，且不会复用上一连接或 TLS 状态。
+这些已注册 route 和 lifecycle timer refresh。该可复现命令默认并发启动两个带 tag 的 client
+process。服务端在同一 UDP socket 上用一个 `EndpointConnectionLifecycle` 分类和路由所有
+datagram，并在有界 handle map 中保留每条 caller-owned `Connection` 与 `Tls13Backend`。
+不同 tag 使 Initial DCID 和 SCID 不会冲突。每个 echo 匹配后，客户端都会发送受保护的
+`CONNECTION_CLOSE`；服务端只处理该连接的 route、进入 draining，并在 close deadline
+只退役该 handle 的 route（`close_cleanup=true`）。有界 map 会拒绝超过请求总数的连接，且
+仅在每条已接受连接都退役后退出。`sequential` 仍作为显式兼容模式保留。
 
 这是本地 Zig 到 Zig 的集成门槛，不是外部互通。它使用本地确定性测试证书，客户端
 关闭证书校验；它不能替代下方的证书校验外部互通证据。
@@ -188,17 +190,18 @@ HANDSHAKE_DONE、protected close、PTO probe 与 recovery-timer service——全
 密钥、无 OpenSSL。
 
 现有聚焦证据已经包含证书校验的外部 STREAM echo、TLS-owned PTO 重传与受控的
-NewReno/persistent-congestion 响应、TLS-owned Retry 重试、stateless reset 处理，以及
-PATH_CHALLENGE/PATH_RESPONSE 驱动的 route migration。这些刻意限定为单连接证明；
-RFC 行仍保持 `Partial`，因为生产级 endpoint connection map、更广泛的 TLS-owned
-client/server policy、0-RTT replay policy 和更宽的外部行为仍未证明。
+NewReno/persistent-congestion 响应、TLS-owned Retry 重试、stateless reset 处理、
+PATH_CHALLENGE/PATH_RESPONSE 驱动的 route migration，以及单 UDP socket、单 lifecycle
+owner 的有界双 client 并发进程服务端。RFC 行仍保持 `Partial`：该服务端只是有限的本地
+证明，不是无限期生产 endpoint policy；更广泛的 TLS-owned client/server policy、0-RTT
+replay policy 和更宽的外部行为仍未证明。
 
-主线任务仍是 IETF QUIC transport 实现。下一阶段优先推进生产级
-endpoint-owned connection map 和 event loop，同时保持已验证的纯 Zig TLS 路径与
-外部互通证据。剩余验收条件是：一条 UDP socket 上的并发 connection ownership、每个
-active connection 由 lifecycle 统一完成 receive/send/timer/close routing、有界资源与
-route retirement，以及可复现的多连接 smoke test。这是生产 ownership 边界，不得因此
-削弱已建立的单连接证据。
+主线任务仍是 IETF QUIC transport 实现。下一阶段将有界 demo ownership 证明推进为生产级
+endpoint-owned connection map 和 event loop，同时保持已验证的纯 Zig TLS 路径与外部互通
+证据。剩余验收条件是：长生命周期的连接容量和 timeout policy、所有 active connection
+由 lifecycle 统一完成 receive/send/timer/close routing、超出固定测试数量后的有界资源与
+route retirement，以及更广泛可复现的多连接 smoke test。这是生产 ownership 边界，不得
+削弱既有证据。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、
