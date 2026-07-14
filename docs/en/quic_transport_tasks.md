@@ -185,7 +185,8 @@ the bounded demo; it is not a production RTT or timeout policy.
 the concurrent server's bounded Retry path. It issues a path- and v1-bound,
 single-use address-validation token, retains and reissues the same Retry for a
 retransmitted tokenless Initial, and accepts a follow-up Initial only after
-the lifecycle validates and consumes that token. The Zig client resets only
+the lifecycle authenticates its packet, then validates and consumes that token.
+Unauthenticated follow-ups leave the token and replay state unchanged. The Zig client resets only
 its Initial send state, re-emits the cached ClientHello with the Retry SCID and
 derived Initial keys, then reports `retry_validated=true`. Fresh
 certificate-verified Go and Rust client runs also completed the two-stream,

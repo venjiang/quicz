@@ -12476,6 +12476,29 @@ test "EndpointConnectionLifecycle accepts Retry follow-up Initial through lifecy
     try std.testing.expectEqual(@as(u64, 0), missing_pending_server.nextPeerPacketNumber(.initial));
     try std.testing.expect(!missing_pending_server.peerAddressValidated());
 
+    var unauthenticated_server = try Connection.init(std.testing.allocator, .server, .{});
+    defer unauthenticated_server.deinit();
+    try unauthenticated_server.issueRetryToken(token);
+    const tampered_followup_initial = try std.testing.allocator.dupe(u8, followup_initial);
+    defer std.testing.allocator.free(tampered_followup_initial);
+    tampered_followup_initial[tampered_followup_initial.len - 1] ^= 0x01;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        lifecycle.processRetryValidatedProtectedInitialDatagram(
+            &policy,
+            connection_id,
+            &unauthenticated_server,
+            1_020,
+            path,
+            tampered_followup_initial,
+            &supported_versions,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), policy.replayFilterEntryCount());
+    try std.testing.expectEqual(@as(usize, 1), unauthenticated_server.pendingRetryTokenCount());
+    try std.testing.expect(!unauthenticated_server.peerAddressValidated());
+    try std.testing.expectEqual(@as(u64, 0), unauthenticated_server.nextPeerPacketNumber(.initial));
+
     var server = try Connection.init(std.testing.allocator, .server, .{});
     defer server.deinit();
     try server.issueRetryToken(token);

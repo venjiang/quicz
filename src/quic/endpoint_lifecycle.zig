@@ -1222,8 +1222,9 @@ pub const EndpointConnectionLifecycle = struct {
     /// lifecycle owner after `switchInitialDestinationConnectionIdAfterRetry()`
     /// has replaced the Original DCID route with the Retry Source CID. It
     /// proves the datagram routes to the caller's connection handle, extracts
-    /// Initial accept metadata, validates and consumes the path-bound Retry
-    /// token, then processes the protected Initial packet.
+    /// Initial accept metadata, prevalidates the path-bound Retry token, then
+    /// authenticates the protected Initial packet. Only an authenticated
+    /// packet consumes the one-time token and unblocks anti-amplification.
     pub fn processRetryValidatedProtectedInitialDatagram(
         self: *EndpointConnectionLifecycle,
         policy: *endpoint.AddressValidationPolicy,
@@ -1247,10 +1248,18 @@ pub const EndpointConnectionLifecycle = struct {
         }
         if (initial_accept.token.len == 0) return error.InvalidPacket;
 
-        const token_validation = try self.validateRetryTokenForPathAndArmConnection(
-            policy,
-            connection_id,
-            connection,
+        // Keep malformed or unauthenticated Initials from consuming the
+        // single-use token. This preliminary check rejects the wrong path,
+        // version, expiry, or token before decryption, without replay state
+        // or connection state side effects.
+        if (connection.side != .server) return error.InvalidPacket;
+        if (connection.connectionState() != .active) {
+            self.refreshRecoveryTimerAfterConnectionError(connection_id, connection);
+            return error.ConnectionClosed;
+        }
+        if (!connection.hasPendingRetryToken(initial_accept.token)) return error.InvalidPacket;
+        _ = try policy.validateTokenForPathWithoutReplayForVersion(
+            .retry,
             initial_accept.version,
             now_millis,
             path,
@@ -1263,6 +1272,15 @@ pub const EndpointConnectionLifecycle = struct {
             now_millis,
             initial_accept.original_destination_connection_id,
             datagram,
+        );
+        const token_validation = try self.validateRetryTokenForPathAndArmConnection(
+            policy,
+            connection_id,
+            connection,
+            initial_accept.version,
+            now_millis,
+            path,
+            initial_accept.token,
         );
 
         return .{

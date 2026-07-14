@@ -150,8 +150,8 @@ recovery 排序，不构成生产 RTT 或 timeout policy。
 
 `QUICZ_PROCESS_INTEROP_RETRY=true zig build run-tls13-process-interop` 会启用并发
 server 的有界 Retry 路径。它签发绑定 UDP path 和 v1 的一次性 address-validation token；对于
-重传的无 token Initial 保留并重发同一个 Retry，只有 lifecycle 校验并消费 token 后才接受 follow-up
-Initial。Zig client 仅重置 Initial send state，使用 Retry SCID 和重新派生的 Initial key 重发缓存的
+重传的无 token Initial 保留并重发同一个 Retry，只有 lifecycle 先认证 packet、再校验并消费 token 后才接受 follow-up
+Initial。未认证的 follow-up 不会改变 token 和 replay 状态。Zig client 仅重置 Initial send state，使用 Retry SCID 和重新派生的 Initial key 重发缓存的
 ClientHello，然后报告 `retry_validated=true`。重新执行的证书校验 Go 与 Rust client 也都通过该 Retry
 路径完成了两条 stream、十字节的双向 FIN echo。静态 demo secret 与内存 replay filter 仍是有界本地 policy，不是生产 key
 storage 或分布式 replay protection。
