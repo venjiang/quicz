@@ -132,8 +132,18 @@ datagram on one UDP socket. The distinct client tags prevent Initial DCID and
 SCID collisions. After each matching FIN-terminated echo, the client sends a protected
 `CONNECTION_CLOSE`; the server processes it through that connection's route,
 enters draining, and retires only that handle's routes at the close deadline
-(`close_cleanup=true`). The bounded map rejects more than its requested total
-connection count and exits only after every accepted connection is retired.
+(`close_cleanup=true`). The bounded map rejects new connections while its
+active capacity is full and exits only after every accepted connection is
+retired.
+
+The server now separates its finite completion target from its active-connection
+capacity. The optional fifth server argument sets `max_active_connections`; the
+default keeps the old behavior by using the completion target for both values.
+`QUICZ_PROCESS_INTEROP_CONNECTIONS=3 QUICZ_PROCESS_INTEROP_MAX_ACTIVE_CONNECTIONS=1 QUICZ_PROCESS_INTEROP_MODE=rolling zig build run-tls13-process-interop`
+runs three independent TLS-owned echoes one after another through the
+concurrent lifecycle path. It proves that protected-close retirement releases
+the sole route/map slot before the next Initial is accepted. This is reusable
+bounded capacity evidence, not an unbounded production endpoint policy.
 `sequential` remains available as an explicit compatibility mode.
 
 The concurrent path reads the monotonic `awake` clock, waits only until

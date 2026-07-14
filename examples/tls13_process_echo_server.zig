@@ -1,6 +1,6 @@
 //! Pure-Zig TLS 1.3 QUIC echo server for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [connections] [sequential|concurrent|concurrent-retry]
+//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [completion_target] [sequential|concurrent|concurrent-retry|rolling] [max_active_connections]
 //! Concurrent mode accepts and routes the requested number of loopback
 //! connections through one UDP socket and one endpoint lifecycle owner. It
 //! waits on the lifecycle's earliest deadline and retires idle connections.
@@ -192,7 +192,8 @@ fn serveConcurrent(
     io: std.Io,
     socket: *std.Io.net.Socket,
     bind_address: std.Io.net.IpAddress,
-    connection_count: usize,
+    completion_target: usize,
+    max_active_connections: usize,
     retry_enabled: bool,
 ) !void {
     const alpn = [_][]const u8{"hq-interop"};
@@ -216,7 +217,7 @@ fn serveConcurrent(
     var accepted_count: usize = 0;
     var completed: usize = 0;
 
-    receive_loop: while (completed < connection_count) {
+    receive_loop: while (completed < completion_target) {
         const next_deadline = next: {
             const deadline_views = try collectDeadlineViews(allocator, &connections);
             defer allocator.free(deadline_views);
@@ -274,7 +275,7 @@ fn serveConcurrent(
                 const initial_info = try protection.peekProtectedLongPacketInfo(received.data);
                 if (initial_info.packet_type != .initial) return error.InvalidPacket;
                 if (retry_enabled) {
-                    if (connections.count() >= connection_count) {
+                    if (connections.count() >= max_active_connections) {
                         var pending = connections.valueIterator();
                         while (pending.next()) |managed| {
                             if (managed.*.retry_datagram_len == 0 or
@@ -286,7 +287,7 @@ fn serveConcurrent(
                         }
                         return error.ConnectionLimitReached;
                     }
-                } else if (accepted_count >= connection_count) return error.ConnectionLimitReached;
+                } else if (connections.count() >= max_active_connections) return error.ConnectionLimitReached;
 
                 const managed = try allocator.create(ManagedProcessConnection);
                 errdefer allocator.destroy(managed);
@@ -643,8 +644,8 @@ fn serveConcurrent(
             .dropped => {},
         }
     }
-    try require(accepted_count == connection_count);
-    std.debug.print("zig_process_server: accepted_connections={d} concurrent=true complete=true\n", .{accepted_count});
+    try require(accepted_count == completion_target);
+    std.debug.print("zig_process_server: accepted_connections={d} max_active_connections={d} concurrent=true complete=true\n", .{ accepted_count, max_active_connections });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -655,27 +656,33 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next();
     const bind_host = args.next() orelse return error.MissingArgs;
     const bind_port = try std.fmt.parseInt(u16, args.next() orelse return error.MissingArgs, 10);
-    const connection_count = if (args.next()) |raw_count|
+    const completion_target = if (args.next()) |raw_count|
         try std.fmt.parseInt(usize, raw_count, 10)
     else
         1;
-    if (connection_count == 0) return error.InvalidConnectionCount;
+    if (completion_target == 0) return error.InvalidConnectionCount;
     const mode = args.next() orelse "sequential";
+    const max_active_connections = if (args.next()) |raw_count|
+        try std.fmt.parseInt(usize, raw_count, 10)
+    else
+        completion_target;
+    if (max_active_connections == 0) return error.InvalidConnectionCount;
+    if (args.next() != null) return error.TooManyArgs;
     const bind_address = try std.Io.net.IpAddress.parseIp4(bind_host, bind_port);
     var socket = try bind_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
-    std.debug.print("zig_process_server: listening={s}:{d} connections={d} mode={s}\n", .{ bind_host, bind_port, connection_count, mode });
+    std.debug.print("zig_process_server: listening={s}:{d} completion_target={d} max_active_connections={d} mode={s}\n", .{ bind_host, bind_port, completion_target, max_active_connections, mode });
 
-    if (std.mem.eql(u8, mode, "concurrent")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, connection_count, false);
+    if (std.mem.eql(u8, mode, "concurrent") or std.mem.eql(u8, mode, "rolling")) {
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false);
     }
     if (std.mem.eql(u8, mode, "concurrent-retry")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, connection_count, true);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, true);
     }
     if (!std.mem.eql(u8, mode, "sequential")) return error.InvalidMode;
 
     const alpn = [_][]const u8{"hq-interop"};
-    for (0..connection_count) |connection_index| {
+    for (0..completion_target) |connection_index| {
         var connection = try Connection.init(allocator, .server, .{
             .initial_max_data = 8192,
             .initial_max_stream_data = 2048,
@@ -925,5 +932,5 @@ pub fn main(init: std.process.Init) !void {
 
         std.debug.print("zig_process_server: connection={d} handshake_done=true echo_bytes=5 close_cleanup=true\n", .{connection_index + 1});
     }
-    std.debug.print("zig_process_server: accepted_connections={d} complete=true\n", .{connection_count});
+    std.debug.print("zig_process_server: accepted_connections={d} complete=true\n", .{completion_target});
 }

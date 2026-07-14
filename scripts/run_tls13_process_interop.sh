@@ -4,17 +4,35 @@ set -eu
 host=127.0.0.1
 port=${QUICZ_PROCESS_INTEROP_PORT:-4443}
 connections=${QUICZ_PROCESS_INTEROP_CONNECTIONS:-2}
+max_active_connections=${QUICZ_PROCESS_INTEROP_MAX_ACTIVE_CONNECTIONS:-$connections}
 mode=${QUICZ_PROCESS_INTEROP_MODE:-concurrent}
 client_completion=${QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION:-close}
 retry=${QUICZ_PROCESS_INTEROP_RETRY:-false}
+case "$mode" in
+    sequential)
+        server_mode=sequential
+        client_parallel=false
+        ;;
+    concurrent)
+        server_mode=concurrent
+        client_parallel=true
+        ;;
+    rolling)
+        server_mode=concurrent
+        client_parallel=false
+        ;;
+    *)
+        echo "QUICZ_PROCESS_INTEROP_MODE must be sequential, concurrent, or rolling" >&2
+        exit 2
+        ;;
+esac
 case "$retry" in
     false|0)
-        server_mode=$mode
         client_retry=none
         ;;
     true|1)
-        if [ "$mode" != concurrent ]; then
-            echo "Retry process interop requires concurrent mode" >&2
+        if [ "$mode" = sequential ]; then
+            echo "Retry process interop requires concurrent or rolling mode" >&2
             exit 2
         fi
         server_mode=concurrent-retry
@@ -43,7 +61,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-./zig-out/bin/quicz-tls13-process-echo-server "$host" "$port" "$connections" "$server_mode" >"$server_log" 2>&1 &
+./zig-out/bin/quicz-tls13-process-echo-server "$host" "$port" "$connections" "$server_mode" "$max_active_connections" >"$server_log" 2>&1 &
 server_pid=$!
 
 ready=false
@@ -67,7 +85,7 @@ fi
 
 client_index=0
 while [ "$client_index" -lt "$connections" ]; do
-    if [ "$mode" = sequential ]; then
+    if [ "$client_parallel" = false ]; then
         ./zig-out/bin/quicz-tls13-process-echo-client "$host" "$port" "$client_index" "$client_completion" "$client_retry" >>"$client_log" 2>&1
     else
         ./zig-out/bin/quicz-tls13-process-echo-client "$host" "$port" "$client_index" "$client_completion" "$client_retry" >>"$client_log" 2>&1 &
@@ -75,7 +93,7 @@ while [ "$client_index" -lt "$connections" ]; do
     fi
     client_index=$((client_index + 1))
 done
-if [ "$mode" != sequential ]; then
+if [ "$client_parallel" = true ]; then
     for client_pid in $client_pids; do
         wait "$client_pid"
     done

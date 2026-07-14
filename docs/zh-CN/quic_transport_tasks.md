@@ -109,8 +109,16 @@ process。服务端在同一 UDP socket 上用一个 `EndpointConnectionLifecycl
 datagram，并在有界 handle map 中保留每条 caller-owned `Connection` 与 `Tls13Backend`。
 不同 tag 使 Initial DCID 和 SCID 不会冲突。每个 FIN-terminated echo 匹配后，客户端都会发送受保护的
 `CONNECTION_CLOSE`；服务端只处理该连接的 route、进入 draining，并在 close deadline
-只退役该 handle 的 route（`close_cleanup=true`）。有界 map 会拒绝超过请求总数的连接，且
+只退役该 handle 的 route（`close_cleanup=true`）。有界 map 在活跃容量已满时拒绝新连接，且
 仅在每条已接受连接都退役后退出。`sequential` 仍作为显式兼容模式保留。
+
+服务端现在把有限的 completion target 与同时活跃连接容量分开：可选的第五个 server
+参数 `max_active_connections` 指定活跃上限；省略时仍沿用旧行为，即 completion target
+同时也是容量上限。执行
+`QUICZ_PROCESS_INTEROP_CONNECTIONS=3 QUICZ_PROCESS_INTEROP_MAX_ACTIVE_CONNECTIONS=1 QUICZ_PROCESS_INTEROP_MODE=rolling zig build run-tls13-process-interop`
+会经同一个 concurrent lifecycle 路径依次运行三次 TLS-owned echo。它证明 protected close
+退役后会释放唯一的 route/map 槽位，下一条 Initial 才可被接收。这是可复用的有界容量证据，
+不是无上限的生产 endpoint policy；`sequential` 仍作为显式兼容模式保留。
 
 并发路径读取单调 `awake` clock，只等待
 `nextDeadlineAcrossConnections()` 选出的最早 lifecycle deadline，并在下一次 receive 前通过
