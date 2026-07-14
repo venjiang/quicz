@@ -104,6 +104,7 @@ const ManagedProcessConnection = struct {
     retry_datagram_len: usize = 0,
     retry_validated: bool = false,
     retry_accepted: bool = false,
+    request_received: bool = false,
     echoed: bool = false,
 
     fn clientScid(self: *const ManagedProcessConnection) []const u8 {
@@ -593,7 +594,10 @@ fn serveConcurrent(
                     var stream_buffer: [128]u8 = undefined;
                     if (try managed.connection.recvOnStream(0, &stream_buffer)) |echo_len| {
                         try require(std.mem.eql(u8, stream_buffer[0..echo_len], "hello"));
-                        try managed.connection.sendOnStream(0, stream_buffer[0..echo_len], false);
+                        managed.request_received = true;
+                    }
+                    if (managed.request_received and try managed.connection.recvStreamFinished(0)) {
+                        try managed.connection.sendOnStream(0, "hello", true);
                         var sent_packets: usize = 0;
                         while (sent_packets < max_initial_datagrams) : (sent_packets += 1) {
                             const echo_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
@@ -814,9 +818,10 @@ pub fn main(init: std.process.Init) !void {
         try require(connection.handshakeConfirmed());
 
         var stream_buffer: [128]u8 = undefined;
-        var echoed_len: ?usize = null;
+        var request_received = false;
+        var request_finished = false;
         var application_datagrams: usize = 0;
-        while (echoed_len == null and application_datagrams < max_initial_datagrams) : (application_datagrams += 1) {
+        while (!request_finished and application_datagrams < max_initial_datagrams) : (application_datagrams += 1) {
             const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
             const stream_route = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
                 server_handle,
@@ -826,11 +831,15 @@ pub fn main(init: std.process.Init) !void {
                 received.data,
             );
             try require(stream_route.connection_id == server_handle);
-            echoed_len = try connection.recvOnStream(0, &stream_buffer);
+            if (try connection.recvOnStream(0, &stream_buffer)) |received_len| {
+                try require(std.mem.eql(u8, stream_buffer[0..received_len], "hello"));
+                request_received = true;
+            }
+            request_finished = request_received and try connection.recvStreamFinished(0);
         }
-        const echo_len = echoed_len orelse return error.MissingStreamData;
-        try require(std.mem.eql(u8, stream_buffer[0..echo_len], "hello"));
-        try connection.sendOnStream(0, stream_buffer[0..echo_len], false);
+        if (!request_received) return error.MissingStreamData;
+        if (!request_finished) return error.MissingStreamFin;
+        try connection.sendOnStream(0, "hello", true);
 
         var sent_packets: usize = 0;
         while (sent_packets < 4) : (sent_packets += 1) {
@@ -902,7 +911,7 @@ pub fn main(init: std.process.Init) !void {
         try require(connection.connectionState() == .closed);
         try require(lifecycle.routeCount() == 0);
 
-        std.debug.print("zig_process_server: connection={d} handshake_done=true echo_bytes={d} close_cleanup=true\n", .{ connection_index + 1, echo_len });
+        std.debug.print("zig_process_server: connection={d} handshake_done=true echo_bytes=5 close_cleanup=true\n", .{connection_index + 1});
     }
     std.debug.print("zig_process_server: accepted_connections={d} complete=true\n", .{connection_count});
 }

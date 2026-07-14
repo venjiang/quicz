@@ -90,7 +90,7 @@ zig build run-initial-keys
   归属——完整握手 + STREAM echo + NEW_CONNECTION_ID + NEW_TOKEN +
   HANDSHAKE_DONE + PTO probe + recovery-timer service + protected close。
 - `run-tls13-process-interop`：启动独立的 Zig client/server 进程，验证并发的真实
-  UDP STREAM echo 与 lifecycle 清理。设置 `QUICZ_PROCESS_INTEROP_CONNECTIONS=1`
+  UDP 双向 STREAM FIN echo 与 lifecycle 清理。设置 `QUICZ_PROCESS_INTEROP_CONNECTIONS=1`
   可只验证一次 echo；设置 `QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=loss` 可运行有界
   socket-loop PTO recovery 探针；设置 `QUICZ_PROCESS_INTEROP_RETRY=true` 可运行路径绑定
   Retry 和 ClientHello 重传路径。
@@ -111,7 +111,7 @@ zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443 2 concurrent-retry
 ```
 
 两个客户端都要求 CA 与 SNI 输入并保持证书校验开启，协商 `hq-interop`；只有证书校验后的
-STREAM echo 成功才会输出 `handshake_done=true echo_bytes=5`。该 PEM 文件仅是
+双向 STREAM FIN echo 成功才会输出 `handshake_done=true echo_bytes=5`。该 PEM 文件仅是
 `localhost`/`127.0.0.1` 的本地测试信任锚，不是部署凭据或公共 CA。
 - `run-tls-openssl-backend-adapter`：OpenSSL-backed C TLS adapter 路径，覆盖本端
   transport parameters、第一段 TLS CRYPTO flight，以及 pair-transcript server

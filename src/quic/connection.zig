@@ -69948,6 +69948,7 @@ test "Tls13Backend + Connection: stream close releases MAX_STREAMS credit on TLS
     var read_buf: [8]u8 = undefined;
     const n = (try server.recvOnStream(stream_id, &read_buf)).?;
     try std.testing.expectEqual(@as(usize, 4), n);
+    try std.testing.expect(try server.recvStreamFinished(stream_id));
     try std.testing.expectEqual(@as(u64, 3), server.recv_max_streams_bidi);
 
     // Server emits the MAX_STREAMS update over 1-RTT.

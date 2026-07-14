@@ -57,6 +57,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if echoed != *b"hello" {
         return Err(format!("unexpected echo {echoed:?}").into());
     }
+    if recv.read_chunk(1, true).await?.is_some() {
+        return Err("expected echo stream FIN after hello".into());
+    }
 
     println!(
         "rust_quic_echo_client: handshake_done=true echo_bytes={}",

@@ -156,13 +156,14 @@ pub fn main(init: std.process.Init) !void {
     try socket.send(io, &server_address, client_finished);
 
     const stream_id = try connection.openStream();
-    try connection.sendOnStream(stream_id, "hello", false);
+    try connection.sendOnStream(stream_id, "hello", true);
     const stream_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(client_handle, &connection, 6, server_scid)) orelse return error.UnexpectedState;
     defer allocator.free(stream_packet);
     try socket.send(io, &server_address, stream_packet);
 
     var stream_buffer: [128]u8 = undefined;
     var got_echo = false;
+    var got_echo_fin = false;
     var dropped_responses: usize = 0;
     var received_packets: usize = 0;
     while (received_packets < 12) : (received_packets += 1) {
@@ -182,10 +183,14 @@ pub fn main(init: std.process.Init) !void {
         if (try connection.recvOnStream(stream_id, &stream_buffer)) |echoed_len| {
             try require(std.mem.eql(u8, stream_buffer[0..echoed_len], "hello"));
             got_echo = true;
+        }
+        if (got_echo and try connection.recvStreamFinished(stream_id)) {
+            got_echo_fin = true;
             break;
         }
     }
     try require(got_echo);
+    try require(got_echo_fin);
     if (drop_initial_responses) try require(dropped_responses == 4);
 
     if (leave_idle) {

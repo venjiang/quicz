@@ -62,6 +62,9 @@ func main() {
 	if _, err := stream.Write([]byte(*message)); err != nil {
 		log.Fatalf("write stream: %v", err)
 	}
+	if err := stream.Close(); err != nil {
+		log.Fatalf("finish stream: %v", err)
+	}
 
 	echoed := make([]byte, len(*message))
 	if _, err := io.ReadFull(stream, echoed); err != nil {
@@ -69,6 +72,10 @@ func main() {
 	}
 	if string(echoed) != *message {
 		log.Fatalf("unexpected echo %q", echoed)
+	}
+	var terminal [1]byte
+	if n, err := stream.Read(terminal[:]); n != 0 || err != io.EOF {
+		log.Fatalf("read echo FIN: bytes=%d err=%v", n, err)
 	}
 
 	fmt.Printf("go_quic_echo_client: handshake_done=true echo_bytes=%d\n", len(echoed))

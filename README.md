@@ -100,7 +100,7 @@ Common runnable examples:
   NEW_CONNECTION_ID + NEW_TOKEN + HANDSHAKE_DONE + PTO probe + recovery-timer
   service + protected close, all over loopback UDP with TLS-owned keys.
 - `run-tls13-process-interop`: starts separate Zig client and server processes
-  and proves concurrent real UDP STREAM echoes with lifecycle cleanup. Set
+  and proves concurrent real UDP bidirectional STREAM FIN echoes with lifecycle cleanup. Set
   `QUICZ_PROCESS_INTEROP_CONNECTIONS=1` for one echo, or set
   `QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=loss` to exercise the bounded
   socket-loop PTO recovery probe. Set `QUICZ_PROCESS_INTEROP_RETRY=true` to
@@ -124,7 +124,8 @@ Then run either verified external-language client in another terminal:
 
 Each client requires the CA and SNI inputs, keeps certificate verification
 enabled, negotiates `hq-interop`, and reports
-`handshake_done=true echo_bytes=5` only after a verified STREAM echo. The PEM
+`handshake_done=true echo_bytes=5` only after a verified bidirectional STREAM
+FIN echo. The PEM
 file is a local `localhost`/`127.0.0.1` test trust anchor, not a deployment
 credential or public CA.
 - `run-tls-openssl-backend-adapter`: OpenSSL-backed C TLS adapter path,
