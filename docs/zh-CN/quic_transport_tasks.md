@@ -104,7 +104,8 @@ bidirectional STREAM echo（`echo_bytes=5`）。服务端通过
 Original DCID 与 server SCID route，然后由 TLS 产生第一份响应。客户端在绑定 UDP
 socket 后注册自己的 SCID route。两端后续 Handshake 与 1-RTT STREAM 的收发都会使用
 这些已注册 route 和 lifecycle timer refresh。该可复现命令默认让服务端在同一 UDP socket
-上顺序接受两个测试连接；每个 echo 匹配后，客户端都会发送受保护的
+上顺序接受两个测试连接；脚本为每个 client process 指定不同 tag，使 Initial DCID 和 SCID
+不会与另一连接冲突。每个 echo 匹配后，客户端都会发送受保护的
 `CONNECTION_CLOSE`，服务端通过 route 处理它并进入 draining，在 close deadline 退役所有
 route（`close_cleanup=true`），随后认证新的 Initial，且不会复用上一连接或 TLS 状态。
 

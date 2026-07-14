@@ -1,6 +1,6 @@
 //! Pure-Zig TLS 1.3 QUIC client for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-client <server_host> <server_port>
+//! Usage: quicz-tls13-process-echo-client <server_host> <server_port> [connection_tag]
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -11,8 +11,8 @@ const Tls13Backend = quicz.tls13_backend.Tls13Backend;
 const endpoint = quicz.endpoint;
 const protection = quicz.protection;
 
-const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
-const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+const original_dcid_base = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+const client_scid_base = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
 
 fn recvTimeout() std.Io.Timeout {
     return .{ .duration = .{
@@ -33,6 +33,14 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next();
     const server_host = args.next() orelse return error.MissingArgs;
     const server_port = try std.fmt.parseInt(u16, args.next() orelse return error.MissingArgs, 10);
+    const connection_tag = if (args.next()) |raw_tag|
+        try std.fmt.parseInt(u8, raw_tag, 10)
+    else
+        0;
+    var original_dcid = original_dcid_base;
+    original_dcid[original_dcid.len - 1] = connection_tag;
+    var client_scid = client_scid_base;
+    client_scid[client_scid.len - 1] = connection_tag;
     const server_address = try std.Io.net.IpAddress.parseIp4(server_host, server_port);
     var local_address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
     var socket = try local_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
@@ -154,5 +162,5 @@ pub fn main(init: std.process.Init) !void {
     try require(connection.connectionState() == .closed);
     try require(lifecycle.routeCount() == 0);
 
-    std.debug.print("zig_process_client: handshake_done=true echo_bytes=5 close_cleanup=true\n", .{});
+    std.debug.print("zig_process_client: tag={d} handshake_done=true echo_bytes=5 close_cleanup=true\n", .{connection_tag});
 }

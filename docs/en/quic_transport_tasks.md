@@ -124,7 +124,9 @@ client registers its SCID route after binding its UDP socket. On both peers,
 the subsequent Handshake and 1-RTT STREAM receive/send steps use those
 registered routes and lifecycle timer refresh. By default the reproducible
 command makes the server accept two sequential test connections on one UDP
-socket. After each matching echo, the client sends a protected
+socket. The integration script gives each process client a distinct tag, so
+its Initial DCID and SCID do not collide with another connection. After each
+matching echo, the client sends a protected
 `CONNECTION_CLOSE`; the server routes it, enters draining, retires every route
 at the close deadline (`close_cleanup=true`), then accepts and authenticates a
 fresh Initial without reusing the preceding connection or TLS state.

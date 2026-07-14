@@ -40,7 +40,7 @@ fi
 
 client_index=0
 while [ "$client_index" -lt "$connections" ]; do
-    ./zig-out/bin/quicz-tls13-process-echo-client "$host" "$port" >>"$client_log"
+    ./zig-out/bin/quicz-tls13-process-echo-client "$host" "$port" "$client_index" >>"$client_log"
     client_index=$((client_index + 1))
 done
 wait "$server_pid"
