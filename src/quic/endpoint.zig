@@ -20,6 +20,8 @@ pub const RouteError = error{
     InvalidResetSize,
     BufferTooSmall,
     DuplicateConnectionId,
+    RouteCapacityReached,
+    StatelessResetTokenCapacityReached,
     UnknownConnectionId,
     AmbiguousConnectionId,
     ActiveMigrationDisabled,
@@ -573,6 +575,18 @@ pub const AddressValidationPolicyOptions = struct {
     max_replay_entries: usize = 1024,
 };
 
+/// Resource limits for one endpoint routing table.
+///
+/// Both limits are unbounded by default for backward compatibility. Long-lived
+/// endpoints should choose explicit values so untrusted connection IDs and
+/// retained stateless-reset tokens cannot grow routing storage indefinitely.
+pub const EndpointRouterOptions = struct {
+    /// Maximum active destination-CID routes.
+    max_routes: usize = std.math.maxInt(usize),
+    /// Maximum retained stateless-reset tokens, including tokens for retired CIDs.
+    max_stateless_reset_tokens: usize = std.math.maxInt(usize),
+};
+
 /// In-memory QUIC endpoint routing table.
 ///
 /// This table does not perform socket I/O and does not own `Connection`
@@ -582,12 +596,23 @@ pub const AddressValidationPolicyOptions = struct {
 /// datagrams by matching registered CID prefixes.
 pub const EndpointRouter = struct {
     allocator: std.mem.Allocator,
+    max_routes: usize,
+    max_stateless_reset_tokens: usize,
     routes: std.ArrayList(Route) = .empty,
     reset_tokens: std.ArrayList(StatelessResetRoute) = .empty,
 
     /// Create an empty endpoint routing table.
     pub fn init(allocator: std.mem.Allocator) EndpointRouter {
-        return .{ .allocator = allocator };
+        return initWithOptions(allocator, .{});
+    }
+
+    /// Create an endpoint routing table with explicit resource limits.
+    pub fn initWithOptions(allocator: std.mem.Allocator, options: EndpointRouterOptions) EndpointRouter {
+        return .{
+            .allocator = allocator,
+            .max_routes = options.max_routes,
+            .max_stateless_reset_tokens = options.max_stateless_reset_tokens,
+        };
     }
 
     /// Release all route storage.
@@ -625,7 +650,13 @@ pub const EndpointRouter = struct {
         }
         if (options.stateless_reset_token) |token| {
             try self.ensureStatelessResetTokenAllowed(cid, token);
+            if (self.findStatelessResetTokenIndex(cid) == null and
+                self.reset_tokens.items.len >= self.max_stateless_reset_tokens)
+            {
+                return error.StatelessResetTokenCapacityReached;
+            }
         }
+        if (self.routes.items.len >= self.max_routes) return error.RouteCapacityReached;
         self.routes.append(self.allocator, .{
             .connection_id = connection_id,
             .sequence_number = options.sequence_number,
@@ -708,6 +739,11 @@ pub const EndpointRouter = struct {
         const cid = try ConnectionId.init(destination_connection_id);
         if (cid.len == 0) return error.InvalidConnectionIdLength;
         try self.ensureStatelessResetTokenAllowed(cid, token);
+        if (self.findStatelessResetTokenIndex(cid) == null and
+            self.reset_tokens.items.len >= self.max_stateless_reset_tokens)
+        {
+            return error.StatelessResetTokenCapacityReached;
+        }
         try self.registerStatelessResetTokenForCid(cid, token);
     }
 
@@ -1987,6 +2023,57 @@ test "EndpointRouter rejects accepted Initial route registration without partial
     );
     try std.testing.expectEqual(@as(usize, 1), router.routeCount());
     try std.testing.expectEqual(@as(usize, 0), router.statelessResetTokenCount());
+}
+
+test "EndpointRouter rolls back accepted Initial routes when capacity is exhausted" {
+    const supported_versions = [_]packet.Version{.v1};
+    const path = testPath(50_000);
+    const initial = [_]u8{
+        0xc0, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0xaa, 0xbb, 0xcc, 0xdd,
+        0xee, 0xff, 0x00, 0x11, 0x04,
+        0x12, 0x34, 0x56, 0x78, 0x00,
+        0x02, 0x00, 0xaa,
+    };
+    const server_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    var router = EndpointRouter.initWithOptions(std.testing.allocator, .{
+        .max_routes = 1,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer router.deinit();
+
+    const accept = (try peekInitialAcceptDatagram(path, &initial, &supported_versions)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectError(
+        error.RouteCapacityReached,
+        router.registerAcceptedInitialConnectionIds(17, accept, &server_scid, .{}),
+    );
+    try std.testing.expectEqual(@as(usize, 0), router.routeCount());
+    try std.testing.expectError(error.UnknownConnectionId, router.routeConnectionId(accept.original_destination_connection_id, path));
+}
+
+test "EndpointRouter bounds retained stateless reset tokens without rejecting reuse" {
+    const path = testPath(50_000);
+    const cid0 = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
+    const cid1 = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3 };
+    const token0 = [_]u8{0x41} ** stateless_reset_token_len;
+    const token1 = [_]u8{0x42} ** stateless_reset_token_len;
+    var router = EndpointRouter.initWithOptions(std.testing.allocator, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer router.deinit();
+
+    try router.registerConnectionId(1, &cid0, path, .{ .stateless_reset_token = token0 });
+    try std.testing.expectEqual(@as(usize, 1), router.statelessResetTokenCount());
+    try std.testing.expect(try router.retireConnectionId(&cid0));
+    try router.registerConnectionId(2, &cid0, path, .{ .stateless_reset_token = token0 });
+    try std.testing.expectEqual(@as(usize, 1), router.statelessResetTokenCount());
+    try std.testing.expectError(
+        error.StatelessResetTokenCapacityReached,
+        router.registerConnectionId(3, &cid1, path, .{ .stateless_reset_token = token1 }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), router.routeCount());
+    try std.testing.expectError(error.UnknownConnectionId, router.routeConnectionId(&cid1, path));
 }
 
 test "Endpoint Initial accept ignores non-Initial and rejects malformed Initial headers" {

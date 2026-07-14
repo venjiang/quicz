@@ -295,8 +295,19 @@ pub const EndpointConnectionLifecycle = struct {
 
     /// Create an endpoint lifecycle owner with empty routes and timers.
     pub fn init(allocator: std.mem.Allocator) EndpointConnectionLifecycle {
+        return initWithRouterOptions(allocator, .{});
+    }
+
+    /// Create an endpoint lifecycle owner with explicit router resource limits.
+    ///
+    /// The caller still owns connection storage and decides admission policy;
+    /// these limits bound the lifecycle-owned route and stateless-reset tables.
+    pub fn initWithRouterOptions(
+        allocator: std.mem.Allocator,
+        router_options: endpoint.EndpointRouterOptions,
+    ) EndpointConnectionLifecycle {
         return .{
-            .router = endpoint.EndpointRouter.init(allocator),
+            .router = endpoint.EndpointRouter.initWithOptions(allocator, router_options),
             .recovery_timers = EndpointLossDetectionTimers.init(allocator),
             .ecn_paths = endpoint.EcnPathPolicy.init(allocator),
         };

@@ -120,6 +120,11 @@ datagram，并在有界 handle map 中保留每条 caller-owned `Connection` 与
 退役后会释放唯一的 route/map 槽位，下一条 Initial 才可被接收。这是可复用的有界容量证据，
 不是无上限的生产 endpoint policy；`sequential` 仍作为显式兼容模式保留。
 
+lifecycle 现在通过 `initWithRouterOptions()` 让调用方同时限制 active destination-CID
+route 与保留的 stateless-reset token。进程 server 以库层上限为每条活跃连接预留两个
+route 槽位。容量耗尽时，已接收 Initial 的第二个 CID 无法安装会回滚第一个 route；token
+容量耗尽时只拒绝新 token，不会扰动已有 route 或保留 token。
+
 并发路径读取单调 `awake` clock，只等待
 `nextDeadlineAcrossConnections()` 选出的最早 lifecycle deadline，并在下一次 receive 前通过
 lifecycle 的有界 output drain 处理该 deadline。本地进程服务端仅为这项聚焦证明通告 1000 ms

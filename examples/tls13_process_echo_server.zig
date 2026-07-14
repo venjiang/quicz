@@ -197,7 +197,11 @@ fn serveConcurrent(
     retry_enabled: bool,
 ) !void {
     const alpn = [_][]const u8{"hq-interop"};
-    var lifecycle = EndpointConnectionLifecycle.init(allocator);
+    const max_routes = std.math.mul(usize, max_active_connections, 2) catch return error.InvalidConnectionCount;
+    var lifecycle = EndpointConnectionLifecycle.initWithRouterOptions(allocator, .{
+        .max_routes = max_routes,
+        .max_stateless_reset_tokens = max_routes,
+    });
     defer lifecycle.deinit();
     var address_validation = endpoint.AddressValidationPolicy.init(allocator, retry_token_secret, .{});
     defer address_validation.deinit();

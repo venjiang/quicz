@@ -146,6 +146,13 @@ the sole route/map slot before the next Initial is accepted. This is reusable
 bounded capacity evidence, not an unbounded production endpoint policy.
 `sequential` remains available as an explicit compatibility mode.
 
+The lifecycle now exposes `initWithRouterOptions()` so callers can bound both
+active destination-CID routes and retained stateless-reset tokens. The process
+server derives two route slots per active connection from this library-level
+limit. A capacity-exhausted accepted Initial rolls back its first route when
+the second CID cannot be installed; reset-token capacity rejects a new token
+without disturbing existing routes or retained tokens.
+
 The concurrent path reads the monotonic `awake` clock, waits only until
 `nextDeadlineAcrossConnections()`'s earliest lifecycle deadline, and services
 that deadline with the lifecycle's bounded output drain before returning to
