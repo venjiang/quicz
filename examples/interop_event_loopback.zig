@@ -9,13 +9,15 @@
 //! deadline 驱动事件循环，能处理 PTO 超时恢复，逼近真实网络行为。
 //!
 //! 命令行：interop_event_loopback [TESTCASE]
-//!   TESTCASE: handshake（默认）/ transfer / loss
+//!   TESTCASE: handshake（默认）/ transfer / loss / congestion
 //!
 //! 场景（本地 loopback 自测）：
 //!   handshake - 事件循环驱动 TLS 1.3 握手到两端 handshakeConfirmed
 //!   transfer  - 握手后开 bidirectional stream，发数据收 echo
 //!   loss      - 丢弃首个 client 1-RTT STREAM 数据报，client PTO/retransmission
 //!               后的 packet-number gap 由 server 接收并 ACK，最终 transfer 成功
+//!   congestion - 丢弃首个 ack-eliciting 1-RTT PING，交付后续三个 PING，
+//!                用真实 sparse ACK 触发 client NewReno packet-threshold 降窗
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -36,12 +38,13 @@ const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
 const client_handle: u64 = 1;
 const server_handle: u64 = 2;
 
-const Testcase = enum { handshake, transfer, loss };
+const Testcase = enum { handshake, transfer, loss, congestion };
 
 fn parseTestcase(name: []const u8) Testcase {
     if (std.mem.eql(u8, name, "handshake")) return .handshake;
     if (std.mem.eql(u8, name, "transfer")) return .transfer;
     if (std.mem.eql(u8, name, "loss")) return .loss;
+    if (std.mem.eql(u8, name, "congestion")) return .congestion;
     return .handshake;
 }
 
@@ -86,8 +89,10 @@ const Endpoint = struct {
     /// 发包目标 DCID（对端 SCID）与本端 SCID。
     dcid: []const u8,
     scid: []const u8,
-    /// 丢弃下一份已轮询的 1-RTT 数据报，用于真实 packet-loss 场景。
-    drop_next_one_rtt_datagram: bool = false,
+    /// 丢弃下一份会增加 in-flight bytes 的 1-RTT 数据报。ACK-only 包不会
+    /// 满足此条件，因此受控 loss 始终针对可被 NewReno 确认的包。
+    drop_next_ack_eliciting_one_rtt_datagram: bool = false,
+    dropped_application_packet_number: ?u64 = null,
 };
 
 /// 按 header form 分发收包到 Initial/Handshake/1-RTT 路由路径。
@@ -203,6 +208,8 @@ fn driveAndPoll(ep: *Endpoint, io: std.Io, now: i64, secrets: protection.Initial
     // poll 1-RTT 输出（HANDSHAKE_DONE / ACK / STREAM / PTO probe / 重传）。
     i = 0;
     while (i < 4) : (i += 1) {
+        const packet_number = ep.conn.nextPacketNumber(.application);
+        const in_flight_before = ep.conn.bytesInFlight(.application);
         const dg = (ep.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
             ep.handle,
             ep.conn,
@@ -210,8 +217,10 @@ fn driveAndPoll(ep: *Endpoint, io: std.Io, now: i64, secrets: protection.Initial
             ep.dcid,
         ) catch null) orelse break;
         defer ep.allocator.free(dg);
-        if (ep.drop_next_one_rtt_datagram) {
-            ep.drop_next_one_rtt_datagram = false;
+        const ack_eliciting = ep.conn.bytesInFlight(.application) > in_flight_before;
+        if (ep.drop_next_ack_eliciting_one_rtt_datagram and ack_eliciting) {
+            ep.drop_next_ack_eliciting_one_rtt_datagram = false;
+            ep.dropped_application_packet_number = packet_number;
             continue;
         }
         try ep.socket.send(io, &ep.peer_socket.address, dg);
@@ -330,7 +339,9 @@ pub fn main(init: std.process.Init) !void {
         .initial_max_stream_data = 2048,
         .initial_max_streams_bidi = 8,
         .initial_rtt_ms = 100,
-        .max_datagram_size = 8192,
+        // Keep the RFC 9002 minimum window below the initial window so the
+        // congestion testcase can observe a genuine NewReno reduction.
+        .max_datagram_size = 1200,
     });
     defer client.deinit();
     var server = try Connection.init(allocator, .server, .{
@@ -338,7 +349,7 @@ pub fn main(init: std.process.Init) !void {
         .initial_max_stream_data = 2048,
         .initial_max_streams_bidi = 8,
         .initial_rtt_ms = 100,
-        .max_datagram_size = 8192,
+        .max_datagram_size = 1200,
     });
     defer server.deinit();
     // server 已验证 peer 地址（跳过 Retry，解除放大限制）。
@@ -444,12 +455,77 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (testcase == .congestion) {
+        // Keep the controlled loss exchange separate from handshake traffic.
+        now += 1;
+        const initial_cwnd = client.congestionWindow(.application);
+        try require(initial_cwnd > 0);
+
+        // Queue four independently ack-eliciting packets. The first is dropped
+        // after polling, while the other three traverse the real UDP sockets.
+        // Process all three at the server before it polls one sparse ACK. This
+        // removes ACK scheduling as a variable: its largest acknowledged packet
+        // is exactly three ahead of the dropped packet.
+        const first_ping_packet_number = client.nextPacketNumber(.application);
+        for (0..4) |_| try client.sendPing();
+        client_ep.drop_next_ack_eliciting_one_rtt_datagram = true;
+        try driveAndPoll(&client_ep, io, now, secrets, &scratch);
+
+        const dropped_packet_number = client_ep.dropped_application_packet_number orelse return error.UnexpectedState;
+        try require(dropped_packet_number == first_ping_packet_number);
+
+        var delivered_pings: usize = 0;
+        while (delivered_pings < 3) : (delivered_pings += 1) {
+            const received = try server_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+            processRecv(&server_ep, received.data, now);
+        }
+        try require(server.pendingAckLargest(.application) == first_ping_packet_number + 3);
+        try require(server.nextPeerPacketNumber(.application) == first_ping_packet_number + 4);
+        try driveAndPoll(&server_ep, io, now, secrets, &scratch);
+
+        // A completed handshake can leave a valid control packet in the client
+        // socket. Drain the bounded server output and require the sparse ACK to
+        // retire the three delivered PINGs before inspecting NewReno state.
+        var received_server_packets: usize = 0;
+        while (received_server_packets < 4 and client.sentPacketCount(.application) > 1) : (received_server_packets += 1) {
+            const datagram = try client_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+            const route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+                client_handle,
+                &client,
+                client_path,
+                now,
+                datagram.data,
+            );
+            try require(route.connection_id == client_handle);
+        }
+        // The sparse ACK both confirms packets 1..3 and classifies packet 0 as
+        // packet-threshold lost, so all four tracking records are retired.
+        try require(client.sentPacketCount(.application) == 0);
+
+        std.debug.print("newreno_trace dropped_packet={d} received_server_packets={d} sent_packets={d} in_flight={d} cwnd_before={d} cwnd_after={d}\n", .{
+            dropped_packet_number,
+            received_server_packets,
+            client.sentPacketCount(.application),
+            client.bytesInFlight(.application),
+            initial_cwnd,
+            client.congestionWindow(.application),
+        });
+        try require(client.congestionWindow(.application) < initial_cwnd);
+        try require(client.bytesInFlight(.application) == 0);
+        std.debug.print("newreno_loss=true dropped_packet={d} cwnd_before={d} cwnd_after={d}\n", .{
+            dropped_packet_number,
+            initial_cwnd,
+            client.congestionWindow(.application),
+        });
+        return;
+    }
+
     // ─── transfer / loss：开 bidirectional stream，发数据，收 echo ───
     const payload = "quicz-interop-event-loop-payload";
     const stream_id = try client.openStream();
     try client.sendOnStream(stream_id, payload, false);
     if (testcase == .loss) {
-        client_ep.drop_next_one_rtt_datagram = true;
+        client_ep.drop_next_ack_eliciting_one_rtt_datagram = true;
     }
     // poll + send client 的 STREAM datagram；loss 场景会实际丢弃第一份。
     try driveAndPoll(&client_ep, io, now, secrets, &scratch);
