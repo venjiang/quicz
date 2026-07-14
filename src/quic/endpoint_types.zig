@@ -193,6 +193,8 @@ pub const EndpointConnectionDeadlineKind = enum {
     close_timeout,
     /// QUIC loss/PTO recovery timer should be serviced at the deadline.
     recovery,
+    /// Retained 1-RTT keys should be discarded after their PTO retain window.
+    key_discard,
 };
 
 /// Earliest endpoint-visible deadline for one caller-owned connection.

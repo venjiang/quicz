@@ -9,7 +9,7 @@
 //! deadline 驱动事件循环，能处理 PTO 超时恢复，逼近真实网络行为。
 //!
 //! 命令行：interop_event_loopback [TESTCASE]
-//!   TESTCASE: handshake（默认）/ transfer / loss / congestion / persistent
+//!   TESTCASE: handshake（默认）/ transfer / loss / congestion / persistent / key-update
 //!
 //! 场景（本地 loopback 自测）：
 //!   handshake - 事件循环驱动 TLS 1.3 握手到两端 handshakeConfirmed
@@ -20,6 +20,8 @@
 //!                用真实 sparse ACK 触发 client NewReno packet-threshold 降窗
 //!   persistent - 建立 RTT sample 后丢弃三个跨 persistent-congestion duration 的
 //!                PING，仅交付第四个，用真实 ACK 将 client cwnd 降到 minimum
+//!   key-update - TLS-owned 1-RTT 两次 key phase 轮转，首轮 ACK 解锁下一轮，
+//!                endpoint key-discard deadline 到期后拒绝旧 key 重放包
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -39,8 +41,9 @@ const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
 const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
 const client_handle: u64 = 1;
 const server_handle: u64 = 2;
+const max_key_update_datagrams: usize = 64;
 
-const Testcase = enum { handshake, transfer, loss, congestion, persistent };
+const Testcase = enum { handshake, transfer, loss, congestion, persistent, key_update };
 
 fn parseTestcase(name: []const u8) Testcase {
     if (std.mem.eql(u8, name, "handshake")) return .handshake;
@@ -48,6 +51,7 @@ fn parseTestcase(name: []const u8) Testcase {
     if (std.mem.eql(u8, name, "loss")) return .loss;
     if (std.mem.eql(u8, name, "congestion")) return .congestion;
     if (std.mem.eql(u8, name, "persistent")) return .persistent;
+    if (std.mem.eql(u8, name, "key-update")) return .key_update;
     return .handshake;
 }
 
@@ -316,6 +320,35 @@ fn stepEventLoop(
             now.* = @max(now.*, target);
         }
     }
+}
+
+/// Drain already-ready control/retransmission output without advancing the
+/// virtual clock. Key-update probes call this before changing phase so their
+/// first protected packet is not hidden behind pre-existing handshake output.
+fn drainReadyOutput(
+    io: std.Io,
+    client: *Endpoint,
+    server: *Endpoint,
+    now: i64,
+    secrets: protection.InitialSecrets,
+    scratch: []u8,
+    recv_buf: []u8,
+) !void {
+    var round: usize = 0;
+    while (round < 64) : (round += 1) {
+        try driveAndPoll(client, io, now, secrets, scratch);
+        try driveAndPoll(server, io, now, secrets, scratch);
+        var received_any = false;
+        for ([_]*Endpoint{ client, server }) |ep| {
+            const received = ep.socket.receiveTimeout(io, recv_buf, shortTimeout()) catch null;
+            if (received) |datagram| {
+                processRecv(ep, datagram.data, now);
+                received_any = true;
+            }
+        }
+        if (!received_any) return;
+    }
+    return error.UnexpectedState;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -604,6 +637,154 @@ pub fn main(init: std.process.Init) !void {
             persistent_ack_packets,
             initial_cwnd,
             client.congestionWindow(.application),
+        });
+        return;
+    }
+
+    if (testcase == .key_update) {
+        // Handshake confirmation can leave an ACK or HANDSHAKE_DONE control
+        // packet queued. Deliver that bounded residual output before switching
+        // phase, so the retained datagram below is unambiguously the update
+        // PING rather than pre-update traffic.
+        try drainReadyOutput(io, &client_ep, &server_ep, now, secrets, &scratch, &recv_buf);
+
+        // The first update must be acknowledged before the local sender may
+        // rotate again. Keep its protected packet so the server can later
+        // prove that its expired previous generation rejects an old replay.
+        const initial_key_phase = client.localOneRttKeyPhase() orelse return error.UnexpectedState;
+        now += 1;
+        try client.initiateOneRttKeyUpdate();
+        try require(client.localOneRttKeyPhase().? != initial_key_phase);
+        try require(client.pendingOneRttKeyUpdateAckThreshold() != null);
+        try client.sendPing();
+        var stale_first_update: ?[]u8 = null;
+        defer if (stale_first_update) |datagram| allocator.free(datagram);
+        var first_update_packets: usize = 0;
+        while (first_update_packets < max_key_update_datagrams) : (first_update_packets += 1) {
+            const outgoing = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                client_handle,
+                &client,
+                now,
+                &server_scid,
+            )) orelse return error.UnexpectedState;
+            defer allocator.free(outgoing);
+            try client_socket.send(io, &server_socket.address, outgoing);
+
+            const received = try server_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+            _ = server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+                server_handle,
+                &server,
+                server_path,
+                now,
+                received.data,
+            ) catch |err| switch (err) {
+                error.InvalidPacket => continue,
+                else => return err,
+            };
+            if ((server.peerOneRttKeyUpdateCount() orelse return error.UnexpectedState) == 1) {
+                stale_first_update = try allocator.dupe(u8, outgoing);
+                break;
+            }
+        }
+        const stale_first_update_datagram = stale_first_update orelse return error.UnexpectedState;
+        try require((server.peerOneRttKeyUpdateCount() orelse return error.UnexpectedState) == 1);
+
+        var first_ack_packets: usize = 0;
+        while (client.pendingOneRttKeyUpdateAckThreshold() != null and first_ack_packets < max_key_update_datagrams) : (first_ack_packets += 1) {
+            const outgoing = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                server_handle,
+                &server,
+                now + 1,
+                &client_scid,
+            )) orelse return error.UnexpectedState;
+            defer allocator.free(outgoing);
+            try server_socket.send(io, &client_socket.address, outgoing);
+
+            const received = try client_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+            _ = client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+                client_handle,
+                &client,
+                client_path,
+                now + 1,
+                received.data,
+            ) catch |err| switch (err) {
+                error.InvalidPacket => continue,
+                else => return err,
+            };
+        }
+        try require(client.pendingOneRttKeyUpdateAckThreshold() == null);
+
+        try drainReadyOutput(io, &client_ep, &server_ep, now + 1, secrets, &scratch, &recv_buf);
+
+        // A second live TLS-owned update flips back to key phase zero and
+        // leaves generation one as the server's retained previous key.
+        now += 2;
+        try client.initiateOneRttKeyUpdate();
+        try require(client.localOneRttKeyPhase().? == initial_key_phase);
+        try client.sendPing();
+        var second_update_packets: usize = 0;
+        while ((server.peerOneRttKeyUpdateCount() orelse return error.UnexpectedState) < 2 and second_update_packets < max_key_update_datagrams) : (second_update_packets += 1) {
+            const outgoing = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                client_handle,
+                &client,
+                now,
+                &server_scid,
+            )) orelse return error.UnexpectedState;
+            defer allocator.free(outgoing);
+            try client_socket.send(io, &server_socket.address, outgoing);
+
+            const received = try server_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+            _ = server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+                server_handle,
+                &server,
+                server_path,
+                now,
+                received.data,
+            ) catch |err| switch (err) {
+                error.InvalidPacket => continue,
+                else => return err,
+            };
+        }
+        try require((server.peerOneRttKeyUpdateCount() orelse return error.UnexpectedState) == 2);
+        try require(server.peerOneRttRetainsKeyGeneration(1).?);
+
+        const key_discard_deadline = server.oneRttKeyDiscardDeadlineMillis() orelse return error.UnexpectedState;
+        const endpoint_deadline = server_lifecycle.nextDeadline(server_handle, &server) orelse return error.UnexpectedState;
+        try require(endpoint_deadline.kind == .key_discard);
+        try require(endpoint_deadline.deadline_millis == key_discard_deadline);
+        now = key_discard_deadline;
+        const discard_result = (try server_lifecycle.processDueDeadlineAndPollDatagram(
+            server_handle,
+            &server,
+            now,
+            &client_scid,
+            &server_scid,
+        )) orelse return error.UnexpectedState;
+        try require(discard_result.deadline.kind == .key_discard);
+        try require(discard_result.datagram == null);
+        try require(!server.peerOneRttRetainsKeyGeneration(1).?);
+
+        // The server must reject the first-update packet after its retained
+        // peer generation has expired, before duplicate packet-number handling
+        // could otherwise hide the obsolete protection key.
+        try client_socket.send(io, &server_socket.address, stale_first_update_datagram);
+        const stale_received = try server_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+        const stale_rejected = if (server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &server,
+            server_path,
+            now,
+            stale_received.data,
+        )) |_| false else |err| switch (err) {
+            error.InvalidPacket => true,
+            else => return err,
+        };
+        try require(stale_rejected);
+
+        std.debug.print("tls_key_update=true first_ack_gate_cleared=true second_update_count={d} discard_deadline={d} stale_rejected={}\n", .{
+            server.peerOneRttKeyUpdateCount().?,
+            key_discard_deadline,
+            stale_rejected,
         });
         return;
     }

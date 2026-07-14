@@ -283,6 +283,11 @@ pub const Aes128KeyPhaseState = struct {
         self.previous_discard_deadline_millis = deadline_millis;
     }
 
+    /// Return the deadline for discarding the retained previous generation.
+    pub fn previousDiscardDeadlineMillis(self: Aes128KeyPhaseState) ?i64 {
+        return self.previous_discard_deadline_millis;
+    }
+
     /// Drop the retained previous key once its discard deadline has passed.
     /// Returns true if the previous key was discarded by this call.
     pub fn discardExpiredPrevious(self: *Aes128KeyPhaseState, now_millis: i64) bool {

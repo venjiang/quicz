@@ -1599,6 +1599,37 @@ pub const Connection = struct {
         return self.local_one_rtt_key_update_ack_threshold;
     }
 
+    /// Return the earliest deadline for discarding retained 1-RTT keys.
+    ///
+    /// A QUIC endpoint must keep a previous key generation for one PTO after a
+    /// key-phase transition, then stop accepting packets protected with it.
+    /// Socket loops use this deadline together with idle, close, and recovery
+    /// deadlines so an otherwise idle connection still discards old keys.
+    pub fn oneRttKeyDiscardDeadlineMillis(self: Connection) ?i64 {
+        var deadline: ?i64 = null;
+        if (self.local_one_rtt_key_phase_state) |state| {
+            if (state.previousDiscardDeadlineMillis()) |candidate| deadline = candidate;
+        }
+        if (self.peer_one_rtt_key_phase_state) |state| {
+            if (state.previousDiscardDeadlineMillis()) |candidate| {
+                if (deadline == null or candidate < deadline.?) deadline = candidate;
+            }
+        }
+        return deadline;
+    }
+
+    /// Discard retained 1-RTT generations whose PTO retain window has elapsed.
+    pub fn discardExpiredOneRttKeys(self: *Connection, now_millis: i64) bool {
+        var discarded = false;
+        if (self.local_one_rtt_key_phase_state) |*state| {
+            discarded = state.discardExpiredPrevious(now_millis) or discarded;
+        }
+        if (self.peer_one_rtt_key_phase_state) |*state| {
+            discarded = state.discardExpiredPrevious(now_millis) or discarded;
+        }
+        return discarded;
+    }
+
     /// Advance the installed local 1-RTT send keys before the next packet.
     ///
     /// This models endpoint-owned key update initiation after handshake
@@ -2214,12 +2245,7 @@ pub const Connection = struct {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         // Drop retained previous-generation 1-RTT keys once their post-update
         // retain window expires (RFC 9001 §6.5).
-        if (self.local_one_rtt_key_phase_state) |*state| {
-            _ = state.discardExpiredPrevious(now_millis);
-        }
-        if (self.peer_one_rtt_key_phase_state) |*state| {
-            _ = state.discardExpiredPrevious(now_millis);
-        }
+        _ = self.discardExpiredOneRttKeys(now_millis);
         try self.expireLossDetectionTimeouts(now_millis);
         const spaces = [_]PacketNumberSpace{ .initial, .handshake, .application };
         var expired_space: ?PacketNumberSpace = null;
@@ -2937,6 +2963,7 @@ pub const Connection = struct {
     fn prepareInboundDatagramProcessing(self: *Connection, now_millis: i64) Error!bool {
         self.expireIdleState(now_millis);
         self.expireCloseState(now_millis);
+        _ = self.discardExpiredOneRttKeys(now_millis);
         if (self.state == .closing or self.state == .draining) return false;
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         return true;
@@ -60641,6 +60668,54 @@ test "installed one RTT key update requires handshake confirmation and ACK befor
     defer std.testing.allocator.free(second_ack);
     try client.processProtectedShortDatagramWithInstalledKeys(18, client_dcid.len, second_ack);
     try std.testing.expectEqual(@as(?u64, null), client.pendingOneRttKeyUpdateAckThreshold());
+}
+
+test "EndpointConnectionLifecycle wakes to discard expired retained 1 RTT keys" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const client_dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try client.initiateOneRttKeyUpdate();
+    try client.sendPing();
+    const update = (try client.pollProtectedShortDatagramWithInstalledKeys(100, &server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(update);
+    try server.processProtectedShortDatagramWithInstalledKeys(100, server_dcid.len, update);
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(0));
+
+    const discard_deadline = server.oneRttKeyDiscardDeadlineMillis() orelse return error.TestUnexpectedResult;
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    const next = lifecycle.nextDeadline(7, &server) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.key_discard, next.kind);
+    try std.testing.expectEqual(discard_deadline, next.deadline_millis);
+
+    const due = (try lifecycle.processDueDeadlineAndPollDatagram(
+        7,
+        &server,
+        discard_deadline,
+        &client_dcid,
+        &server_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.key_discard, due.deadline.kind);
+    try std.testing.expectEqual(@as(?[]u8, null), due.datagram);
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
 }
 
 test "installed one RTT key update ACK confirmation rolls back with invalid payload" {

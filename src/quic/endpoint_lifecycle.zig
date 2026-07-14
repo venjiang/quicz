@@ -7005,6 +7005,15 @@ pub const EndpointConnectionLifecycle = struct {
                     };
                 }
             }
+            if (connection.oneRttKeyDiscardDeadlineMillis()) |deadline| {
+                if (next == null or deadline < next.?.deadline_millis) {
+                    next = .{
+                        .connection_id = connection_id,
+                        .deadline_millis = deadline,
+                        .kind = .key_discard,
+                    };
+                }
+            }
         }
 
         return next;
@@ -10174,6 +10183,8 @@ pub const EndpointConnectionLifecycle = struct {
             now_millis,
         );
         if (result.close_retired != null) return result;
+
+        _ = connection.discardExpiredOneRttKeys(now_millis);
 
         result.recovery_serviced = try self.serviceRecoveryTimer(
             connection_id,
