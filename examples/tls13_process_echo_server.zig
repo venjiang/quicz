@@ -556,21 +556,26 @@ fn serveConcurrent(
                                 }
                             },
                             .handshake => {
-                                _ = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeys(
+                                var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
+                                var handshake_scratch: [8192]u8 = undefined;
+                                const handshake = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams(
                                     managed.handle,
                                     &managed.connection,
                                     path,
                                     now_millis,
                                     long_packet,
-                                );
-                                var scratch: [8192]u8 = undefined;
-                                _ = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
-                                    managed.handle,
-                                    &managed.connection,
-                                    .handshake,
                                     managed.backend.cryptoBackend(),
-                                    &scratch,
+                                    &handshake_scratch,
+                                    managed.clientScid(),
+                                    &managed.server_scid,
+                                    &handshake_outputs,
                                 );
+                                try require(handshake.route.connection_id == managed.handle);
+                                for (handshake_outputs[0..handshake.backend.drain.datagrams_written]) |output| {
+                                    defer allocator.free(output.datagram);
+                                    try socket.send(io, &managed.peer_address, output.datagram);
+                                }
+                                if (handshake.backend.drain.first_error) |drain_error| return drain_error;
                             },
                             else => return error.InvalidPacket,
                         }
