@@ -345,7 +345,8 @@ fn serveConcurrent(
                 }
 
                 var scratch: [8192]u8 = undefined;
-                const accepted = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram(
+                var initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
+                const accepted = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams(
                     handle,
                     &managed.connection,
                     now_millis,
@@ -355,6 +356,7 @@ fn serveConcurrent(
                     .{ .active_migration_disabled = true },
                     managed.backend.cryptoBackend(),
                     &scratch,
+                    &initial_outputs,
                 );
                 const peer_scid = managed.connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
                 if (peer_scid.len > managed.client_scid.len) return error.InvalidConnectionIdLength;
@@ -363,10 +365,11 @@ fn serveConcurrent(
                 try connections.adopt(handle, managed);
                 managed_adopted = true;
                 accepted_count += 1;
-                if (accepted.response_datagram) |datagram| {
-                    defer allocator.free(datagram);
-                    try socket.send(io, &managed.peer_address, datagram);
+                for (initial_outputs[0..accepted.drain.datagrams_written]) |output| {
+                    defer allocator.free(output.datagram);
+                    try socket.send(io, &managed.peer_address, output.datagram);
                 }
+                if (accepted.drain.first_error) |drain_error| return drain_error;
                 if (accepted.backend.handshake_keys_installed) {
                     _ = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
                         handle,
