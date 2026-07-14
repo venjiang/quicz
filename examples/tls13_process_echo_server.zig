@@ -165,24 +165,6 @@ fn serverPath(bind_address: std.Io.net.IpAddress, peer_address: std.Io.net.IpAdd
     };
 }
 
-fn collectDeadlineViews(
-    allocator: std.mem.Allocator,
-    connections: *ProcessConnectionRegistry,
-) ![]quicz.EndpointConnectionView {
-    return connections.deadlineViews(allocator);
-}
-
-fn collectPollViews(
-    allocator: std.mem.Allocator,
-    connections: *ProcessConnectionRegistry,
-) ![]quicz.EndpointConnectionPollView {
-    return connections.pollViews(
-        allocator,
-        ManagedProcessConnection.destinationConnectionId,
-        ManagedProcessConnection.sourceConnectionId,
-    );
-}
-
 fn destroyManagedConnection(
     connections: *ProcessConnectionRegistry,
     handle: u64,
@@ -218,24 +200,21 @@ fn serveConcurrent(
     var completed: usize = 0;
 
     receive_loop: while (completed < completion_target) {
-        const next_deadline = next: {
-            const deadline_views = try collectDeadlineViews(allocator, &connections);
-            defer allocator.free(deadline_views);
-            break :next lifecycle.nextDeadlineAcrossConnections(deadline_views);
-        };
+        const next_deadline = try connections.nextDeadline(&lifecycle, allocator);
         const received = socket.receiveTimeout(
             io,
             &receive_buffer,
             recvTimeoutForDeadline(io, if (next_deadline) |deadline| deadline.deadline_millis else null),
         ) catch |err| switch (err) {
             error.Timeout => {
-                const poll_views = try collectPollViews(allocator, &connections);
-                defer allocator.free(poll_views);
                 var due_datagrams: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
-                const due = (try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
-                    poll_views,
+                const due = (try connections.processDueDeadlineAndDrainDatagrams(
+                    &lifecycle,
+                    allocator,
                     nowMillis(io),
                     &due_datagrams,
+                    ManagedProcessConnection.destinationConnectionId,
+                    ManagedProcessConnection.sourceConnectionId,
                 )) orelse continue;
                 for (due_datagrams[0..due.drain.datagrams_written]) |output| {
                     defer allocator.free(output.datagram);

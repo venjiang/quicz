@@ -120,6 +120,43 @@ pub fn EndpointConnectionRegistry(
             }
             return views;
         }
+
+        /// Select the earliest lifecycle deadline from the records owned by this registry.
+        pub fn nextDeadline(
+            self: *Self,
+            lifecycle: *const root.EndpointConnectionLifecycle,
+            allocator: std.mem.Allocator,
+        ) !?root.EndpointConnectionDeadline {
+            const views = try self.deadlineViews(allocator);
+            defer allocator.free(views);
+            return lifecycle.nextDeadlineAcrossConnections(views);
+        }
+
+        /// Service the earliest due lifecycle deadline using this registry's records.
+        ///
+        /// The returned datagrams remain caller-owned and retain the existing
+        /// lifecycle allocation contract.
+        pub fn processDueDeadlineAndDrainDatagrams(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            allocator: std.mem.Allocator,
+            now_millis: i64,
+            out: []root.EndpointPolledDatagramResult,
+            comptime destination_connection_id: *const fn (*const Record) []const u8,
+            comptime source_connection_id: *const fn (*const Record) []const u8,
+        ) root.Error!?root.EndpointDueWorkDatagramDrainResult {
+            const views = try self.pollViews(
+                allocator,
+                destination_connection_id,
+                source_connection_id,
+            );
+            defer allocator.free(views);
+            return lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
+                views,
+                now_millis,
+                out,
+            );
+        }
     };
 }
 
@@ -169,6 +206,10 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
     try std.testing.expectEqual(@as(usize, 1), views.len);
     try std.testing.expectEqual(@as(u64, 7), views[0].connection_id);
     try std.testing.expect(views[0].connection == &record.connection);
+
+    var lifecycle = root.EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try std.testing.expect((try registry.nextDeadline(&lifecycle, std.testing.allocator)) == null);
 
     try registry.remove(7);
     try std.testing.expectEqual(@as(usize, 0), registry.count());
