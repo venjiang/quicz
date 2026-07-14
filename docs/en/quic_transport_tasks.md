@@ -224,35 +224,22 @@ Handshake/1-RTT traffic secrets, and exercising STREAM echo, RESET_STREAM,
 STOP_SENDING, NEW_CONNECTION_ID, NEW_TOKEN, HANDSHAKE_DONE, protected close,
 PTO probe, and recovery-timer service — all without mock keys or OpenSSL.
 
-The evidence does not yet prove external interop, controlled-clock loss/PTO
-lifecycle tests, or path validation / stateless reset / Retry on the TLS-owned
-UDP path. Until those exist, the RFC rows that depend on those properties
-remain `Partial` rather than `Done`.
+The focused evidence now includes certificate-verified external STREAM echo,
+TLS-owned PTO retransmission plus controlled NewReno and persistent-congestion
+responses, TLS-owned Retry resumption, stateless-reset handling, and
+PATH_CHALLENGE/PATH_RESPONSE route migration. These are deliberately scoped
+single-connection proofs. The RFC rows remain `Partial`: a production endpoint
+connection map, broader TLS-owned client/server policy, 0-RTT replay policy,
+and wider external behavior are still unproven.
 
 The main task remains the IETF QUIC transport implementation. The next-stage
-direction refines execution order and evidence requirements without replacing
-the transport task matrix below: prioritize the endpoint-owned live TLS
-handshake/socket loop first, then the embeddable socket API, minimal interop
-entry, and TLS/interop observability.
-
-The next implementation milestone is an endpoint-owned live TLS
-handshake/socket loop. The minimum proof for that milestone is:
-
-- a pure-Zig TLS 1.3 backend (`Tls13Backend` in `src/quic/tls13_backend.zig`)
-  that exposes QUIC transport-parameter and traffic-secret hooks through the
-  `CryptoBackend` interface (the OpenSSL C adapter is the deprecated path);
-- real TLS backend integration that exports and consumes QUIC transport
-  parameters through the handshake transcript;
-- TLS-owned Initial, Handshake, 0-RTT when enabled, and 1-RTT traffic-secret
-  installation without caller-provided mock keys on the happy path;
-- a local UDP client/server stream echo that drives connection accept,
-  handshake confirmation, stream data delivery, ACK cleanup, loss/PTO timer
-  service, key discard, close, and route cleanup through one lifecycle owner;
-- adapter evidence from `run-tls-backend-adapter`, `run-tls-c-abi-adapter`,
-  `run-tls-openssl-probe`, and `run-tls-openssl-backend-adapter`, plus
-  `zig build test --summary all`;
-- an interop note against at least one external QUIC implementation or a
-  documented blocker explaining why interop cannot yet be run.
+priority is a production endpoint-owned connection map and event loop, while
+keeping the established pure-Zig TLS path and external interop evidence intact.
+The remaining acceptance criteria are concurrent connection ownership on one
+UDP socket, lifecycle-owned receive/send/timer/close routing for every active
+connection, bounded resource and route retirement, and a reproducible
+multi-connection smoke test. This is a production-ownership boundary, not a
+reason to weaken the existing single-connection evidence.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first

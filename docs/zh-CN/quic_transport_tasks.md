@@ -186,30 +186,18 @@ TLS 1.3 握手（ClientHello → ServerHello flight → client Finished →
 HANDSHAKE_DONE、protected close、PTO probe 与 recovery-timer service——全程无 mock
 密钥、无 OpenSSL。
 
-现有证据尚不能证明外部互通、controlled-clock loss/PTO lifecycle 测试、或在
-TLS-owned UDP 路径上的 path validation / stateless reset / Retry。在这些能力存在前，
-依赖这些性质的 RFC 行仍保持 `Partial`。
+现有聚焦证据已经包含证书校验的外部 STREAM echo、TLS-owned PTO 重传与受控的
+NewReno/persistent-congestion 响应、TLS-owned Retry 重试、stateless reset 处理，以及
+PATH_CHALLENGE/PATH_RESPONSE 驱动的 route migration。这些刻意限定为单连接证明；
+RFC 行仍保持 `Partial`，因为生产级 endpoint connection map、更广泛的 TLS-owned
+client/server policy、0-RTT replay policy 和更宽的外部行为仍未证明。
 
-主线任务仍是 IETF QUIC transport 实现。下一阶段的方向调整只收敛执行顺序和证据要求，
-不替代下方 transport 任务矩阵：优先推进 endpoint-owned live TLS handshake/socket
-loop，再推进可嵌入 socket API、最小互通入口和 TLS/互通可观测性。
-
-下一实现里程碑是 endpoint-owned live TLS handshake/socket loop。该里程碑的最小证明包括：
-
-- 纯 Zig TLS 1.3 后端（`src/quic/tls13_backend.zig` 的 `Tls13Backend`），通过
-  `CryptoBackend` 接口暴露 QUIC transport-parameter 和 traffic-secret hook
-  （OpenSSL C adapter 为废弃路径）；
-- 真实 TLS backend 集成，通过 handshake transcript 导出并消费 QUIC transport
-  parameters；
-- happy path 上由 TLS 持有 Initial、Handshake、启用时的 0-RTT 和 1-RTT
-  traffic-secret 安装，而不是调用方提供 mock key；
-- 本地 UDP client/server stream echo 通过同一个 lifecycle owner 驱动 connection
-  accept、handshake confirmation、stream data delivery、ACK cleanup、loss/PTO
-  timer service、key discard、close 和 route cleanup；
-- `run-tls-backend-adapter`、`run-tls-c-abi-adapter`、`run-tls-openssl-probe` 和
-  `run-tls-openssl-backend-adapter` 等 adapter 证据，以及
-  `zig build test --summary all`；
-- 至少一个外部 QUIC 实现的互通记录，或说明当前无法运行互通的 blocker。
+主线任务仍是 IETF QUIC transport 实现。下一阶段优先推进生产级
+endpoint-owned connection map 和 event loop，同时保持已验证的纯 Zig TLS 路径与
+外部互通证据。剩余验收条件是：一条 UDP socket 上的并发 connection ownership、每个
+active connection 由 lifecycle 统一完成 receive/send/timer/close routing、有界资源与
+route retirement，以及可复现的多连接 smoke test。这是生产 ownership 边界，不得因此
+削弱已建立的单连接证据。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、
