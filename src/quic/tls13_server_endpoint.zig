@@ -46,6 +46,26 @@ pub fn Tls13ServerEndpoint(
             path: endpoint.Udp4Tuple,
         };
 
+        /// Endpoint-owned protected datagram paired with its committed UDP route.
+        pub const DatagramPathResult = struct {
+            /// Endpoint-owned connection handle that produced `datagram`.
+            connection_id: u64,
+            /// Protected datagram emitted by the selected record.
+            datagram: []u8,
+            /// Current committed UDP tuple for this record's local route CID.
+            path: endpoint.Udp4Tuple,
+        };
+
+        /// Due-work result with every drained datagram paired to a route.
+        pub const DueWorkDatagramPathDrainResult = struct {
+            /// Deadline that was due when this pending-work pass started.
+            deadline: root.EndpointConnectionDeadline,
+            /// Pending-work actions applied for the due deadline.
+            pending_work: root.EndpointPendingWorkResult,
+            /// Bounded output drain after a due recovery timer, if any.
+            drain: root.EndpointDatagramDrainResult,
+        };
+
         lifecycle: EndpointConnectionLifecycle,
         records: Registry,
 
@@ -154,6 +174,91 @@ pub fn Tls13ServerEndpoint(
                 destination_connection_id_of,
                 source_connection_id_of,
             );
+        }
+
+        /// Service the earliest due deadline and pair output with route paths.
+        ///
+        /// This socket-facing form keeps recovery service and packet generation
+        /// under the lifecycle owner, while also resolving the current endpoint
+        /// route before output is emitted. Each initialized output slot is owned
+        /// by the caller and must be freed even when `drain.first_error` is set.
+        pub fn processDueDeadlineAndDrainDatagramsWithRoutePath(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            now_millis: i64,
+            out: []DatagramPathResult,
+        ) (root.Error || endpoint.RouteError)!?DueWorkDatagramPathDrainResult {
+            const deadline = (try self.nextDeadline(allocator)) orelse return null;
+            if (deadline.deadline_millis > now_millis) return null;
+            const record = self.records.get(deadline.connection_id) orelse return error.UnknownConnectionId;
+            const connection = connection_of(record);
+            const source_connection_id = source_connection_id_of(record);
+            const path = try self.lifecycle.currentRoutePath(source_connection_id);
+
+            const pending_work = if (deadline.installedKeyPollOptions(
+                destination_connection_id_of(record),
+                source_connection_id,
+            )) |options| pending: {
+                const pending = try self.lifecycle.processPendingWork(
+                    deadline.connection_id,
+                    connection,
+                    now_millis,
+                );
+                const serviced = pending.recovery_serviced orelse break :pending pending;
+                if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
+                return .{
+                    .deadline = deadline,
+                    .pending_work = pending,
+                    .drain = self.drainDatagramsWithRoutePath(
+                        deadline.connection_id,
+                        connection,
+                        now_millis,
+                        options,
+                        path,
+                        out,
+                    ),
+                };
+            } else try self.lifecycle.processPendingWork(
+                deadline.connection_id,
+                connection,
+                now_millis,
+            );
+
+            return .{
+                .deadline = deadline,
+                .pending_work = pending_work,
+                .drain = .{},
+            };
+        }
+
+        fn drainDatagramsWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            connection: *Connection,
+            now_millis: i64,
+            options: root.EndpointPollInstalledKeyDatagramOptions,
+            path: endpoint.Udp4Tuple,
+            out: []DatagramPathResult,
+        ) root.EndpointDatagramDrainResult {
+            var result = root.EndpointDatagramDrainResult{};
+            while (result.datagrams_written < out.len) {
+                const datagram = self.lifecycle.pollDatagram(
+                    connection_id,
+                    connection,
+                    now_millis,
+                    options,
+                ) catch |err| {
+                    result.first_error = err;
+                    return result;
+                };
+                out[result.datagrams_written] = if (datagram) |bytes| .{
+                    .connection_id = connection_id,
+                    .datagram = bytes,
+                    .path = path,
+                } else return result;
+                result.datagrams_written += 1;
+            }
+            return result;
         }
 
         /// Route and process one protected installed-key datagram.
@@ -1163,6 +1268,142 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
             },
         ),
     );
+}
+
+test "Tls13ServerEndpoint pairs due recovery output with committed route path" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: root.CryptoBackend,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "initial";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 1,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer endpoint_owner.deinit();
+
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_444),
+    };
+    const server_dcid = "local";
+    const secrets = try protection.deriveInitialSecrets(.v1, "endpoint-due");
+    var empty_backend = EmptyBackend{};
+
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer {
+        if (record_owned) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = 82,
+        .connection = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 }),
+        .backend = empty_backend.backend(),
+    };
+    record_initialized = true;
+    try record.connection.validatePeerAddress();
+    try record.connection.confirmHandshake();
+    try record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, old_path, .{});
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(record.handle);
+    try endpoint_owner.records.adopt(record.handle, record);
+    record_owned = false;
+
+    try record.connection.sendPing();
+    const first = (try endpoint_owner.pollOneRttDatagram(record.handle, 10)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    const deadline = (try endpoint_owner.nextDeadline(std.testing.allocator)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, deadline.kind);
+    try std.testing.expectEqual(record.handle, deadline.connection_id);
+
+    _ = try endpoint_owner.lifecycle.updateRoutePathFromValidatedDatagramAndResetSpinBit(
+        server_dcid,
+        new_path,
+        &record.connection,
+    );
+
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    var due_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        deadline.deadline_millis,
+        &due_out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, due.deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, due.deadline.kind);
+    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, serviced.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.application, serviced.timer.space);
+    try std.testing.expectEqual(@as(usize, 1), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), due.drain.first_error);
+    defer std.testing.allocator.free(due_out[0].datagram);
+    try std.testing.expectEqual(record.handle, due_out[0].connection_id);
+    try std.testing.expect(due_out[0].path.eql(new_path));
+    try std.testing.expect(due_out[0].datagram.len != 0);
 }
 
 test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
