@@ -97,6 +97,16 @@ pub fn Tls13ServerEndpoint(
             drain: root.EndpointDatagramDrainResult,
         };
 
+        /// Result from draining active-record output with committed route paths.
+        pub const DatagramPathDrainResult = struct {
+            /// Number of initialized entries written to the caller-provided output slice.
+            datagrams_written: usize = 0,
+            /// First polling error observed after any earlier entries were written.
+            first_error: ?root.Error = null,
+            /// First route lookup error observed after any earlier entries were written.
+            first_route_error: ?endpoint.RouteError = null,
+        };
+
         /// Accepted Initial output paired with the committed UDP route.
         pub const AcceptedInitialDatagramDrainPathResult = struct {
             accepted: root.EndpointAcceptedInitialCryptoBackendDatagramDrainResult,
@@ -822,6 +832,48 @@ pub fn Tls13ServerEndpoint(
                 .datagram = polled.datagram,
                 .path = try self.currentRecordRoutePath(record),
             };
+        }
+
+        /// Drain installed-key datagrams across active endpoint-owned records.
+        ///
+        /// Each initialized output slot owns its datagram. If `first_error` or
+        /// `first_route_error` is set, the caller still owns the first
+        /// `datagrams_written` entries.
+        pub fn drainDatagramsAcrossRecordsWithRoutePath(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+            out: []DatagramPathResult,
+        ) DatagramPathDrainResult {
+            var result = DatagramPathDrainResult{};
+            while (result.datagrams_written < out.len) {
+                const polled = self.records.pollDatagramAcrossConnections(
+                    &self.lifecycle,
+                    allocator,
+                    now_millis,
+                    space,
+                    destination_connection_id_of,
+                    source_connection_id_of,
+                ) catch |err| {
+                    result.first_error = err;
+                    return result;
+                };
+                const datagram = polled orelse return result;
+                const record = self.records.get(datagram.connection_id) orelse unreachable;
+                const path = self.currentRecordRoutePath(record) catch |err| {
+                    connection_of(record).allocator.free(datagram.datagram);
+                    result.first_route_error = err;
+                    return result;
+                };
+                out[result.datagrams_written] = .{
+                    .connection_id = datagram.connection_id,
+                    .datagram = datagram.datagram,
+                    .path = path,
+                };
+                result.datagrams_written += 1;
+            }
+            return result;
         }
 
         /// Queue a transport CONNECTION_CLOSE and return it with the route.
@@ -3197,6 +3249,43 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
         11,
         .application,
     )) == null);
+
+    try second_record.connection.sendPing();
+    var zero_drain_out: [0]TestEndpoint.DatagramPathResult = .{};
+    const zero_drain = endpoint_owner.drainDatagramsAcrossRecordsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        12,
+        .application,
+        &zero_drain_out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), zero_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), zero_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), zero_drain.first_route_error);
+
+    var drain_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const drain = endpoint_owner.drainDatagramsAcrossRecordsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        13,
+        .application,
+        &drain_out,
+    );
+    try std.testing.expectEqual(@as(usize, 1), drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), drain.first_route_error);
+    defer std.testing.allocator.free(drain_out[0].datagram);
+    try std.testing.expectEqual(second_record.handle, drain_out[0].connection_id);
+    try std.testing.expect(drain_out[0].path.eql(second_path));
+    try std.testing.expect(drain_out[0].datagram.len != 0);
+
+    const empty_drain = endpoint_owner.drainDatagramsAcrossRecordsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        14,
+        .application,
+        &drain_out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), empty_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), empty_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), empty_drain.first_route_error);
 }
 
 test "Tls13ServerEndpoint pairs Initial due recovery output with committed route path" {
