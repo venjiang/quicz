@@ -150,7 +150,10 @@ pub const Tls13ClientEndpoint = struct {
             if (err != error.InvalidPacket) return err;
             return .{
                 .receive_error = error.InvalidPacket,
-                .outbound_application = try self.pollApplicationDatagramWithRoutePath(now_millis),
+                .outbound_application = if (self.transport.connection.connectionState() == .closing)
+                    try self.pollApplicationDatagramWithRoutePath(now_millis)
+                else
+                    null,
             };
         };
         const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
@@ -632,6 +635,61 @@ test "Tls13ClientEndpoint receive returns route-bound close on frame error" {
     defer std.testing.allocator.free(close_datagram.datagram);
     try std.testing.expect(close_datagram.path.eql(new_path));
     try std.testing.expect(close_datagram.datagram.len != 0);
+}
+
+test "Tls13ClientEndpoint receive does not drain queued application output on route mismatch" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41 };
+    const decoy_dcid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        17,
+        path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+    try client.lifecycle.registerConnectionId(99, &decoy_dcid, path, .{ .active_migration_disabled = false });
+
+    const traffic_secret = [_]u8{0x45} ** protection.traffic_secret_len;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4 };
+    const reset_token = [_]u8{0x56} ** 16;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+    try client.transport.connection.sendPing();
+
+    const decoy_datagram = [_]u8{ 0x40, 0xd1, 0xd2, 0xd3, 0xd4, 0x00 };
+    var scratch: [128]u8 = undefined;
+    const received = try client.receiveWithRoutePathOrClose(10, &scratch, &decoy_datagram);
+    try std.testing.expect(received.receive == null);
+    try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), received.receive_error);
+    try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
+    try std.testing.expect(received.outbound_application == null);
+
+    const queued = (try client.pollApplicationDatagramWithRoutePath(11)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(queued.datagram);
+    try std.testing.expect(queued.path.eql(path));
+    try std.testing.expect(queued.datagram.len != 0);
 }
 
 test "Tls13ClientEndpoint services due recovery with committed route output" {

@@ -71,6 +71,12 @@ bounded route-bound output drain; Retry follow-up and routed Handshake input use
 the same record boundary. This is
 incremental endpoint ownership rather than a complete production event loop.
 
+Client endpoint close-on-error output is isolated from unrelated receive
+errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
+route-bound application datagram after `InvalidPacket` if the connection has
+entered `closing`. Route mismatches and other non-closing invalid inputs keep
+already queued application output pending for normal polling.
+
 ### Packet-number reordering evidence
 
 Protected long-header and 1-RTT short-packet receive paths retain a bounded

@@ -64,6 +64,11 @@ Handshake backend output 和有界 route-bound drain；Retry follow-up 与已路
 Handshake input 也使用同一 record boundary。这只是
 endpoint ownership 的增量证据，并非完整生产级 event loop。
 
+Client endpoint 的错误路径不会再把无关待发送应用包误当作 close-on-error 输出：
+`Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入
+`closing` 时才取 route-bound application datagram。route mismatch 和其他未进入 closing
+的无效输入会保留已排队 application output，等待正常 poll。
+
 ### Packet number 重排证据
 
 受保护 long-header 与 1-RTT short-packet 接收路径都会保留有界的已收 packet
