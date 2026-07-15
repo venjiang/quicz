@@ -1478,6 +1478,7 @@ pub const Tls13Handshake = struct {
         var pos: usize = 4;
         // legacy_version (0x0303)
         if (pos + 2 > msg.len) return error.DecodeError;
+        if (readU16(msg[pos..]) != legacy_version_tls_1_2) return error.UnsupportedVersion;
         pos += 2;
         // random (32 bytes; HelloRetryRequest sentinel is not handled yet)
         if (pos + 32 > msg.len) return error.DecodeError;
@@ -1486,6 +1487,7 @@ pub const Tls13Handshake = struct {
         if (pos + 1 > msg.len) return error.DecodeError;
         const sid_len = msg[pos];
         pos += 1;
+        if (sid_len != 0) return error.DecodeError;
         if (pos + sid_len > msg.len) return error.DecodeError;
         pos += sid_len;
         // cipher_suite (must be TLS_AES_128_GCM_SHA256)
@@ -1494,6 +1496,7 @@ pub const Tls13Handshake = struct {
         pos += 2;
         // legacy_compression_method (null)
         if (pos + 1 > msg.len) return error.DecodeError;
+        if (msg[pos] != 0) return error.DecodeError;
         pos += 1;
         // extensions
         if (pos + 2 > msg.len) return error.DecodeError;
@@ -2590,6 +2593,63 @@ test "Tls13Handshake client rejects ServerHello with wrong cipher suite" {
 
     var sh_buf: [128]u8 = undefined;
     const sh_len = buildServerHello(&sh_buf, server_public, 0x1302, true, true);
+    hs.provideData(sh_buf[0..sh_len]);
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects ServerHello invalid legacy_version" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    writeU16(sh_buf[4..][0..2], 0x0301);
+    hs.provideData(sh_buf[0..sh_len]);
+
+    try std.testing.expectError(error.UnsupportedVersion, hs.step());
+}
+
+test "Tls13Handshake client rejects non-empty ServerHello legacy_session_id_echo" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    const sid_len_offset = 4 + 2 + 32;
+    const insert_offset = sid_len_offset + 1;
+    std.mem.copyBackwards(u8, sh_buf[insert_offset + 1 .. sh_len + 1], sh_buf[insert_offset..sh_len]);
+    sh_buf[sid_len_offset] = 1;
+    sh_buf[insert_offset] = 0xaa;
+    const new_body_len = sh_len + 1 - 4;
+    sh_buf[1] = @intCast((new_body_len >> 16) & 0xFF);
+    sh_buf[2] = @intCast((new_body_len >> 8) & 0xFF);
+    sh_buf[3] = @intCast(new_body_len & 0xFF);
+    hs.provideData(sh_buf[0 .. sh_len + 1]);
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects non-null ServerHello compression method" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    const compression_method_offset = 4 + 2 + 32 + 1 + 2;
+    sh_buf[compression_method_offset] = 1;
     hs.provideData(sh_buf[0..sh_len]);
 
     try std.testing.expectError(error.DecodeError, hs.step());
