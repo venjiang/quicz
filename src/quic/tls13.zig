@@ -768,6 +768,19 @@ test "Tls13Handshake ClientHello includes pre_shared_key when has_psk" {
     try std.testing.expect(found_early_data);
 }
 
+test "Tls13Handshake client rejects ClientHello PSK output overflow" {
+    var long_name: [12250]u8 = undefined;
+    @memset(&long_name, 'a');
+    const psk = [_]u8{0xab} ** secret_len;
+    var hs = Tls13Handshake.initClientWithPsk(.{
+        .server_name = &long_name,
+    }, &[_]u8{}, psk);
+    @memset(&hs.session_ticket, 0xcc);
+    hs.session_ticket_len = hs.session_ticket.len;
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
 test "Tls13Handshake server parses client pre_shared_key and early_data extensions" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -1498,12 +1511,14 @@ pub const Tls13Handshake = struct {
 
         // QUIC transport parameters
         if (self.tp_encoded_len > 0) {
+            if (pos + 4 + self.tp_encoded_len > buf.len) return error.DecodeError;
             pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.quic_transport_parameters), self.tp_encoded_len);
             @memcpy(buf[pos..][0..self.tp_encoded_len], self.tp_encoded[0..self.tp_encoded_len]);
             pos += self.tp_encoded_len;
         }
 
         // psk_key_exchange_modes
+        if (pos + 4 + 2 > buf.len) return error.DecodeError;
         pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.psk_key_exchange_modes), 2);
         buf[pos] = 1;
         pos += 1;
@@ -1513,6 +1528,7 @@ pub const Tls13Handshake = struct {
         // early_data (RFC 8446 §4.2.10) -- empty extension signals 0-RTT
         // intent. Must precede pre_shared_key.
         if (self.has_psk) {
+            if (pos + 4 > buf.len) return error.DecodeError;
             pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.early_data), 0);
         }
 
@@ -1521,11 +1537,14 @@ pub const Tls13Handshake = struct {
         // ClientHello transcript truncated at the binder list.
         if (self.has_psk and self.session_ticket_len > 0) {
             const ticket_len = self.session_ticket_len;
-            const identity_len = 2 + ticket_len + 4;
+            if (ticket_len > self.session_ticket.len) return error.DecodeError;
+            const identity_len = std.math.add(usize, 2 + 4, ticket_len) catch return error.DecodeError;
             const identities_len = identity_len;
             const binder_len: usize = 32;
             const binders_len = 1 + binder_len;
             const psk_ext_data_len = 2 + identities_len + 2 + binders_len;
+            if (psk_ext_data_len > std.math.maxInt(u16)) return error.DecodeError;
+            if (pos + 4 + psk_ext_data_len > buf.len) return error.DecodeError;
             pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.pre_shared_key), psk_ext_data_len);
             // identities
             writeU16(buf[pos..], @intCast(identities_len));
