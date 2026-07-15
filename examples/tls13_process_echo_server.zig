@@ -371,23 +371,26 @@ fn serveConcurrent(
                 }
                 if (accepted.drain.first_error) |drain_error| return drain_error;
                 if (accepted.backend.handshake_keys_installed) {
-                    _ = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+                    var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
+                    const handshake = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
                         handle,
                         &managed.connection,
                         .handshake,
                         managed.backend.cryptoBackend(),
                         &scratch,
-                    );
-                    if (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
-                        handle,
-                        &managed.connection,
                         now_millis,
-                        managed.clientScid(),
-                        &managed.server_scid,
-                    )) |datagram| {
-                        defer allocator.free(datagram);
-                        try socket.send(io, &managed.peer_address, datagram);
+                        .{
+                            .space = .handshake,
+                            .destination_connection_id = managed.clientScid(),
+                            .source_connection_id = &managed.server_scid,
+                        },
+                        &handshake_outputs,
+                    );
+                    for (handshake_outputs[0..handshake.drain.datagrams_written]) |output| {
+                        defer allocator.free(output.datagram);
+                        try socket.send(io, &managed.peer_address, output.datagram);
                     }
+                    if (handshake.drain.first_error) |drain_error| return drain_error;
                 }
             },
             .routed => |route| {
