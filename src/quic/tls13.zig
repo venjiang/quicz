@@ -606,6 +606,23 @@ test "Tls13Handshake clientProcessPostHandshake drains NewSessionTicket from inp
     try std.testing.expect(hs.resumption_psk != null);
 }
 
+test "Tls13Handshake clientProcessPostHandshake rejects unsupported messages" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    const shared_secret = [_]u8{0x01} ** 32;
+    hs.key_schedule.deriveHandshakeSecrets(&shared_secret, hs.transcript.current());
+    hs.key_schedule.deriveAppSecrets(hs.transcript.current());
+    hs.state = .connected;
+
+    const certificate_msg = [_]u8{
+        @intFromEnum(HandshakeType.certificate),
+        0x00,
+        0x00,
+        0x00,
+    };
+    hs.provideData(&certificate_msg);
+    try std.testing.expectError(error.UnexpectedMessage, hs.clientProcessPostHandshake());
+}
+
 test "resumption PSK round-trips through initWithPsk" {
     var ks = KeySchedule.init();
     const shared_secret = [_]u8{0x01} ** 32;
@@ -1421,14 +1438,16 @@ pub const Tls13Handshake = struct {
 
     /// Process buffered post-handshake messages (client side, after the
     /// handshake is complete). Currently handles NewSessionTicket to derive
-    /// and store the resumption PSK; other post-handshake messages are
-    /// ignored. Drains complete messages from the input buffer.
+    /// and store the resumption PSK. Unsupported post-handshake message types
+    /// are rejected instead of being silently ignored.
     pub fn clientProcessPostHandshake(self: *Tls13Handshake) HandshakeError!void {
         if (self.is_server) return;
         if (self.state != .connected) return;
         while (self.readHandshakeMsg()) |msg| {
             if (msg.len > 0 and msg[0] == @intFromEnum(HandshakeType.new_session_ticket)) {
                 try self.clientProcessNewSessionTicket(msg);
+            } else {
+                return error.UnexpectedMessage;
             }
         }
     }
