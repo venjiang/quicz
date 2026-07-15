@@ -782,6 +782,7 @@ test "Tls13Handshake clientProcessNewSessionTicket stores session ticket" {
     try hs.clientProcessNewSessionTicket(&nst_msg);
     try std.testing.expectEqual(@as(usize, 4), hs.session_ticket_len);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xcc, 0xdd, 0xee, 0xff }, hs.session_ticket[0..4]);
+    try std.testing.expectEqual(@as(u32, 1), hs.session_ticket_age_add);
     try std.testing.expect(!hs.session_ticket_allows_early_data);
 }
 
@@ -857,6 +858,20 @@ test "Tls13Handshake serverBuildNewSessionTicket requires server connected state
     try std.testing.expectError(error.UnexpectedMessage, client.serverBuildNewSessionTicket());
 }
 
+test "Tls13Handshake serverBuildNewSessionTicket emits ticket age add" {
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    const shared_secret = [_]u8{0x01} ** 32;
+    server.key_schedule.deriveHandshakeSecrets(&shared_secret, server.transcript.current());
+    server.key_schedule.deriveAppSecrets(server.transcript.current());
+    server.state = .connected;
+
+    const action = try server.serverBuildNewSessionTicket();
+    const nst = try parseNewSessionTicket(action.send_data.data);
+
+    try std.testing.expect(nst.ticket_age_add != 0);
+    try std.testing.expectEqual(@as(u32, 3600), nst.ticket_lifetime);
+}
+
 test "PSK binder computes via computeFinishedVerifyData over binder key" {
     const psk = [_]u8{0xab} ** secret_len;
     const ks = KeySchedule.initWithPsk(psk);
@@ -926,6 +941,28 @@ test "Tls13Handshake ClientHello resumes without early_data when ticket disallow
 
     _ = try clientHelloExtension(hello, @intFromEnum(ExtType.pre_shared_key));
     try std.testing.expectError(error.TestUnexpectedResult, clientHelloExtension(hello, @intFromEnum(ExtType.early_data)));
+}
+
+test "Tls13Handshake ClientHello uses stored ticket_age_add" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hs = Tls13Handshake.initClientWithPsk(.{}, &[_]u8{}, psk);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(hs.session_ticket[0..ticket.len], &ticket);
+    hs.session_ticket_len = ticket.len;
+    hs.session_ticket_age_add = 0x01020304;
+
+    const action = try hs.step();
+    const hello = action.send_data.data;
+    const ext = try clientHelloExtension(hello, @intFromEnum(ExtType.pre_shared_key));
+    var pos = ext.body_offset;
+    const identities_len = readU16(hello[pos..]);
+    pos += 2;
+    const identities_end = pos + identities_len;
+    const identity_len = readU16(hello[pos..]);
+    pos += 2 + identity_len;
+
+    try std.testing.expect(pos + 4 <= identities_end);
+    try std.testing.expectEqual(@as(u32, 0x01020304), readU32(hello[pos..]));
 }
 
 test "Tls13Handshake ClientHello omits early_data without session ticket" {
@@ -1299,6 +1336,7 @@ pub const Tls13Handshake = struct {
     // Carried in the pre_shared_key extension of a resumed ClientHello.
     session_ticket: [4096]u8 = undefined,
     session_ticket_len: usize = 0,
+    session_ticket_age_add: u32 = 0,
     session_ticket_allows_early_data: bool = false,
 
     // Server-side: a PSK configured out-of-band (extern_psk or a restored
@@ -1355,6 +1393,7 @@ pub const Tls13Handshake = struct {
         self.resumption_psk = null;
         self.has_psk = false;
         self.session_ticket_len = 0;
+        self.session_ticket_age_add = 0;
         self.session_ticket_allows_early_data = false;
         self.server_psk = null;
         self.peer_psk_identity_len = 0;
@@ -1416,6 +1455,7 @@ pub const Tls13Handshake = struct {
         self.resumption_psk = null;
         self.has_psk = false;
         self.session_ticket_len = 0;
+        self.session_ticket_age_add = 0;
         self.session_ticket_allows_early_data = false;
         self.server_psk = null;
         self.peer_psk_identity_len = 0;
@@ -1560,6 +1600,7 @@ pub const Tls13Handshake = struct {
         @memcpy(self.session_ticket[0..ticket_len], nst.ticket[0..ticket_len]);
         self.resumption_psk = resumption_psk;
         self.session_ticket_len = ticket_len;
+        self.session_ticket_age_add = nst.ticket_age_add;
         self.session_ticket_allows_early_data = nst.allows_quic_0rtt;
     }
 
@@ -1733,11 +1774,9 @@ pub const Tls13Handshake = struct {
             pos += 2;
             @memcpy(buf[pos..][0..ticket_len], self.session_ticket[0..ticket_len]);
             pos += ticket_len;
-            // obfuscated_ticket_age: 0 (no timing for this skeleton)
-            buf[pos] = 0;
-            buf[pos + 1] = 0;
-            buf[pos + 2] = 0;
-            buf[pos + 3] = 0;
+            // obfuscated_ticket_age = ticket age (0 in this caller-clock-free
+            // skeleton) plus the server-provided ticket_age_add modulo 2^32.
+            writeU32(buf[pos..], self.session_ticket_age_add);
             pos += 4;
             // binders
             writeU16(buf[pos..], @intCast(binders_len));
@@ -2756,14 +2795,20 @@ pub const Tls13Handshake = struct {
         var nonce: [16]u8 = undefined;
         secureRandomBytes(&nonce);
         _ = KeySchedule.derivePskFromTicket(rms, &nonce);
+        var ticket_age_add: u32 = 0;
+        while (ticket_age_add == 0) {
+            var ticket_age_add_bytes: [4]u8 = undefined;
+            secureRandomBytes(&ticket_age_add_bytes);
+            ticket_age_add = readU32(&ticket_age_add_bytes);
+        }
 
         const buf = &self.out_buf;
         var pos: usize = 4; // reserve type + 3-byte length
         // ticket_lifetime = 3600 (1 hour)
         writeU32(buf[pos..], 3600);
         pos += 4;
-        // ticket_age_add = 0 (skeleton: no obfuscated age timing)
-        writeU32(buf[pos..], 0);
+        // ticket_age_add masks the client's future ticket age.
+        writeU32(buf[pos..], ticket_age_add);
         pos += 4;
         // ticket_nonce<0..255>
         buf[pos] = @intCast(nonce.len);
