@@ -7100,36 +7100,61 @@ pub const Connection = struct {
         }
 
         const pending = self.send_queue.items[0];
-        const stream_encoded_len = try streamFrameWireLen(pending.stream_id, pending.offset, pending.data.len);
         const max_tx_datagram_size = self.maxTxDatagramSize();
-        if (stream_encoded_len > max_tx_datagram_size) return error.BufferTooSmall;
-
-        var encoded_len = stream_encoded_len;
+        const ack_encoded_len = if (ack_to_send) |ack| try ackFrameWireLen(ack) else 0;
+        var stream_budget = max_tx_datagram_size;
         var include_ack = false;
         if (ack_to_send) |ack| {
-            const ack_encoded_len = try ackFrameWireLen(ack);
-            const coalesced_len = try addWireLen(ack_encoded_len, stream_encoded_len);
-            if (coalesced_len <= max_tx_datagram_size and out_buf.len >= coalesced_len and
-                self.canSendAckElicitingInSpace(.application, coalesced_len) and self.canSendToPeerAddress(coalesced_len))
-            {
-                encoded_len = coalesced_len;
-                include_ack = true;
-            } else if (ack_encoded_len <= max_tx_datagram_size and out_buf.len >= ack_encoded_len) {
+            stream_budget = std.math.sub(usize, max_tx_datagram_size, ack_encoded_len) catch {
                 return try self.pollAckOnly(ack, now_millis, out_buf);
-            } else {
-                return error.BufferTooSmall;
+            };
+            if (try streamFrameWireLen(pending.stream_id, pending.offset, 0) > stream_budget) {
+                return try self.pollAckOnly(ack, now_millis, out_buf);
             }
         }
 
+        const stream_data_len = try maxStreamFrameDataLen(
+            pending.stream_id,
+            pending.offset,
+            pending.data.len,
+            stream_budget,
+        );
+        const stream_encoded_len = try streamFrameWireLen(pending.stream_id, pending.offset, stream_data_len);
+        const encoded_len = try addWireLen(if (ack_to_send == null) 0 else ack_encoded_len, stream_encoded_len);
+        if (ack_to_send) |ack| {
+            if (out_buf.len >= encoded_len and
+                self.canSendAckElicitingInSpace(.application, encoded_len) and self.canSendToPeerAddress(encoded_len))
+            {
+                include_ack = true;
+            } else {
+                return try self.pollAckOnly(ack, now_millis, out_buf);
+            }
+        }
         if (!self.canSendAckElicitingInSpace(.application, encoded_len) or !self.canSendToPeerAddress(encoded_len)) return null;
         if (out_buf.len < encoded_len) return error.BufferTooSmall;
         if (self.next_packet_number > max_quic_varint) return error.Internal;
 
-        const sent_stream_frame = try self.clonePendingStreamFrame(pending);
+        const sent_stream_frame = try self.clonePendingStreamFrame(.{
+            .stream_id = pending.stream_id,
+            .offset = pending.offset,
+            .fin = pending.fin and stream_data_len == pending.data.len,
+            .data = pending.data[0..stream_data_len],
+        });
         var sent_stream_frame_transferred = false;
         errdefer if (!sent_stream_frame_transferred) {
             self.allocator.free(sent_stream_frame.data);
         };
+        const queued_stream_remainder: ?PendingStreamFrame = if (stream_data_len < pending.data.len) remainder: {
+            const remainder_offset = streamEndOffset(pending.offset, stream_data_len) orelse return error.Internal;
+            const remainder_data = self.allocator.dupe(u8, pending.data[stream_data_len..]) catch return error.OutOfMemory;
+            break :remainder .{
+                .stream_id = pending.stream_id,
+                .offset = remainder_offset,
+                .fin = pending.fin,
+                .data = remainder_data,
+            };
+        } else null;
+        errdefer if (queued_stream_remainder) |remainder| self.allocator.free(remainder.data);
 
         var appended_sent_packet = false;
         errdefer if (appended_sent_packet) {
@@ -7157,8 +7182,8 @@ pub const Connection = struct {
         frame.encodeFrame(out.writer(), .{ .stream = .{
             .stream_id = pending.stream_id,
             .offset = pending.offset,
-            .fin = pending.fin,
-            .data = pending.data,
+            .fin = pending.fin and stream_data_len == pending.data.len,
+            .data = pending.data[0..stream_data_len],
         } }) catch |err| switch (err) {
             error.NoSpaceLeft => return error.BufferTooSmall,
             else => return error.Internal,
@@ -7167,7 +7192,12 @@ pub const Connection = struct {
         const written = out.getWritten();
         std.debug.assert(written.len == encoded_len);
 
-        const removed = self.send_queue.orderedRemove(0);
+        const removed = self.send_queue.items[0];
+        if (queued_stream_remainder) |remainder| {
+            self.send_queue.items[0] = remainder;
+        } else {
+            _ = self.send_queue.orderedRemove(0);
+        }
         self.allocator.free(removed.data);
         if (include_ack) self.pending_ack_largest = null;
         self.next_packet_number = std.math.add(u64, packet_number, 1) catch return error.Internal;
@@ -14798,6 +14828,67 @@ test "sendOnStream fragments stream data by max datagram size" {
     try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
     try std.testing.expectEqual(@as(u64, 16), conn.findSendStream(stream_id).?.next_offset);
     try std.testing.expect(conn.findSendStream(stream_id).?.fin_sent);
+}
+
+test "pollTx re-fragments queued stream data after the peer packet budget shrinks" {
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 8192,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 8192,
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    // Make the first client payload also acknowledge a real server packet.
+    try server.sendPing();
+    var ping_buffer: [128]u8 = undefined;
+    const ping = (try server.pollTx(0, &ping_buffer)) orelse return error.TestUnexpectedResult;
+    try client.processDatagram(1, ping);
+    try std.testing.expect(client.pendingAckLargest(.application) != null);
+
+    const stream_id = try client.openStream();
+    const payload = [_]u8{'p'} ** 4096;
+    try client.sendOnStream(stream_id, &payload, true);
+    try std.testing.expectEqual(@as(usize, 1), client.send_queue.items.len);
+    client.peer_max_udp_payload_size = 1200;
+
+    var datagram_buffer: [8192]u8 = undefined;
+    var now_millis: i64 = 2;
+    const first = (try client.pollTx(now_millis, &datagram_buffer)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first.len <= 1200);
+    try std.testing.expectEqual(@as(?u64, null), client.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(usize, 1), client.send_queue.items.len);
+    const first_sent = client.sent_packets.items[client.sent_packets.items.len - 1].stream_frame orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first_sent.data.len < payload.len);
+    try std.testing.expect(!first_sent.fin);
+    try std.testing.expectEqual(first_sent.offset + first_sent.data.len, client.send_queue.items[0].offset);
+    try std.testing.expect(client.send_queue.items[0].fin);
+    try server.processDatagram(now_millis + 1, first);
+    now_millis += 2;
+
+    var packets_sent: usize = 1;
+    while (client.send_queue.items.len != 0) {
+        const datagram = (try client.pollTx(now_millis, &datagram_buffer)) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(datagram.len <= 1200);
+        try server.processDatagram(now_millis + 1, datagram);
+        now_millis += 2;
+        packets_sent += 1;
+    }
+    try std.testing.expect(packets_sent > 1);
+
+    var received: [payload.len]u8 = undefined;
+    var received_len: usize = 0;
+    while (try server.recvOnStream(stream_id, received[received_len..])) |count| {
+        received_len += count;
+    }
+    try std.testing.expectEqual(payload.len, received_len);
+    try std.testing.expectEqualSlices(u8, &payload, &received);
 }
 
 test "pollTx records sent packets for ACK-driven recovery" {
