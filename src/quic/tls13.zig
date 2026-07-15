@@ -555,6 +555,31 @@ test "Tls13Handshake clientProcessNewSessionTicket derives and stores PSK" {
     try std.testing.expect(hs.resumption_psk != null);
 }
 
+test "Tls13Handshake clientProcessNewSessionTicket ignores zero-lifetime tickets" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp);
+    const shared_secret = [_]u8{0x01} ** 32;
+    hs.key_schedule.deriveHandshakeSecrets(&shared_secret, hs.transcript.current());
+    hs.key_schedule.deriveAppSecrets(hs.transcript.current());
+    hs.state = .connected;
+
+    const nst_msg = [_]u8{
+        0x04, 0x00, 0x00, 0x13,
+        0x00, 0x00, 0x00, 0x00, // ticket_lifetime=0: discard immediately
+        0x00, 0x00, 0x00, 0x01,
+        0x02, 0xaa, 0xbb, 0x00,
+        0x04, 0xcc, 0xdd, 0xee,
+        0xff, 0x00, 0x00,
+    };
+    try hs.clientProcessNewSessionTicket(&nst_msg);
+    try std.testing.expect(hs.resumption_psk == null);
+    try std.testing.expectEqual(@as(usize, 0), hs.session_ticket_len);
+}
+
 test "Tls13Handshake clientProcessPostHandshake drains NewSessionTicket from input buffer" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -1385,6 +1410,7 @@ pub const Tls13Handshake = struct {
         if (self.is_server) return error.UnexpectedMessage;
         if (self.state != .connected) return error.UnexpectedMessage;
         const nst = try parseNewSessionTicket(msg);
+        if (nst.ticket_lifetime == 0) return;
         const rms = self.key_schedule.deriveResumptionMasterSecret(self.transcript.current());
         self.resumption_psk = KeySchedule.derivePskFromTicket(rms, nst.ticket_nonce);
         if (nst.ticket.len > self.session_ticket.len) return error.DecodeError;
