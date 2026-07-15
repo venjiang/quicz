@@ -232,17 +232,17 @@ pub fn Tls13ServerEndpoint(
         pub fn driveBackend(
             self: *Self,
             connection_id: u64,
-            connection: *Connection,
             space: root.PacketNumberSpace,
             backend: root.CryptoBackend,
             scratch: []u8,
             now_millis: i64,
             poll_options: root.EndpointPollInstalledKeyDatagramOptions,
             out: []root.EndpointPolledDatagramResult,
-        ) root.Error!root.EndpointCryptoBackendDriveDatagramDrainResult {
+        ) (root.Error || error{UnknownConnectionId})!root.EndpointCryptoBackendDriveDatagramDrainResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             return self.lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
                 connection_id,
-                connection,
+                connection_of(record),
                 space,
                 backend,
                 scratch,
@@ -419,6 +419,21 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             return null;
         }
     };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
     const TestEndpoint = Tls13ServerEndpoint(
         TestRecord,
         TestRecord.connectionRef,
@@ -498,6 +513,39 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectEqual(retry_record.handle, retry_route.connection_id);
     try std.testing.expect(endpoint_owner.records.get(retry_record.handle) != null);
     try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
+    var empty_backend = EmptyBackend{};
+    var backend_scratch: [1]u8 = undefined;
+    var backend_output: [1]root.EndpointPolledDatagramResult = undefined;
+    const backend_progress = try endpoint_owner.driveBackend(
+        retry_record.handle,
+        .handshake,
+        empty_backend.backend(),
+        &backend_scratch,
+        1,
+        .{
+            .space = .handshake,
+            .destination_connection_id = "peer",
+            .source_connection_id = "local",
+        },
+        &backend_output,
+    );
+    try std.testing.expectEqual(@as(usize, 0), backend_progress.backend.progress.outbound_chunks);
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        endpoint_owner.driveBackend(
+            99,
+            .handshake,
+            empty_backend.backend(),
+            &backend_scratch,
+            1,
+            .{
+                .space = .handshake,
+                .destination_connection_id = "peer",
+                .source_connection_id = "local",
+            },
+            &backend_output,
+        ),
+    );
 
     const duplicate_record = try std.testing.allocator.create(TestRecord);
     var duplicate_record_initialized = false;

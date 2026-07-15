@@ -403,7 +403,6 @@ fn serveConcurrent(
                     var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                     const handshake = try server_endpoint.driveBackend(
                         handle,
-                        &managed.transport.connection,
                         .handshake,
                         managed.transport.cryptoBackend(),
                         &scratch,
@@ -465,7 +464,6 @@ fn serveConcurrent(
                     var retry_handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                     const retry_handshake_progress = try server_endpoint.driveBackend(
                         managed.handle,
-                        &managed.transport.connection,
                         .handshake,
                         managed.transport.cryptoBackend(),
                         &retry_scratch,
@@ -518,7 +516,6 @@ fn serveConcurrent(
                         var coalesced_handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                         const coalesced_handshake = try server_endpoint.driveBackend(
                             managed.handle,
-                            &managed.transport.connection,
                             .handshake,
                             managed.transport.cryptoBackend(),
                             &coalesced_scratch,
@@ -579,7 +576,6 @@ fn serveConcurrent(
                                     var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                                     const handshake = try server_endpoint.driveBackend(
                                         managed.handle,
-                                        &managed.transport.connection,
                                         .handshake,
                                         managed.transport.cryptoBackend(),
                                         &initial_scratch,
