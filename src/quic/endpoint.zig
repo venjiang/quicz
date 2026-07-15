@@ -1144,6 +1144,16 @@ pub const EndpointRouter = struct {
         return resultForRoute(self.routes.items[index], path);
     }
 
+    /// Return the committed UDP tuple for a registered destination connection ID.
+    pub fn currentRoutePath(
+        self: *const EndpointRouter,
+        destination_connection_id: []const u8,
+    ) RouteError!Udp4Tuple {
+        const cid = try ConnectionId.init(destination_connection_id);
+        const index = self.findRouteIndex(cid) orelse return error.UnknownConnectionId;
+        return self.routes.items[index].path;
+    }
+
     fn routeShortDatagram(self: *const EndpointRouter, path: Udp4Tuple, datagram: []const u8) RouteError!RouteResult {
         const index = (try self.findShortRouteIndex(path, datagram)) orelse return error.UnknownConnectionId;
         return resultForRoute(self.routes.items[index], path);
@@ -2239,12 +2249,15 @@ test "EndpointRouter updates route path after caller validates migration" {
     defer router.deinit();
 
     try router.registerConnectionId(3, &dcid, old_path, .{});
+    try std.testing.expect((try router.currentRoutePath(&dcid)).eql(old_path));
+    try std.testing.expectError(error.UnknownConnectionId, router.currentRoutePath(&[_]u8{0x99}));
     const migrated = try router.routeDatagram(new_path, &short_datagram);
     try std.testing.expect(migrated.path_changed);
 
     const updated = try router.updateRoutePath(&dcid, old_path, new_path);
     try std.testing.expectEqual(@as(u64, 3), updated.connection_id);
     try std.testing.expect(!updated.path_changed);
+    try std.testing.expect((try router.currentRoutePath(&dcid)).eql(new_path));
 
     const on_new_path = try router.routeDatagram(new_path, &short_datagram);
     try std.testing.expect(!on_new_path.path_changed);
@@ -2253,6 +2266,7 @@ test "EndpointRouter updates route path after caller validates migration" {
     const validated_update = try router.updateRoutePathFromValidatedDatagram(&dcid, third_path);
     try std.testing.expectEqual(@as(u64, 3), validated_update.connection_id);
     try std.testing.expect(!validated_update.path_changed);
+    try std.testing.expect((try router.currentRoutePath(&dcid)).eql(third_path));
     const on_third_path = try router.routeDatagram(third_path, &short_datagram);
     try std.testing.expect(!on_third_path.path_changed);
 

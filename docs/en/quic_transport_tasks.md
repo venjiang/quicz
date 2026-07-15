@@ -54,7 +54,7 @@ packet/key/token and RFC 9368 version-information primitives:
 | Congestion control | Required at least at a NewReno-style baseline. CUBIC or configurable controllers are later performance work. | Partial: simplified NewReno-style behavior exists; production tuning and configurable controllers are missing. |
 | Connection IDs and stateless reset | Required. Routing, CID issuance/retirement, reset-token handling, close cleanup, and inactive-CID reset emission must work in the endpoint lifecycle. | Partial: endpoint router, connection-level reset receive-to-draining state, endpoint installed-key feed active-route reset handling with recovery timer disarm, lifecycle helpers, and socket-backed loopbacks exist. TLS client/server transports select the newest active peer `NEW_CONNECTION_ID` for outgoing packets, falling back to the authenticated Initial SCID; the concurrent TLS process server generates an independent 8-byte CSPRNG Initial SCID per accepted connection. Full TLS-owned lifecycle integration is still incomplete. |
 | Retry and address validation | Required for server-side robustness and interop. | Partial: concurrent Retry uses fresh per-process token-secret and per-issuance nonce entropy; token policy, Retry validation, address-validation loopbacks, and TLS extension byte checks exist; production storage/replay policy is missing. |
-| Path validation and migration | Required for single-path validation and route update; full multipath is out of scope. | Partial: PATH_CHALLENGE/PATH_RESPONSE and route-update loopbacks exist; production path policy is incomplete. |
+| Path validation and migration | Required for single-path validation and route update; full multipath is out of scope. | Partial: PATH_CHALLENGE/PATH_RESPONSE and route-update loopbacks exist; endpoint-owned server output can now read the committed route tuple after validated migration. Production path policy and external migration evidence are incomplete. |
 | 0-RTT | Schedule after the first 1-RTT stream echo interop gate; not required for the current milestone. | Partial: explicit accept/reject and mock installed-key 0-RTT paths exist; real TLS replay policy is missing. |
 | RFC 9221 DATAGRAM | Optional extension, not part of the first transport milestone. | Deferred. |
 | HTTP/3 and QPACK | Application-layer work after the transport is interoperable. | Deferred. |
@@ -115,6 +115,9 @@ delivers a protected `PATH_CHALLENGE` to that new tuple and routes the matching
 route until authenticated response processing consumes the outstanding
 challenge, then commits the new tuple (`tls_path_validation=true` and
 `server_route_updated=true`).
+Focused endpoint tests also prove that the committed router tuple is readable
+after validation and that an endpoint-owned TLS server can pair subsequent
+ordinary 1-RTT output with that committed tuple.
 
 This gives focused Initial/Handshake/1-RTT packet-number-space coverage. A
 full external client-to-server stream transfer remains required before it is

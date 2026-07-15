@@ -48,7 +48,7 @@ version-information 原语）：
 | Congestion control | 至少需要 NewReno-style 基线。CUBIC 或可配置 controller 是后续性能工作。 | 部分完成：已有简化 NewReno-style 行为；缺少生产调优和可配置 controller。 |
 | Connection ID 和 stateless reset | 必须具备。Routing、CID issue/retire、reset-token handling、close cleanup 和 inactive-CID reset emission 必须接入 endpoint lifecycle。 | 部分完成：已有 endpoint router、连接层 reset receive-to-draining 状态、endpoint installed-key feed 的 active-route reset 处理与 recovery timer disarm、lifecycle helper 和 socket-backed loopback。TLS client/server transport 会为发包选择最新未退役的 peer `NEW_CONNECTION_ID`，并在没有该值时回退到已认证 Initial SCID；并发 TLS process server 现为每个接纳的连接生成独立的 8 字节 CSPRNG Initial SCID。完整 TLS-owned lifecycle 集成仍未完成。 |
 | Retry 和 address validation | 服务端健壮性和互通必须具备。 | 部分完成：并发 Retry 使用每个进程的新 token secret 与每次签发的新 nonce 熵；已有 token policy、Retry validation、address-validation loopback 和 TLS extension byte 校验；缺少生产存储/replay policy。 |
-| Path validation 和迁移 | 需要单路径 validation 和 route update；完整 multipath 不在范围内。 | 部分完成：已有 PATH_CHALLENGE/PATH_RESPONSE 和 route-update loopback；生产 path policy 未完成。 |
+| Path validation 和迁移 | 需要单路径 validation 和 route update；完整 multipath 不在范围内。 | 部分完成：已有 PATH_CHALLENGE/PATH_RESPONSE 和 route-update loopback；endpoint-owned server output 现在可在已验证迁移后读取已提交 route tuple。生产 path policy 和外部迁移证据仍未完成。 |
 | 0-RTT | 第一轮 1-RTT stream echo 互通之后推进；不阻塞当前里程碑。 | 部分完成：已有显式 accept/reject 和 mock installed-key 0-RTT 路径；缺少真实 TLS replay policy。 |
 | RFC 9221 DATAGRAM | 可选扩展，不属于第一轮 transport 里程碑。 | Deferred。 |
 | HTTP/3 和 QPACK | transport 可互通后再做的应用层工作。 | Deferred。 |
@@ -98,6 +98,8 @@ output，再通过真实 UDP 驱动两次 TLS-owned 1-RTT key phase 轮转。首
 再将匹配的 `PATH_RESPONSE` 经 server lifecycle 路由回来。server 在已认证 response
 消费 outstanding challenge 前保持旧 route，随后才提交新 tuple（`tls_path_validation=true`、
 `server_route_updated=true`）。
+聚焦 endpoint 测试也证明，validation 后可读取已提交的 router tuple，并且
+endpoint-owned TLS server 可把后续普通 1-RTT output 与该已提交 tuple 配对。
 
 这为 Initial/Handshake/1-RTT packet number space 提供聚焦覆盖。完整的外部
 client-to-server STREAM transfer 通过前，不能将其视为外部服务端互通证据。

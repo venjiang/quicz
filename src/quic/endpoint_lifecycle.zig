@@ -1096,6 +1096,14 @@ pub const EndpointConnectionLifecycle = struct {
         return updated;
     }
 
+    /// Return the committed UDP tuple for a registered destination connection ID.
+    pub fn currentRoutePath(
+        self: *const EndpointConnectionLifecycle,
+        destination_connection_id: []const u8,
+    ) endpoint.RouteError!endpoint.Udp4Tuple {
+        return self.router.currentRoutePath(destination_connection_id);
+    }
+
     /// Route one received datagram using the owned endpoint routing table.
     pub fn routeDatagram(
         self: *const EndpointConnectionLifecycle,

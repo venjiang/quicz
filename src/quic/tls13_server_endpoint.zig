@@ -40,6 +40,12 @@ pub fn Tls13ServerEndpoint(
     return struct {
         const Self = @This();
 
+        /// Endpoint-owned 1-RTT datagram paired with its committed UDP route.
+        pub const OneRttDatagramPathResult = struct {
+            datagram: []u8,
+            path: endpoint.Udp4Tuple,
+        };
+
         lifecycle: EndpointConnectionLifecycle,
         records: Registry,
 
@@ -229,6 +235,30 @@ pub fn Tls13ServerEndpoint(
                 now_millis,
                 destination_connection_id_of(record),
             );
+        }
+
+        /// Poll one installed-key 1-RTT datagram with its committed UDP route.
+        ///
+        /// This is the socket-facing variant for endpoint-owned servers after
+        /// route migration has been validated and committed. The path is read
+        /// from the same route table used for inbound classification.
+        pub fn pollOneRttDatagramWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            now_millis: i64,
+        ) (root.Error || endpoint.RouteError)!?OneRttDatagramPathResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.lifecycle.currentRoutePath(source_connection_id_of(record));
+            const datagram = (try self.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                connection_id,
+                connection_of(record),
+                now_millis,
+                destination_connection_id_of(record),
+            )) orelse return null;
+            return .{
+                .datagram = datagram,
+                .path = path,
+            };
         }
 
         /// Atomically attach a Retry-pending record and switch its Initial route.
@@ -1127,4 +1157,10 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     defer std.testing.allocator.free(ack_packet.datagram);
     try std.testing.expectEqual(record.handle, ack_packet.connection_id);
     try std.testing.expect(!(try endpoint_owner.routeDatagram(new_path, response)).path_changed);
+
+    try record.connection.sendPing();
+    const committed_output = (try endpoint_owner.pollOneRttDatagramWithRoutePath(record.handle, 6)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(committed_output.datagram);
+    try std.testing.expect(committed_output.path.eql(new_path));
+    try std.testing.expect(committed_output.datagram.len != 0);
 }
