@@ -15,8 +15,8 @@ by `build.zig`; `zig build --help` is the authoritative generated index.
 | `run-tls13-process-interop` | `tls13_process_echo_{client,server}.zig` | Separate pure-Zig TLS/QUIC processes, two FIN streams, routing and close cleanup. |
 | `run-interop-external-client -- <ip> <port> <ca> [name]` | `interop_external_client.zig` | Certificate-verified IPv4 peer probe with FIN `hello`/`world` echoes on streams 0 and 4. |
 | `run-interop-client -- <host> <port> [testcase]` | `interop_client.zig` | QUIC-Interop-Runner-style client and local fallback probe. |
-| `run-interop-event-loopback -- [handshake|transfer|loss|congestion|persistent|key-update|path]` | `interop_event_loopback.zig` | TLS-owned UDP event-loop scenarios. |
-| Go client | `interop/go_echo_client/main.go` | quic-go client sending FIN streams 0 and 4 to the Zig server. |
+| `run-interop-event-loopback -- [handshake|transfer|loss|congestion|persistent|key-update|path|stream-control|stream-limit]` | `interop_event_loopback.zig` | TLS-owned UDP event-loop scenarios, including stream control and credit release. |
+| Go client | `interop/go_echo_client/main.go` | quic-go FIN echo client; `-expect-stream-limit` asserts stream 0 then 4 against `concurrent-limit`. |
 | Go server | `interop/go_echo_client/echo_server/main.go` | One-connection quic-go peer that generates a local CA PEM and echoes two FIN streams. |
 | Rust client | `interop/rust_echo_client/src/main.rs` | quinn/rustls client sending FIN streams 0 and 4 to the Zig server. |
 

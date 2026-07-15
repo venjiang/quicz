@@ -1,6 +1,6 @@
 //! Pure-Zig TLS 1.3 QUIC echo server for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [completion_target] [sequential|concurrent|concurrent-retry|rolling] [max_active_connections]
+//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [completion_target] [sequential|concurrent|concurrent-retry|concurrent-limit|rolling] [max_active_connections]
 //! Concurrent mode accepts and routes the requested number of loopback
 //! connections through one UDP socket and one endpoint lifecycle owner. It
 //! waits on the lifecycle's earliest deadline and retires idle connections.
@@ -180,6 +180,7 @@ fn serveConcurrent(
     completion_target: usize,
     max_active_connections: usize,
     retry_enabled: bool,
+    initial_max_streams_bidi: u64,
 ) !void {
     const alpn = [_][]const u8{"hq-interop"};
     const max_routes = std.math.mul(usize, max_active_connections, 2) catch return error.InvalidConnectionCount;
@@ -284,7 +285,7 @@ fn serveConcurrent(
                 const transport = try Tls13ServerTransport.init(allocator, .{
                     .initial_max_data = 8192,
                     .initial_max_stream_data = 2048,
-                    .initial_max_streams_bidi = 8,
+                    .initial_max_streams_bidi = initial_max_streams_bidi,
                     .max_datagram_size = 8192,
                     // Keep the local loss-recovery probe comfortably ahead of
                     // the short test-only idle timeout in concurrent mode.
@@ -708,10 +709,13 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("zig_process_server: listening={s}:{d} completion_target={d} max_active_connections={d} mode={s}\n", .{ bind_host, bind_port, completion_target, max_active_connections, mode });
 
     if (std.mem.eql(u8, mode, "concurrent") or std.mem.eql(u8, mode, "rolling")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8);
     }
     if (std.mem.eql(u8, mode, "concurrent-retry")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, true);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, true, 8);
+    }
+    if (std.mem.eql(u8, mode, "concurrent-limit")) {
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 1);
     }
     if (!std.mem.eql(u8, mode, "sequential")) return error.InvalidMode;
 

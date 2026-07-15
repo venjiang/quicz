@@ -23,6 +23,7 @@ func main() {
 	alpn := flag.String("alpn", "hq-interop", "required QUIC ALPN")
 	caPath := flag.String("ca", "", "PEM trust anchor for the Zig echo server (required)")
 	serverName := flag.String("server-name", "localhost", "TLS server name")
+	expectStreamLimit := flag.Bool("expect-stream-limit", false, "require stream IDs 0 then 4 after a one-stream peer limit")
 	flag.Parse()
 
 	if *caPath == "" {
@@ -52,10 +53,16 @@ func main() {
 	defer connection.CloseWithError(0, "example complete")
 
 	echoBytes := 0
-	for _, message := range []string{"hello", "world"} {
+	for streamIndex, message := range []string{"hello", "world"} {
 		stream, err := connection.OpenStreamSync(ctx)
 		if err != nil {
 			log.Fatalf("open stream: %v", err)
+		}
+		if *expectStreamLimit {
+			expectedID := uint64(streamIndex * 4)
+			if uint64(stream.StreamID()) != expectedID {
+				log.Fatalf("stream-limit release: got stream %d, want %d", stream.StreamID(), expectedID)
+			}
 		}
 		if _, err := stream.Write([]byte(message)); err != nil {
 			log.Fatalf("write stream: %v", err)
@@ -78,5 +85,9 @@ func main() {
 		echoBytes += len(echoed)
 	}
 
+	if *expectStreamLimit {
+		fmt.Printf("go_quic_stream_limit_client: handshake_done=true initial_limit=1 released_stream=4 echo_bytes=%d\n", echoBytes)
+		return
+	}
 	fmt.Printf("go_quic_echo_client: handshake_done=true echo_streams=2 echo_bytes=%d\n", echoBytes)
 }
