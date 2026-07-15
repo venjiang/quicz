@@ -23,12 +23,23 @@ pub fn EndpointConnectionRegistry(
 
         allocator: std.mem.Allocator,
         records: std.AutoHashMap(u64, *Record),
+        max_records: usize,
 
         /// Create an empty registry. Record handles must be unique while active.
         pub fn init(allocator: std.mem.Allocator) Self {
             return .{
                 .allocator = allocator,
                 .records = std.AutoHashMap(u64, *Record).init(allocator),
+                .max_records = std.math.maxInt(usize),
+            };
+        }
+
+        /// Create a registry that rejects new records once `max_records` are active.
+        pub fn initWithCapacity(allocator: std.mem.Allocator, max_records: usize) Self {
+            return .{
+                .allocator = allocator,
+                .records = std.AutoHashMap(u64, *Record).init(allocator),
+                .max_records = max_records,
             };
         }
 
@@ -47,6 +58,11 @@ pub fn EndpointConnectionRegistry(
             return self.records.count();
         }
 
+        /// Return whether this registry can own one additional record.
+        pub fn hasCapacity(self: *const Self) bool {
+            return self.count() < self.max_records;
+        }
+
         /// Find one active record by its endpoint connection handle.
         pub fn get(self: *const Self, connection_id: u64) ?*Record {
             return self.records.get(connection_id);
@@ -62,6 +78,7 @@ pub fn EndpointConnectionRegistry(
         /// On error the caller retains ownership of `record` and must destroy it.
         pub fn adopt(self: *Self, connection_id: u64, record: *Record) !void {
             if (self.records.contains(connection_id)) return error.DuplicateConnectionId;
+            if (!self.hasCapacity()) return error.ConnectionLimitReached;
             try self.records.put(connection_id, record);
         }
 
@@ -203,7 +220,7 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
         TestRecord.deinit,
     );
 
-    var registry = Registry.init(std.testing.allocator);
+    var registry = Registry.initWithCapacity(std.testing.allocator, 1);
     defer registry.deinit();
     var connection = try root.Connection.init(std.testing.allocator, .client, .{});
     var connection_owned = true;
@@ -227,6 +244,7 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
     const views = try registry.deadlineViews(std.testing.allocator);
     defer std.testing.allocator.free(views);
     try std.testing.expectEqual(@as(usize, 1), registry.count());
+    try std.testing.expect(!registry.hasCapacity());
     try std.testing.expectEqual(@as(usize, 1), views.len);
     try std.testing.expectEqual(@as(u64, 7), views[0].connection_id);
     try std.testing.expect(views[0].connection == &record.connection);
@@ -254,6 +272,30 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
     );
     try std.testing.expect(feed == .dropped);
 
+    const second_record = try std.testing.allocator.create(TestRecord);
+    var second_initialized = false;
+    var second_adopted = false;
+    defer if (!second_adopted) {
+        if (second_initialized) second_record.deinit();
+        std.testing.allocator.destroy(second_record);
+    };
+    second_record.* = .{
+        .handle = 8,
+        .connection = try root.Connection.init(std.testing.allocator, .client, .{}),
+    };
+    second_initialized = true;
+    if (registry.adopt(second_record.handle, second_record)) |_| {
+        second_adopted = true;
+    } else |err| {
+        try std.testing.expectEqual(error.ConnectionLimitReached, err);
+    }
+    try std.testing.expect(!second_adopted);
+
     try registry.remove(7);
     try std.testing.expectEqual(@as(usize, 0), registry.count());
+    try std.testing.expect(registry.hasCapacity());
+    try registry.adopt(second_record.handle, second_record);
+    second_adopted = true;
+    try std.testing.expectEqual(@as(usize, 1), registry.count());
+    try std.testing.expect(!registry.hasCapacity());
 }

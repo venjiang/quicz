@@ -141,8 +141,9 @@ poll views and installed-key receive dispatch from that same record set. The dis
 SCID collisions. After each matching FIN-terminated echo, the client sends a protected
 `CONNECTION_CLOSE`; the server processes it through that connection's route,
 enters draining, and retires only that handle's routes at the close deadline
-(`close_cleanup=true`). The bounded map rejects new connections while its
-active capacity is full and exits only after every accepted connection is
+(`close_cleanup=true`). The endpoint-owned registry itself rejects new
+records while its active capacity is full and releases that capacity only when
+the record is retired; the server exits after every accepted connection is
 retired.
 
 The server now separates its finite completion target from its active-connection

@@ -117,8 +117,9 @@ datagram，并由有界、endpoint-owned 的 `EndpointConnectionRegistry` 持有
 `Connection` 与其 `Tls13Backend` record，并从同一 record 集合生成 lifecycle 的 deadline
 与 due-recovery poll view 及 installed-key receive dispatch。不同 tag 使 Initial DCID 和 SCID 不会冲突。每个 FIN-terminated echo 匹配后，客户端都会发送受保护的
 `CONNECTION_CLOSE`；服务端只处理该连接的 route、进入 draining，并在 close deadline
-只退役该 handle 的 route（`close_cleanup=true`）。有界 map 在活跃容量已满时拒绝新连接，且
-仅在每条已接受连接都退役后退出。`sequential` 仍作为显式兼容模式保留。
+只退役该 handle 的 route（`close_cleanup=true`）。endpoint-owned registry 在活跃容量已满时
+自行拒绝新 record，且只在 record 退役后释放容量；服务端仅在每条已接受连接都退役后退出。
+`sequential` 仍作为显式兼容模式保留。
 
 服务端现在把有限的 completion target 与同时活跃连接容量分开：可选的第五个 server
 参数 `max_active_connections` 指定活跃上限；省略时仍沿用旧行为，即 completion target

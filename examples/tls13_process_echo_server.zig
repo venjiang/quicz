@@ -203,7 +203,7 @@ fn serveConcurrent(
     defer lifecycle.deinit();
     var address_validation = endpoint.AddressValidationPolicy.init(allocator, retry_token_secret, .{});
     defer address_validation.deinit();
-    var connections = ProcessConnectionRegistry.init(allocator);
+    var connections = ProcessConnectionRegistry.initWithCapacity(allocator, max_active_connections);
     defer connections.deinit();
 
     var receive_buffer: [2048]u8 = undefined;
@@ -267,7 +267,7 @@ fn serveConcurrent(
                 const initial_info = try protection.peekProtectedLongPacketInfo(received.data);
                 if (initial_info.packet_type != .initial) return error.InvalidPacket;
                 if (retry_enabled) {
-                    if (connections.count() >= max_active_connections) {
+                    if (!connections.hasCapacity()) {
                         var pending = connections.valueIterator();
                         while (pending.next()) |managed| {
                             if (managed.*.retry_datagram_len == 0 or
@@ -279,7 +279,7 @@ fn serveConcurrent(
                         }
                         return error.ConnectionLimitReached;
                     }
-                } else if (connections.count() >= max_active_connections) return error.ConnectionLimitReached;
+                } else if (!connections.hasCapacity()) return error.ConnectionLimitReached;
 
                 const handle = next_handle;
                 next_handle += 1;
