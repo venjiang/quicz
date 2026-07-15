@@ -1565,10 +1565,11 @@ pub const EndpointConnectionLifecycle = struct {
             datagram,
             feed_options,
         );
-        switch (feed.feed) {
-            .routed => {},
+        const routed = switch (feed.feed) {
+            .routed => |value| value,
             else => return .{ .feed = feed },
-        }
+        };
+        const output_path = feed.selected_output_path orelse try self.currentRoutePath(routed.destination_connection_id.asSlice());
         const polled = try self.pollDatagram(
             connection_id,
             connection,
@@ -1582,14 +1583,10 @@ pub const EndpointConnectionLifecycle = struct {
             }
         else
             null;
-        const output_path = if (polled_result != null)
-            feed.selected_output_path orelse try self.currentRoutePath(poll_options.destination_connection_id)
-        else
-            null;
         return .{
             .feed = feed,
             .datagram = polled_result,
-            .output_path = output_path,
+            .output_path = if (polled_result != null) output_path else null,
         };
     }
 

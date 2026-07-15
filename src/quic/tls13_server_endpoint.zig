@@ -57,6 +57,16 @@ pub fn Tls13ServerEndpoint(
             path: endpoint.Udp4Tuple,
         };
 
+        /// Installed-key receive result with any immediate output route.
+        pub const InstalledKeyDatagramRoutePollResult = struct {
+            /// Receive, path validation, and route-update result when feed succeeded.
+            feed: ?root.EndpointFeedInstalledKeyPathUpdateResult = null,
+            /// Feed error returned after the endpoint had selected a record.
+            feed_error: ?root.EndpointProtectedDatagramError = null,
+            /// Protected output emitted after feed or close-on-error handling.
+            datagram: ?DatagramPathResult = null,
+        };
+
         /// Due-work result with every drained datagram paired to a route.
         pub const DueWorkDatagramPathDrainResult = struct {
             /// Deadline that was due when this pending-work pass started.
@@ -393,6 +403,83 @@ pub fn Tls13ServerEndpoint(
                     .destination_connection_id = destination_connection_id_of(record),
                 },
             );
+        }
+
+        /// Route, process, and poll one installed-key datagram with output path.
+        ///
+        /// Successful receive paths return the feed result plus any immediate
+        /// output datagram paired with the selected UDP tuple. If authenticated
+        /// frame processing reports `InvalidPacket` after selecting a record,
+        /// this helper returns that error as data and polls a queued
+        /// CONNECTION_CLOSE on the committed route. Pre-route classification
+        /// errors and non-frame processing errors still return through the
+        /// function error set.
+        pub fn feedInstalledKeyDatagramWithRoutePath(
+            self: *Self,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!InstalledKeyDatagramRoutePollResult {
+            const action = try self.lifecycle.feedDatagram(
+                options.out,
+                path,
+                datagram,
+                options.unpredictable_prefix,
+                options.supported_versions,
+            );
+            const route = switch (action) {
+                .routed => |value| value,
+                .accept_initial => |initial| return .{ .feed = .{ .feed = .{ .accept_initial = initial } } },
+                .version_negotiation => |response| return .{ .feed = .{ .feed = .{ .version_negotiation = response } } },
+                .stateless_reset => |reset| return .{ .feed = .{ .feed = .{ .stateless_reset = reset } } },
+                .dropped => return .{ .feed = .{ .feed = .dropped } },
+            };
+            const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
+            const connection = connection_of(record);
+            const destination_connection_id = destination_connection_id_of(record);
+            const feed = self.lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+                route.connection_id,
+                connection,
+                path,
+                now_millis,
+                datagram,
+                options,
+            ) catch |err| {
+                if (err != error.InvalidPacket) return err;
+                const close_datagram = try self.pollOneRttDatagramWithRoutePath(route.connection_id, now_millis);
+                return .{
+                    .feed_error = err,
+                    .datagram = if (close_datagram) |value| .{
+                        .connection_id = route.connection_id,
+                        .datagram = value.datagram,
+                        .path = value.path,
+                    } else null,
+                };
+            };
+            switch (feed.feed) {
+                .routed => {},
+                else => return .{ .feed = feed },
+            }
+            const output_path = feed.selected_output_path orelse
+                try self.lifecycle.currentRoutePath(route.destination_connection_id.asSlice());
+            const polled = try self.lifecycle.pollDatagram(
+                route.connection_id,
+                connection,
+                now_millis,
+                .{
+                    .space = .application,
+                    .destination_connection_id = destination_connection_id,
+                },
+            );
+            return .{
+                .feed = feed,
+                .datagram = if (polled) |protected_datagram| .{
+                    .connection_id = route.connection_id,
+                    .datagram = protected_datagram,
+                    .path = output_path,
+                } else null,
+            };
         }
 
         /// Poll one installed-key 1-RTT datagram from an endpoint-owned record.
@@ -2250,6 +2337,21 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     try std.testing.expect(committed_output.path.eql(new_path));
     try std.testing.expect(committed_output.datagram.len != 0);
 
+    try client.sendPing();
+    const routed_ping = (try client.pollProtectedShortDatagramWithInstalledKeys(7, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(routed_ping);
+    const routed_result = try endpoint_owner.feedInstalledKeyDatagramWithRoutePath(
+        new_path,
+        8,
+        routed_ping,
+        options,
+    );
+    try std.testing.expect((routed_result.feed orelse return error.TestUnexpectedResult).feed == .routed);
+    const routed_ack = routed_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(routed_ack.datagram);
+    try std.testing.expectEqual(record.handle, routed_ack.connection_id);
+    try std.testing.expect(routed_ack.path.eql(new_path));
+
     const invalid_packet_number = record.connection.nextPeerPacketNumber(.application);
     const illegal_plaintext = [_]u8{@intFromEnum(frame.FrameType.handshake_done)} ++ ([_]u8{0} ** 31);
     const illegal_handshake_done = try protection.protectShortPacketAes128(std.testing.allocator, .{
@@ -2260,19 +2362,19 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     }, try quic_packet.encodePacketNumberForHeader(invalid_packet_number, null), secrets.client, &illegal_plaintext);
     defer std.testing.allocator.free(illegal_handshake_done);
 
-    try std.testing.expectError(
-        error.InvalidPacket,
-        endpoint_owner.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
-            new_path,
-            8,
-            illegal_handshake_done,
-            options,
-        ),
+    const error_result = try endpoint_owner.feedInstalledKeyDatagramWithRoutePath(
+        new_path,
+        9,
+        illegal_handshake_done,
+        options,
     );
+    try std.testing.expectEqual(@as(?root.EndpointProtectedDatagramError, error.InvalidPacket), error_result.feed_error);
+    try std.testing.expect(error_result.feed == null);
     try std.testing.expectEqual(connection_module.ConnectionState.closing, record.connection.connectionState());
 
-    const close_output = (try endpoint_owner.pollOneRttDatagramWithRoutePath(record.handle, 9)) orelse return error.TestUnexpectedResult;
+    const close_output = error_result.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(close_output.datagram);
+    try std.testing.expectEqual(record.handle, close_output.connection_id);
     try std.testing.expect(close_output.path.eql(new_path));
     try client.processProtectedShortDatagramWithInstalledKeys(10, client_dcid.len, close_output.datagram);
     try std.testing.expectEqual(connection_module.ConnectionState.draining, client.connectionState());
