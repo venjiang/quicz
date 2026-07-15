@@ -339,6 +339,7 @@ pub const NewSessionTicket = struct {
     ticket_age_add: u32,
     ticket_nonce: []const u8,
     ticket: []const u8,
+    allows_quic_0rtt: bool,
 };
 
 /// Parse a NewSessionTicket handshake message (RFC 8446 §4.6.1). The
@@ -375,12 +376,37 @@ pub fn parseNewSessionTicket(msg: []const u8) HandshakeError!NewSessionTicket {
     const extensions_len = readU16(msg[pos..]);
     pos += 2;
     if (pos + extensions_len != msg.len) return error.DecodeError;
+    const allows_quic_0rtt = try parseNewSessionTicketExtensions(msg[pos .. pos + extensions_len]);
     return .{
         .ticket_lifetime = ticket_lifetime,
         .ticket_age_add = ticket_age_add,
         .ticket_nonce = ticket_nonce,
         .ticket = ticket,
+        .allows_quic_0rtt = allows_quic_0rtt,
     };
+}
+
+fn parseNewSessionTicketExtensions(extensions: []const u8) HandshakeError!bool {
+    var pos: usize = 0;
+    var saw_early_data = false;
+    while (pos < extensions.len) {
+        if (pos + 4 > extensions.len) return error.DecodeError;
+        const ext_type = readU16(extensions[pos..]);
+        pos += 2;
+        const ext_len = readU16(extensions[pos..]);
+        pos += 2;
+        if (pos + ext_len > extensions.len) return error.DecodeError;
+        const ext_data = extensions[pos .. pos + ext_len];
+        pos += ext_len;
+
+        if (ext_type == @intFromEnum(ExtType.early_data)) {
+            if (saw_early_data) return error.DecodeError;
+            saw_early_data = true;
+            if (ext_data.len != 4) return error.DecodeError;
+            if (readU32(ext_data) != 0xffffffff) return error.DecodeError;
+        }
+    }
+    return saw_early_data;
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────
@@ -479,6 +505,47 @@ test "parseNewSessionTicket parses fields" {
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0xbb }, nst.ticket_nonce);
     try std.testing.expectEqual(@as(usize, 4), nst.ticket.len);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xcc, 0xdd, 0xee, 0xff }, nst.ticket);
+    try std.testing.expect(!nst.allows_quic_0rtt);
+}
+
+test "parseNewSessionTicket accepts QUIC early_data sentinel" {
+    const msg = [_]u8{
+        0x04, 0x00, 0x00, 0x1b, // type=new_session_ticket, length=27
+        0x00, 0x00, 0x0e, 0x10, // ticket_lifetime=3600
+        0x00, 0x00, 0x00, 0x01, // ticket_age_add=1
+        0x02, 0xaa, 0xbb, // nonce_len=2, nonce=0xaabb
+        0x00, 0x04, 0xcc, 0xdd, 0xee, 0xff, // ticket_len=4, ticket
+        0x00, 0x08, // extensions_len=8
+        0x00, 0x2a, 0x00, 0x04, // early_data extension
+        0xff, 0xff, 0xff, 0xff, // QUIC 0-RTT sentinel
+    };
+    const nst = try parseNewSessionTicket(&msg);
+    try std.testing.expect(nst.allows_quic_0rtt);
+}
+
+test "parseNewSessionTicket rejects invalid QUIC early_data values" {
+    const wrong_value = [_]u8{
+        0x04, 0x00, 0x00, 0x1b,
+        0x00, 0x00, 0x0e, 0x10,
+        0x00, 0x00, 0x00, 0x01,
+        0x02, 0xaa, 0xbb, 0x00,
+        0x04, 0xcc, 0xdd, 0xee,
+        0xff, 0x00, 0x08, 0x00,
+        0x2a, 0x00, 0x04, 0x00,
+        0x00, 0x00, 0x01,
+    };
+    try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&wrong_value));
+
+    const wrong_length = [_]u8{
+        0x04, 0x00, 0x00, 0x17,
+        0x00, 0x00, 0x0e, 0x10,
+        0x00, 0x00, 0x00, 0x01,
+        0x02, 0xaa, 0xbb, 0x00,
+        0x04, 0xcc, 0xdd, 0xee,
+        0xff, 0x00, 0x04, 0x00,
+        0x2a, 0x00, 0x00,
+    };
+    try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&wrong_length));
 }
 
 test "parseNewSessionTicket rejects wrong type and truncation" {
@@ -715,6 +782,33 @@ test "Tls13Handshake clientProcessNewSessionTicket stores session ticket" {
     try hs.clientProcessNewSessionTicket(&nst_msg);
     try std.testing.expectEqual(@as(usize, 4), hs.session_ticket_len);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xcc, 0xdd, 0xee, 0xff }, hs.session_ticket[0..4]);
+    try std.testing.expect(!hs.session_ticket_allows_early_data);
+}
+
+test "Tls13Handshake clientProcessNewSessionTicket records QUIC 0-RTT permission" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp);
+    const shared_secret = [_]u8{0x01} ** 32;
+    hs.key_schedule.deriveHandshakeSecrets(&shared_secret, hs.transcript.current());
+    hs.key_schedule.deriveAppSecrets(hs.transcript.current());
+    hs.state = .connected;
+
+    const nst_msg = [_]u8{
+        0x04, 0x00, 0x00, 0x1b,
+        0x00, 0x00, 0x0e, 0x10,
+        0x00, 0x00, 0x00, 0x01,
+        0x02, 0xaa, 0xbb, 0x00,
+        0x04, 0xcc, 0xdd, 0xee,
+        0xff, 0x00, 0x08, 0x00,
+        0x2a, 0x00, 0x04, 0xff,
+        0xff, 0xff, 0xff,
+    };
+    try hs.clientProcessNewSessionTicket(&nst_msg);
+    try std.testing.expect(hs.session_ticket_allows_early_data);
 }
 
 test "Tls13Handshake clientProcessNewSessionTicket rejects oversized session ticket" {
@@ -791,6 +885,7 @@ test "Tls13Handshake ClientHello includes pre_shared_key when has_psk" {
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
     @memcpy(hs.session_ticket[0..ticket.len], &ticket);
     hs.session_ticket_len = ticket.len;
+    hs.session_ticket_allows_early_data = true;
 
     const action = try hs.step();
     try std.testing.expect(action == .send_data);
@@ -817,6 +912,20 @@ test "Tls13Handshake ClientHello includes pre_shared_key when has_psk" {
         }
     }
     try std.testing.expect(found_early_data);
+}
+
+test "Tls13Handshake ClientHello resumes without early_data when ticket disallows it" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hs = Tls13Handshake.initClientWithPsk(.{}, &[_]u8{}, psk);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(hs.session_ticket[0..ticket.len], &ticket);
+    hs.session_ticket_len = ticket.len;
+
+    const action = try hs.step();
+    const hello = action.send_data.data;
+
+    _ = try clientHelloExtension(hello, @intFromEnum(ExtType.pre_shared_key));
+    try std.testing.expectError(error.TestUnexpectedResult, clientHelloExtension(hello, @intFromEnum(ExtType.early_data)));
 }
 
 test "Tls13Handshake ClientHello omits early_data without session ticket" {
@@ -854,6 +963,7 @@ test "Tls13Handshake server parses client pre_shared_key and early_data extensio
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
     @memcpy(client.session_ticket[0..ticket.len], &ticket);
     client.session_ticket_len = ticket.len;
+    client.session_ticket_allows_early_data = true;
 
     // Build the ClientHello (with pre_shared_key + early_data).
     const action = try client.step();
@@ -896,6 +1006,7 @@ test "Tls13Handshake initServerWithPsk derives matching client early traffic sec
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
     @memcpy(client.session_ticket[0..ticket.len], &ticket);
     client.session_ticket_len = ticket.len;
+    client.session_ticket_allows_early_data = true;
     const action = try client.step();
     const client_hello = action.send_data.data;
 
@@ -1181,13 +1292,14 @@ pub const Tls13Handshake = struct {
     resumption_psk: ?[secret_len]u8 = null,
 
     // True when the client was initialized with a resumption PSK, enabling
-    // 0-RTT early data in the ClientHello.
+    // pre_shared_key resumption in the ClientHello.
     has_psk: bool = false,
 
     // Session ticket from a post-handshake NewSessionTicket (client side).
     // Carried in the pre_shared_key extension of a resumed ClientHello.
     session_ticket: [4096]u8 = undefined,
     session_ticket_len: usize = 0,
+    session_ticket_allows_early_data: bool = false,
 
     // Server-side: a PSK configured out-of-band (extern_psk or a restored
     // resumption_psk) used to accept a resumed client's 0-RTT. When present,
@@ -1243,6 +1355,7 @@ pub const Tls13Handshake = struct {
         self.resumption_psk = null;
         self.has_psk = false;
         self.session_ticket_len = 0;
+        self.session_ticket_allows_early_data = false;
         self.server_psk = null;
         self.peer_psk_identity_len = 0;
         self.peer_offered_psk = false;
@@ -1270,9 +1383,9 @@ pub const Tls13Handshake = struct {
     }
 
     /// Initialize as a TLS 1.3 client with a resumption PSK (RFC 8446 §7.1
-    /// + §8.1). The PSK seeds the key schedule via `initWithPsk` and enables
-    /// 0-RTT early data. The caller obtains the PSK from a prior session's
-    /// `resumptionPsk` (client side, after a NewSessionTicket).
+    /// + §8.1). The PSK seeds the key schedule via `initWithPsk`; a resumed
+    /// ClientHello only offers 0-RTT when the stored ticket carried QUIC's
+    /// RFC 9001 early_data sentinel.
     pub fn initClientWithPsk(config: TlsConfig, transport_params: []const u8, psk: [secret_len]u8) Tls13Handshake {
         var self = initClient(config, transport_params);
         self.key_schedule = KeySchedule.initWithPsk(psk);
@@ -1303,6 +1416,7 @@ pub const Tls13Handshake = struct {
         self.resumption_psk = null;
         self.has_psk = false;
         self.session_ticket_len = 0;
+        self.session_ticket_allows_early_data = false;
         self.server_psk = null;
         self.peer_psk_identity_len = 0;
         self.peer_offered_psk = false;
@@ -1432,19 +1546,21 @@ pub const Tls13Handshake = struct {
     /// Process a post-handshake NewSessionTicket message (client side, after
     /// the handshake is complete). Derives the resumption PSK from the
     /// resumption master secret and the ticket nonce, and stores it for a
-    /// future resumed session that can send 0-RTT early data
-    /// (RFC 8446 §4.6.1 + §7.1 + §8.1).
+    /// future resumed session. QUIC 0-RTT is enabled only when the ticket
+    /// carries the RFC 9001 early_data sentinel.
     pub fn clientProcessNewSessionTicket(self: *Tls13Handshake, msg: []const u8) HandshakeError!void {
         if (self.is_server) return error.UnexpectedMessage;
         if (self.state != .connected) return error.UnexpectedMessage;
         const nst = try parseNewSessionTicket(msg);
+        if (nst.ticket.len > self.session_ticket.len) return error.DecodeError;
         if (nst.ticket_lifetime == 0) return;
         const rms = self.key_schedule.deriveResumptionMasterSecret(self.transcript.current());
-        self.resumption_psk = KeySchedule.derivePskFromTicket(rms, nst.ticket_nonce);
-        if (nst.ticket.len > self.session_ticket.len) return error.DecodeError;
+        const resumption_psk = KeySchedule.derivePskFromTicket(rms, nst.ticket_nonce);
         const ticket_len = nst.ticket.len;
         @memcpy(self.session_ticket[0..ticket_len], nst.ticket[0..ticket_len]);
+        self.resumption_psk = resumption_psk;
         self.session_ticket_len = ticket_len;
+        self.session_ticket_allows_early_data = nst.allows_quic_0rtt;
     }
 
     /// Process buffered post-handshake messages (client side, after the
@@ -1591,7 +1707,7 @@ pub const Tls13Handshake = struct {
 
         // early_data (RFC 8446 §4.2.10) -- empty extension signals 0-RTT
         // intent. Must precede pre_shared_key.
-        if (self.has_psk and self.session_ticket_len > 0) {
+        if (self.has_psk and self.session_ticket_len > 0 and self.session_ticket_allows_early_data) {
             if (pos + 4 > buf.len) return error.DecodeError;
             pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.early_data), 0);
         }
@@ -4095,6 +4211,7 @@ fn clientHelloPskBytes(config: TlsConfig, psk: [secret_len]u8, out: []u8) ![]u8 
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
     @memcpy(client.session_ticket[0..ticket.len], &ticket);
     client.session_ticket_len = ticket.len;
+    client.session_ticket_allows_early_data = true;
     const action = try client.step();
     if (std.meta.activeTag(action) != .send_data) return error.TestUnexpectedResult;
     if (action.send_data.data.len > out.len) return error.TestUnexpectedResult;
