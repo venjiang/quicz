@@ -864,6 +864,7 @@ const ExtType = enum(u16) {
 
 const cipher_aes_128_gcm_sha256: u16 = 0x1301;
 const group_x25519: u16 = 0x001D;
+const legacy_version_tls_1_2: u16 = 0x0303;
 const version_tls_1_3: u16 = 0x0304;
 
 const sig_ecdsa_secp256r1_sha256: u16 = 0x0403;
@@ -1863,6 +1864,7 @@ pub const Tls13Handshake = struct {
         const body = msg[4..];
         if (body.len < 2 + 32 + 1) return error.DecodeError;
         var pos: usize = 0;
+        if (readU16(body[pos..]) != legacy_version_tls_1_2) return error.UnsupportedVersion;
         pos += 2; // legacy_version
         pos += 32; // random
         // legacy_session_id (QUIC uses empty, but skip whatever is sent)
@@ -1875,6 +1877,7 @@ pub const Tls13Handshake = struct {
         if (pos + 2 > body.len) return error.DecodeError;
         const cs_len = readU16(body[pos..]);
         pos += 2;
+        if (cs_len == 0 or cs_len % 2 != 0) return error.DecodeError;
         if (pos + cs_len > body.len) return error.DecodeError;
         var cs_found = false;
         {
@@ -1892,7 +1895,9 @@ pub const Tls13Handshake = struct {
         if (pos >= body.len) return error.DecodeError;
         const cm_len = body[pos];
         pos += 1;
+        if (cm_len != 1) return error.DecodeError;
         if (pos + cm_len > body.len) return error.DecodeError;
+        if (body[pos] != 0) return error.DecodeError;
         pos += cm_len;
         // extensions
         if (pos + 2 > body.len) return error.DecodeError;
@@ -3329,6 +3334,57 @@ test "Tls13Handshake server rejects early_data without pre_shared_key" {
         @intFromEnum(ExtType.early_data),
         &[_]u8{},
     );
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects invalid ClientHello legacy_version" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    writeU16(hello[4..][0..2], 0x0301);
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.UnsupportedVersion, server.step());
+}
+
+test "Tls13Handshake server rejects malformed ClientHello cipher_suites length" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const body = hello[4..];
+    const session_id_len_offset = 2 + 32;
+    const cipher_suites_len_offset = 4 + session_id_len_offset + 1 + body[session_id_len_offset];
+    writeU16(hello[cipher_suites_len_offset..][0..2], 1);
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects empty ClientHello compression_methods" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const body = hello[4..];
+    const session_id_len_offset = 2 + 32;
+    const cipher_suites_len_offset = 4 + session_id_len_offset + 1 + body[session_id_len_offset];
+    const compression_methods_len_offset = cipher_suites_len_offset + 2 + readU16(hello[cipher_suites_len_offset..]);
+    hello[compression_methods_len_offset] = 0;
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects non-null ClientHello compression method" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const body = hello[4..];
+    const session_id_len_offset = 2 + 32;
+    const cipher_suites_len_offset = 4 + session_id_len_offset + 1 + body[session_id_len_offset];
+    const compression_methods_len_offset = cipher_suites_len_offset + 2 + readU16(hello[cipher_suites_len_offset..]);
+    hello[compression_methods_len_offset + 1] = 1;
 
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
