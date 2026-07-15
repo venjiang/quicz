@@ -76,6 +76,10 @@ Server endpoint 的 installed-key feed 也遵循同一规则：
 `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram()`
 也会把认证后的 close-on-frame-error 表示为 `feed_error` 和可选 close datagram，同时保留
 未进入 closing 的无效输入下已排队输出。
+调用方持 key 的 long-header
+`processProtectedLongDatagramInSpaceOrCloseAndPollDatagram()` 也采用同一边界：认证后的
+Initial/Handshake frame 错误会直接返回已排队 CONNECTION_CLOSE datagram；畸形且未进入
+closing 的输入仍抛错，并保留已排队输出给正常 poll。
 
 ### Packet number 重排证据
 

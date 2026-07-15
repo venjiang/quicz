@@ -86,6 +86,11 @@ The lower lifecycle helper
 also surfaces authenticated close-on-frame-error as `feed_error` plus an
 optional close datagram, while preserving queued output on non-closing invalid
 inputs.
+Caller-keyed long-header
+`processProtectedLongDatagramInSpaceOrCloseAndPollDatagram()` now follows the
+same output boundary: authenticated Initial/Handshake frame errors return the
+queued CONNECTION_CLOSE datagram, while malformed non-closing inputs still
+throw and leave queued output available for normal polling.
 
 ### Packet-number reordering evidence
 

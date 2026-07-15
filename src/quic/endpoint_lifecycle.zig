@@ -17211,8 +17211,8 @@ pub const EndpointConnectionLifecycle = struct {
 
     /// Process caller-keyed Initial/Handshake input with close propagation, then poll output.
     ///
-    /// Authenticated frame errors queue CONNECTION_CLOSE and return before
-    /// ordinary caller-keyed long-header output polling.
+    /// Authenticated frame errors queue CONNECTION_CLOSE and poll that close
+    /// datagram. Non-closing invalid packets keep the throwing receive path.
     pub fn processProtectedLongDatagramInSpaceOrCloseAndPollDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -17226,14 +17226,16 @@ pub const EndpointConnectionLifecycle = struct {
         initial_token: []const u8,
         send_keys: protection.Aes128PacketProtectionKeys,
     ) Error!?EndpointPolledDatagramResult {
-        try self.processProtectedLongDatagramInSpaceOrClose(
+        self.processProtectedLongDatagramInSpaceOrClose(
             connection_id,
             connection,
             space,
             now_millis,
             receive_keys,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+        };
         const output = try self.pollProtectedLongDatagram(
             connection_id,
             connection,

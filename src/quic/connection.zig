@@ -43442,7 +43442,7 @@ test "EndpointConnectionLifecycle routes long datagram in space and drains outpu
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
 }
 
-test "EndpointConnectionLifecycle long OrClose poll stops before output" {
+test "EndpointConnectionLifecycle long OrClose poll returns close output after frame error" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x13, 0x23, 0x33, 0x43 };
     const server_scid = [_]u8{ 0xac, 0xbc, 0xcc, 0xdc };
@@ -43471,7 +43471,7 @@ test "EndpointConnectionLifecycle long OrClose poll stops before output" {
     defer server.deinit();
     try server.validatePeerAddress();
 
-    try std.testing.expectError(error.InvalidPacket, lifecycle.processProtectedLongDatagramInSpaceOrCloseAndPollDatagram(
+    const close_result = (try lifecycle.processProtectedLongDatagramInSpaceOrCloseAndPollDatagram(
         94,
         &server,
         .initial,
@@ -43482,14 +43482,48 @@ test "EndpointConnectionLifecycle long OrClose poll stops before output" {
         &server_scid,
         &[_]u8{},
         secrets.server,
-    ));
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_result.datagram);
+
+    try std.testing.expectEqual(@as(u64, 94), close_result.connection_id);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.initial));
-    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 
-    const close_packet = (try lifecycle.pollProtectedLongDatagram(
-        94,
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(12, .{ .initial = secrets.server }, close_result.datagram));
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+}
+
+test "EndpointConnectionLifecycle long OrClose poll preserves queued output on malformed input" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x14, 0x24, 0x34, 0x44 };
+    const server_scid = [_]u8{ 0xad, 0xbd, 0xcd, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.sendCryptoInSpace(.initial, "queued initial output");
+
+    const malformed_initial = [_]u8{ 0xc0, 0x00, 0x00, 0x00 };
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processProtectedLongDatagramInSpaceOrCloseAndPollDatagram(
+        95,
+        &server,
+        .initial,
+        10,
+        secrets.client,
+        &malformed_initial,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    ));
+    try std.testing.expectEqual(ConnectionState.active, server.connectionState());
+
+    const queued = (try lifecycle.pollProtectedLongDatagram(
+        95,
         &server,
         11,
         &client_scid,
@@ -43497,10 +43531,8 @@ test "EndpointConnectionLifecycle long OrClose poll stops before output" {
         &[_]u8{},
         .{ .initial = secrets.server },
     )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(close_packet);
-
-    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(12, .{ .initial = secrets.server }, close_packet));
-    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+    defer std.testing.allocator.free(queued);
+    try std.testing.expect(queued.len != 0);
 }
 
 test "EndpointConnectionLifecycle routes long datagram then drives backend and drains output" {
