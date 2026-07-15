@@ -894,6 +894,14 @@ fn clientHelloKnownExtensionBit(ext_type: u16) ?u4 {
     };
 }
 
+fn serverHelloKnownExtensionBit(ext_type: u16) ?u4 {
+    return switch (ext_type) {
+        @intFromEnum(ExtType.supported_versions) => 0,
+        @intFromEnum(ExtType.key_share) => 1,
+        else => null,
+    };
+}
+
 // ─── Write helpers ───────────────────────────────────────────────────
 
 fn writeU16(buf: []u8, val: u16) void {
@@ -1507,6 +1515,7 @@ pub const Tls13Handshake = struct {
 
         var have_version = false;
         var have_key_share = false;
+        var seen_known_extensions: u16 = 0;
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
             const et = readU16(msg[pos..]);
@@ -1515,6 +1524,11 @@ pub const Tls13Handshake = struct {
             if (pos + el > ext_end) return error.DecodeError;
             const ext = msg[pos .. pos + el];
             pos += el;
+            if (serverHelloKnownExtensionBit(et)) |bit| {
+                const mask = @as(u16, 1) << bit;
+                if (seen_known_extensions & mask != 0) return error.DecodeError;
+                seen_known_extensions |= mask;
+            }
             switch (et) {
                 @intFromEnum(ExtType.supported_versions) => {
                     if (el < 2) return error.DecodeError;
@@ -2532,6 +2546,47 @@ pub fn buildServerHello(
     return p;
 }
 
+fn appendDuplicateServerHelloExtension(buf: []u8, msg_len: usize, ext_type: u16) ![]u8 {
+    if (msg_len < 4 + 2 + 32 + 1 + 2 + 1 + 2) return error.TestUnexpectedResult;
+    var pos: usize = 4 + 2 + 32;
+    const sid_len = buf[pos];
+    pos += 1;
+    if (pos + sid_len + 2 + 1 + 2 > msg_len) return error.TestUnexpectedResult;
+    pos += sid_len;
+    pos += 2; // cipher_suite
+    pos += 1; // legacy_compression_method
+    const extensions_len_offset = pos;
+    const extensions_len = readU16(buf[pos..]);
+    pos += 2;
+    if (pos + extensions_len > msg_len) return error.TestUnexpectedResult;
+    const ext_end = pos + extensions_len;
+
+    while (pos < ext_end) {
+        if (pos + 4 > ext_end) return error.TestUnexpectedResult;
+        const header_offset = pos;
+        const current_type = readU16(buf[pos..]);
+        const current_len = readU16(buf[pos + 2 ..]);
+        pos += 4;
+        if (pos + current_len > ext_end) return error.TestUnexpectedResult;
+        if (current_type == ext_type) {
+            const duplicate_len = 4 + current_len;
+            if (msg_len + duplicate_len > buf.len) return error.TestUnexpectedResult;
+            std.mem.copyForwards(u8, buf[msg_len..][0..duplicate_len], buf[header_offset..][0..duplicate_len]);
+            const new_body_len = msg_len - 4 + duplicate_len;
+            buf[1] = @as(u8, @intCast(new_body_len >> 16));
+            buf[2] = @as(u8, @intCast((new_body_len >> 8) & 0xFF));
+            buf[3] = @as(u8, @intCast(new_body_len & 0xFF));
+            writeU16(
+                buf[extensions_len_offset..][0..2],
+                @as(u16, @intCast(extensions_len + duplicate_len)),
+            );
+            return buf[0 .. msg_len + duplicate_len];
+        }
+        pos += current_len;
+    }
+    return error.TestUnexpectedResult;
+}
+
 test "Tls13Handshake client processes ServerHello and installs handshake keys" {
     const alpn = [_][]const u8{"hq-interop"};
     var hs = Tls13Handshake.initClient(.{
@@ -2594,6 +2649,26 @@ test "Tls13Handshake client rejects ServerHello with wrong cipher suite" {
     var sh_buf: [128]u8 = undefined;
     const sh_len = buildServerHello(&sh_buf, server_public, 0x1302, true, true);
     hs.provideData(sh_buf[0..sh_len]);
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects duplicate known ServerHello extensions" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [160]u8 = undefined;
+    const base_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    const server_hello = try appendDuplicateServerHelloExtension(
+        &sh_buf,
+        base_len,
+        @intFromEnum(ExtType.supported_versions),
+    );
+    hs.provideData(server_hello);
 
     try std.testing.expectError(error.DecodeError, hs.step());
 }
