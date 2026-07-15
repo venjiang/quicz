@@ -295,6 +295,59 @@ pub const Tls13ClientEndpoint = struct {
         );
     }
 
+    /// Process Version Negotiation, replace the owned transport, and emit the
+    /// first follow-up Initial with its committed UDP route.
+    ///
+    /// This is the endpoint-owned restart path after an incompatible but valid
+    /// Version Negotiation packet. The old attempt validates the VN packet; the
+    /// lifecycle retires its route/timer and registers the follow-up Initial
+    /// Source CID; then this endpoint installs a fresh client transport for the
+    /// selected version and queues its first ClientHello Initial.
+    pub fn processVersionNegotiationRestartWithRoutePath(
+        self: *Tls13ClientEndpoint,
+        now_millis: i64,
+        scratch: []u8,
+        datagram: []const u8,
+        followup_connection_id: u64,
+        followup_local_initial_source_connection_id: [8]u8,
+        route_options: endpoint.ClientInitialRouteOptions,
+        tls_config: tls13.TlsConfig,
+    ) !?VersionNegotiationRestartResult {
+        const followup = (try self.processVersionNegotiationFollowupRoute(
+            now_millis,
+            datagram,
+            followup_connection_id,
+            &followup_local_initial_source_connection_id,
+            route_options,
+        )) orelse return null;
+
+        var followup_transport = try Tls13ClientTransport.init(
+            self.transport.allocator,
+            followup.version_negotiation.followup_config,
+            tls_config,
+            self.transport.original_destination_connection_id,
+            followup_local_initial_source_connection_id,
+        );
+        errdefer followup_transport.deinit();
+
+        const path = try self.lifecycle.currentRoutePath(&followup_local_initial_source_connection_id);
+        const initial_datagram = try followup_transport.begin(now_millis, scratch);
+        errdefer followup_transport.connection.allocator.free(initial_datagram);
+        try self.lifecycle.armRecoveryTimerFromConnection(followup_connection_id, &followup_transport.connection);
+
+        self.transport.deinit();
+        self.transport = followup_transport;
+        self.connection_id = followup_connection_id;
+        self.path = path;
+        return .{
+            .followup = followup,
+            .initial = .{
+                .datagram = initial_datagram,
+                .path = path,
+            },
+        };
+    }
+
     /// Open a locally initiated bidirectional stream.
     pub fn openStream(self: *Tls13ClientEndpoint) !u64 {
         return self.transport.openStream();
@@ -380,6 +433,12 @@ pub const Tls13ClientEndpoint = struct {
     pub const ApplicationDatagramPathResult = struct {
         datagram: []u8,
         path: endpoint.Udp4Tuple,
+    };
+
+    /// Client Version Negotiation restart result.
+    pub const VersionNegotiationRestartResult = struct {
+        followup: endpoint_lifecycle.EndpointVersionNegotiationFollowupResult,
+        initial: ApplicationDatagramPathResult,
     };
 
     /// Client due-deadline result with optional route-bound recovery output.
@@ -742,6 +801,66 @@ test "Tls13ClientEndpoint installs Version Negotiation follow-up route" {
     try std.testing.expectError(error.UnknownConnectionId, client.lifecycle.currentRoutePath(&client_scid));
     try std.testing.expect((try client.lifecycle.currentRoutePath(&followup_scid)).eql(path));
     try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) == null);
+}
+
+test "Tls13ClientEndpoint restarts transport after Version Negotiation" {
+    const original_dcid = [_]u8{ 0x93, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x89, 0x8a, 0x8b, 0x8c, 0x8d, 0x8e, 0x8f, 0x90 };
+    const followup_scid = [_]u8{ 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const available_versions = [_]packet.Version{ .v2, .v1 };
+    const tls_config = tls13.TlsConfig{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true };
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        21,
+        path,
+        .{ .active_migration_disabled = false },
+        .{ .chosen_version = .v2, .available_versions = &available_versions },
+        tls_config,
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    var scratch: [8192]u8 = undefined;
+    const initial = try client.begin(1, &scratch);
+    defer std.testing.allocator.free(initial);
+    try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
+
+    const server_versions = [_]packet.Version{.v1};
+    var vn_buf: [64]u8 = undefined;
+    var vn_writer = buffer.fixedWriter(&vn_buf);
+    try packet.encodeVersionNegotiationPacket(vn_writer.writer(), .{
+        .dcid = &client_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+    const restarted = (try client.processVersionNegotiationRestartWithRoutePath(
+        2,
+        &scratch,
+        vn_writer.getWritten(),
+        22,
+        followup_scid,
+        .{ .active_migration_disabled = false },
+        tls_config,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(restarted.initial.datagram);
+
+    try std.testing.expectEqual(packet.Version.v1, restarted.followup.version_negotiation.selected_version);
+    try std.testing.expectEqual(@as(u64, 22), client.connection_id);
+    try std.testing.expectEqual(packet.Version.v1, client.transport.version);
+    try std.testing.expectEqualSlices(u8, &followup_scid, &client.transport.local_source_connection_id);
+    try std.testing.expect(restarted.initial.path.eql(path));
+    try std.testing.expect(restarted.initial.datagram.len >= 1200);
+    try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
+    try std.testing.expectError(error.UnknownConnectionId, client.lifecycle.currentRoutePath(&client_scid));
+    try std.testing.expect((try client.lifecycle.currentRoutePath(&followup_scid)).eql(path));
+    try std.testing.expect(client.lifecycle.nextDeadline(21, &client.transport.connection) == null);
+    try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
 }
 
 test "Tls13ClientEndpoint receive enters draining on active stateless reset" {
