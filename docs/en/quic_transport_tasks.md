@@ -82,6 +82,9 @@ Route-facing server due-deadline drains now return the next endpoint-visible
 deadline after recovery output or terminal close cleanup, so socket loops can
 service a due timer, send bounded route-bound output, and schedule the next
 wakeup without a separate query.
+The shared lifecycle bounded due-deadline drain result now carries the same
+post-drain next-deadline signal for single-connection and cross-connection
+caller-owned maps, including explicit installed-key output options.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a

@@ -73,6 +73,9 @@ endpoint ownership 的增量证据，并非完整生产级 event loop。
 server route-facing due-deadline drain 现在会在 recovery output 或 terminal close
 cleanup 后返回下一 endpoint-visible deadline，socket loop 可在一次 due timer
 处理中完成 route-bound bounded output 和下一次 wakeup 调度。
+共享 lifecycle 的 bounded due-deadline drain result 现在也携带相同的
+post-drain next-deadline 信号，覆盖单连接、跨连接 caller-owned map，以及显式
+installed-key output options。
 
 Client endpoint 的错误路径不会再把无关待发送应用包误当作 close-on-error 输出：
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入

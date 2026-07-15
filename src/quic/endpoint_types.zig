@@ -466,6 +466,8 @@ pub const EndpointDueWorkDatagramDrainResult = struct {
     pending_work: EndpointPendingWorkResult,
     /// Bounded output drain after a due recovery timer, if any.
     drain: EndpointDatagramDrainResult,
+    /// Next endpoint-visible deadline after due work and output drain.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from servicing one due deadline and selecting the next wakeup.

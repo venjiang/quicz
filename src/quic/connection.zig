@@ -32326,6 +32326,9 @@ test "EndpointConnectionLifecycle processDueDeadlineAndDrainDatagramsWithInstall
     try std.testing.expectEqual(@as(u64, 67), due_out[0].connection_id);
     try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    const next_deadline = due.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 67), next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
     try std.testing.expect(try protectedZeroRttContainsControlFrame(
         due_out[0].datagram,
@@ -34804,6 +34807,9 @@ test "EndpointConnectionLifecycle processDueDeadlineAndDrainDatagrams drains rec
     try std.testing.expectEqual(@as(u64, 66), due_out[0].connection_id);
     try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    const next_deadline = due.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 66), next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
 
     var opened = try protection.unprotectShortPacketAes128(
         std.testing.allocator,
@@ -35951,6 +35957,9 @@ test "EndpointConnectionLifecycle processDueDeadlineAcrossConnectionsAndDrainDat
     try std.testing.expectEqual(@as(u64, 83), due_out[0].connection_id);
     try std.testing.expectEqual(@as(usize, 2), fast.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
+    const next_deadline = due.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 83), next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
 }
 
 test "EndpointConnectionLifecycle due-deadline backend loop returns recovery datagram before backend drive" {

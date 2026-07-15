@@ -13679,6 +13679,7 @@ pub const EndpointConnectionLifecycle = struct {
             .deadline = deadline,
             .pending_work = pending_drain.pending_work,
             .drain = pending_drain.drain,
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -13751,6 +13752,7 @@ pub const EndpointConnectionLifecycle = struct {
             .deadline = deadline,
             .pending_work = pending_drain.pending_work,
             .drain = pending_drain.drain,
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -15734,14 +15736,21 @@ pub const EndpointConnectionLifecycle = struct {
 
         const index = selected_index orelse return null;
         const view = connections[index];
-        return self.processDueDeadlineAndDrainDatagrams(
+        var result = (try self.processDueDeadlineAndDrainDatagrams(
             view.connection_id,
             view.connection,
             now_millis,
             view.destination_connection_id,
             view.source_connection_id,
             out,
-        );
+        )) orelse return null;
+        for (connections) |deadline_view| {
+            const candidate = self.nextDeadline(deadline_view.connection_id, deadline_view.connection) orelse continue;
+            if (result.next_deadline == null or candidate.deadline_millis < result.next_deadline.?.deadline_millis) {
+                result.next_deadline = candidate;
+            }
+        }
+        return result;
     }
 
     /// Process the earliest due deadline with explicit installed-key draining.
@@ -15767,13 +15776,20 @@ pub const EndpointConnectionLifecycle = struct {
 
         const index = selected_index orelse return null;
         const view = connections[index];
-        return self.processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions(
+        var result = (try self.processDueDeadlineAndDrainDatagramsWithInstalledKeyOptions(
             view.connection_id,
             view.connection,
             now_millis,
             view.poll_options,
             out,
-        );
+        )) orelse return null;
+        for (connections) |deadline_view| {
+            const candidate = self.nextDeadline(deadline_view.connection_id, deadline_view.connection) orelse continue;
+            if (result.next_deadline == null or candidate.deadline_millis < result.next_deadline.?.deadline_millis) {
+                result.next_deadline = candidate;
+            }
+        }
+        return result;
     }
 
     /// Process the earliest due deadline, then drive TLS backends if no datagram was emitted.
