@@ -1236,6 +1236,8 @@ pub fn Tls13ServerEndpoint(
         /// Single-packet datagrams use `processLongPacketWithRoutePath()`.
         /// Coalesced Initial/Handshake datagrams are accepted only after
         /// Handshake keys exist, matching the installed-key coalesced path.
+        /// Other packet-leading coalesced datagrams are rejected so trailing
+        /// bytes cannot be hidden behind a single-packet dispatch.
         pub fn processLongDatagramWithRoutePath(
             self: *Self,
             connection_id: u64,
@@ -1249,7 +1251,8 @@ pub fn Tls13ServerEndpoint(
         ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!LongDatagramProcessPathResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             const info = protection.peekProtectedLongPacketInfo(datagram) catch return error.InvalidPacket;
-            if (info.packet_type == .initial and info.len < datagram.len) {
+            if (info.len < datagram.len) {
+                if (info.packet_type != .initial) return error.InvalidPacket;
                 if (!connection_of(record).hasHandshakeProtectionKeys()) return error.InvalidPacket;
                 return .{ .coalesced_initial_handshake = try self.processInitialWithHandshakeKeysWithRoutePath(
                     connection_id,
@@ -1990,6 +1993,21 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expect(record.backend.received_handshake);
+
+    const unsupported_coalesced = try std.testing.allocator.alloc(u8, handshake_datagram.len + initial_datagram.len);
+    defer std.testing.allocator.free(unsupported_coalesced);
+    @memcpy(unsupported_coalesced[0..handshake_datagram.len], handshake_datagram);
+    @memcpy(unsupported_coalesced[handshake_datagram.len..], initial_datagram);
+    try std.testing.expectError(error.InvalidPacket, endpoint_owner.processLongDatagramWithRoutePath(
+        record.handle,
+        path,
+        4,
+        unsupported_coalesced,
+        &scratch,
+        &[_]u8{},
+        &initial_out,
+        &handshake_out,
+    ));
 }
 
 test "Tls13ServerEndpoint dispatches coalesced long datagrams with installed Handshake keys" {
