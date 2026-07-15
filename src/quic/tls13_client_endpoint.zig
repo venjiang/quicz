@@ -76,6 +76,16 @@ pub const Tls13ClientEndpoint = struct {
         return datagram;
     }
 
+    /// Queue ClientHello and return it with the committed UDP route.
+    pub fn beginWithRoutePath(self: *Tls13ClientEndpoint, now_millis: i64, scratch: []u8) !ApplicationDatagramPathResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        return .{
+            .datagram = try self.begin(now_millis, scratch),
+            .path = path,
+        };
+    }
+
     /// Route and process one peer datagram through the owned transport.
     pub fn receive(
         self: *Tls13ClientEndpoint,
@@ -337,6 +347,39 @@ test "Tls13ClientEndpoint registers its client route before begin" {
     try std.testing.expect(!updated.path_changed);
     try std.testing.expect(client.path.eql(new_path));
     try std.testing.expect((try client.lifecycle.currentRoutePath(&client_scid)).eql(new_path));
+}
+
+test "Tls13ClientEndpoint begins with committed route path" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = old_path.remote,
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        15,
+        old_path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    _ = try client.updatePath(new_path);
+    var scratch: [8192]u8 = undefined;
+    const initial = try client.beginWithRoutePath(1, &scratch);
+    defer std.testing.allocator.free(initial.datagram);
+    try std.testing.expect(initial.path.eql(new_path));
+    try std.testing.expect(initial.datagram.len >= 1200);
+    try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
 }
 
 test "Tls13ClientEndpoint polls application output with committed route path" {
