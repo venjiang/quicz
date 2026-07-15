@@ -26,7 +26,6 @@ const max_application_datagrams: usize = 16;
 const server_max_datagram_size: usize = 8192;
 const process_idle_timeout_millis: u64 = 1000;
 const retry_token_lifetime_millis: u64 = 10_000;
-const retry_token_secret = [_]u8{0x73} ** address_validation_token.secret_len;
 const max_retry_datagram_size: usize = 256;
 const echo_stream_ids = [_]u64{ 0, 4 };
 const echo_payloads = [_][]const u8{ "hello", "world" };
@@ -183,15 +182,9 @@ fn processServerScid(handle: u64) [4]u8 {
     return .{ 0x31, 0x32, @truncate(handle >> 8), @truncate(handle) };
 }
 
-fn retryTokenNonce(handle: u64) address_validation_token.Nonce {
-    var nonce = [_]u8{0xa7} ** address_validation_token.nonce_len;
-    var value = handle;
-    var index = nonce.len;
-    while (index > 0) {
-        index -= 1;
-        nonce[index] = @truncate(value);
-        value >>= 8;
-    }
+fn randomRetryTokenNonce(io: std.Io) !address_validation_token.Nonce {
+    var nonce: address_validation_token.Nonce = undefined;
+    try io.randomSecure(&nonce);
     return nonce;
 }
 
@@ -230,6 +223,8 @@ fn serveConcurrent(
         .max_stateless_reset_tokens = max_routes,
     });
     defer server_endpoint.deinit();
+    var retry_token_secret: address_validation_token.Secret = undefined;
+    try io.randomSecure(&retry_token_secret);
     var address_validation = endpoint.AddressValidationPolicy.init(allocator, retry_token_secret, .{});
     defer address_validation.deinit();
     const connections = &server_endpoint.records;
@@ -365,7 +360,7 @@ fn serveConcurrent(
                         now_millis,
                         retry_token_lifetime_millis,
                         path,
-                        retryTokenNonce(handle),
+                        try randomRetryTokenNonce(io),
                     );
                     defer allocator.free(token);
                     const retry_datagram = try managed.transport.connection.issueRetryDatagram(

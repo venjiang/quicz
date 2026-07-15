@@ -47,7 +47,7 @@ version-information 原语）：
 | ACK/loss/PTO recovery | 必须具备。ACK processing、packet/time-threshold loss、PTO、retransmission 和 timer service 必须驱动 endpoint loop。 | 部分完成：已有确定性 recovery model 和 socket-backed loopback；有界 Zig server 已完成外部 1-RTT 与 Initial-space PTO recovery，生产 lifecycle 集成仍未完成。 |
 | Congestion control | 至少需要 NewReno-style 基线。CUBIC 或可配置 controller 是后续性能工作。 | 部分完成：已有简化 NewReno-style 行为；缺少生产调优和可配置 controller。 |
 | Connection ID 和 stateless reset | 必须具备。Routing、CID issue/retire、reset-token handling、close cleanup 和 inactive-CID reset emission 必须接入 endpoint lifecycle。 | 部分完成：已有 endpoint router、连接层 reset receive-to-draining 状态、endpoint installed-key feed 的 active-route reset 处理与 recovery timer disarm、lifecycle helper 和 socket-backed loopback；缺少完整 TLS-owned lifecycle 集成。 |
-| Retry 和 address validation | 服务端健壮性和互通必须具备。 | 部分完成：已有 token policy、Retry validation、address-validation loopback 和 TLS extension byte 校验；缺少生产存储/replay policy。 |
+| Retry 和 address validation | 服务端健壮性和互通必须具备。 | 部分完成：并发 Retry 使用每个进程的新 token secret 与每次签发的新 nonce 熵；已有 token policy、Retry validation、address-validation loopback 和 TLS extension byte 校验；缺少生产存储/replay policy。 |
 | Path validation 和迁移 | 需要单路径 validation 和 route update；完整 multipath 不在范围内。 | 部分完成：已有 PATH_CHALLENGE/PATH_RESPONSE 和 route-update loopback；生产 path policy 未完成。 |
 | 0-RTT | 第一轮 1-RTT stream echo 互通之后推进；不阻塞当前里程碑。 | 部分完成：已有显式 accept/reject 和 mock installed-key 0-RTT 路径；缺少真实 TLS replay policy。 |
 | RFC 9221 DATAGRAM | 可选扩展，不属于第一轮 transport 里程碑。 | Deferred。 |
