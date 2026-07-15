@@ -65,6 +65,8 @@
   QUIC transport parameters。
 - 纯 Zig TLS certificate 路径会拒绝空 CertificateEntry，测试构造器也不再生成空
   certificate entry。
+- 纯 Zig TLS certificate 路径会拒绝 per-entry Certificate extension；当前
+  ClientHello 未请求 OCSP/SCT 数据。
 - 纯 Zig TLS ClientHello 只有在已有 session ticket、可以同时发送匹配
   `pre_shared_key` 时才发送 `early_data`。
 - `pollProtectedShortDatagram()` / `processProtectedShortDatagram()` 支持使用调用方提供的 key 收发 protected 1-RTT short PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_RESPONSE/RETIRE_CONNECTION_ID/MAX_*/BLOCKED/STREAM/RESET_STREAM/STOP_SENDING/CONNECTION_CLOSE datagram，并把 plaintext 按 Application-space 1-RTT frame 规则处理；真实 TLS secret production 和 socket-backed endpoint DCID lookup wiring 仍待实现。

@@ -1955,6 +1955,7 @@ pub const Tls13Handshake = struct {
         const extensions_len = readU16(certificate_message[pos.*..]);
         pos.* += 2;
         if (extensions_len > list_end - pos.*) return error.DecodeError;
+        if (extensions_len != 0) return error.DecodeError;
         pos.* += extensions_len;
         return cert_der;
     }
@@ -3487,6 +3488,12 @@ test "nextCertificateEntry rejects empty certificate entries" {
     try std.testing.expectError(error.DecodeError, Tls13Handshake.nextCertificateEntry(&malformed, &pos, malformed.len));
 }
 
+test "nextCertificateEntry rejects unrequested per-entry extensions" {
+    const malformed = [_]u8{ 0, 0, 1, 0xaa, 0, 1, 0xbb };
+    var pos: usize = 0;
+    try std.testing.expectError(error.DecodeError, Tls13Handshake.nextCertificateEntry(&malformed, &pos, malformed.len));
+}
+
 test "Tls13Handshake rejects malformed certificate chains when verification is skipped" {
     const malformed = [_]u8{
         @intFromEnum(HandshakeType.certificate), 0, 0, 9,
@@ -3505,6 +3512,18 @@ test "Tls13Handshake rejects empty leaf certificate when verification is skipped
         0,                                       0, 0, 5,
         0,                                       0, 0, 0,
         0,
+    };
+    var handshake = Tls13Handshake.initClient(.{}, &.{});
+    handshake.provideData(&malformed);
+    try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificate());
+}
+
+test "Tls13Handshake rejects CertificateEntry extensions when verification is skipped" {
+    const malformed = [_]u8{
+        @intFromEnum(HandshakeType.certificate), 0, 0,    11,
+        0,                                       0, 0,    7,
+        0,                                       0, 1,    0xaa,
+        0,                                       1, 0xbb,
     };
     var handshake = Tls13Handshake.initClient(.{}, &.{});
     handshake.provideData(&malformed);
