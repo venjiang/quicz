@@ -194,6 +194,32 @@ fn serverPath(bind_address: std.Io.net.IpAddress, peer_address: std.Io.net.IpAdd
     };
 }
 
+fn peerAddressForPath(path: endpoint.Udp4Tuple) std.Io.net.IpAddress {
+    return .{ .ip4 = .{
+        .bytes = path.remote.octets,
+        .port = path.remote.port,
+    } };
+}
+
+fn currentPeerAddress(
+    server_endpoint: *const ProcessServerEndpoint,
+    managed: *const ManagedProcessConnection,
+) std.Io.net.IpAddress {
+    const route_path = server_endpoint.lifecycle.currentRoutePath(managed.sourceConnectionId()) catch return managed.peer_address;
+    return peerAddressForPath(route_path);
+}
+
+fn sendToCurrentRoute(
+    io: std.Io,
+    socket: *std.Io.net.Socket,
+    server_endpoint: *const ProcessServerEndpoint,
+    managed: *const ManagedProcessConnection,
+    datagram: []const u8,
+) !void {
+    const peer_address = currentPeerAddress(server_endpoint, managed);
+    try socket.send(io, &peer_address, datagram);
+}
+
 fn destroyManagedConnection(
     server_endpoint: *ProcessServerEndpoint,
     handle: u64,
@@ -254,7 +280,7 @@ fn serveConcurrent(
                 for (due_datagrams[0..due.drain.datagrams_written]) |output| {
                     defer allocator.free(output.datagram);
                     const managed = connections.get(output.connection_id) orelse return error.UnknownConnectionId;
-                    try socket.send(io, &managed.peer_address, output.datagram);
+                    try sendToCurrentRoute(io, socket, &server_endpoint, managed, output.datagram);
                 }
                 if (due.drain.first_error) |drain_error| return drain_error;
                 if (due.deadline.kind == .recovery) {
@@ -300,7 +326,7 @@ fn serveConcurrent(
                             if (managed.*.retry_datagram_len == 0 or
                                 !std.mem.eql(u8, managed.*.transport.originalDestinationConnectionId(), initial_info.dcid) or
                                 !std.meta.eql(managed.*.peer_address, received.from)) continue;
-                            try socket.send(io, &managed.*.peer_address, managed.*.retryDatagram());
+                            try sendToCurrentRoute(io, socket, &server_endpoint, managed.*, managed.*.retryDatagram());
                             std.debug.print("zig_process_server: connection={d} concurrent=true retry_reissued=true\n", .{managed.*.handle});
                             continue :receive_loop;
                         }
@@ -384,7 +410,7 @@ fn serveConcurrent(
                         .{ .active_migration_disabled = true },
                     );
                     managed_adopted = true;
-                    try socket.send(io, &managed.peer_address, retry_datagram);
+                    try sendToCurrentRoute(io, socket, &server_endpoint, managed, retry_datagram);
                     std.debug.print("zig_process_server: connection={d} concurrent=true retry_issued=true\n", .{handle});
                     continue;
                 }
@@ -408,13 +434,13 @@ fn serveConcurrent(
                 accepted_count += 1;
                 for (initial_outputs[0..accepted.initial.drain.datagrams_written]) |output| {
                     defer allocator.free(output.datagram);
-                    try socket.send(io, &managed.peer_address, output.datagram);
+                    try sendToCurrentRoute(io, socket, &server_endpoint, managed, output.datagram);
                 }
                 if (accepted.initial.drain.first_error) |drain_error| return drain_error;
                 if (accepted.handshake) |handshake| {
                     for (handshake_outputs[0..handshake.drain.datagrams_written]) |output| {
                         defer allocator.free(output.datagram);
-                        try socket.send(io, &managed.peer_address, output.datagram);
+                        try sendToCurrentRoute(io, socket, &server_endpoint, managed, output.datagram);
                     }
                     if (handshake.drain.first_error) |drain_error| return drain_error;
                 }
@@ -443,7 +469,7 @@ fn serveConcurrent(
                     );
                     for (retry_initial_outputs[0..retry_initial_progress.drain.datagrams_written]) |output| {
                         defer allocator.free(output.datagram);
-                        try socket.send(io, &managed.peer_address, output.datagram);
+                        try sendToCurrentRoute(io, socket, &server_endpoint, managed, output.datagram);
                     }
                     if (retry_initial_progress.drain.first_error) |drain_error| return drain_error;
                     if (!retry_initial_progress.backend.handshake_keys_installed) continue;
@@ -457,7 +483,7 @@ fn serveConcurrent(
                     );
                     for (retry_handshake_outputs[0..retry_handshake_progress.drain.datagrams_written]) |output| {
                         defer allocator.free(output.datagram);
-                        try socket.send(io, &managed.peer_address, output.datagram);
+                        try sendToCurrentRoute(io, socket, &server_endpoint, managed, output.datagram);
                     }
                     if (retry_handshake_progress.drain.first_error) |drain_error| return drain_error;
                     accepted_count += 1;
@@ -492,7 +518,7 @@ fn serveConcurrent(
                         );
                         for (coalesced_handshake_outputs[0..coalesced_handshake.backend.drain.datagrams_written]) |output| {
                             defer allocator.free(output.datagram);
-                            try socket.send(io, &managed.peer_address, output.datagram);
+                            try sendToCurrentRoute(io, socket, &server_endpoint, managed, output.datagram);
                         }
                         if (coalesced_handshake.backend.drain.first_error) |drain_error| return drain_error;
                         continue;
@@ -520,13 +546,13 @@ fn serveConcurrent(
                                 try require(initial.initial.route.connection_id == managed.handle);
                                 for (initial_outputs[0..initial.initial.backend.drain.datagrams_written]) |output| {
                                     defer allocator.free(output.datagram);
-                                    try socket.send(io, &managed.peer_address, output.datagram);
+                                    try sendToCurrentRoute(io, socket, &server_endpoint, managed, output.datagram);
                                 }
                                 if (initial.initial.backend.drain.first_error) |drain_error| return drain_error;
                                 if (initial.handshake) |handshake| {
                                     for (handshake_outputs[0..handshake.drain.datagrams_written]) |output| {
                                         defer allocator.free(output.datagram);
-                                        try socket.send(io, &managed.peer_address, output.datagram);
+                                        try sendToCurrentRoute(io, socket, &server_endpoint, managed, output.datagram);
                                     }
                                     if (handshake.drain.first_error) |drain_error| return drain_error;
                                     if (retry_enabled and managed.retry_validated and !managed.retry_accepted) {
@@ -550,7 +576,7 @@ fn serveConcurrent(
                                 try require(handshake.route.connection_id == managed.handle);
                                 for (handshake_outputs[0..handshake.backend.drain.datagrams_written]) |output| {
                                     defer allocator.free(output.datagram);
-                                    try socket.send(io, &managed.peer_address, output.datagram);
+                                    try sendToCurrentRoute(io, socket, &server_endpoint, managed, output.datagram);
                                 }
                                 if (handshake.backend.drain.first_error) |drain_error| return drain_error;
                             },
@@ -666,7 +692,7 @@ fn serveConcurrent(
                         else => return err,
                     }) orelse break;
                     defer allocator.free(output_packet);
-                    try socket.send(io, &managed.peer_address, output_packet);
+                    try sendToCurrentRoute(io, socket, &server_endpoint, managed, output_packet);
                 }
                 if (queued_echo) {
                     try require(sent_packets > 0);

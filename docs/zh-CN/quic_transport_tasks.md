@@ -39,7 +39,7 @@ version-information 原语）：
 
 | 功能 | 实用目标 | quicz 状态 |
 | --- | --- | --- |
-| UDP client/server endpoint | 第一轮可用里程碑必须具备。由同一个 endpoint owner 驱动 accept/connect、packet receive/send、timer、route cleanup 和 close。 | 部分完成：`Tls13ServerEndpoint` 持有动态分配或有界的 TLS server record、ingress 分类、lifecycle routing/timer、accepted-Initial 到 Handshake 的 TLS backend output 与原子 record 退役；`Tls13ClientEndpoint` 持有一个 client transport、CID route、recovery-timer mirror，以及受保护的 close 发送和 route 退役。process client/server 的 UDP receive capacity 已各自与配置的 local datagram limit 对齐。调用方仍持有 UDP I/O 与接纳策略；仍缺少生产级多连接 event-loop policy。 |
+| UDP client/server endpoint | 第一轮可用里程碑必须具备。由同一个 endpoint owner 驱动 accept/connect、packet receive/send、timer、route cleanup 和 close。 | 部分完成：`Tls13ServerEndpoint` 持有动态分配或有界的 TLS server record、ingress 分类、lifecycle routing/timer、accepted-Initial 到 Handshake 的 TLS backend output、原子 record 退役，以及 process server 基于已提交 route tuple 的 datagram send selection；`Tls13ClientEndpoint` 持有一个 client transport、CID route、recovery-timer mirror，以及受保护的 close 发送和 route 退役。process client/server 的 UDP receive capacity 已各自与配置的 local datagram limit 对齐。调用方仍持有 UDP I/O 与接纳策略；仍缺少生产级多连接 event-loop policy。 |
 | TLS 1.3 集成 | 必须具备。纯 Zig TLS 1.3（`src/quic/tls13.zig` + `src/quic/tls13_backend.zig`）通过 `CryptoBackend` 接口接入；OpenSSL C adapter 为废弃路径。 | 部分完成：client 与 server TLS transport 持有 protected I/O，并统一选择和处理 recovery、idle、close 与 key-discard deadline；每个并发 server record 持有 `Tls13ServerTransport`（Connection、TLS backend，以及本端/对端/Original DCID 的固定副本）。服务端 Certificate 消息保留配置的 leaf-first DER certificate chain；配置 bundle 的 client 会在信任锚前逐跳校验收到的 leaf-to-issuer chain。下方 `quic-go` 证据完成真实 TLS-owned handshake 与两条带 FIN 的 1-RTT STREAM echo，不使用 mock key 或 OpenSSL；仍缺少生产级 endpoint-owned event loop。 |
 | QUIC v1 packet protection | 必须具备。Initial、Handshake、启用时的 0-RTT 和 1-RTT packet 必须由 TLS-owned 路径生成和消费。 | 部分完成：已有 v1/v2 Initial、Retry integrity、protected long/short helper、受保护 packet 解密和状态更新前的接收侧 UDP datagram 大小拒绝，以及 mock installed-key 路径。 |
 | Stream | 必须具备。Bidirectional/unidirectional stream 的 open、read、write、FIN、reset、STOP_SENDING 和 stream limit 必须能跑在 protected UDP 上。 | 部分完成：TLS-owned client/server transport 已暴露 bidirectional 和 unidirectional 的 open/write/read/FIN，以及 RESET_STREAM 和 STOP_SENDING。TLS-backed endpoint UDP loopback 已验证 RESET_STREAM 与 FIN 驱动的 MAX_STREAMS_BIDI 额度释放；独立 `quic-go` client 已验证 stream 0 到 4 到 8 到 12 的连续 stream-count 额度释放、RESET_STREAM(41)、STOP_SENDING(42) 后对端回送 RESET_STREAM(42)，以及 client 单向 stream 2 / server 单向 stream 3 的 FIN 交换。更广泛的 stream-limit 互通仍不完整。 |
@@ -48,7 +48,7 @@ version-information 原语）：
 | Congestion control | 至少需要 NewReno-style 基线。CUBIC 或可配置 controller 是后续性能工作。 | 部分完成：已有简化 NewReno-style 行为；缺少生产调优和可配置 controller。 |
 | Connection ID 和 stateless reset | 必须具备。Routing、CID issue/retire、reset-token handling、close cleanup 和 inactive-CID reset emission 必须接入 endpoint lifecycle。 | 部分完成：已有 endpoint router、连接层 reset receive-to-draining 状态、endpoint installed-key feed 的 active-route reset 处理与 recovery timer disarm、lifecycle helper 和 socket-backed loopback。TLS client/server transport 会为发包选择最新未退役的 peer `NEW_CONNECTION_ID`，并在没有该值时回退到已认证 Initial SCID；并发 TLS process server 现为每个接纳的连接生成独立的 8 字节 CSPRNG Initial SCID。完整 TLS-owned lifecycle 集成仍未完成。 |
 | Retry 和 address validation | 服务端健壮性和互通必须具备。 | 部分完成：并发 Retry 使用每个进程的新 token secret 与每次签发的新 nonce 熵；已有 token policy、Retry validation、address-validation loopback 和 TLS extension byte 校验；缺少生产存储/replay policy。 |
-| Path validation 和迁移 | 需要单路径 validation 和 route update；完整 multipath 不在范围内。 | 部分完成：已有 PATH_CHALLENGE/PATH_RESPONSE 和 route-update loopback；endpoint-owned server output 现在可在已验证迁移后读取已提交 route tuple。生产 path policy 和外部迁移证据仍未完成。 |
+| Path validation 和迁移 | 需要单路径 validation 和 route update；完整 multipath 不在范围内。 | 部分完成：已有 PATH_CHALLENGE/PATH_RESPONSE 和 route-update loopback；endpoint-owned server output 与 process server datagram send 现在可在已验证迁移后使用已提交 route tuple。生产 path policy 和外部迁移证据仍未完成。 |
 | 0-RTT | 第一轮 1-RTT stream echo 互通之后推进；不阻塞当前里程碑。 | 部分完成：已有显式 accept/reject 和 mock installed-key 0-RTT 路径；缺少真实 TLS replay policy。 |
 | RFC 9221 DATAGRAM | 可选扩展，不属于第一轮 transport 里程碑。 | Deferred。 |
 | HTTP/3 和 QPACK | transport 可互通后再做的应用层工作。 | Deferred。 |
@@ -116,7 +116,8 @@ stream 0 与 4 独立完成以 FIN 结束的 bidirectional STREAM echo
 `EndpointConnectionLifecycle` 分类并接受首个 Initial；只有认证成功后才注册
 Original DCID 与 server SCID route，然后由 TLS 产生第一份响应。客户端在绑定 UDP
 socket 后注册自己的 SCID route。两端后续 Handshake 与 1-RTT STREAM 的收发都会使用
-这些已注册 route 和 lifecycle timer refresh。客户端 endpoint 将 Initial/Retry/Handshake 状态推进交给
+这些已注册 route 和 lifecycle timer refresh；process server 会通过 endpoint 已提交的
+route tuple 发送 managed connection output，而不是固定使用接纳时的 peer address。客户端 endpoint 将 Initial/Retry/Handshake 状态推进交给
 其 `Tls13ClientTransport`；握手后按该 transport 的 recovery、idle、close 与 key-discard deadline
 选择 UDP receive 等待，due recovery 会重传有界的 1-RTT output。该可复现命令默认并发启动两个带 tag 的 client
 process。服务端在同一 UDP socket 上用一个 `EndpointConnectionLifecycle` 分类和路由所有
