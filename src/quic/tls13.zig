@@ -2133,12 +2133,16 @@ pub const Tls13Handshake = struct {
                     const shares_len = readU16(ext[0..2]);
                     if (shares_len == 0 or 2 + shares_len != el) return error.DecodeError;
                     var sp: usize = 2; // skip client_shares_len
+                    var seen_x25519_key_share = false;
                     while (sp + 4 <= el) {
                         const group = readU16(ext[sp..]);
                         const klen = readU16(ext[sp + 2 ..]);
                         sp += 4;
                         if (sp + klen > el) return error.DecodeError;
-                        if (group == group_x25519 and klen == 32 and sp + 32 <= el) {
+                        if (group == group_x25519) {
+                            if (seen_x25519_key_share) return error.DecodeError;
+                            seen_x25519_key_share = true;
+                            if (klen != 32 or sp + 32 > el) return error.DecodeError;
                             @memcpy(&self.peer_x25519_public, ext[sp..][0..32]);
                             have_key_share = true;
                         }
@@ -4236,6 +4240,32 @@ test "Tls13Handshake server rejects malformed ClientHello key_share length" {
     const hello = try clientHelloBytes(.{}, &hello_buf);
     const key_share = try clientHelloExtension(hello, @intFromEnum(ExtType.key_share));
     writeU16(hello[key_share.body_offset..][0..2], @as(u16, @intCast(key_share.body_len - 3)));
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects duplicate ClientHello X25519 key_share entries" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const key_share = try clientHelloExtension(base_hello, @intFromEnum(ExtType.key_share));
+    const share_entry_len = key_share.body_len - 2;
+    const insert_offset = key_share.body_offset + key_share.body_len;
+    std.mem.copyBackwards(
+        u8,
+        hello_buf[insert_offset + share_entry_len .. base_hello.len + share_entry_len],
+        hello_buf[insert_offset..base_hello.len],
+    );
+    @memcpy(hello_buf[insert_offset..][0..share_entry_len], hello_buf[key_share.body_offset + 2 ..][0..share_entry_len]);
+
+    const shares_len = readU16(hello_buf[key_share.body_offset..]);
+    writeU16(hello_buf[key_share.body_offset..][0..2], @as(u16, @intCast(shares_len + share_entry_len)));
+    writeU16(hello_buf[key_share.header_offset + 2 ..][0..2], @as(u16, @intCast(key_share.body_len + share_entry_len)));
+    try setClientHelloBodyLen(&hello_buf, base_hello.len - 4 + share_entry_len);
+    const extensions_len = readU16(hello_buf[key_share.extensions_len_offset..]);
+    writeU16(hello_buf[key_share.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + share_entry_len)));
+    const hello = hello_buf[0 .. base_hello.len + share_entry_len];
 
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
