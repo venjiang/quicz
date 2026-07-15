@@ -134,6 +134,41 @@ pub const Tls13ClientTransport = struct {
         );
     }
 
+    /// Return one protected datagram after a due recovery timer is serviced.
+    ///
+    /// The selected packet number space controls which packet format and keys
+    /// are used. Initial retransmission derives keys from the Original DCID or
+    /// Retry SCID, Handshake uses installed TLS keys, and Application uses the
+    /// normal 1-RTT short-packet path.
+    pub fn pollRecoveryDatagram(
+        self: *Tls13ClientTransport,
+        deadline: LossDetectionTimerDeadline,
+        now_millis: i64,
+    ) ClientTransportError!?[]u8 {
+        return switch (deadline.space) {
+            .initial => initial: {
+                const dcid = self.connection.retrySourceConnectionId() orelse &self.original_destination_connection_id;
+                const initial_keys = try protection.deriveInitialSecrets(self.version, dcid);
+                break :initial try self.connection.pollProtectedLongDatagram(
+                    now_millis,
+                    dcid,
+                    &self.local_source_connection_id,
+                    &[_]u8{},
+                    .{ .initial = initial_keys.client },
+                );
+            },
+            .handshake => handshake: {
+                const peer_connection_id = self.connection.peerInitialSourceConnectionId() orelse return error.InvalidPacket;
+                break :handshake try self.connection.pollProtectedHandshakeDatagramWithInstalledKeys(
+                    now_millis,
+                    peer_connection_id,
+                    &self.local_source_connection_id,
+                );
+            },
+            .application => try self.pollApplicationDatagram(now_millis),
+        };
+    }
+
     /// Read received bytes from one application stream into `out`.
     pub fn recvStream(
         self: *Tls13ClientTransport,

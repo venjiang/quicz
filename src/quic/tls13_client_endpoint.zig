@@ -244,18 +244,37 @@ pub const Tls13ClientEndpoint = struct {
     }
 
     /// Service one due client deadline and return route-bound recovery output.
-    pub fn serviceDueDeadlineAndPollApplicationDatagramWithRoutePath(
+    ///
+    /// Recovery output may be an Initial, Handshake, or 1-RTT Application
+    /// datagram, depending on the due packet number space.
+    pub fn serviceDueDeadlineAndPollDatagramWithRoutePath(
         self: *Tls13ClientEndpoint,
         now_millis: i64,
-    ) !?DueDeadlineApplicationDatagramPathResult {
+    ) !?DueDeadlineDatagramPathResult {
         const serviced = (try self.serviceDueDeadline(now_millis)) orelse return null;
         const datagram = switch (serviced) {
-            .recovery => try self.pollApplicationDatagramWithRoutePath(now_millis),
+            .recovery => |recovery| try self.pollRecoveryDatagramWithRoutePath(recovery, now_millis),
             .idle_timeout, .close_timeout, .key_discard => null,
         };
         return .{
             .deadline = serviced,
             .datagram = datagram,
+        };
+    }
+
+    fn pollRecoveryDatagramWithRoutePath(
+        self: *Tls13ClientEndpoint,
+        recovery: transport_types.LossDetectionTimerDeadline,
+        now_millis: i64,
+    ) !?ApplicationDatagramPathResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        const datagram = (try self.transport.pollRecoveryDatagram(recovery, now_millis)) orelse return null;
+        errdefer self.transport.connection.allocator.free(datagram);
+        try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+        return .{
+            .datagram = datagram,
+            .path = path,
         };
     }
 
@@ -446,8 +465,9 @@ pub const Tls13ClientEndpoint = struct {
     };
 
     /// Client due-deadline result with optional route-bound recovery output.
-    pub const DueDeadlineApplicationDatagramPathResult = struct {
+    pub const DueDeadlineDatagramPathResult = struct {
         deadline: client_transport.ClientTransportDeadline,
+        /// Protected datagram for the due recovery packet number space.
         datagram: ?ApplicationDatagramPathResult = null,
     };
 };
@@ -692,6 +712,53 @@ test "Tls13ClientEndpoint receive does not drain queued application output on ro
     try std.testing.expect(queued.datagram.len != 0);
 }
 
+test "Tls13ClientEndpoint services Initial recovery with committed route output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = old_path.remote,
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        19,
+        old_path,
+        .{ .active_migration_disabled = false },
+        .{ .initial_rtt_ms = 100 },
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    var scratch: [8192]u8 = undefined;
+    const initial = try client.beginWithRoutePath(1, &scratch);
+    defer std.testing.allocator.free(initial.datagram);
+    try std.testing.expect(initial.path.eql(old_path));
+
+    const deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.initial, deadline.recovery.space);
+    _ = try client.updatePath(new_path);
+
+    const before_deadline = try client.serviceDueDeadlineAndPollDatagramWithRoutePath(deadline.deadlineMillis() - 1);
+    try std.testing.expect(before_deadline == null);
+
+    const serviced = (try client.serviceDueDeadlineAndPollDatagramWithRoutePath(deadline.deadlineMillis())) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(serviced.deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.initial, serviced.deadline.recovery.space);
+    const output = serviced.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(output.datagram);
+    try std.testing.expect(output.path.eql(new_path));
+    try std.testing.expect(output.datagram.len >= 1200);
+    try std.testing.expectEqual(packet.HeaderForm.long, packet.parseHeaderForm(output.datagram[0]));
+}
+
 test "Tls13ClientEndpoint services due recovery with committed route output" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
@@ -741,10 +808,10 @@ test "Tls13ClientEndpoint services due recovery with committed route output" {
     try std.testing.expect(deadline == .recovery);
 
     _ = try client.updatePath(new_path);
-    const before_deadline = try client.serviceDueDeadlineAndPollApplicationDatagramWithRoutePath(deadline.deadlineMillis() - 1);
+    const before_deadline = try client.serviceDueDeadlineAndPollDatagramWithRoutePath(deadline.deadlineMillis() - 1);
     try std.testing.expect(before_deadline == null);
 
-    const serviced = (try client.serviceDueDeadlineAndPollApplicationDatagramWithRoutePath(deadline.deadlineMillis())) orelse return error.TestUnexpectedResult;
+    const serviced = (try client.serviceDueDeadlineAndPollDatagramWithRoutePath(deadline.deadlineMillis())) orelse return error.TestUnexpectedResult;
     try std.testing.expect(serviced.deadline == .recovery);
     const output = serviced.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(output.datagram);

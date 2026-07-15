@@ -95,6 +95,11 @@ peer-parameter 错误会直接返回或 drain 触发连接上的 protected Hands
 installed-key 1-RTT short OrClose helper 对 Application-space receive 和 backend 错误也
 采用同一边界：direct/routed poll/drain helper 会从选中的连接返回 protected short close
 datagram；route mismatch 和未进入 closing 的 invalid packet 仍在输出前失败。
+Client endpoint 的 due-recovery service 现在会按到期 packet number space 取输出，不再只
+走 Application short-packet 路径。`Tls13ClientTransport.pollRecoveryDatagram()` 会根据
+已服务的 RFC 9002 timer 发出 Initial、Handshake 或 Application protected output，
+`Tls13ClientEndpoint` 再把该输出绑定到已提交 route。测试覆盖 Initial PTO route output，
+并保留已有 Application PTO route output 证据。
 
 ### Packet number 重排证据
 

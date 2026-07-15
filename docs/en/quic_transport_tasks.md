@@ -110,6 +110,12 @@ Installed-key 1-RTT short OrClose helpers now do the same for Application-space
 receive and backend errors: direct and routed poll/drain helpers return the
 protected short close datagram from the selected connection while route
 mismatches and non-closing invalid packets still fail before output.
+Client endpoint due-recovery service now polls the due packet number space, not
+only the Application short-packet path. `Tls13ClientTransport.pollRecoveryDatagram()`
+emits Initial, Handshake, or Application protected output according to the
+serviced RFC 9002 timer, and `Tls13ClientEndpoint` pairs that output with the
+committed route. Tests cover Initial PTO route output and the existing
+Application PTO route output.
 
 ### Packet-number reordering evidence
 
