@@ -42276,6 +42276,7 @@ test "EndpointConnectionLifecycle feed installed-key path update commits after P
     try std.testing.expect(ping_route.path_changed);
     try std.testing.expect(ping_result.updated_route == null);
     try std.testing.expect(ping_result.path_challenge_queued);
+    try std.testing.expect((ping_result.selected_output_path orelse return error.TestUnexpectedResult).eql(new_path));
     try std.testing.expectEqual(@as(usize, 1), server.pendingPathChallengeCount());
     try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
     try std.testing.expect((try lifecycle.routeDatagram(new_path, migrated_ping)).path_changed);
@@ -42292,6 +42293,7 @@ test "EndpointConnectionLifecycle feed installed-key path update commits after P
         options,
     );
     try std.testing.expect(!duplicate_ping_result.path_challenge_queued);
+    try std.testing.expect(duplicate_ping_result.selected_output_path == null);
     try std.testing.expectEqual(@as(usize, 1), server.pendingPathChallengeCount());
     try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
 
@@ -42316,6 +42318,7 @@ test "EndpointConnectionLifecycle feed installed-key path update commits after P
     try std.testing.expect(response_route.path_changed);
     const updated_route = validation_result.updated_route orelse return error.TestUnexpectedResult;
     try std.testing.expect(!validation_result.path_challenge_queued);
+    try std.testing.expect((validation_result.selected_output_path orelse return error.TestUnexpectedResult).eql(new_path));
     try std.testing.expectEqual(@as(u64, 188), updated_route.connection_id);
     try std.testing.expect(!updated_route.path_changed);
     try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());

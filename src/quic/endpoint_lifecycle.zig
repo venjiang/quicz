@@ -1450,7 +1450,8 @@ pub const EndpointConnectionLifecycle = struct {
     /// PATH_CHALLENGE response from the changed UDP tuple. When the caller
     /// supplies `path_challenge_data`, a successfully processed application
     /// packet from a changed path queues one PATH_CHALLENGE unless validation
-    /// is already pending or has just completed.
+    /// is already pending or has just completed. The result exposes the UDP
+    /// tuple that immediate path-validation-related output should use.
     pub fn feedDatagramWithInstalledKeysAndUpdatePathOrClose(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -1518,6 +1519,7 @@ pub const EndpointConnectionLifecycle = struct {
                             .feed = .{ .routed = route },
                             .updated_route = updated_route,
                             .path_challenge_queued = path_challenge_queued,
+                            .selected_output_path = if (updated_route != null or path_challenge_queued) path else null,
                         };
                     },
                 }

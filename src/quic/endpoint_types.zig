@@ -527,6 +527,8 @@ pub const EndpointFeedInstalledKeyPathUpdateResult = struct {
     updated_route: ?endpoint.RouteResult = null,
     /// Whether a PATH_CHALLENGE was queued for a changed path.
     path_challenge_queued: bool = false,
+    /// UDP tuple selected for immediate path-validation-related output.
+    selected_output_path: ?endpoint.Udp4Tuple = null,
 };
 
 /// Result from feeding one installed-key datagram, then selecting a wakeup.
