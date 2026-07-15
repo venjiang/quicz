@@ -29,6 +29,8 @@ const retry_token_lifetime_millis: u64 = 10_000;
 const max_retry_datagram_size: usize = 256;
 const echo_stream_ids = [_]u64{ 0, 4 };
 const echo_payloads = [_][]const u8{ "hello", "world" };
+const interop_echo_stream_ids = [_]u64{ 0, 4, 8, 12 };
+const interop_echo_payloads = [_][]const u8{ "hello", "world", "again", "more" };
 const echo_total_bytes: usize = 10;
 const flow_control_payload = [_]u8{'f'} ** 12_288;
 const client_uni_stream_id: u64 = 2;
@@ -118,8 +120,8 @@ const ManagedProcessConnection = struct {
     server_uni_sent: bool = false,
     flow_bytes_received: usize = 0,
     flow_echoed: bool = false,
-    request_received: [echo_stream_ids.len]bool = .{ false, false },
-    echoed: [echo_stream_ids.len]bool = .{ false, false },
+    request_received: [interop_echo_stream_ids.len]bool = .{ false, false, false, false },
+    echoed: [interop_echo_stream_ids.len]bool = .{ false, false, false, false },
 
     fn clientScid(self: *const ManagedProcessConnection) []const u8 {
         return self.transport.peerInitialSourceConnectionId();
@@ -640,7 +642,7 @@ fn serveConcurrent(
                     }
                 }
                 if (!expect_flow_control) {
-                    inline for (echo_stream_ids, echo_payloads, 0..) |stream_id, payload, index| {
+                    inline for (interop_echo_stream_ids, interop_echo_payloads, 0..) |stream_id, payload, index| {
                         const skip_echo = expect_client_stop_sending and index == 0;
                         if (!skip_echo and !managed.request_received[index]) {
                             var stream_buffer: [128]u8 = undefined;

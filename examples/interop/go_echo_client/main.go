@@ -53,7 +53,7 @@ func main() {
 	alpn := flag.String("alpn", "hq-interop", "required QUIC ALPN")
 	caPath := flag.String("ca", "", "PEM trust anchor for the Zig echo server (required)")
 	serverName := flag.String("server-name", "localhost", "TLS server name")
-	expectStreamLimit := flag.Bool("expect-stream-limit", false, "require stream IDs 0 then 4 after a one-stream peer limit")
+	expectStreamLimit := flag.Bool("expect-stream-limit", false, "require stream IDs 0, 4, 8, and 12 after one-stream peer limits")
 	expectReset := flag.Bool("expect-reset", false, "cancel stream 0 with RESET_STREAM error 41, then echo stream 4")
 	expectStopSending := flag.Bool("expect-stop-sending", false, "require remote STOP_SENDING error 42 on stream 0, then echo stream 4")
 	expectUni := flag.Bool("expect-uni", false, "send client unidirectional stream 2 and require server unidirectional stream 3")
@@ -152,6 +152,9 @@ func main() {
 	}
 
 	messages := []string{"hello", "world"}
+	if *expectStreamLimit {
+		messages = []string{"hello", "world", "again", "more"}
+	}
 	if *expectFlowControl {
 		messages = []string{strings.Repeat("f", 12_288)}
 	}
@@ -235,7 +238,7 @@ func main() {
 	}
 
 	if *expectStreamLimit {
-		fmt.Printf("go_quic_stream_limit_client: handshake_done=true initial_limit=1 released_stream=4 echo_bytes=%d\n", echoBytes)
+		fmt.Printf("go_quic_stream_limit_client: handshake_done=true initial_limit=1 released_stream=12 echo_bytes=%d\n", echoBytes)
 		return
 	}
 	if *expectReset {
