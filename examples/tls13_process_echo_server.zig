@@ -488,26 +488,21 @@ fn serveConcurrent(
                         first_long_info.len < received.data.len and
                         managed.transport.connection.hasHandshakeProtectionKeys())
                     {
-                        _ = try server_endpoint.processInitialWithHandshakeKeys(
+                        var coalesced_scratch: [8192]u8 = undefined;
+                        var coalesced_handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
+                        const coalesced_handshake = try server_endpoint.processInitialWithHandshakeKeys(
                             managed.handle,
                             path,
                             now_millis,
                             received.data,
-                        );
-                        var coalesced_scratch: [8192]u8 = undefined;
-                        var coalesced_handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
-                        const coalesced_handshake = try server_endpoint.driveBackend(
-                            managed.handle,
-                            .handshake,
                             &coalesced_scratch,
-                            now_millis,
                             &coalesced_handshake_outputs,
                         );
-                        for (coalesced_handshake_outputs[0..coalesced_handshake.drain.datagrams_written]) |output| {
+                        for (coalesced_handshake_outputs[0..coalesced_handshake.backend.drain.datagrams_written]) |output| {
                             defer allocator.free(output.datagram);
                             try socket.send(io, &managed.peer_address, output.datagram);
                         }
-                        if (coalesced_handshake.drain.first_error) |drain_error| return drain_error;
+                        if (coalesced_handshake.backend.drain.first_error) |drain_error| return drain_error;
                         continue;
                     }
                     var datagram_offset: usize = 0;

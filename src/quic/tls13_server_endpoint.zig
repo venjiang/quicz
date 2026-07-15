@@ -365,16 +365,23 @@ pub fn Tls13ServerEndpoint(
             return result;
         }
 
-        /// Authenticate a routed Initial after Handshake keys are available.
+        /// Authenticate coalesced Initial/Handshake input and drive TLS output.
+        ///
+        /// Once Handshake keys exist, this keeps the retained Initial receive
+        /// path and the corresponding Handshake backend drive on the same
+        /// endpoint-owned record boundary. The caller still owns UDP sends for
+        /// the returned bounded output datagrams.
         pub fn processInitialWithHandshakeKeys(
             self: *Self,
             connection_id: u64,
             path: endpoint.Udp4Tuple,
             now_millis: i64,
             datagram: []const u8,
-        ) (root.EndpointProtectedInitialError || error{UnknownConnectionId})!endpoint.RouteResult {
+            scratch: []u8,
+            out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedInitialError || root.Error || error{UnknownConnectionId})!root.EndpointRoutedCryptoBackendDriveDatagramDrainResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
-            return self.lifecycle.processRoutedProtectedLongDatagramWithInstalledHandshakeKeys(
+            const route = try self.lifecycle.processRoutedProtectedLongDatagramWithInstalledHandshakeKeys(
                 connection_id,
                 connection_of(record),
                 path,
@@ -382,6 +389,10 @@ pub fn Tls13ServerEndpoint(
                 initial_destination_connection_id_of(record),
                 datagram,
             );
+            return .{
+                .route = route,
+                .backend = try self.driveBackend(connection_id, .handshake, scratch, now_millis, out),
+            };
         }
 
         /// Authenticate a routed Initial, drive TLS, and drain bounded output.
@@ -688,6 +699,8 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             retry_path,
             1,
             &[_]u8{},
+            &backend_scratch,
+            &backend_output,
         ),
     );
     try std.testing.expectError(
