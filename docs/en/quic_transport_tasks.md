@@ -131,8 +131,12 @@ server classifies and accepts its first Initial through
 routes only after authentication before TLS produces the first response. The
 client registers its SCID route after binding its UDP socket. On both peers,
 the subsequent Handshake and 1-RTT STREAM receive/send steps use those
-registered routes and lifecycle timer refresh. By default the reproducible
-command starts two tagged client processes concurrently. The server keeps
+registered routes and lifecycle timer refresh. The client delegates
+Initial/Retry/Handshake processing to `Tls13ClientTransport`; after the
+handshake its UDP receive wait is selected from that transport's recovery,
+idle, close, and key-discard deadlines, and a due recovery retransmits bounded
+1-RTT output. By default the reproducible command starts two tagged client
+processes concurrently. The server keeps
 each `Connection` and its `Tls13Backend` record in the bounded,
 endpoint-owned `EndpointConnectionRegistry`, and uses one
 `EndpointConnectionLifecycle` to classify and route every datagram on one UDP

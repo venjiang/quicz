@@ -111,7 +111,9 @@ stream 0 与 4 独立完成以 FIN 结束的 bidirectional STREAM echo
 `EndpointConnectionLifecycle` 分类并接受首个 Initial；只有认证成功后才注册
 Original DCID 与 server SCID route，然后由 TLS 产生第一份响应。客户端在绑定 UDP
 socket 后注册自己的 SCID route。两端后续 Handshake 与 1-RTT STREAM 的收发都会使用
-这些已注册 route 和 lifecycle timer refresh。该可复现命令默认并发启动两个带 tag 的 client
+这些已注册 route 和 lifecycle timer refresh。客户端将 Initial/Retry/Handshake 状态推进交给
+`Tls13ClientTransport`；握手后按该 transport 的 recovery、idle、close 与 key-discard deadline
+选择 UDP receive 等待，due recovery 会重传有界的 1-RTT output。该可复现命令默认并发启动两个带 tag 的 client
 process。服务端在同一 UDP socket 上用一个 `EndpointConnectionLifecycle` 分类和路由所有
 datagram，并由有界、endpoint-owned 的 `EndpointConnectionRegistry` 持有每条
 `Connection` 与其 `Tls13Backend` record；固定容量形式会从同一 record 集合预分配 lifecycle 的 deadline、
