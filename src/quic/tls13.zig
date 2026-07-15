@@ -1714,8 +1714,9 @@ pub const Tls13Handshake = struct {
                     have_alpn = true;
                 },
                 @intFromEnum(ExtType.quic_transport_parameters) => {
-                    self.peer_tp_len = @min(el, self.peer_tp.len);
-                    @memcpy(self.peer_tp[0..self.peer_tp_len], ext[0..self.peer_tp_len]);
+                    if (el > self.peer_tp.len) return error.DecodeError;
+                    self.peer_tp_len = el;
+                    @memcpy(self.peer_tp[0..self.peer_tp_len], ext);
                 },
                 else => {}, // ignore unrecognized extensions
             }
@@ -2175,8 +2176,9 @@ pub const Tls13Handshake = struct {
                     }
                 },
                 @intFromEnum(ExtType.quic_transport_parameters) => {
-                    self.peer_tp_len = @min(el, self.peer_tp.len);
-                    @memcpy(self.peer_tp[0..self.peer_tp_len], ext[0..self.peer_tp_len]);
+                    if (el > self.peer_tp.len) return error.DecodeError;
+                    self.peer_tp_len = el;
+                    @memcpy(self.peer_tp[0..self.peer_tp_len], ext);
                 },
                 @intFromEnum(ExtType.psk_key_exchange_modes) => {
                     if (el < 2) return error.DecodeError;
@@ -3425,6 +3427,19 @@ test "Tls13Handshake client rejects duplicate known EncryptedExtensions extensio
     try std.testing.expectError(error.DecodeError, hs.step());
 }
 
+test "Tls13Handshake client rejects oversized EncryptedExtensions transport parameters" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var peer_tp: [1025]u8 = undefined;
+    @memset(&peer_tp, 0xaa);
+    var ee_buf: [2048]u8 = undefined;
+    const ee_len = buildEncryptedExtensions(&ee_buf, "", &peer_tp);
+    hs.provideData(ee_buf[0..ee_len]);
+
+    try std.testing.expectError(error.DecodeError, hs.clientProcessEncryptedExtensions());
+}
+
 test "Tls13Handshake client rejects trailing bytes after EncryptedExtensions extensions" {
     var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
     _ = try hs.step();
@@ -3933,6 +3948,23 @@ test "Tls13Handshake server rejects trailing ClientHello PSK binder bytes" {
     const hello = hello_buf[0 .. base_hello.len + 1];
 
     var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects oversized ClientHello transport parameters" {
+    var hello_buf: [2048]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    var peer_tp: [1025]u8 = undefined;
+    @memset(&peer_tp, 0xaa);
+    const hello = try appendClientHelloRawExtension(
+        &hello_buf,
+        base_hello.len,
+        @intFromEnum(ExtType.quic_transport_parameters),
+        &peer_tp,
+    );
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
 }
