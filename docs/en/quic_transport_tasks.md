@@ -242,7 +242,9 @@ zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443
 
 Both clients reported `handshake_done=true echo_streams=2 echo_bytes=10` after
 verifying both bidirectional STREAM FIN exchanges against the Zig server when rerun on
-2026-07-14. The server reassembles a bounded ClientHello
+2026-07-14. A current two-client Go run also completed both handshakes and
+echoes concurrently through one two-slot endpoint, with both routes retained
+through their draining periods and `capacity_dropped_initials=0`. The server reassembles a bounded ClientHello
 across Initial packets, iterates coalesced Initial/Handshake packets before
 consuming the Handshake packet, and routes late long-header ACK traffic without
 decrypting it after that key space is discarded. It also accepts 1-RTT

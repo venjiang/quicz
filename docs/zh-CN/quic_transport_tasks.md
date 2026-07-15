@@ -188,7 +188,9 @@ zig-out/bin/quicz-tls13-process-echo-server 127.0.0.1 4443
 ```
 
 两个客户端在 2026-07-14 重新验证时对 Zig server 都在验证两条双向 STREAM FIN exchange 后输出
-`handshake_done=true echo_streams=2 echo_bytes=10`。server 会跨多个 Initial packet 重组有上限的
+`handshake_done=true echo_streams=2 echo_bytes=10`。当前两 client Go 并发运行也通过同一个双槽位
+endpoint 完成两次握手与 echo，两条 route 均保留至 draining period 结束，且
+`capacity_dropped_initials=0`。server 会跨多个 Initial packet 重组有上限的
 ClientHello，逐个处理共包的 Initial/Handshake packet 后再消费 Handshake packet，并在对应
 key space 已丢弃后仅路由迟到的 long-header ACK 流量而不再解密；它也接受先于 stream payload
 到达的 1-RTT ACK/control packet。该 PEM 文件只是在 `localhost` 和 `127.0.0.1` 上使用的本地
