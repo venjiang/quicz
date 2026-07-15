@@ -1086,6 +1086,7 @@ pub const Tls13Handshake = struct {
     // Pre-encoded QUIC transport parameters
     tp_encoded: [1024]u8 = undefined,
     tp_encoded_len: usize = 0,
+    local_tp_too_large: bool = false,
 
     // Peer QUIC transport parameters (parsed from EncryptedExtensions)
     peer_tp: [1024]u8 = undefined,
@@ -1175,8 +1176,11 @@ pub const Tls13Handshake = struct {
         self.peer_psk_binder_valid = false;
         self.nst_sent = false;
 
-        // Copy pre-encoded transport parameters
-        const tp_len = @min(transport_params.len, self.tp_encoded.len);
+        // Copy pre-encoded transport parameters. Oversized local bytes cannot
+        // be represented without changing the wire value, so defer failure to
+        // the message-building step instead of truncating.
+        self.local_tp_too_large = transport_params.len > self.tp_encoded.len;
+        const tp_len = if (self.local_tp_too_large) 0 else transport_params.len;
         @memcpy(self.tp_encoded[0..tp_len], transport_params[0..tp_len]);
         self.tp_encoded_len = tp_len;
 
@@ -1233,7 +1237,10 @@ pub const Tls13Handshake = struct {
         self.nst_sent = false;
 
         // Copy pre-encoded transport parameters (sent in EncryptedExtensions).
-        const tp_len = @min(transport_params.len, self.tp_encoded.len);
+        // Oversized local bytes cannot be represented without changing the
+        // wire value, so defer failure to the message-building step.
+        self.local_tp_too_large = transport_params.len > self.tp_encoded.len;
+        const tp_len = if (self.local_tp_too_large) 0 else transport_params.len;
         @memcpy(self.tp_encoded[0..tp_len], transport_params[0..tp_len]);
         self.tp_encoded_len = tp_len;
 
@@ -1381,6 +1388,7 @@ pub const Tls13Handshake = struct {
     /// Build a ClientHello message with ALPN, SNI, key_share, and QUIC
     /// transport parameters extensions (RFC 8446 §4.1.2 + RFC 9001 §8).
     fn clientBuildHello(self: *Tls13Handshake) HandshakeError!Action {
+        if (self.local_tp_too_large) return error.DecodeError;
         secureRandomBytes(&self.client_random);
 
         const buf = &self.out_buf;
@@ -2375,6 +2383,7 @@ pub const Tls13Handshake = struct {
     /// Build EncryptedExtensions carrying the negotiated ALPN and the server's
     /// QUIC transport parameters (RFC 8446 §4.3.1 + RFC 9001 §8).
     fn serverBuildEncryptedExtensions(self: *Tls13Handshake) HandshakeError!Action {
+        if (self.local_tp_too_large) return error.DecodeError;
         const alpn = self.negotiated_alpn[0..self.negotiated_alpn_len];
         const tp = self.tp_encoded[0..self.tp_encoded_len];
         const len = buildEncryptedExtensions(&self.out_buf, alpn, tp);
@@ -2619,6 +2628,14 @@ test "Tls13Handshake client builds ClientHello with transport parameters" {
         }
     }
     try std.testing.expect(found_tp);
+}
+
+test "Tls13Handshake client rejects oversized local transport parameters" {
+    var tp: [1025]u8 = undefined;
+    @memset(&tp, 0xaa);
+    var hs = Tls13Handshake.initClient(.{}, &tp);
+
+    try std.testing.expectError(error.DecodeError, hs.step());
 }
 
 test "Tls13Handshake isComplete is false before handshake" {
@@ -3463,6 +3480,14 @@ test "Tls13Handshake client rejects oversized EncryptedExtensions transport para
     hs.provideData(ee_buf[0..ee_len]);
 
     try std.testing.expectError(error.DecodeError, hs.clientProcessEncryptedExtensions());
+}
+
+test "Tls13Handshake server rejects oversized local transport parameters" {
+    var tp: [1025]u8 = undefined;
+    @memset(&tp, 0xaa);
+    var hs = Tls13Handshake.initServer(.{}, &tp);
+
+    try std.testing.expectError(error.DecodeError, hs.serverBuildEncryptedExtensions());
 }
 
 test "Tls13Handshake client rejects trailing bytes after EncryptedExtensions extensions" {
