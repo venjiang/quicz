@@ -868,6 +868,22 @@ const sig_ecdsa_secp256r1_sha256: u16 = 0x0403;
 const sig_ed25519: u16 = 0x0807;
 const sig_rsa_pss_rsae_sha256: u16 = 0x0804;
 
+fn clientHelloKnownExtensionBit(ext_type: u16) ?u4 {
+    return switch (ext_type) {
+        @intFromEnum(ExtType.server_name) => 0,
+        @intFromEnum(ExtType.supported_groups) => 1,
+        @intFromEnum(ExtType.signature_algorithms) => 2,
+        @intFromEnum(ExtType.alpn) => 3,
+        @intFromEnum(ExtType.pre_shared_key) => 4,
+        @intFromEnum(ExtType.early_data) => 5,
+        @intFromEnum(ExtType.psk_key_exchange_modes) => 6,
+        @intFromEnum(ExtType.supported_versions) => 7,
+        @intFromEnum(ExtType.key_share) => 8,
+        @intFromEnum(ExtType.quic_transport_parameters) => 9,
+        else => null,
+    };
+}
+
 // ─── Write helpers ───────────────────────────────────────────────────
 
 fn writeU16(buf: []u8, val: u16) void {
@@ -1879,6 +1895,7 @@ pub const Tls13Handshake = struct {
         var have_key_share = false;
         var have_version = false;
         var have_server_name = false;
+        var seen_known_extensions: u16 = 0;
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
             const et = readU16(body[pos..]);
@@ -1887,6 +1904,11 @@ pub const Tls13Handshake = struct {
             if (pos + el > ext_end) return error.DecodeError;
             const ext = body[pos .. pos + el];
             pos += el;
+            if (clientHelloKnownExtensionBit(et)) |bit| {
+                const mask = @as(u16, 1) << bit;
+                if (seen_known_extensions & mask != 0) return error.DecodeError;
+                seen_known_extensions |= mask;
+            }
             switch (et) {
                 @intFromEnum(ExtType.supported_versions) => {
                     // ClientHello: 1-byte list length + 2-byte versions.
@@ -3033,8 +3055,10 @@ test "verifyCertificateVerifySignature rejects an unsupported scheme" {
 // ─── Tests for server-side handshake + loopback ──────────────────────
 
 const ClientHelloExtension = struct {
+    header_offset: usize,
     body_offset: usize,
     body_len: usize,
+    extensions_len_offset: usize,
 };
 
 fn clientHelloExtension(msg: []const u8, ext_type: u16) !ClientHelloExtension {
@@ -3058,18 +3082,25 @@ fn clientHelloExtension(msg: []const u8, ext_type: u16) !ClientHelloExtension {
     if (pos + compression_methods_len > body.len) return error.TestUnexpectedResult;
     pos += compression_methods_len;
     if (pos + 2 > body.len) return error.TestUnexpectedResult;
+    const extensions_len_offset = 4 + pos;
     const extensions_len = readU16(body[pos..]);
     pos += 2;
     if (pos + extensions_len > body.len) return error.TestUnexpectedResult;
     const ext_end = pos + extensions_len;
     while (pos < ext_end) {
         if (pos + 4 > ext_end) return error.TestUnexpectedResult;
+        const header_offset = 4 + pos;
         const current_type = readU16(body[pos..]);
         const current_len = readU16(body[pos + 2 ..]);
         pos += 4;
         if (pos + current_len > ext_end) return error.TestUnexpectedResult;
         if (current_type == ext_type) {
-            return .{ .body_offset = 4 + pos, .body_len = current_len };
+            return .{
+                .header_offset = header_offset,
+                .body_offset = 4 + pos,
+                .body_len = current_len,
+                .extensions_len_offset = extensions_len_offset,
+            };
         }
         pos += current_len;
     }
@@ -3083,6 +3114,41 @@ fn clientHelloBytes(config: TlsConfig, out: []u8) ![]u8 {
     if (action.send_data.data.len > out.len) return error.TestUnexpectedResult;
     @memcpy(out[0..action.send_data.data.len], action.send_data.data);
     return out[0..action.send_data.data.len];
+}
+
+fn appendDuplicateClientHelloExtension(buf: []u8, msg_len: usize, ext_type: u16) ![]u8 {
+    const msg = buf[0..msg_len];
+    const ext = try clientHelloExtension(msg, ext_type);
+    const duplicate_len = 4 + ext.body_len;
+    if (msg_len + duplicate_len > buf.len) return error.TestUnexpectedResult;
+
+    const old_body_len = msg_len - 4;
+    const new_body_len = old_body_len + duplicate_len;
+    if (new_body_len > 0xFF_FF_FF) return error.TestUnexpectedResult;
+
+    std.mem.copyForwards(
+        u8,
+        buf[msg_len..][0..duplicate_len],
+        buf[ext.header_offset..][0..duplicate_len],
+    );
+    buf[1] = @as(u8, @intCast(new_body_len >> 16));
+    buf[2] = @as(u8, @intCast((new_body_len >> 8) & 0xFF));
+    buf[3] = @as(u8, @intCast(new_body_len & 0xFF));
+
+    const old_extensions_len = readU16(buf[ext.extensions_len_offset..]);
+    const new_extensions_len = old_extensions_len + duplicate_len;
+    writeU16(buf[ext.extensions_len_offset..][0..2], @as(u16, @intCast(new_extensions_len)));
+    return buf[0 .. msg_len + duplicate_len];
+}
+
+test "Tls13Handshake server rejects duplicate known ClientHello extensions" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const hello = try appendDuplicateClientHelloExtension(&hello_buf, base_hello.len, @intFromEnum(ExtType.supported_versions));
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
 }
 
 test "Tls13Handshake server rejects malformed ClientHello supported_versions length" {
