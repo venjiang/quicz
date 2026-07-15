@@ -307,6 +307,7 @@ fn serveConcurrent(
                 var managed_adopted = false;
                 errdefer {
                     if (managed_adopted) {
+                        _ = lifecycle.retireConnection(handle);
                         connections.remove(handle) catch {};
                     } else {
                         if (managed_initialized) managed.deinit();
@@ -361,9 +362,14 @@ fn serveConcurrent(
                     if (retry_datagram.len > managed.retry_datagram.len) return error.InvalidPacket;
                     @memcpy(managed.retry_datagram[0..retry_datagram.len], retry_datagram);
                     managed.retry_datagram_len = retry_datagram.len;
-                    try lifecycle.registerConnectionId(handle, initial_info.dcid, path, .{ .active_migration_disabled = true });
-                    _ = try lifecycle.switchInitialDestinationConnectionIdAfterRetry(initial_info.dcid, managed.transport.localInitialSourceConnectionId(), path);
-                    try connections.adopt(handle, managed);
+                    _ = try server_endpoint.adoptRetryRecordAndSwitchInitialRoute(
+                        handle,
+                        managed,
+                        initial_info.dcid,
+                        managed.transport.localInitialSourceConnectionId(),
+                        path,
+                        .{ .active_migration_disabled = true },
+                    );
                     managed_adopted = true;
                     try socket.send(io, &managed.peer_address, retry_datagram);
                     std.debug.print("zig_process_server: connection={d} concurrent=true retry_issued=true\n", .{handle});

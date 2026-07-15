@@ -123,6 +123,40 @@ pub fn Tls13ServerEndpoint(
             );
         }
 
+        /// Atomically attach a Retry-pending record and switch its Initial route.
+        ///
+        /// The caller retains `record` on failure. Once the Original-DCID route
+        /// is installed, every later failure retires that handle's routes and
+        /// timer before returning, so no route can outlive its record admission.
+        pub fn adoptRetryRecordAndSwitchInitialRoute(
+            self: *Self,
+            connection_id: u64,
+            record: *Record,
+            original_destination_connection_id: []const u8,
+            retry_source_connection_id: []const u8,
+            path: endpoint.Udp4Tuple,
+            options: endpoint.RouteOptions,
+        ) (endpoint.RouteError || error{ConnectionLimitReached})!endpoint.RouteResult {
+            if (self.records.get(connection_id) != null) return error.DuplicateConnectionId;
+            if (!self.records.hasCapacity()) return error.ConnectionLimitReached;
+
+            try self.lifecycle.registerConnectionId(
+                connection_id,
+                original_destination_connection_id,
+                path,
+                options,
+            );
+            errdefer _ = self.lifecycle.retireConnection(connection_id);
+
+            const route = try self.lifecycle.switchInitialDestinationConnectionIdAfterRetry(
+                original_destination_connection_id,
+                retry_source_connection_id,
+                path,
+            );
+            try self.records.adopt(connection_id, record);
+            return route;
+        }
+
         /// Register an accepted Initial, drive its TLS backend, and drain its
         /// bounded Initial-space response datagrams.
         pub fn acceptInitial(
@@ -332,20 +366,28 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         TestRecord.deinit,
     );
 
-    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
-        .max_routes = 2,
-        .max_stateless_reset_tokens = 2,
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 2, .{
+        .max_routes = 3,
+        .max_stateless_reset_tokens = 3,
     });
     defer endpoint_owner.deinit();
     try std.testing.expect(endpoint_owner.records.hasCapacity());
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
 
     const record = try std.testing.allocator.create(TestRecord);
-    errdefer std.testing.allocator.destroy(record);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer {
+        if (record_owned) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
     record.* = .{
         .handle = 7,
         .connection = try Connection.init(std.testing.allocator, .server, .{}),
     };
+    record_initialized = true;
     try record.connection.validatePeerAddress();
     try record.connection.confirmHandshake();
     const secrets = try protection.deriveInitialSecrets(.v1, "endpoint");
@@ -356,13 +398,108 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try record.connection.sendPing();
     const record_handle = record.handle;
     try endpoint_owner.records.adopt(record_handle, record);
-    try std.testing.expect(!endpoint_owner.records.hasCapacity());
+    record_owned = false;
+    try std.testing.expect(endpoint_owner.records.hasCapacity());
     const one_rtt = (try endpoint_owner.pollOneRttDatagram(record_handle, 1, "peer")) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(one_rtt);
     try std.testing.expect(one_rtt.len != 0);
     try endpoint_owner.records.remove(record_handle);
     try std.testing.expect(endpoint_owner.records.hasCapacity());
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.pollOneRttDatagram(record_handle, 2, "peer"));
+
+    const retry_record = try std.testing.allocator.create(TestRecord);
+    var retry_record_initialized = false;
+    var retry_record_owned = true;
+    errdefer {
+        if (retry_record_owned) {
+            if (retry_record_initialized) retry_record.deinit();
+            std.testing.allocator.destroy(retry_record);
+        }
+    }
+    retry_record.* = .{
+        .handle = 8,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+    };
+    retry_record_initialized = true;
+    const retry_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5443),
+    };
+    const original_dcid = [_]u8{ 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87 };
+    const retry_scid = [_]u8{ 0x90, 0x91, 0x92, 0x93 };
+    const retry_route = try endpoint_owner.adoptRetryRecordAndSwitchInitialRoute(
+        retry_record.handle,
+        retry_record,
+        &original_dcid,
+        &retry_scid,
+        retry_path,
+        .{ .active_migration_disabled = true },
+    );
+    retry_record_owned = false;
+    try std.testing.expectEqual(retry_record.handle, retry_route.connection_id);
+    try std.testing.expect(endpoint_owner.records.get(retry_record.handle) != null);
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
+
+    const duplicate_record = try std.testing.allocator.create(TestRecord);
+    var duplicate_record_initialized = false;
+    var duplicate_record_owned = true;
+    errdefer {
+        if (duplicate_record_owned) {
+            if (duplicate_record_initialized) duplicate_record.deinit();
+            std.testing.allocator.destroy(duplicate_record);
+        }
+    }
+    duplicate_record.* = .{
+        .handle = retry_record.handle,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+    };
+    duplicate_record_initialized = true;
+    try std.testing.expectError(
+        error.DuplicateConnectionId,
+        endpoint_owner.adoptRetryRecordAndSwitchInitialRoute(
+            duplicate_record.handle,
+            duplicate_record,
+            &original_dcid,
+            &retry_scid,
+            retry_path,
+            .{ .active_migration_disabled = true },
+        ),
+    );
+    duplicate_record_owned = false;
+    duplicate_record.deinit();
+    std.testing.allocator.destroy(duplicate_record);
+
+    const rollback_record = try std.testing.allocator.create(TestRecord);
+    var rollback_record_initialized = false;
+    var rollback_record_owned = true;
+    errdefer {
+        if (rollback_record_owned) {
+            if (rollback_record_initialized) rollback_record.deinit();
+            std.testing.allocator.destroy(rollback_record);
+        }
+    }
+    rollback_record.* = .{
+        .handle = 9,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+    };
+    rollback_record_initialized = true;
+    const rollback_original_dcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7 };
+    try std.testing.expectError(
+        error.DuplicateConnectionId,
+        endpoint_owner.adoptRetryRecordAndSwitchInitialRoute(
+            rollback_record.handle,
+            rollback_record,
+            &rollback_original_dcid,
+            &retry_scid,
+            retry_path,
+            .{ .active_migration_disabled = true },
+        ),
+    );
+    try std.testing.expect(endpoint_owner.records.get(rollback_record.handle) == null);
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
+    rollback_record_owned = false;
+    rollback_record.deinit();
+    std.testing.allocator.destroy(rollback_record);
 
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
