@@ -535,6 +535,8 @@ pub const EndpointFeedInstalledKeyPathUpdateResult = struct {
 pub const EndpointFeedPathUpdateDatagramPollResult = struct {
     /// Receive, path-validation, and route-update result.
     feed: EndpointFeedInstalledKeyPathUpdateResult,
+    /// Feed error surfaced as data after a close-propagating receive path.
+    feed_error: ?EndpointProtectedDatagramError = null,
     /// Protected datagram emitted after receive processing, if any.
     datagram: ?EndpointPolledDatagramResult = null,
     /// UDP tuple selected for `datagram`.

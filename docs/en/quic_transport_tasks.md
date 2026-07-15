@@ -81,6 +81,11 @@ Server endpoint installed-key feed follows the same rule:
 route-bound 1-RTT datagram after `InvalidPacket` when the selected record's
 connection has entered `closing`, so decrypt/authentication failures do not
 consume unrelated queued output.
+The lower lifecycle helper
+`EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram()`
+also surfaces authenticated close-on-frame-error as `feed_error` plus an
+optional close datagram, while preserving queued output on non-closing invalid
+inputs.
 
 ### Packet-number reordering evidence
 

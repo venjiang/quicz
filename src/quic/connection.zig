@@ -42458,6 +42458,96 @@ test "EndpointConnectionLifecycle installed-key path update OrClose queues close
     try std.testing.expect(unchanged_route.path_changed);
 }
 
+test "EndpointConnectionLifecycle path-update feed poll surfaces close only after closing" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .application,
+        .out = &[_]u8{},
+        .unpredictable_prefix = &[_]u8{},
+        .supported_versions = &[_]packet.Version{.v1},
+    };
+    const poll_options = EndpointPollInstalledKeyDatagramOptions{
+        .space = .application,
+        .destination_connection_id = &client_dcid,
+    };
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(189, &server_dcid, path, .{});
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    try client.confirmHandshake();
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    try server.sendPing();
+    const malformed_on_route = [_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd, 0x00 };
+    const malformed_result = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
+        189,
+        &server,
+        path,
+        1,
+        &malformed_on_route,
+        options,
+        poll_options,
+    );
+    try std.testing.expectEqual(@as(?EndpointProtectedDatagramError, error.InvalidPacket), malformed_result.feed_error);
+    try std.testing.expect(malformed_result.datagram == null);
+    try std.testing.expect(malformed_result.output_path == null);
+    try std.testing.expectEqual(ConnectionState.active, server.connectionState());
+
+    const queued_ping = (try lifecycle.pollDatagram(189, &server, 2, poll_options)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(queued_ping);
+    try std.testing.expect(queued_ping.len != 0);
+
+    const invalid_packet_number = server.nextPeerPacketNumber(.application);
+    const illegal_plaintext = [_]u8{@intFromEnum(frame.FrameType.handshake_done)} ++ ([_]u8{0} ** 31);
+    const illegal_handshake_done = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = invalid_packet_number,
+    }, try packet.encodePacketNumberForHeader(invalid_packet_number, null), secrets.client, &illegal_plaintext);
+    defer std.testing.allocator.free(illegal_handshake_done);
+
+    const close_result = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
+        189,
+        &server,
+        path,
+        3,
+        illegal_handshake_done,
+        options,
+        poll_options,
+    );
+    try std.testing.expectEqual(@as(?EndpointProtectedDatagramError, error.InvalidPacket), close_result.feed_error);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect((close_result.output_path orelse return error.TestUnexpectedResult).eql(path));
+    const close_datagram = close_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_datagram.datagram);
+    try std.testing.expectEqual(@as(u64, 189), close_datagram.connection_id);
+    try client.processProtectedShortDatagramWithInstalledKeys(4, client_dcid.len, close_datagram.datagram);
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+}
+
 test "EndpointConnectionLifecycle retires zero-length CID routes by path" {
     var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer lifecycle.deinit();

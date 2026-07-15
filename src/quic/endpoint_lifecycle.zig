@@ -1557,14 +1557,45 @@ pub const EndpointConnectionLifecycle = struct {
         feed_options: EndpointFeedInstalledKeyDatagramOptions,
         poll_options: EndpointPollInstalledKeyDatagramOptions,
     ) EndpointProtectedDatagramError!EndpointFeedPathUpdateDatagramPollResult {
-        const feed = try self.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+        const feed = self.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
             connection_id,
             connection,
             path,
             now_millis,
             datagram,
             feed_options,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket) return err;
+            const close_datagram = if (connection.connectionState() == .closing)
+                try self.pollDatagram(
+                    connection_id,
+                    connection,
+                    now_millis,
+                    poll_options,
+                )
+            else
+                null;
+            const routed = if (close_datagram != null)
+                self.routeDatagram(path, datagram) catch null
+            else
+                null;
+            const output_path: ?endpoint.Udp4Tuple = if (routed) |route|
+                if (route.connection_id == connection_id)
+                    try self.currentRoutePath(route.destination_connection_id.asSlice())
+                else
+                    null
+            else
+                null;
+            return .{
+                .feed = .{ .feed = .dropped },
+                .feed_error = err,
+                .datagram = if (close_datagram) |protected_datagram| .{
+                    .connection_id = connection_id,
+                    .datagram = protected_datagram,
+                } else null,
+                .output_path = output_path,
+            };
+        };
         const routed = switch (feed.feed) {
             .routed => |value| value,
             else => return .{ .feed = feed },
