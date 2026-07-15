@@ -1807,6 +1807,11 @@ pub const Connection = struct {
         return self.retry_source_connection_id;
     }
 
+    /// Return the configured QUIC version for protected packet processing.
+    pub fn chosenVersion(self: Connection) packet.Version {
+        return self.config.chosen_version;
+    }
+
     /// Return the version selected from a validated Version Negotiation packet.
     ///
     /// The current connection object only records the result. The caller still
