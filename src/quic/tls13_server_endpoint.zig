@@ -365,61 +365,6 @@ pub fn Tls13ServerEndpoint(
             return result;
         }
 
-        /// Result of validating one Retry follow-up Initial and driving TLS output.
-        pub const RetryInitialProcessResult = struct {
-            /// Authenticated Retry Initial metadata and route selection.
-            retry_initial: root.EndpointRetryProtectedInitialResult,
-            /// Initial-space TLS drive and bounded protected output drain.
-            initial: root.EndpointCryptoBackendDriveProtectedLongDatagramDrainResult,
-            /// Handshake-space drive when the Initial TLS drive installed keys.
-            handshake: ?root.EndpointCryptoBackendDriveDatagramDrainResult = null,
-        };
-
-        /// Authenticate a Retry follow-up Initial, then drive Initial and Handshake TLS.
-        ///
-        /// The Retry validation path has already authenticated the protected
-        /// datagram, so this method must not feed it through routed Initial
-        /// processing again. It only drives the record-owned TLS backend using
-        /// the accepted version and Retry token, then conditionally drives the
-        /// Handshake backend after a clean Initial drain installs its keys.
-        pub fn processRetryInitial(
-            self: *Self,
-            policy: *endpoint.AddressValidationPolicy,
-            connection_id: u64,
-            now_millis: i64,
-            path: endpoint.Udp4Tuple,
-            datagram: []const u8,
-            supported_versions: []const quic_packet.Version,
-            scratch: []u8,
-            initial_out: []root.EndpointPolledDatagramResult,
-            handshake_out: []root.EndpointPolledDatagramResult,
-        ) (root.EndpointRetryProtectedInitialError || root.Error || error{UnknownConnectionId})!RetryInitialProcessResult {
-            const retry_initial = try self.validateRetryInitial(
-                policy,
-                connection_id,
-                now_millis,
-                path,
-                datagram,
-                supported_versions,
-            );
-            const initial = try self.driveInitialBackend(
-                connection_id,
-                scratch,
-                now_millis,
-                retry_initial.initial_accept.token,
-                retry_initial.initial_accept.version,
-                initial_out,
-            );
-            if (initial.drain.first_error != null or !initial.backend.handshake_keys_installed) {
-                return .{ .retry_initial = retry_initial, .initial = initial };
-            }
-            return .{
-                .retry_initial = retry_initial,
-                .initial = initial,
-                .handshake = try self.driveBackend(connection_id, .handshake, scratch, now_millis, handshake_out),
-            };
-        }
-
         /// Authenticate coalesced Initial/Handshake input and drive TLS output.
         ///
         /// Once Handshake keys exist, this keeps the retained Initial receive
@@ -776,20 +721,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             1,
             &[_]u8{},
             &backend_scratch,
-            &backend_output,
-        ),
-    );
-    try std.testing.expectError(
-        error.UnknownConnectionId,
-        endpoint_owner.processRetryInitial(
-            &validation_policy,
-            99,
-            1,
-            retry_path,
-            &[_]u8{},
-            &[_]quic_packet.Version{.v1},
-            &backend_scratch,
-            &backend_output,
             &backend_output,
         ),
     );
