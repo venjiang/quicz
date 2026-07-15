@@ -261,8 +261,8 @@ or a public CA.
 `zig build run-interop-external-client -- <server_ip> <server_port>
 <absolute_ca_pem> [server_name]` runs a client-only path. It loads the supplied
 CA bundle, uses the real wall clock and SNI, keeps certificate verification
-enabled, and drives TLS-owned Initial, Handshake, and 1-RTT keys over a real
-UDP socket. Coalesced long-header packets are processed before a trailing
+enabled, and drives its `Tls13ClientEndpoint`-owned TLS Initial, Handshake, and
+1-RTT keys over a real UDP socket. Coalesced long-header packets are processed before a trailing
 1-RTT short-header packet in the same datagram. Against two independently
 implemented local servers from distinct implementation families, each using an
 ECDSA P-256 certificate, the command reported
@@ -288,6 +288,11 @@ and sends the stored token automatically. An independent `quic-go` v0.59.0
 server using `Transport.VerifySourceAddress` to force Retry completed the same
 certificate-verified FIN echo. This is real peer-driven Retry behavior, not a
 local token fixture.
+
+The same endpoint-owned client also completed a real v2-to-v1 Version
+Negotiation handoff against a v1-only `quic-go` server: it retires the prior
+endpoint with its route and starts a fresh endpoint with new CIDs before the
+certificate-verified FIN echo.
 
 Its application receive loop uses the monotonic clock and the connection's next
 loss-detection deadline, rather than a packet-count clock. A separate

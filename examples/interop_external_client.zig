@@ -62,6 +62,11 @@ pub fn main(init: std.process.Init) !void {
     var local_address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
     var socket = try local_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
+    const client_path = quicz.endpoint.Udp4Tuple{
+        .local = quicz.endpoint.Udp4Address.init(local_address.ip4.bytes, local_address.ip4.port),
+        .remote = quicz.endpoint.Udp4Address.init(server_address.ip4.bytes, server_address.ip4.port),
+    };
+    const client_handle: u64 = 1;
 
     var original_dcid: [8]u8 = undefined;
     quicz.tls13.secureRandomBytes(&original_dcid);
@@ -90,33 +95,41 @@ pub fn main(init: std.process.Init) !void {
         .chosen_version = if (require_version_negotiation) .v2 else .v1,
         .available_versions = if (require_version_negotiation) &available_versions else &[_]quicz.packet.Version{.v1},
     };
-    var transport = try quicz.Tls13ClientTransport.init(
+    var client_endpoint = try quicz.Tls13ClientEndpoint.init(
         allocator,
+        client_handle,
+        client_path,
+        .{ .active_migration_disabled = true },
         initial_connection_config,
         tls_config,
         original_dcid,
         client_scid,
     );
-    defer transport.deinit();
+    defer client_endpoint.deinit();
     var scratch: [8192]u8 = undefined;
     var receive_buffer: [8192]u8 = undefined;
 
-    const client_initial = try transport.begin(nowMillis(io), &scratch);
+    const client_initial = try client_endpoint.begin(nowMillis(io), &scratch);
     defer allocator.free(client_initial);
     try socket.send(io, &server_address, client_initial);
 
     var sent_finished = false;
     var version_negotiated = false;
     var datagrams_received: usize = 0;
-    while (datagrams_received < 8 and !transport.handshakeConfirmed()) : (datagrams_received += 1) {
+    while (datagrams_received < 8 and !client_endpoint.handshakeConfirmed()) : (datagrams_received += 1) {
         const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-        const progress = try transport.receive(nowMillis(io), &scratch, received.data);
+        const received_result = try client_endpoint.receive(nowMillis(io), &scratch, received.data);
+        try require(received_result.route.connection_id == client_handle);
+        const progress = received_result.transport;
         if (progress.version_negotiation_selected_version) |selected_version| {
             if (!require_version_negotiation or selected_version != .v1 or version_negotiated) return error.UnexpectedVersionNegotiation;
-            const followup_config = try transport.versionNegotiationFollowupConfig();
-            const followup_transport = blk: {
-                var candidate = try quicz.Tls13ClientTransport.init(
+            const followup_config = try client_endpoint.versionNegotiationFollowupConfig();
+            const followup_endpoint = blk: {
+                var candidate = try quicz.Tls13ClientEndpoint.init(
                     allocator,
+                    client_handle,
+                    client_path,
+                    .{ .active_migration_disabled = true },
                     followup_config,
                     tls_config,
                     new_dcid: {
@@ -136,8 +149,8 @@ pub fn main(init: std.process.Init) !void {
                 try socket.send(io, &server_address, followup_initial);
                 break :blk candidate;
             };
-            transport.deinit();
-            transport = followup_transport;
+            client_endpoint.deinit();
+            client_endpoint = followup_endpoint;
             version_negotiated = true;
             continue;
         }
@@ -154,18 +167,18 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (require_version_negotiation and !version_negotiated) return error.MissingVersionNegotiation;
-    if (!sent_finished or !transport.handshakeConfirmed()) return error.HandshakeNotConfirmed;
+    if (!sent_finished or !client_endpoint.handshakeConfirmed()) return error.HandshakeNotConfirmed;
 
     // The independent peer must parse both protected 1-RTT STREAMs and finish
     // each matching response. This is intentionally not a local-only contract.
     var stream_ids: [echo_payloads.len]u64 = undefined;
     for (echo_payloads, 0..) |payload, index| {
-        stream_ids[index] = try transport.openStream();
-        try transport.sendStream(stream_ids[index], payload, true);
+        stream_ids[index] = try client_endpoint.openStream();
+        try client_endpoint.sendStream(stream_ids[index], payload, true);
     }
     var sent_application_datagrams: usize = 0;
     while (sent_application_datagrams < 8) : (sent_application_datagrams += 1) {
-        const datagram = (try transport.pollApplicationDatagram(nowMillis(io))) orelse break;
+        const datagram = (try client_endpoint.pollApplicationDatagram(nowMillis(io))) orelse break;
         defer allocator.free(datagram);
         try socket.send(io, &server_address, datagram);
     }
@@ -177,13 +190,13 @@ pub fn main(init: std.process.Init) !void {
     var got_echo_fin: [echo_payloads.len]bool = .{ false, false };
     var pto_recovered = false;
     while (received_application_datagrams < 16 and recovery_timer_services < 4) {
-        const next_deadline = if (transport.nextDeadline()) |deadline|
+        const next_deadline = if (client_endpoint.nextDeadline()) |deadline|
             deadline.deadlineMillis()
         else
             null;
         const received = socket.receiveTimeout(io, &receive_buffer, recvTimeoutForDeadline(io, next_deadline)) catch |err| switch (err) {
             error.Timeout => {
-                const serviced = (try transport.serviceDueDeadline(nowMillis(io))) orelse continue;
+                const serviced = (try client_endpoint.serviceDueDeadline(nowMillis(io))) orelse continue;
                 switch (serviced) {
                     .recovery => |recovery| {
                         recovery_timer_services += 1;
@@ -191,7 +204,7 @@ pub fn main(init: std.process.Init) !void {
 
                         var retransmission_count: usize = 0;
                         while (retransmission_count < 4) : (retransmission_count += 1) {
-                            const retransmission = (try transport.pollApplicationDatagram(nowMillis(io))) orelse break;
+                            const retransmission = (try client_endpoint.pollApplicationDatagram(nowMillis(io))) orelse break;
                             defer allocator.free(retransmission);
                             try socket.send(io, &server_address, retransmission);
                         }
@@ -203,7 +216,9 @@ pub fn main(init: std.process.Init) !void {
             },
             else => return err,
         };
-        const progress = try transport.receive(nowMillis(io), &scratch, received.data);
+        const received_result = try client_endpoint.receive(nowMillis(io), &scratch, received.data);
+        try require(received_result.route.connection_id == client_handle);
+        const progress = received_result.transport;
         if (progress.outbound_handshake) |client_finished| {
             defer allocator.free(client_finished);
             try socket.send(io, &server_address, client_finished);
@@ -214,11 +229,11 @@ pub fn main(init: std.process.Init) !void {
         if (!progress.application_processed) continue;
         received_application_datagrams += 1;
         inline for (stream_ids, echo_payloads, 0..) |stream_id, payload, index| {
-            if (try transport.recvStream(stream_id, &stream_buffer)) |echoed_len| {
+            if (try client_endpoint.recvStream(stream_id, &stream_buffer)) |echoed_len| {
                 try require(std.mem.eql(u8, stream_buffer[0..echoed_len], payload));
                 got_echo[index] = true;
             }
-            if (got_echo[index] and try transport.streamFinished(stream_id)) {
+            if (got_echo[index] and try client_endpoint.streamFinished(stream_id)) {
                 got_echo_fin[index] = true;
             }
         }

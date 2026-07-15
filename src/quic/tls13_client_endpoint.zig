@@ -113,6 +113,11 @@ pub const Tls13ClientEndpoint = struct {
         return self.transport.handshakeConfirmed();
     }
 
+    /// Return the selected configuration for a fresh post-VN client attempt.
+    pub fn versionNegotiationFollowupConfig(self: *const Tls13ClientEndpoint) !Config {
+        return self.transport.versionNegotiationFollowupConfig();
+    }
+
     /// Open a locally initiated bidirectional stream.
     pub fn openStream(self: *Tls13ClientEndpoint) !u64 {
         return self.transport.openStream();
