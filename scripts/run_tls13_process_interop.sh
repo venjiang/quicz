@@ -7,6 +7,7 @@ connections=${QUICZ_PROCESS_INTEROP_CONNECTIONS:-2}
 max_active_connections=${QUICZ_PROCESS_INTEROP_MAX_ACTIVE_CONNECTIONS:-$connections}
 mode=${QUICZ_PROCESS_INTEROP_MODE:-concurrent}
 client_completion=${QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION:-close}
+idle_timeout_millis=${QUICZ_PROCESS_INTEROP_IDLE_TIMEOUT_MS:-1000}
 retry=${QUICZ_PROCESS_INTEROP_RETRY:-false}
 case "$mode" in
     sequential)
@@ -61,7 +62,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-./zig-out/bin/quicz-tls13-process-echo-server "$host" "$port" "$connections" "$server_mode" "$max_active_connections" >"$server_log" 2>&1 &
+./zig-out/bin/quicz-tls13-process-echo-server "$host" "$port" "$connections" "$server_mode" "$max_active_connections" "$idle_timeout_millis" >"$server_log" 2>&1 &
 server_pid=$!
 
 ready=false

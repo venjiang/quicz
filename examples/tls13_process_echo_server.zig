@@ -1,6 +1,6 @@
 //! Pure-Zig TLS 1.3 QUIC echo server for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [completion_target] [sequential|concurrent|concurrent-retry|concurrent-limit|concurrent-reset|concurrent-stop|concurrent-uni|concurrent-flow|rolling] [max_active_connections]
+//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [completion_target] [sequential|concurrent|concurrent-retry|concurrent-limit|concurrent-reset|concurrent-stop|concurrent-uni|concurrent-flow|rolling] [max_active_connections] [idle_timeout_millis]
 //!
 //! A concurrent mode with completion_target=0 runs until interrupted and
 //! requires an explicit positive max_active_connections value.
@@ -24,7 +24,7 @@ const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
 const max_initial_datagrams: usize = 4;
 const max_application_datagrams: usize = 16;
 const server_max_datagram_size: usize = 8192;
-const process_idle_timeout_millis: u64 = 1000;
+const default_server_idle_timeout_millis: u64 = 30_000;
 const retry_token_lifetime_millis: u64 = 10_000;
 const max_retry_datagram_size: usize = 256;
 const echo_stream_ids = [_]u64{ 0, 4 };
@@ -215,6 +215,7 @@ fn serveConcurrent(
     expect_client_stop_sending: bool,
     expect_client_uni_stream: bool,
     expect_flow_control: bool,
+    idle_timeout_millis: u64,
 ) !void {
     const alpn = [_][]const u8{"hq-interop"};
     const max_routes = std.math.mul(usize, max_active_connections, 2) catch return error.InvalidConnectionCount;
@@ -332,9 +333,9 @@ fn serveConcurrent(
                     .initial_max_streams_bidi = initial_max_streams_bidi,
                     .max_datagram_size = server_max_datagram_size,
                     // Keep the local loss-recovery probe comfortably ahead of
-                    // the short test-only idle timeout in concurrent mode.
+                    // the configured endpoint idle timeout.
                     .initial_rtt_ms = 100,
-                    .max_idle_timeout_ms = process_idle_timeout_millis,
+                    .max_idle_timeout_ms = idle_timeout_millis,
                 }, .{
                     .alpn = &alpn,
                     .cert_chain_der = &.{&certificate_der},
@@ -724,32 +725,36 @@ pub fn main(init: std.process.Init) !void {
     else
         return error.MissingActiveConnectionCapacity;
     if (max_active_connections == 0) return error.InvalidConnectionCount;
+    const idle_timeout_millis = if (args.next()) |raw_timeout|
+        try std.fmt.parseInt(u64, raw_timeout, 10)
+    else
+        default_server_idle_timeout_millis;
     if (args.next() != null) return error.TooManyArgs;
     const bind_address = try std.Io.net.IpAddress.parseIp4(bind_host, bind_port);
     var socket = try bind_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
-    std.debug.print("zig_process_server: listening={s}:{d} completion_target={d} max_active_connections={d} mode={s}\n", .{ bind_host, bind_port, completion_target, max_active_connections, mode });
+    std.debug.print("zig_process_server: listening={s}:{d} completion_target={d} max_active_connections={d} idle_timeout_ms={d} mode={s}\n", .{ bind_host, bind_port, completion_target, max_active_connections, idle_timeout_millis, mode });
 
     if (std.mem.eql(u8, mode, "concurrent") or std.mem.eql(u8, mode, "rolling")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, false, false);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, false, false, idle_timeout_millis);
     }
     if (std.mem.eql(u8, mode, "concurrent-retry")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, true, 8, false, false, false, false);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, true, 8, false, false, false, false, idle_timeout_millis);
     }
     if (std.mem.eql(u8, mode, "concurrent-limit")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 1, false, false, false, false);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 1, false, false, false, false, idle_timeout_millis);
     }
     if (std.mem.eql(u8, mode, "concurrent-reset")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, true, false, false, false);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, true, false, false, false, idle_timeout_millis);
     }
     if (std.mem.eql(u8, mode, "concurrent-stop")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, true, false, false);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, true, false, false, idle_timeout_millis);
     }
     if (std.mem.eql(u8, mode, "concurrent-uni")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, true, false);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, true, false, idle_timeout_millis);
     }
     if (std.mem.eql(u8, mode, "concurrent-flow")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, false, true);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, false, true, idle_timeout_millis);
     }
     if (!std.mem.eql(u8, mode, "sequential")) return error.InvalidMode;
     if (completion_target == 0) return error.InvalidConnectionCount;

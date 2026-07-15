@@ -180,12 +180,14 @@ without disturbing existing routes or retained tokens.
 The concurrent path reads the monotonic `awake` clock, waits only until
 `nextDeadlineAcrossConnections()`'s earliest lifecycle deadline, and services
 that deadline with the lifecycle's bounded output drain before returning to
-receive. The local process server advertises a 1000 ms idle timeout solely for
-this focused proof. Running
+receive. The process server accepts an optional `idle_timeout_millis` argument
+and defaults to 30 seconds for a long-lived invocation. The reproducible
+interop harness explicitly uses 1000 ms by default; running
 `QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=idle zig build run-tls13-process-interop`
 leaves both clients silent after their verified echo and proves each map entry
-is independently retired by its idle deadline (`idle_cleanup=true`). This is
-still a bounded test policy, not a production capacity or timeout policy.
+is independently retired by its idle deadline (`idle_cleanup=true`). Set
+`QUICZ_PROCESS_INTEROP_IDLE_TIMEOUT_MS` to test another bounded timeout. This
+is still a bounded test policy, not a complete production timeout policy.
 
 The same bounded path also has a deliberate local recovery proof. Running
 `QUICZ_PROCESS_INTEROP_CONNECTIONS=1 QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=loss zig build run-tls13-process-interop`

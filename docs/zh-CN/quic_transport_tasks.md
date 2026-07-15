@@ -143,11 +143,13 @@ route 槽位。容量耗尽时，已接收 Initial 的第二个 CID 无法安装
 
 并发路径读取单调 `awake` clock，只等待
 `nextDeadlineAcrossConnections()` 选出的最早 lifecycle deadline，并在下一次 receive 前通过
-lifecycle 的有界 output drain 处理该 deadline。本地进程服务端仅为这项聚焦证明通告 1000 ms
-idle timeout。执行
+lifecycle 的有界 output drain 处理该 deadline。进程服务端接受可选
+`idle_timeout_millis` 参数，常驻调用默认 30 秒；可复现 interop harness 默认显式传入
+1000 ms。执行
 `QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=idle zig build run-tls13-process-interop`
 会让两个 client 在验证 echo 后保持静默，并证明每个 map entry 都在自己的 idle deadline 被独立
-退役（`idle_cleanup=true`）。这仍是有界测试 policy，不是生产容量或 timeout policy。
+退役（`idle_cleanup=true`）。可用 `QUICZ_PROCESS_INTEROP_IDLE_TIMEOUT_MS` 测试其他有界
+timeout。这仍是有界测试 policy，不是完整的生产 timeout policy。
 
 同一有界路径还包含一个刻意构造的本地 recovery 证明。执行
 `QUICZ_PROCESS_INTEROP_CONNECTIONS=1 QUICZ_PROCESS_INTEROP_CLIENT_COMPLETION=loss zig build run-tls13-process-interop`
