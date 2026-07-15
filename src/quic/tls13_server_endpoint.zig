@@ -309,15 +309,15 @@ pub fn Tls13ServerEndpoint(
         pub fn processInitialWithHandshakeKeys(
             self: *Self,
             connection_id: u64,
-            connection: *Connection,
             path: endpoint.Udp4Tuple,
             now_millis: i64,
             original_destination_connection_id: []const u8,
             datagram: []const u8,
-        ) root.EndpointProtectedInitialError!endpoint.RouteResult {
+        ) (root.EndpointProtectedInitialError || error{UnknownConnectionId})!endpoint.RouteResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             return self.lifecycle.processRoutedProtectedLongDatagramWithInstalledHandshakeKeys(
                 connection_id,
-                connection,
+                connection_of(record),
                 path,
                 now_millis,
                 original_destination_connection_id,
@@ -329,7 +329,6 @@ pub fn Tls13ServerEndpoint(
         pub fn processInitial(
             self: *Self,
             connection_id: u64,
-            connection: *Connection,
             path: endpoint.Udp4Tuple,
             now_millis: i64,
             receive_keys: protection.Aes128PacketProtectionKeys,
@@ -341,10 +340,11 @@ pub fn Tls13ServerEndpoint(
             initial_token: []const u8,
             send_keys: protection.Aes128PacketProtectionKeys,
             out: []root.EndpointPolledDatagramResult,
-        ) root.EndpointProtectedDatagramError!root.EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult {
+        ) (root.EndpointProtectedDatagramError || error{UnknownConnectionId})!root.EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             return self.lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
                 connection_id,
-                connection,
+                connection_of(record),
                 .initial,
                 path,
                 now_millis,
@@ -364,7 +364,6 @@ pub fn Tls13ServerEndpoint(
         pub fn processHandshake(
             self: *Self,
             connection_id: u64,
-            connection: *Connection,
             path: endpoint.Udp4Tuple,
             now_millis: i64,
             datagram: []const u8,
@@ -373,10 +372,11 @@ pub fn Tls13ServerEndpoint(
             destination_connection_id: []const u8,
             source_connection_id: []const u8,
             out: []root.EndpointPolledDatagramResult,
-        ) root.EndpointProtectedDatagramError!root.EndpointRoutedCryptoBackendDriveDatagramDrainResult {
+        ) (root.EndpointProtectedDatagramError || error{UnknownConnectionId})!root.EndpointRoutedCryptoBackendDriveDatagramDrainResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             return self.lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams(
                 connection_id,
-                connection,
+                connection_of(record),
                 path,
                 now_millis,
                 datagram,
@@ -586,6 +586,47 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             retry_path,
             &[_]u8{},
             &[_]quic_packet.Version{.v1},
+        ),
+    );
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        endpoint_owner.processInitialWithHandshakeKeys(
+            99,
+            retry_path,
+            1,
+            &original_dcid,
+            &[_]u8{},
+        ),
+    );
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        endpoint_owner.processInitial(
+            99,
+            retry_path,
+            1,
+            retry_initial_secrets.client,
+            &[_]u8{},
+            empty_backend.backend(),
+            &backend_scratch,
+            "peer",
+            "local",
+            &[_]u8{},
+            retry_initial_secrets.server,
+            &backend_output,
+        ),
+    );
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        endpoint_owner.processHandshake(
+            99,
+            retry_path,
+            1,
+            &[_]u8{},
+            empty_backend.backend(),
+            &backend_scratch,
+            "peer",
+            "local",
+            &backend_output,
         ),
     );
 

@@ -504,7 +504,6 @@ fn serveConcurrent(
                             managed.transport.originalDestinationConnectionId();
                         _ = try server_endpoint.processInitialWithHandshakeKeys(
                             managed.handle,
-                            &managed.transport.connection,
                             path,
                             now_millis,
                             initial_destination_connection_id,
@@ -551,7 +550,6 @@ fn serveConcurrent(
                                 var initial_scratch: [8192]u8 = undefined;
                                 const initial = try server_endpoint.processInitial(
                                     managed.handle,
-                                    &managed.transport.connection,
                                     path,
                                     now_millis,
                                     initial_secrets.client,
@@ -602,7 +600,6 @@ fn serveConcurrent(
                                 var handshake_scratch: [8192]u8 = undefined;
                                 const handshake = try server_endpoint.processHandshake(
                                     managed.handle,
-                                    &managed.transport.connection,
                                     path,
                                     now_millis,
                                     long_packet,
