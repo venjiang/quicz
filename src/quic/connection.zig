@@ -7265,7 +7265,10 @@ pub const Connection = struct {
             return error.FlowControlBlocked;
         }
 
-        const max_tx_datagram_size = self.maxTxDatagramSize();
+        // Reserve protected short-packet overhead when splitting a STREAM write.
+        const datagram_size = self.maxTxDatagramSize();
+        const base_datagram_size: usize = if (datagram_size == 0) 1200 else datagram_size;
+        const max_tx_datagram_size = if (base_datagram_size > 64) base_datagram_size - 64 else base_datagram_size;
         _ = try maxStreamFrameDataLen(stream_id, offset, data.len, max_tx_datagram_size);
 
         var appended_send_state = false;

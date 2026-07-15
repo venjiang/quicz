@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -57,15 +58,16 @@ func main() {
 	expectStopSending := flag.Bool("expect-stop-sending", false, "require remote STOP_SENDING error 42 on stream 0, then echo stream 4")
 	expectUni := flag.Bool("expect-uni", false, "send client unidirectional stream 2 and require server unidirectional stream 3")
 	expectServerPTO := flag.Bool("expect-server-pto", false, "drop four post-stream Zig datagrams and require a PTO-recovered echo")
+	expectFlowControl := flag.Bool("expect-flow-control", false, "send 4 KiB through the server's 2 KiB stream window")
 	flag.Parse()
 	selectedProbeCount := 0
-	for _, enabled := range []bool{*expectStreamLimit, *expectReset, *expectStopSending, *expectUni, *expectServerPTO} {
+	for _, enabled := range []bool{*expectStreamLimit, *expectReset, *expectStopSending, *expectUni, *expectServerPTO, *expectFlowControl} {
 		if enabled {
 			selectedProbeCount++
 		}
 	}
 	if selectedProbeCount > 1 {
-		log.Fatal("stream-limit, reset, stop-sending, uni, and server-PTO probes are mutually exclusive")
+		log.Fatal("stream-limit, reset, stop-sending, uni, server-PTO, and flow-control probes are mutually exclusive")
 	}
 
 	if *caPath == "" {
@@ -146,6 +148,9 @@ func main() {
 	}
 
 	messages := []string{"hello", "world"}
+	if *expectFlowControl {
+		messages = []string{strings.Repeat("f", 4096)}
+	}
 	expectedFirstStreamID := uint64(0)
 	if *expectReset {
 		resetStream, err := connection.OpenStreamSync(ctx)
@@ -242,6 +247,10 @@ func main() {
 			log.Fatal("PTO probe did not drop the expected post-handshake Zig datagrams")
 		}
 		fmt.Printf("go_quic_server_pto_client: handshake_done=true dropped_datagrams=%d echo_streams=2 echo_bytes=%d\n", dropConnection.dropLimit, echoBytes)
+		return
+	}
+	if *expectFlowControl {
+		fmt.Printf("go_quic_flow_control_client: handshake_done=true stream_bytes=%d echo_bytes=%d\n", len(messages[0]), echoBytes)
 		return
 	}
 	fmt.Printf("go_quic_echo_client: handshake_done=true echo_streams=2 echo_bytes=%d\n", echoBytes)
