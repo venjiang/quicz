@@ -103,6 +103,26 @@ pub fn Tls13ServerEndpoint(
             );
         }
 
+        /// Poll one installed-key 1-RTT datagram from an endpoint-owned record.
+        ///
+        /// The caller supplies only the selected handle and peer destination CID;
+        /// routing, recovery-timer refresh, and the embedded connection remain
+        /// owned by this endpoint's record table.
+        pub fn pollOneRttDatagram(
+            self: *Self,
+            connection_id: u64,
+            now_millis: i64,
+            destination_connection_id: []const u8,
+        ) (root.Error || error{UnknownConnectionId})!?[]u8 {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            return self.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                connection_id,
+                connection_of(record),
+                now_millis,
+                destination_connection_id,
+            );
+        }
+
         /// Register an accepted Initial, drive its TLS backend, and drain its
         /// bounded Initial-space response datagrams.
         pub fn acceptInitial(
@@ -326,10 +346,23 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         .handle = 7,
         .connection = try Connection.init(std.testing.allocator, .server, .{}),
     };
-    try endpoint_owner.records.adopt(record.handle, record);
+    try record.connection.validatePeerAddress();
+    try record.connection.confirmHandshake();
+    const secrets = try protection.deriveInitialSecrets(.v1, "endpoint");
+    try record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try record.connection.sendPing();
+    const record_handle = record.handle;
+    try endpoint_owner.records.adopt(record_handle, record);
     try std.testing.expect(!endpoint_owner.records.hasCapacity());
-    try endpoint_owner.records.remove(record.handle);
+    const one_rtt = (try endpoint_owner.pollOneRttDatagram(record_handle, 1, "peer")) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(one_rtt);
+    try std.testing.expect(one_rtt.len != 0);
+    try endpoint_owner.records.remove(record_handle);
     try std.testing.expect(endpoint_owner.records.hasCapacity());
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.pollOneRttDatagram(record_handle, 2, "peer"));
 
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);

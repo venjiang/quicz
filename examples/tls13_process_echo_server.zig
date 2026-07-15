@@ -724,9 +724,8 @@ fn serveConcurrent(
                 }
                 var sent_packets: usize = 0;
                 while (sent_packets < max_initial_datagrams) : (sent_packets += 1) {
-                    const output_packet = (lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                    const output_packet = (server_endpoint.pollOneRttDatagram(
                         managed.handle,
-                        &managed.transport.connection,
                         now_millis + @as(i64, @intCast(sent_packets)),
                         managed.clientScid(),
                     ) catch |err| switch (err) {
