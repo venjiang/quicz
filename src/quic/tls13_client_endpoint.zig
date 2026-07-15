@@ -4,9 +4,11 @@
 //! timer mirroring. Callers retain UDP socket I/O and application policy.
 
 const std = @import("std");
+const buffer = @import("buffer.zig");
 const connection_config = @import("connection_config.zig");
 const endpoint = @import("endpoint.zig");
 const endpoint_lifecycle = @import("endpoint_lifecycle.zig");
+const frame = @import("frame.zig");
 const tls13 = @import("tls13.zig");
 const client_transport = @import("tls13_client_transport.zig");
 
@@ -106,6 +108,17 @@ pub const Tls13ClientEndpoint = struct {
         return datagram;
     }
 
+    /// Poll one protected application datagram with its committed UDP route.
+    pub fn pollApplicationDatagramWithRoutePath(self: *Tls13ClientEndpoint, now_millis: i64) !?ApplicationDatagramPathResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        const datagram = (try self.pollApplicationDatagram(now_millis)) orelse return null;
+        return .{
+            .datagram = datagram,
+            .path = path,
+        };
+    }
+
     /// Select the next client transport lifecycle deadline.
     pub fn nextDeadline(self: *const Tls13ClientEndpoint) ?client_transport.ClientTransportDeadline {
         return self.transport.nextDeadline();
@@ -182,6 +195,12 @@ pub const Tls13ClientEndpoint = struct {
         route: endpoint.RouteResult,
         transport: Tls13ClientTransport.ReceiveResult,
     };
+
+    /// Client endpoint application datagram paired with the committed route.
+    pub const ApplicationDatagramPathResult = struct {
+        datagram: []u8,
+        path: endpoint.Udp4Tuple,
+    };
 };
 
 test "Tls13ClientEndpoint registers its client route before begin" {
@@ -218,4 +237,55 @@ test "Tls13ClientEndpoint registers its client route before begin" {
     try std.testing.expect(!updated.path_changed);
     try std.testing.expect(client.path.eql(new_path));
     try std.testing.expect((try client.lifecycle.currentRoutePath(&client_scid)).eql(new_path));
+}
+
+test "Tls13ClientEndpoint polls application output with committed route path" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = old_path.remote,
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        8,
+        old_path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const traffic_secret = [_]u8{0x44} ** 32;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const reset_token = [_]u8{0x55} ** 16;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+    try client.transport.connection.sendPing();
+    _ = try client.updatePath(new_path);
+
+    const polled = (try client.pollApplicationDatagramWithRoutePath(1)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expect(polled.path.eql(new_path));
+    try std.testing.expect(polled.datagram.len != 0);
+    try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
 }
