@@ -134,6 +134,22 @@ pub const Tls13ClientEndpoint = struct {
         return serviced;
     }
 
+    /// Service one due client deadline and return route-bound recovery output.
+    pub fn serviceDueDeadlineAndPollApplicationDatagramWithRoutePath(
+        self: *Tls13ClientEndpoint,
+        now_millis: i64,
+    ) !?DueDeadlineApplicationDatagramPathResult {
+        const serviced = (try self.serviceDueDeadline(now_millis)) orelse return null;
+        const datagram = switch (serviced) {
+            .recovery => try self.pollApplicationDatagramWithRoutePath(now_millis),
+            .idle_timeout, .close_timeout, .key_discard => null,
+        };
+        return .{
+            .deadline = serviced,
+            .datagram = datagram,
+        };
+    }
+
     /// Return whether TLS and QUIC have reached confirmed 1-RTT state.
     pub fn handshakeConfirmed(self: *const Tls13ClientEndpoint) bool {
         return self.transport.handshakeConfirmed();
@@ -200,6 +216,12 @@ pub const Tls13ClientEndpoint = struct {
     pub const ApplicationDatagramPathResult = struct {
         datagram: []u8,
         path: endpoint.Udp4Tuple,
+    };
+
+    /// Client due-deadline result with optional route-bound recovery output.
+    pub const DueDeadlineApplicationDatagramPathResult = struct {
+        deadline: client_transport.ClientTransportDeadline,
+        datagram: ?ApplicationDatagramPathResult = null,
     };
 };
 
@@ -288,4 +310,64 @@ test "Tls13ClientEndpoint polls application output with committed route path" {
     try std.testing.expect(polled.path.eql(new_path));
     try std.testing.expect(polled.datagram.len != 0);
     try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
+}
+
+test "Tls13ClientEndpoint services due recovery with committed route output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = old_path.remote,
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        9,
+        old_path,
+        .{ .active_migration_disabled = false },
+        .{ .initial_rtt_ms = 100 },
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const traffic_secret = [_]u8{0x55} ** 32;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xba, 0xbb, 0xbc, 0xbd };
+    const reset_token = [_]u8{0x66} ** 16;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+    try client.transport.connection.sendPing();
+
+    const first = (try client.pollApplicationDatagramWithRoutePath(10)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first.datagram);
+    const deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(deadline == .recovery);
+
+    _ = try client.updatePath(new_path);
+    const before_deadline = try client.serviceDueDeadlineAndPollApplicationDatagramWithRoutePath(deadline.deadlineMillis() - 1);
+    try std.testing.expect(before_deadline == null);
+
+    const serviced = (try client.serviceDueDeadlineAndPollApplicationDatagramWithRoutePath(deadline.deadlineMillis())) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(serviced.deadline == .recovery);
+    const output = serviced.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(output.datagram);
+    try std.testing.expect(output.path.eql(new_path));
+    try std.testing.expect(output.datagram.len != 0);
 }
