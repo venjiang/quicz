@@ -2181,9 +2181,9 @@ pub const Tls13Handshake = struct {
                             if (saw_host_name) return error.DecodeError;
                             saw_host_name = true;
                             have_server_name = true;
-                            const copy_len = @min(offered_name.len, self.client_sni.len);
-                            @memcpy(self.client_sni[0..copy_len], offered_name[0..copy_len]);
-                            self.client_sni_len = copy_len;
+                            if (offered_name.len > self.client_sni.len) return error.DecodeError;
+                            @memcpy(self.client_sni[0..offered_name.len], offered_name);
+                            self.client_sni_len = offered_name.len;
                             if (self.config.server_name) |expected_name| {
                                 if (!std.ascii.eqlIgnoreCase(offered_name, expected_name)) {
                                     return error.UnrecognizedName;
@@ -4180,6 +4180,20 @@ test "Tls13Handshake server accepts matching ClientHello SNI" {
     server.provideData(client_hello_action.send_data.data);
     try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
     try std.testing.expectEqualStrings("Example.COM", server.client_sni[0..server.client_sni_len]);
+}
+
+test "Tls13Handshake server rejects oversized ClientHello SNI host_name" {
+    const long_name = "a" ** 257;
+    var client = Tls13Handshake.initClient(.{
+        .server_name = long_name,
+    }, &[_]u8{});
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+
+    const client_hello_action = try client.step();
+    try std.testing.expect(std.meta.activeTag(client_hello_action) == .send_data);
+
+    server.provideData(client_hello_action.send_data.data);
+    try std.testing.expectError(error.DecodeError, server.step());
 }
 
 test "Tls13Handshake server rejects missing ClientHello SNI when configured" {
