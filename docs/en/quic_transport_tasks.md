@@ -116,7 +116,10 @@ The lower lifecycle helper
 `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram()`
 also surfaces authenticated close-on-frame-error as `feed_error` plus an
 optional close datagram, while preserving queued output on non-closing invalid
-inputs.
+inputs. Its result now exposes the selected connection's post-feed deadline
+state after path-validation output, route commit ACK output, non-closing invalid
+input, and protected close emission, including null when the selected connection
+has no next deadline.
 Caller-keyed long-header
 `processProtectedLongDatagramInSpaceOrCloseAndPollDatagram()` now follows the
 same output boundary: authenticated Initial/Handshake frame errors return the

@@ -42351,6 +42351,9 @@ test "EndpointConnectionLifecycle feed installed-key path update commits after P
     const challenge_packet = ping_result.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(challenge_packet.datagram);
     try std.testing.expectEqual(@as(u64, 188), challenge_packet.connection_id);
+    const ping_next_deadline = ping_result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 188), ping_next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, ping_next_deadline.kind);
     try std.testing.expectEqual(@as(usize, 0), server.pendingPathChallengeCount());
     try std.testing.expectEqual(@as(usize, 1), server.outstandingPathChallengeCount());
     try std.testing.expect((try lifecycle.routeDatagram(new_path, migrated_ping)).path_changed);
@@ -42399,6 +42402,7 @@ test "EndpointConnectionLifecycle feed installed-key path update commits after P
     const ack_packet = validation_result.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(ack_packet.datagram);
     try std.testing.expectEqual(@as(u64, 188), ack_packet.connection_id);
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), validation_result.next_deadline);
     try std.testing.expectEqual(@as(u64, 188), updated_route.connection_id);
     try std.testing.expect(!updated_route.path_changed);
     try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
@@ -42522,6 +42526,7 @@ test "EndpointConnectionLifecycle path-update feed poll surfaces close only afte
     try std.testing.expectEqual(@as(?EndpointProtectedDatagramError, error.InvalidPacket), malformed_result.feed_error);
     try std.testing.expect(malformed_result.datagram == null);
     try std.testing.expect(malformed_result.output_path == null);
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), malformed_result.next_deadline);
     try std.testing.expectEqual(ConnectionState.active, server.connectionState());
 
     const queued_ping = (try lifecycle.pollDatagram(189, &server, 2, poll_options)) orelse return error.TestUnexpectedResult;
@@ -42553,6 +42558,9 @@ test "EndpointConnectionLifecycle path-update feed poll surfaces close only afte
     const close_datagram = close_result.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(close_datagram.datagram);
     try std.testing.expectEqual(@as(u64, 189), close_datagram.connection_id);
+    const close_next_deadline = close_result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 189), close_next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.close_timeout, close_next_deadline.kind);
     try client.processProtectedShortDatagramWithInstalledKeys(4, client_dcid.len, close_datagram.datagram);
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
 }

@@ -548,6 +548,8 @@ pub const EndpointFeedPathUpdateDatagramPollResult = struct {
     /// Path-validation probes use the candidate tuple; other output uses the
     /// current committed route.
     output_path: ?endpoint.Udp4Tuple = null,
+    /// Next endpoint-visible deadline for the selected connection after feed and poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from feeding one installed-key datagram, then selecting a wakeup.

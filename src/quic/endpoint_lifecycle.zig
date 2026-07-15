@@ -1594,11 +1594,15 @@ pub const EndpointConnectionLifecycle = struct {
                     .datagram = protected_datagram,
                 } else null,
                 .output_path = output_path,
+                .next_deadline = self.nextDeadline(connection_id, connection),
             };
         };
         const routed = switch (feed.feed) {
             .routed => |value| value,
-            else => return .{ .feed = feed },
+            else => return .{
+                .feed = feed,
+                .next_deadline = self.nextDeadline(connection_id, connection),
+            },
         };
         const output_path = feed.selected_output_path orelse try self.currentRoutePath(routed.destination_connection_id.asSlice());
         const polled = try self.pollDatagram(
@@ -1618,6 +1622,7 @@ pub const EndpointConnectionLifecycle = struct {
             .feed = feed,
             .datagram = polled_result,
             .output_path = if (polled_result != null) output_path else null,
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 

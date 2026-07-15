@@ -102,7 +102,9 @@ endpoint deadline。
 底层 lifecycle helper
 `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram()`
 也会把认证后的 close-on-frame-error 表示为 `feed_error` 和可选 close datagram，同时保留
-未进入 closing 的无效输入下已排队输出。
+未进入 closing 的无效输入下已排队输出。其 result 现在会在 path-validation output、
+route commit ACK output、未进入 closing 的 invalid input 和 protected close emission 后，
+暴露所选连接的 feed 后 deadline 状态；所选连接没有下一 deadline 时返回 null。
 调用方持 key 的 long-header
 `processProtectedLongDatagramInSpaceOrCloseAndPollDatagram()` 也采用同一边界：认证后的
 Initial/Handshake frame 错误会直接返回已排队 CONNECTION_CLOSE datagram；畸形且未进入
