@@ -58,7 +58,7 @@ version-information 原语）：
 
 并发纯 Zig server 现经由其拥有的 `EndpointConnectionRegistry` 分发已路由的
 1-RTT short packet，涵盖 lifecycle route lookup、installed-key 接收和
-stateless-reset 处理。已接受、Retry follow-up 及已路由的 Initial 与 Handshake 接收、TLS 推进和有界
+stateless-reset 处理。已接受、Retry follow-up、coalesced 及已路由的 Initial 与 Handshake 接收、TLS 推进和有界
 protected-output drain 均由一次 lifecycle 操作完成。这只是
 endpoint ownership 的增量证据，并非完整生产级 event loop。
 
