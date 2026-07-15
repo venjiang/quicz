@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const address_validation_token = @import("address_validation_token.zig");
+const buffer = @import("buffer.zig");
 const root = @import("../lib.zig");
 const connection_module = @import("connection.zig");
 const endpoint = @import("endpoint.zig");
@@ -63,6 +64,8 @@ pub fn Tls13ServerEndpoint(
             feed: ?root.EndpointFeedInstalledKeyPathUpdateResult = null,
             /// Feed error returned after the endpoint had selected a record.
             feed_error: ?root.EndpointProtectedDatagramError = null,
+            /// Peer-issued CID sequence whose stateless reset token matched.
+            stateless_reset_sequence_number: ?u64 = null,
             /// Protected output emitted after feed or close-on-error handling.
             datagram: ?DatagramPathResult = null,
         };
@@ -448,6 +451,15 @@ pub fn Tls13ServerEndpoint(
             const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
             const connection = connection_of(record);
             const destination_connection_id = destination_connection_id_of(record);
+            if (datagram.len != 0 and quic_packet.parseHeaderForm(datagram[0]) == .short) {
+                if (connection.processStatelessResetDatagram(now_millis, datagram)) |sequence_number| {
+                    try self.lifecycle.armRecoveryTimerFromConnection(route.connection_id, connection);
+                    return .{
+                        .feed = .{ .feed = .dropped },
+                        .stateless_reset_sequence_number = sequence_number,
+                    };
+                }
+            }
             const feed = self.lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
                 route.connection_id,
                 connection,
@@ -2653,4 +2665,165 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     try std.testing.expect(close_output.path.eql(new_path));
     try client.processProtectedShortDatagramWithInstalledKeys(12, client_dcid.len, close_output.datagram);
     try std.testing.expectEqual(connection_module.ConnectionState.draining, client.connectionState());
+}
+
+test "Tls13ServerEndpoint feed reports active stateless reset and retires record" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: root.CryptoBackend,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "initial";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 1,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer endpoint_owner.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+    };
+    const server_dcid = "local";
+    const peer_connection_id = [_]u8{ 0xea, 0xeb, 0xec, 0xed };
+    const reset_token = [_]u8{0xbb} ** quic_packet.stateless_reset_token_len;
+    var empty_backend = EmptyBackend{};
+
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer {
+        if (record_owned) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = 86,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    record_initialized = true;
+
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try record.connection.processDatagram(0, writer.getWritten());
+    try record.connection.validatePeerAddress();
+    try record.connection.confirmHandshake();
+    _ = try record.connection.recordPacketSentInSpace(.application, 1, 64);
+    try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, path, .{});
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(record.handle);
+    try endpoint_owner.records.adopt(record.handle, record);
+    record_owned = false;
+    const record_handle = record.handle;
+    try endpoint_owner.lifecycle.armRecoveryTimerFromConnection(record_handle, &record.connection);
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.recoveryTimerCount());
+
+    var reset_prefix: [1 + server_dcid.len]u8 = undefined;
+    reset_prefix[0] = 0x40;
+    @memcpy(reset_prefix[1..], server_dcid);
+    var reset_datagram: [64]u8 = undefined;
+    var reset_writer = buffer.fixedWriter(&reset_datagram);
+    try quic_packet.encodeStatelessReset(reset_writer.writer(), &reset_prefix, reset_token);
+
+    var route_out: [64]u8 = undefined;
+    const reset = try endpoint_owner.feedInstalledKeyDatagramWithRoutePath(
+        path,
+        10,
+        reset_writer.getWritten(),
+        .{
+            .space = .application,
+            .out = &route_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+    );
+    const feed = reset.feed orelse return error.TestUnexpectedResult;
+    try std.testing.expect(feed.feed == .dropped);
+    try std.testing.expect(reset.datagram == null);
+    try std.testing.expectEqual(@as(?u64, 0), reset.stateless_reset_sequence_number);
+    try std.testing.expectEqual(connection_module.ConnectionState.draining, record.connection.connectionState());
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.recoveryTimerCount());
+
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    const deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.close_timeout, deadline.kind);
+    try std.testing.expectEqual(record_handle, deadline.connection_id);
+
+    var due_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    try std.testing.expect((try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        deadline.deadline_millis - 1,
+        &due_out,
+    )) == null);
+    try std.testing.expect(endpoint_owner.records.get(record_handle) != null);
+
+    const due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        deadline.deadline_millis,
+        &due_out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(due.pending_work.close_retired != null);
+    try std.testing.expectEqual(@as(usize, 0), due.drain.datagrams_written);
+    try std.testing.expect(endpoint_owner.records.get(record_handle) == null);
+    try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
 }
