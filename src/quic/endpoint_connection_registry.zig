@@ -45,15 +45,19 @@ pub fn EndpointConnectionRegistry(
         /// Fixed-capacity registries allocate lifecycle view scratch space once,
         /// so receive and deadline paths do not allocate per datagram.
         pub fn initWithCapacity(allocator: std.mem.Allocator, max_records: usize) !Self {
+            const record_capacity = std.math.cast(u32, max_records) orelse return error.CapacityOverflow;
             const deadline_view_scratch = try allocator.alloc(root.EndpointConnectionView, max_records);
             errdefer allocator.free(deadline_view_scratch);
             const receive_view_scratch = try allocator.alloc(root.EndpointConnectionReceiveView, max_records);
             errdefer allocator.free(receive_view_scratch);
             const poll_view_scratch = try allocator.alloc(root.EndpointConnectionPollView, max_records);
             errdefer allocator.free(poll_view_scratch);
+            var records = std.AutoHashMap(u64, *Record).init(allocator);
+            errdefer records.deinit();
+            try records.ensureTotalCapacity(record_capacity);
             return .{
                 .allocator = allocator,
-                .records = std.AutoHashMap(u64, *Record).init(allocator),
+                .records = records,
                 .max_records = max_records,
                 .deadline_view_scratch = deadline_view_scratch,
                 .receive_view_scratch = receive_view_scratch,
@@ -100,7 +104,11 @@ pub fn EndpointConnectionRegistry(
         pub fn adopt(self: *Self, connection_id: u64, record: *Record) !void {
             if (self.records.contains(connection_id)) return error.DuplicateConnectionId;
             if (!self.hasCapacity()) return error.ConnectionLimitReached;
-            try self.records.put(connection_id, record);
+            if (self.max_records != std.math.maxInt(usize)) {
+                self.records.putAssumeCapacityNoClobber(connection_id, record);
+            } else {
+                try self.records.put(connection_id, record);
+            }
         }
 
         /// Retire and destroy one active record.
@@ -302,6 +310,7 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
 
     var registry = try Registry.initWithCapacity(std.testing.allocator, 1);
     defer registry.deinit();
+    try std.testing.expect(registry.records.capacity() >= 1);
     var connection = try root.Connection.init(std.testing.allocator, .client, .{});
     var connection_owned = true;
     errdefer if (connection_owned) connection.deinit();
