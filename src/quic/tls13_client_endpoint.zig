@@ -124,14 +124,35 @@ pub const Tls13ClientEndpoint = struct {
         return self.transport.nextDeadline();
     }
 
-    /// Service one due client deadline and refresh endpoint recovery state.
+    /// Service one due client deadline and keep endpoint lifecycle state in sync.
     pub fn serviceDueDeadline(
         self: *Tls13ClientEndpoint,
         now_millis: i64,
     ) !?client_transport.ClientTransportDeadline {
-        const serviced = try self.transport.serviceDueDeadline(now_millis);
-        try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
-        return serviced;
+        const deadline = self.transport.nextDeadline() orelse return null;
+        if (deadline.deadlineMillis() > now_millis) return null;
+
+        switch (deadline) {
+            .idle_timeout => {
+                _ = try self.lifecycle.checkIdleTimeoutsAndRetireConnection(
+                    self.connection_id,
+                    &self.transport.connection,
+                    now_millis,
+                );
+            },
+            .close_timeout => {
+                _ = try self.lifecycle.checkCloseTimeoutsAndRetireConnection(
+                    self.connection_id,
+                    &self.transport.connection,
+                    now_millis,
+                );
+            },
+            .recovery, .key_discard => {
+                _ = try self.transport.serviceDueDeadline(now_millis);
+                try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+            },
+        }
+        return deadline;
     }
 
     /// Service one due client deadline and return route-bound recovery output.
@@ -384,6 +405,41 @@ test "Tls13ClientEndpoint services due recovery with committed route output" {
     try std.testing.expect(output.datagram.len != 0);
 }
 
+test "Tls13ClientEndpoint retires its route when idle deadline closes the client" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        11,
+        path,
+        .{ .active_migration_disabled = false },
+        .{ .max_idle_timeout_ms = 10 },
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+    client.transport.connection.last_packet_activity_millis = 10;
+
+    const deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(deadline == .idle_timeout);
+    try std.testing.expectEqual(@as(i64, 20), deadline.deadlineMillis());
+    try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
+
+    try std.testing.expect((try client.serviceDueDeadline(19)) == null);
+    try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
+
+    const serviced = (try client.serviceDueDeadline(20)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(serviced == .idle_timeout);
+    try std.testing.expectEqual(@as(usize, 0), client.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), client.lifecycle.recoveryTimerCount());
+}
+
 test "Tls13ClientEndpoint closes with committed route output" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58 };
@@ -432,4 +488,59 @@ test "Tls13ClientEndpoint closes with committed route output" {
     try std.testing.expect(close_datagram.path.eql(new_path));
     try std.testing.expect(close_datagram.datagram.len != 0);
     try std.testing.expect(client.closeDeadlineMillis() != null);
+}
+
+test "Tls13ClientEndpoint retires its route when close deadline elapses" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        12,
+        path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const traffic_secret = [_]u8{0x99} ** 32;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xda, 0xdb, 0xdc, 0xdd };
+    const reset_token = [_]u8{0xaa} ** 16;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+
+    const close_datagram = (try client.closeWithRoutePath(0, 0, "done", 1)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_datagram.datagram);
+    const close_deadline = client.closeDeadlineMillis() orelse return error.TestUnexpectedResult;
+    const deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(deadline == .close_timeout);
+    try std.testing.expectEqual(close_deadline, deadline.deadlineMillis());
+    try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
+
+    try std.testing.expect((try client.serviceDueDeadline(close_deadline - 1)) == null);
+    try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
+
+    const serviced = (try client.serviceDueDeadline(close_deadline)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(serviced == .close_timeout);
+    try std.testing.expectEqual(@as(usize, 0), client.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), client.lifecycle.recoveryTimerCount());
 }
