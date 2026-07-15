@@ -7,12 +7,14 @@ const crypto_types = @import("crypto_types.zig");
 const tls13 = @import("tls13.zig");
 const tls13_backend = @import("tls13_backend.zig");
 const transport_types = @import("transport_types.zig");
+const protocol_limits = @import("protocol_limits.zig");
 
 const Connection = connection_module.Connection;
 const Config = connection_config.Config;
 const Tls13Backend = tls13_backend.Tls13Backend;
 const Error = transport_types.Error;
 const LossDetectionTimerDeadline = transport_types.LossDetectionTimerDeadline;
+const max_connection_id_len = protocol_limits.max_connection_id_len;
 
 /// One deadline that a TLS-owned server connection must observe.
 pub const ServerTransportDeadline = union(enum) {
@@ -42,6 +44,12 @@ pub const ServerTransportDeadline = union(enum) {
 pub const Tls13ServerTransport = struct {
     connection: Connection,
     backend: Tls13Backend,
+    local_initial_source_connection_id: [max_connection_id_len]u8 = undefined,
+    local_initial_source_connection_id_len: usize = 0,
+    peer_initial_source_connection_id: [max_connection_id_len]u8 = undefined,
+    peer_initial_source_connection_id_len: usize = 0,
+    original_destination_connection_id: [max_connection_id_len]u8 = undefined,
+    original_destination_connection_id_len: usize = 0,
 
     /// Create one server transport with caller-supplied QUIC and TLS policy.
     pub fn init(
@@ -70,6 +78,52 @@ pub const Tls13ServerTransport = struct {
     /// Return the pure-Zig TLS backend for lifecycle CRYPTO driving.
     pub fn cryptoBackend(self: *Tls13ServerTransport) crypto_types.CryptoBackend {
         return self.backend.cryptoBackend();
+    }
+
+    /// Store and apply the server CID used for its first Initial response.
+    pub fn setLocalInitialSourceConnectionId(
+        self: *Tls13ServerTransport,
+        connection_id: []const u8,
+    ) Error!void {
+        try validateConnectionId(connection_id, false);
+        try self.connection.setLocalInitialSourceConnectionId(connection_id);
+        self.local_initial_source_connection_id_len = connection_id.len;
+        @memcpy(self.local_initial_source_connection_id[0..connection_id.len], connection_id);
+    }
+
+    /// Return the server CID used for Initial and subsequent routed packets.
+    pub fn localInitialSourceConnectionId(self: *const Tls13ServerTransport) []const u8 {
+        return self.local_initial_source_connection_id[0..self.local_initial_source_connection_id_len];
+    }
+
+    /// Store the client Initial source CID after endpoint authentication.
+    pub fn setPeerInitialSourceConnectionId(
+        self: *Tls13ServerTransport,
+        connection_id: []const u8,
+    ) Error!void {
+        try validateConnectionId(connection_id, true);
+        self.peer_initial_source_connection_id_len = connection_id.len;
+        @memcpy(self.peer_initial_source_connection_id[0..connection_id.len], connection_id);
+    }
+
+    /// Return the peer CID used as the destination of server packets.
+    pub fn peerInitialSourceConnectionId(self: *const Tls13ServerTransport) []const u8 {
+        return self.peer_initial_source_connection_id[0..self.peer_initial_source_connection_id_len];
+    }
+
+    /// Store the client Original DCID used to derive Initial protection keys.
+    pub fn setOriginalDestinationConnectionId(
+        self: *Tls13ServerTransport,
+        connection_id: []const u8,
+    ) Error!void {
+        try validateConnectionId(connection_id, true);
+        self.original_destination_connection_id_len = connection_id.len;
+        @memcpy(self.original_destination_connection_id[0..connection_id.len], connection_id);
+    }
+
+    /// Return the client's Original DCID retained for Initial packet handling.
+    pub fn originalDestinationConnectionId(self: *const Tls13ServerTransport) []const u8 {
+        return self.original_destination_connection_id[0..self.original_destination_connection_id_len];
     }
 
     /// Read received bytes from one peer-initiated application stream.
@@ -202,6 +256,10 @@ pub const Tls13ServerTransport = struct {
     }
 };
 
+fn validateConnectionId(connection_id: []const u8, allow_empty: bool) Error!void {
+    if ((!allow_empty and connection_id.len == 0) or connection_id.len > max_connection_id_len) return error.InvalidPacket;
+}
+
 fn selectEarlierDeadline(
     current: ?ServerTransportDeadline,
     candidate: ServerTransportDeadline,
@@ -232,6 +290,23 @@ test "Tls13ServerTransport exposes unidirectional and stream cancellation contro
     const bidirectional_stream = try transport.openStream();
     try transport.stopSending(bidirectional_stream, 42);
     try std.testing.expectEqual(@as(usize, 1), transport.connection.pending_stop_sending.items.len);
+}
+
+test "Tls13ServerTransport owns endpoint connection IDs" {
+    var transport = try Tls13ServerTransport.init(std.testing.allocator, .{}, .{});
+    defer transport.deinit();
+
+    try transport.setLocalInitialSourceConnectionId(&.{ 1, 2, 3, 4 });
+    try transport.setPeerInitialSourceConnectionId(&.{ 5, 6, 7, 8 });
+    try transport.setOriginalDestinationConnectionId(&.{ 9, 10, 11, 12 });
+
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, transport.localInitialSourceConnectionId());
+    try std.testing.expectEqualSlices(u8, &.{ 5, 6, 7, 8 }, transport.peerInitialSourceConnectionId());
+    try std.testing.expectEqualSlices(u8, &.{ 9, 10, 11, 12 }, transport.originalDestinationConnectionId());
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, transport.connection.localInitialSourceConnectionId().?);
+    try transport.setPeerInitialSourceConnectionId(&.{});
+    try std.testing.expectEqual(@as(usize, 0), transport.peerInitialSourceConnectionId().len);
+    try std.testing.expectError(error.InvalidPacket, transport.setLocalInitialSourceConnectionId(&.{}));
 }
 
 test "Tls13ServerTransport services idle lifecycle deadline" {

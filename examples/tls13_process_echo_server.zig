@@ -106,11 +106,6 @@ const ManagedProcessConnection = struct {
     handle: u64,
     transport: Tls13ServerTransport,
     peer_address: std.Io.net.IpAddress,
-    server_scid: [4]u8,
-    client_scid: [20]u8 = undefined,
-    client_scid_len: usize = 0,
-    original_dcid: [20]u8 = undefined,
-    original_dcid_len: usize = 0,
     retry_datagram: [max_retry_datagram_size]u8 = undefined,
     retry_datagram_len: usize = 0,
     retry_validated: bool = false,
@@ -124,7 +119,7 @@ const ManagedProcessConnection = struct {
     echoed: [echo_stream_ids.len]bool = .{ false, false },
 
     fn clientScid(self: *const ManagedProcessConnection) []const u8 {
-        return self.client_scid[0..self.client_scid_len];
+        return self.transport.peerInitialSourceConnectionId();
     }
 
     fn retryDatagram(self: *const ManagedProcessConnection) []const u8 {
@@ -144,7 +139,7 @@ const ManagedProcessConnection = struct {
     }
 
     fn sourceConnectionId(self: *const ManagedProcessConnection) []const u8 {
-        return &self.server_scid;
+        return self.transport.localInitialSourceConnectionId();
     }
 };
 
@@ -281,7 +276,7 @@ fn serveConcurrent(
                         var pending = connections.valueIterator();
                         while (pending.next()) |managed| {
                             if (managed.*.retry_datagram_len == 0 or
-                                !std.mem.eql(u8, managed.*.original_dcid[0..managed.*.original_dcid_len], initial_info.dcid) or
+                                !std.mem.eql(u8, managed.*.transport.originalDestinationConnectionId(), initial_info.dcid) or
                                 !std.meta.eql(managed.*.peer_address, received.from)) continue;
                             try socket.send(io, &managed.*.peer_address, managed.*.retryDatagram());
                             std.debug.print("zig_process_server: connection={d} concurrent=true retry_reissued=true\n", .{managed.*.handle});
@@ -297,6 +292,7 @@ fn serveConcurrent(
 
                 const handle = next_handle;
                 next_handle += 1;
+                const connection_scid = processServerScid(handle);
                 const managed = try allocator.create(ManagedProcessConnection);
                 var managed_initialized = false;
                 var managed_adopted = false;
@@ -327,19 +323,14 @@ fn serveConcurrent(
                     .handle = handle,
                     .transport = transport,
                     .peer_address = received.from,
-                    .server_scid = processServerScid(handle),
                 };
                 managed_initialized = true;
                 try managed.transport.connection.validatePeerAddress();
-                try managed.transport.connection.setLocalInitialSourceConnectionId(&managed.server_scid);
-                if (initial_info.dcid.len > managed.original_dcid.len) return error.InvalidConnectionIdLength;
-                @memcpy(managed.original_dcid[0..initial_info.dcid.len], initial_info.dcid);
-                managed.original_dcid_len = initial_info.dcid.len;
+                try managed.transport.setLocalInitialSourceConnectionId(&connection_scid);
+                try managed.transport.setOriginalDestinationConnectionId(initial_info.dcid);
 
                 if (retry_enabled) {
-                    if (initial_accept.source_connection_id.len > managed.client_scid.len) return error.InvalidConnectionIdLength;
-                    @memcpy(managed.client_scid[0..initial_accept.source_connection_id.len], initial_accept.source_connection_id);
-                    managed.client_scid_len = initial_accept.source_connection_id.len;
+                    try managed.transport.setPeerInitialSourceConnectionId(initial_accept.source_connection_id);
                     const token = try address_validation.issueTokenForPathForVersion(
                         allocator,
                         .retry,
@@ -354,7 +345,7 @@ fn serveConcurrent(
                         now_millis,
                         initial_info.dcid,
                         initial_accept.source_connection_id,
-                        &managed.server_scid,
+                        managed.transport.localInitialSourceConnectionId(),
                         token,
                     );
                     defer allocator.free(retry_datagram);
@@ -362,7 +353,7 @@ fn serveConcurrent(
                     @memcpy(managed.retry_datagram[0..retry_datagram.len], retry_datagram);
                     managed.retry_datagram_len = retry_datagram.len;
                     try lifecycle.registerConnectionId(handle, initial_info.dcid, path, .{ .active_migration_disabled = true });
-                    _ = try lifecycle.switchInitialDestinationConnectionIdAfterRetry(initial_info.dcid, &managed.server_scid, path);
+                    _ = try lifecycle.switchInitialDestinationConnectionIdAfterRetry(initial_info.dcid, managed.transport.localInitialSourceConnectionId(), path);
                     try connections.adopt(handle, managed);
                     managed_adopted = true;
                     try socket.send(io, &managed.peer_address, retry_datagram);
@@ -377,7 +368,7 @@ fn serveConcurrent(
                     &managed.transport.connection,
                     now_millis,
                     initial_accept,
-                    &managed.server_scid,
+                    managed.transport.localInitialSourceConnectionId(),
                     received.data,
                     .{ .active_migration_disabled = true },
                     managed.transport.cryptoBackend(),
@@ -385,9 +376,7 @@ fn serveConcurrent(
                     &initial_outputs,
                 );
                 const peer_scid = managed.transport.connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
-                if (peer_scid.len > managed.client_scid.len) return error.InvalidConnectionIdLength;
-                @memcpy(managed.client_scid[0..peer_scid.len], peer_scid);
-                managed.client_scid_len = peer_scid.len;
+                try managed.transport.setPeerInitialSourceConnectionId(peer_scid);
                 try connections.adopt(handle, managed);
                 managed_adopted = true;
                 accepted_count += 1;
@@ -408,7 +397,7 @@ fn serveConcurrent(
                         .{
                             .space = .handshake,
                             .destination_connection_id = managed.clientScid(),
-                            .source_connection_id = &managed.server_scid,
+                            .source_connection_id = managed.transport.localInitialSourceConnectionId(),
                         },
                         &handshake_outputs,
                     );
@@ -449,7 +438,7 @@ fn serveConcurrent(
                         .initial,
                         now_millis,
                         managed.clientScid(),
-                        &managed.server_scid,
+                        managed.transport.localInitialSourceConnectionId(),
                         &[_]u8{},
                         retry_secrets.server,
                         &retry_initial_outputs,
@@ -472,7 +461,7 @@ fn serveConcurrent(
                         .{
                             .space = .handshake,
                             .destination_connection_id = managed.clientScid(),
-                            .source_connection_id = &managed.server_scid,
+                            .source_connection_id = managed.transport.localInitialSourceConnectionId(),
                         },
                         &retry_handshake_outputs,
                     );
@@ -502,9 +491,9 @@ fn serveConcurrent(
                         managed.transport.connection.hasHandshakeProtectionKeys())
                     {
                         const initial_destination_connection_id = if (managed.retry_validated)
-                            managed.server_scid[0..]
+                            managed.transport.localInitialSourceConnectionId()
                         else
-                            managed.original_dcid[0..managed.original_dcid_len];
+                            managed.transport.originalDestinationConnectionId();
                         _ = try lifecycle.processRoutedProtectedLongDatagramWithInstalledHandshakeKeys(
                             managed.handle,
                             &managed.transport.connection,
@@ -525,7 +514,7 @@ fn serveConcurrent(
                             .{
                                 .space = .handshake,
                                 .destination_connection_id = managed.clientScid(),
-                                .source_connection_id = &managed.server_scid,
+                                .source_connection_id = managed.transport.localInitialSourceConnectionId(),
                             },
                             &coalesced_handshake_outputs,
                         );
@@ -544,9 +533,9 @@ fn serveConcurrent(
                         switch (long_info.packet_type) {
                             .initial => {
                                 const initial_destination_connection_id = if (managed.retry_validated)
-                                    managed.server_scid[0..]
+                                    managed.transport.localInitialSourceConnectionId()
                                 else
-                                    managed.original_dcid[0..managed.original_dcid_len];
+                                    managed.transport.originalDestinationConnectionId();
                                 const initial_secrets = try protection.deriveInitialSecrets(
                                     long_info.version,
                                     initial_destination_connection_id,
@@ -564,7 +553,7 @@ fn serveConcurrent(
                                     managed.transport.cryptoBackend(),
                                     &initial_scratch,
                                     managed.clientScid(),
-                                    &managed.server_scid,
+                                    managed.transport.localInitialSourceConnectionId(),
                                     &[_]u8{},
                                     initial_secrets.server,
                                     &initial_outputs,
@@ -587,7 +576,7 @@ fn serveConcurrent(
                                         .{
                                             .space = .handshake,
                                             .destination_connection_id = managed.clientScid(),
-                                            .source_connection_id = &managed.server_scid,
+                                            .source_connection_id = managed.transport.localInitialSourceConnectionId(),
                                         },
                                         &handshake_outputs,
                                     );
@@ -615,7 +604,7 @@ fn serveConcurrent(
                                     managed.transport.cryptoBackend(),
                                     &handshake_scratch,
                                     managed.clientScid(),
-                                    &managed.server_scid,
+                                    managed.transport.localInitialSourceConnectionId(),
                                     &handshake_outputs,
                                 );
                                 try require(handshake.route.connection_id == managed.handle);
