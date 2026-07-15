@@ -43535,6 +43535,106 @@ test "EndpointConnectionLifecycle long OrClose poll preserves queued output on m
     try std.testing.expect(queued.len != 0);
 }
 
+test "EndpointConnectionLifecycle long OrClose drain returns close output after frame error" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x15, 0x25, 0x35, 0x45 };
+    const server_scid = [_]u8{ 0xae, 0xbe, 0xce, 0xde };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var plaintext: [1200]u8 = undefined;
+    @memset(&plaintext, 0);
+    plaintext[0] = @intFromEnum(frame.FrameType.handshake_done);
+
+    const invalid_initial = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &original_dcid,
+        .scid = &client_scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(invalid_initial);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var drained: [2]EndpointPolledDatagramResult = undefined;
+    const result = try lifecycle.processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams(
+        96,
+        &server,
+        .initial,
+        10,
+        secrets.client,
+        invalid_initial,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+        &drained,
+    );
+    defer for (drained[0..result.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(result.datagrams_written != 0);
+    try std.testing.expectEqual(@as(?Error, null), result.first_error);
+    for (drained[0..result.datagrams_written]) |entry| {
+        try std.testing.expectEqual(@as(u64, 96), entry.connection_id);
+    }
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(11, .{ .initial = secrets.server }, drained[0].datagram));
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+}
+
+test "EndpointConnectionLifecycle long OrClose drain preserves queued output on malformed input" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x16, 0x26, 0x36, 0x46 };
+    const server_scid = [_]u8{ 0xaf, 0xbf, 0xcf, 0xdf };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.sendCryptoInSpace(.initial, "queued initial drain output");
+
+    const malformed_initial = [_]u8{ 0xc0, 0x00, 0x00, 0x00 };
+    var drained: [1]EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams(
+        97,
+        &server,
+        .initial,
+        10,
+        secrets.client,
+        &malformed_initial,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+        &drained,
+    ));
+    try std.testing.expectEqual(ConnectionState.active, server.connectionState());
+
+    const queued = (try lifecycle.pollProtectedLongDatagram(
+        97,
+        &server,
+        11,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(queued);
+    try std.testing.expect(queued.len != 0);
+}
+
 test "EndpointConnectionLifecycle routes long datagram then drives backend and drains output" {
     const Backend = struct {
         outbound: []const u8,

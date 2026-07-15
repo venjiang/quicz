@@ -17379,8 +17379,8 @@ pub const EndpointConnectionLifecycle = struct {
 
     /// Process caller-keyed Initial/Handshake input with close propagation, then drain output.
     ///
-    /// Authenticated frame errors queue CONNECTION_CLOSE and return before any
-    /// ordinary caller-keyed long-header output is drained.
+    /// Authenticated frame errors queue CONNECTION_CLOSE and drain that close
+    /// datagram. Non-closing invalid packets keep the throwing receive path.
     pub fn processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -17395,14 +17395,16 @@ pub const EndpointConnectionLifecycle = struct {
         send_keys: protection.Aes128PacketProtectionKeys,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointDatagramDrainResult {
-        try self.processProtectedLongDatagramInSpaceOrClose(
+        self.processProtectedLongDatagramInSpaceOrClose(
             connection_id,
             connection,
             space,
             now_millis,
             receive_keys,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+        };
         const output_keys = try protectedLongDatagramKeysForSpace(space, send_keys);
         var result = EndpointDatagramDrainResult{};
         while (result.datagrams_written < out.len) {

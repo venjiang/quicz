@@ -91,6 +91,10 @@ Caller-keyed long-header
 same output boundary: authenticated Initial/Handshake frame errors return the
 queued CONNECTION_CLOSE datagram, while malformed non-closing inputs still
 throw and leave queued output available for normal polling.
+The bounded-drain variant
+`processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams()` follows the
+same rule and drains close output after authenticated frame errors without
+draining unrelated queued output on malformed non-closing inputs.
 
 ### Packet-number reordering evidence
 

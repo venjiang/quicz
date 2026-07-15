@@ -80,6 +80,9 @@ Server endpoint 的 installed-key feed 也遵循同一规则：
 `processProtectedLongDatagramInSpaceOrCloseAndPollDatagram()` 也采用同一边界：认证后的
 Initial/Handshake frame 错误会直接返回已排队 CONNECTION_CLOSE datagram；畸形且未进入
 closing 的输入仍抛错，并保留已排队输出给正常 poll。
+有界 drain 版本 `processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams()` 也遵循同一
+规则：认证后的 frame 错误会 drain close output；畸形且未进入 closing 的输入不会 drain
+无关已排队输出。
 
 ### Packet number 重排证据
 
