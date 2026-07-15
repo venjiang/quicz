@@ -41,6 +41,13 @@ pub fn Tls13ServerEndpoint(
         lifecycle: EndpointConnectionLifecycle,
         records: Registry,
 
+        fn packetNumberSpace(space: root.EndpointInstalledKeyDatagramSpace) root.PacketNumberSpace {
+            return switch (space) {
+                .handshake => .handshake,
+                .zero_rtt, .application => .application,
+            };
+        }
+
         /// Create an endpoint with bounded record, route, and reset-token storage.
         pub fn initWithCapacity(
             allocator: std.mem.Allocator,
@@ -155,14 +162,13 @@ pub fn Tls13ServerEndpoint(
             self: *Self,
             connection_id: u64,
             now_millis: i64,
-            destination_connection_id: []const u8,
         ) (root.Error || error{UnknownConnectionId})!?[]u8 {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             return self.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
                 connection_id,
                 connection_of(record),
                 now_millis,
-                destination_connection_id,
+                destination_connection_id_of(record),
             );
         }
 
@@ -274,21 +280,24 @@ pub fn Tls13ServerEndpoint(
         pub fn driveBackend(
             self: *Self,
             connection_id: u64,
-            space: root.PacketNumberSpace,
+            space: root.EndpointInstalledKeyDatagramSpace,
             scratch: []u8,
             now_millis: i64,
-            poll_options: root.EndpointPollInstalledKeyDatagramOptions,
             out: []root.EndpointPolledDatagramResult,
         ) (root.Error || error{UnknownConnectionId})!root.EndpointCryptoBackendDriveDatagramDrainResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             return self.lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
                 connection_id,
                 connection_of(record),
-                space,
+                packetNumberSpace(space),
                 crypto_backend_of(record),
                 scratch,
                 now_millis,
-                poll_options,
+                .{
+                    .space = space,
+                    .destination_connection_id = destination_connection_id_of(record),
+                    .source_connection_id = source_connection_id_of(record),
+                },
                 out,
             );
         }
@@ -299,8 +308,6 @@ pub fn Tls13ServerEndpoint(
             connection_id: u64,
             scratch: []u8,
             now_millis: i64,
-            destination_connection_id: []const u8,
-            source_connection_id: []const u8,
             initial_token: []const u8,
             keys: protection.Aes128PacketProtectionKeys,
             out: []root.EndpointPolledDatagramResult,
@@ -314,8 +321,8 @@ pub fn Tls13ServerEndpoint(
                 scratch,
                 .initial,
                 now_millis,
-                destination_connection_id,
-                source_connection_id,
+                destination_connection_id_of(record),
+                source_connection_id_of(record),
                 initial_token,
                 keys,
                 out,
@@ -373,8 +380,6 @@ pub fn Tls13ServerEndpoint(
             receive_keys: protection.Aes128PacketProtectionKeys,
             datagram: []const u8,
             scratch: []u8,
-            destination_connection_id: []const u8,
-            source_connection_id: []const u8,
             initial_token: []const u8,
             send_keys: protection.Aes128PacketProtectionKeys,
             out: []root.EndpointPolledDatagramResult,
@@ -390,8 +395,8 @@ pub fn Tls13ServerEndpoint(
                 datagram,
                 crypto_backend_of(record),
                 scratch,
-                destination_connection_id,
-                source_connection_id,
+                destination_connection_id_of(record),
+                source_connection_id_of(record),
                 initial_token,
                 send_keys,
                 out,
@@ -406,8 +411,6 @@ pub fn Tls13ServerEndpoint(
             now_millis: i64,
             datagram: []const u8,
             scratch: []u8,
-            destination_connection_id: []const u8,
-            source_connection_id: []const u8,
             out: []root.EndpointPolledDatagramResult,
         ) (root.EndpointProtectedDatagramError || error{UnknownConnectionId})!root.EndpointRoutedCryptoBackendDriveDatagramDrainResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
@@ -419,8 +422,8 @@ pub fn Tls13ServerEndpoint(
                 datagram,
                 crypto_backend_of(record),
                 scratch,
-                destination_connection_id,
-                source_connection_id,
+                destination_connection_id_of(record),
+                source_connection_id_of(record),
                 out,
             );
         }
@@ -530,12 +533,12 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try endpoint_owner.records.adopt(record_handle, record);
     record_owned = false;
     try std.testing.expect(endpoint_owner.records.hasCapacity());
-    const one_rtt = (try endpoint_owner.pollOneRttDatagram(record_handle, 1, "peer")) orelse return error.TestUnexpectedResult;
+    const one_rtt = (try endpoint_owner.pollOneRttDatagram(record_handle, 1)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(one_rtt);
     try std.testing.expect(one_rtt.len != 0);
     try endpoint_owner.records.remove(record_handle);
     try std.testing.expect(endpoint_owner.records.hasCapacity());
-    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.pollOneRttDatagram(record_handle, 2, "peer"));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.pollOneRttDatagram(record_handle, 2));
 
     const retry_record = try std.testing.allocator.create(TestRecord);
     var retry_record_initialized = false;
@@ -592,11 +595,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         .handshake,
         &backend_scratch,
         1,
-        .{
-            .space = .handshake,
-            .destination_connection_id = "peer",
-            .source_connection_id = "local",
-        },
         &backend_output,
     );
     try std.testing.expectEqual(@as(usize, 0), backend_progress.backend.progress.outbound_chunks);
@@ -607,11 +605,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             .handshake,
             &backend_scratch,
             1,
-            .{
-                .space = .handshake,
-                .destination_connection_id = "peer",
-                .source_connection_id = "local",
-            },
             &backend_output,
         ),
     );
@@ -620,8 +613,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         retry_record.handle,
         &backend_scratch,
         1,
-        "peer",
-        "local",
         &[_]u8{},
         retry_initial_secrets.server,
         &backend_output,
@@ -633,8 +624,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             99,
             &backend_scratch,
             1,
-            "peer",
-            "local",
             &[_]u8{},
             retry_initial_secrets.server,
             &backend_output,
@@ -673,8 +662,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             retry_initial_secrets.client,
             &[_]u8{},
             &backend_scratch,
-            "peer",
-            "local",
             &[_]u8{},
             retry_initial_secrets.server,
             &backend_output,
@@ -688,8 +675,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             1,
             &[_]u8{},
             &backend_scratch,
-            "peer",
-            "local",
             &backend_output,
         ),
     );

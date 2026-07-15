@@ -408,11 +408,6 @@ fn serveConcurrent(
                         .handshake,
                         &scratch,
                         now_millis,
-                        .{
-                            .space = .handshake,
-                            .destination_connection_id = managed.clientScid(),
-                            .source_connection_id = managed.transport.localInitialSourceConnectionId(),
-                        },
                         &handshake_outputs,
                     );
                     for (handshake_outputs[0..handshake.drain.datagrams_written]) |output| {
@@ -446,8 +441,6 @@ fn serveConcurrent(
                         managed.handle,
                         &retry_scratch,
                         now_millis,
-                        managed.clientScid(),
-                        managed.transport.localInitialSourceConnectionId(),
                         &[_]u8{},
                         retry_secrets.server,
                         &retry_initial_outputs,
@@ -465,11 +458,6 @@ fn serveConcurrent(
                         .handshake,
                         &retry_scratch,
                         now_millis,
-                        .{
-                            .space = .handshake,
-                            .destination_connection_id = managed.clientScid(),
-                            .source_connection_id = managed.transport.localInitialSourceConnectionId(),
-                        },
                         &retry_handshake_outputs,
                     );
                     for (retry_handshake_outputs[0..retry_handshake_progress.drain.datagrams_written]) |output| {
@@ -515,11 +503,6 @@ fn serveConcurrent(
                             .handshake,
                             &coalesced_scratch,
                             now_millis,
-                            .{
-                                .space = .handshake,
-                                .destination_connection_id = managed.clientScid(),
-                                .source_connection_id = managed.transport.localInitialSourceConnectionId(),
-                            },
                             &coalesced_handshake_outputs,
                         );
                         for (coalesced_handshake_outputs[0..coalesced_handshake.drain.datagrams_written]) |output| {
@@ -553,8 +536,6 @@ fn serveConcurrent(
                                     initial_secrets.client,
                                     long_packet,
                                     &initial_scratch,
-                                    managed.clientScid(),
-                                    managed.transport.localInitialSourceConnectionId(),
                                     &[_]u8{},
                                     initial_secrets.server,
                                     &initial_outputs,
@@ -572,11 +553,6 @@ fn serveConcurrent(
                                         .handshake,
                                         &initial_scratch,
                                         now_millis,
-                                        .{
-                                            .space = .handshake,
-                                            .destination_connection_id = managed.clientScid(),
-                                            .source_connection_id = managed.transport.localInitialSourceConnectionId(),
-                                        },
                                         &handshake_outputs,
                                     );
                                     for (handshake_outputs[0..handshake.drain.datagrams_written]) |output| {
@@ -600,8 +576,6 @@ fn serveConcurrent(
                                     now_millis,
                                     long_packet,
                                     &handshake_scratch,
-                                    managed.clientScid(),
-                                    managed.transport.localInitialSourceConnectionId(),
                                     &handshake_outputs,
                                 );
                                 try require(handshake.route.connection_id == managed.handle);
@@ -718,7 +692,6 @@ fn serveConcurrent(
                     const output_packet = (server_endpoint.pollOneRttDatagram(
                         managed.handle,
                         now_millis + @as(i64, @intCast(sent_packets)),
-                        managed.clientScid(),
                     ) catch |err| switch (err) {
                         error.ConnectionClosed => null,
                         else => return err,
