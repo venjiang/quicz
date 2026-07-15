@@ -290,6 +290,46 @@ pub const Tls13ClientEndpoint = struct {
         };
     }
 
+    /// Service one due client deadline and drain route-bound recovery output.
+    ///
+    /// The deadline is serviced once. Recovery output is bounded by `out.len`;
+    /// initialized slots own their datagrams even when `drain.first_error` is set.
+    pub fn serviceDueDeadlineAndDrainDatagramsWithRoutePath(
+        self: *Tls13ClientEndpoint,
+        now_millis: i64,
+        out: []ApplicationDatagramPathResult,
+    ) !?DueDeadlineDatagramPathDrainResult {
+        const serviced = (try self.serviceDueDeadline(now_millis)) orelse return null;
+        if (serviced != .recovery) {
+            return .{ .deadline = serviced };
+        }
+
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        var drain = ApplicationDatagramPathDrainResult{};
+        while (drain.datagrams_written < out.len) {
+            const datagram = self.transport.pollRecoveryDatagram(serviced.recovery, now_millis) catch |err| {
+                drain.first_error = err;
+                return .{
+                    .deadline = serviced,
+                    .drain = drain,
+                };
+            };
+            out[drain.datagrams_written] = if (datagram) |bytes| .{
+                .datagram = bytes,
+                .path = path,
+            } else break;
+            drain.datagrams_written += 1;
+        }
+        self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection) catch |err| {
+            drain.first_error = err;
+        };
+        return .{
+            .deadline = serviced,
+            .drain = drain,
+        };
+    }
+
     fn pollRecoveryDatagramWithRoutePath(
         self: *Tls13ClientEndpoint,
         recovery: transport_types.LossDetectionTimerDeadline,
@@ -508,6 +548,12 @@ pub const Tls13ClientEndpoint = struct {
         deadline: client_transport.ClientTransportDeadline,
         /// Protected datagram for the due recovery packet number space.
         datagram: ?ApplicationDatagramPathResult = null,
+    };
+
+    /// Client due-deadline result with bounded route-bound recovery output.
+    pub const DueDeadlineDatagramPathDrainResult = struct {
+        deadline: client_transport.ClientTransportDeadline,
+        drain: ApplicationDatagramPathDrainResult = .{},
     };
 };
 
@@ -958,6 +1004,70 @@ test "Tls13ClientEndpoint services due recovery with committed route output" {
     defer std.testing.allocator.free(output.datagram);
     try std.testing.expect(output.path.eql(new_path));
     try std.testing.expect(output.datagram.len != 0);
+}
+
+test "Tls13ClientEndpoint drains due recovery with committed route output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a };
+    const alpn = [_][]const u8{"hq-interop"};
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = old_path.remote,
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        21,
+        old_path,
+        .{ .active_migration_disabled = false },
+        .{ .initial_rtt_ms = 100 },
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const traffic_secret = [_]u8{0x57} ** protection.traffic_secret_len;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xca, 0xcb, 0xcc, 0xcd };
+    const reset_token = [_]u8{0x67} ** packet.stateless_reset_token_len;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+    try client.transport.connection.sendPing();
+
+    const first = (try client.pollApplicationDatagramWithRoutePath(10)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first.datagram);
+    const deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, deadline.recovery.space);
+
+    _ = try client.updatePath(new_path);
+    var out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const before_deadline = try client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(deadline.deadlineMillis() - 1, &out);
+    try std.testing.expect(before_deadline == null);
+
+    const serviced = (try client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(deadline.deadlineMillis(), &out)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(serviced.deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, serviced.deadline.recovery.space);
+    try std.testing.expectEqual(@as(usize, 1), serviced.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), serviced.drain.first_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    try std.testing.expect(out[0].path.eql(new_path));
+    try std.testing.expect(out[0].datagram.len != 0);
 }
 
 test "Tls13ClientEndpoint receive returns Retry output with committed route path" {
