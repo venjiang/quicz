@@ -103,6 +103,8 @@ pub fn Tls13ServerEndpoint(
             pending_work: root.EndpointPendingWorkSweepResult,
             /// Bounded output drain after pending recovery work, if any.
             drain: DatagramPathDrainResult,
+            /// Next endpoint-visible deadline after pending work and output drain.
+            next_deadline: ?root.EndpointConnectionDeadline = null,
         };
 
         /// Result from draining active-record output with committed route paths.
@@ -374,6 +376,7 @@ pub fn Tls13ServerEndpoint(
             return .{
                 .pending_work = pending_work,
                 .drain = drain,
+                .next_deadline = try self.nextDeadline(allocator),
             };
         }
 
@@ -3352,6 +3355,9 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expectEqual(second_record.handle, pending_out[0].connection_id);
     try std.testing.expect(pending_out[0].path.eql(second_path));
     try std.testing.expect(pending_out[0].datagram.len != 0);
+    const next_deadline = pending_drain.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(second_record.handle, next_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
 }
 
 test "Tls13ServerEndpoint pairs Initial due recovery output with committed route path" {
