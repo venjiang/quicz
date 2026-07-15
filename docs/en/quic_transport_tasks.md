@@ -141,8 +141,8 @@ due-recovery poll, and installed-key receive views from that same record set,
 so the hot receive/timer paths do not allocate. The distinct client tags prevent Initial DCID and
 SCID collisions. After each matching FIN-terminated echo, the client sends a protected
 `CONNECTION_CLOSE`; the server processes it through that connection's route,
-enters draining, and retires only that handle's routes at the close deadline
-(`close_cleanup=true`). The endpoint-owned registry itself rejects new
+keeps it routable while draining, and retires only that handle's routes when
+the lifecycle close deadline expires (`close_cleanup=true`). The endpoint-owned registry itself rejects new
 records while its active capacity is full and releases that capacity only when
 the record is retired; the server exits after every accepted connection is
 retired.

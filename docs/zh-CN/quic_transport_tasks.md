@@ -116,8 +116,8 @@ process。服务端在同一 UDP socket 上用一个 `EndpointConnectionLifecycl
 datagram，并由有界、endpoint-owned 的 `EndpointConnectionRegistry` 持有每条
 `Connection` 与其 `Tls13Backend` record；固定容量形式会从同一 record 集合预分配 lifecycle 的 deadline、
 due-recovery poll view 与 installed-key receive view，因此热路径收包和 timer 不再分配。不同 tag 使 Initial DCID 和 SCID 不会冲突。每个 FIN-terminated echo 匹配后，客户端都会发送受保护的
-`CONNECTION_CLOSE`；服务端只处理该连接的 route、进入 draining，并在 close deadline
-只退役该 handle 的 route（`close_cleanup=true`）。endpoint-owned registry 在活跃容量已满时
+`CONNECTION_CLOSE`；服务端只处理该连接的 route、进入 draining 并保持该 route 可路由，直到
+close deadline 到期才退役该 handle 的 route（`close_cleanup=true`）。endpoint-owned registry 在活跃容量已满时
 自行拒绝新 record，且只在 record 退役后释放容量；服务端仅在每条已接受连接都退役后退出。
 `sequential` 仍作为显式兼容模式保留。
 

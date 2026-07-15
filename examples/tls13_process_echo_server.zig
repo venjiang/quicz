@@ -245,10 +245,15 @@ fn serveConcurrent(
                 if (due.pending_work.idle_retired != null or due.pending_work.close_retired != null) {
                     const managed = connections.get(due.deadline.connection_id) orelse return error.UnknownConnectionId;
                     const completed_connection = !retry_enabled or managed.retry_accepted;
+                    const retired_after_close_timeout = due.pending_work.close_retired != null;
                     try destroyManagedConnection(&connections, due.deadline.connection_id);
                     if (completed_connection) {
                         completed += 1;
-                        std.debug.print("zig_process_server: connection={d} concurrent=true idle_cleanup=true\n", .{completed});
+                        if (retired_after_close_timeout) {
+                            std.debug.print("zig_process_server: connection={d} concurrent=true close_cleanup=true\n", .{completed});
+                        } else {
+                            std.debug.print("zig_process_server: connection={d} concurrent=true idle_cleanup=true\n", .{completed});
+                        }
                     } else {
                         std.debug.print("zig_process_server: connection={d} concurrent=true retry_expired=true\n", .{due.deadline.connection_id});
                     }
@@ -728,22 +733,6 @@ fn serveConcurrent(
                     if (expect_client_reset and !managed.client_reset_received) return error.UnexpectedState;
                     if (expect_client_stop_sending and !managed.client_stop_reset_received) return error.UnexpectedState;
                     if (expect_client_uni_stream and (!managed.client_uni_received or !managed.server_uni_sent)) return error.UnexpectedState;
-                    const deadline = managed.transport.connection.closeDeadlineMillis() orelse return error.UnexpectedState;
-                    const retired = (try lifecycle.checkCloseTimeoutsAndRetireConnection(
-                        managed.handle,
-                        &managed.transport.connection,
-                        deadline,
-                    )) orelse return error.UnexpectedState;
-                    try require(retired.routes_retired > 0);
-                    const completed_connection = !retry_enabled or managed.retry_accepted;
-                    const connection_handle = managed.handle;
-                    try destroyManagedConnection(&connections, connection_handle);
-                    if (completed_connection) {
-                        completed += 1;
-                        std.debug.print("zig_process_server: connection={d} concurrent=true close_cleanup=true\n", .{completed});
-                    } else {
-                        std.debug.print("zig_process_server: connection={d} concurrent=true retry_expired=true\n", .{connection_handle});
-                    }
                 }
             },
             .version_negotiation => |datagram| try socket.send(io, &received.from, datagram),
