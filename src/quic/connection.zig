@@ -20193,7 +20193,7 @@ test "EndpointConnectionLifecycle single pending-work explicit backend variants 
     try std.testing.expectEqual(@as(usize, 14), backend.pulls);
 }
 
-test "EndpointConnectionLifecycle single pending-work backend OrClose stops before output drain" {
+test "EndpointConnectionLifecycle single pending-work backend OrClose drains close output" {
     const BadBackend = struct {
         peer_sent: bool = false,
         output_pulled: bool = false,
@@ -20247,32 +20247,32 @@ test "EndpointConnectionLifecycle single pending-work backend OrClose stops befo
     var backend = BadBackend{};
     var scratch: [64]u8 = undefined;
     var out: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
-            189,
-            &server,
-            10,
-            .handshake,
-            backend.backend(),
-            &scratch,
-            .{
-                .space = .handshake,
-                .destination_connection_id = &server_dcid,
-                .source_connection_id = &server_dcid,
-            },
-            &out,
-        ),
+    const result = try lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
+        189,
+        &server,
+        10,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &server_dcid,
+            .source_connection_id = &server_dcid,
+        },
+        &out,
     );
+    defer std.testing.allocator.free(out[0].datagram);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.backend.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 189), out[0].connection_id);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
-    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 }
 
-test "EndpointConnectionLifecycle single pending-work backend OrClose stops before output poll" {
+test "EndpointConnectionLifecycle single pending-work backend OrClose polls close output" {
     const BadBackend = struct {
         peer_sent: bool = false,
         output_pulled: bool = false,
@@ -20325,28 +20325,27 @@ test "EndpointConnectionLifecycle single pending-work backend OrClose stops befo
 
     var backend = BadBackend{};
     var scratch: [64]u8 = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
-            193,
-            &server,
-            10,
-            .handshake,
-            backend.backend(),
-            &scratch,
-            .{
-                .space = .handshake,
-                .destination_connection_id = &server_dcid,
-                .source_connection_id = &server_dcid,
-            },
-        ),
+    const result = try lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        193,
+        &server,
+        10,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &server_dcid,
+            .source_connection_id = &server_dcid,
+        },
     );
+    const polled = result.backend.datagram.?;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 193), polled.connection_id);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.handshake));
-    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 }
 
 test "EndpointConnectionLifecycle single pending-work compatible backend drain applies peer information" {
@@ -25506,36 +25505,29 @@ test "EndpointConnectionLifecycle feed pending-work close backend poll queues cl
 
     var backend = BadBackend{};
     var scratch: [64]u8 = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        server_lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
-            231,
-            &server,
-            server_path,
-            11,
-            first_datagram,
-            feed_options,
-            .handshake,
-            backend.backend(),
-            &scratch,
-            .{
-                .space = .handshake,
-                .destination_connection_id = &client_dcid,
-                .source_connection_id = &server_dcid,
-            },
-        ),
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        231,
+        &server,
+        server_path,
+        11,
+        first_datagram,
+        feed_options,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
     );
+    const close_packet = result.backend.?.datagram.?;
+    defer std.testing.allocator.free(close_packet.datagram);
+    try std.testing.expectEqual(@as(u64, 231), close_packet.connection_id);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
 
-    const close_packet = (try server_lifecycle.pollDatagram(231, &server, 12, .{
-        .space = .handshake,
-        .destination_connection_id = &client_dcid,
-        .source_connection_id = &server_dcid,
-    })) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(close_packet);
-
-    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, close_packet);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, close_packet.datagram);
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
@@ -29869,31 +29861,32 @@ test "EndpointConnectionLifecycle single feed backend OrClose stops before drain
     var out: [1]EndpointPolledDatagramResult = undefined;
     const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
     const versions = [_]packet.Version{.v1};
-    try std.testing.expectError(
-        error.InvalidPacket,
-        server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
-            164,
-            &server,
-            server_path,
-            11,
-            client_datagram,
-            .{
-                .space = .handshake,
-                .out = &feed_out,
-                .unpredictable_prefix = &reset_prefix,
-                .supported_versions = &versions,
-            },
-            .handshake,
-            backend.backend(),
-            &scratch,
-            .{
-                .space = .handshake,
-                .destination_connection_id = &client_dcid,
-                .source_connection_id = &server_dcid,
-            },
-            &out,
-        ),
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
+        164,
+        &server,
+        server_path,
+        11,
+        client_datagram,
+        .{
+            .space = .handshake,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
+        &out,
     );
+    defer std.testing.allocator.free(out[0].datagram);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.?.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.backend.?.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 164), out[0].connection_id);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
@@ -29982,30 +29975,30 @@ test "EndpointConnectionLifecycle single feed backend OrClose stops before poll"
     const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
     const versions = [_]packet.Version{.v1};
 
-    try std.testing.expectError(
-        error.InvalidPacket,
-        server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
-            168,
-            &server,
-            server_path,
-            11,
-            client_datagram,
-            .{
-                .space = .handshake,
-                .out = &feed_out,
-                .unpredictable_prefix = &reset_prefix,
-                .supported_versions = &versions,
-            },
-            .handshake,
-            backend.backend(),
-            &scratch,
-            .{
-                .space = .handshake,
-                .destination_connection_id = &client_dcid,
-                .source_connection_id = &server_dcid,
-            },
-        ),
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        168,
+        &server,
+        server_path,
+        11,
+        client_datagram,
+        .{
+            .space = .handshake,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
     );
+    const polled = result.backend.?.datagram.?;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 168), polled.connection_id);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
@@ -31834,30 +31827,29 @@ test "EndpointConnectionLifecycle feed then close-propagating backend stops befo
     const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
     const versions = [_]packet.Version{.v1};
 
-    try std.testing.expectError(
-        error.InvalidPacket,
-        server_lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram(
-            &receive_connections,
-            server_path,
-            11,
-            client_datagram,
-            .{
-                .space = .handshake,
-                .out = &out,
-                .unpredictable_prefix = &reset_prefix,
-                .supported_versions = &versions,
-            },
-            .handshake,
-            &drive_views,
-            &poll_views,
-            .handshake,
-        ),
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndPollDatagram(
+        &receive_connections,
+        server_path,
+        11,
+        client_datagram,
+        .{
+            .space = .handshake,
+            .out = &out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        .handshake,
+        &drive_views,
+        &poll_views,
+        .handshake,
     );
+    const polled = result.backend.?.datagram.?;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 172), polled.connection_id);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
-    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 }
 
 test "EndpointConnectionLifecycle feed then close-propagating backend stops before output drain" {
@@ -31956,31 +31948,31 @@ test "EndpointConnectionLifecycle feed then close-propagating backend stops befo
     const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
     const versions = [_]packet.Version{.v1};
 
-    try std.testing.expectError(
-        error.InvalidPacket,
-        server_lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
-            &receive_connections,
-            server_path,
-            11,
-            client_datagram,
-            .{
-                .space = .handshake,
-                .out = &feed_out,
-                .unpredictable_prefix = &reset_prefix,
-                .supported_versions = &versions,
-            },
-            .handshake,
-            &drive_views,
-            &poll_views,
-            .handshake,
-            &drained,
-        ),
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+        &receive_connections,
+        server_path,
+        11,
+        client_datagram,
+        .{
+            .space = .handshake,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        .handshake,
+        &drive_views,
+        &poll_views,
+        .handshake,
+        &drained,
     );
+    defer std.testing.allocator.free(drained[0].datagram);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.?.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.backend.?.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 174), drained[0].connection_id);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
-    try std.testing.expectEqual(@as(usize, 0), server_lifecycle.recoveryTimerCount());
 }
 
 test "EndpointConnectionLifecycle processPendingWorkAndPollDatagramWithInstalledKeyOptions emits PTO probe" {
@@ -35158,29 +35150,29 @@ test "EndpointConnectionLifecycle single due-deadline backend OrClose stops befo
     var backend = BadBackend{};
     var scratch: [64]u8 = undefined;
     var out: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
-            191,
-            &client,
-            recovery_timer.deadline_millis,
-            .handshake,
-            backend.backend(),
-            &scratch,
-            .{
-                .space = .handshake,
-                .destination_connection_id = &server_dcid,
-                .source_connection_id = &client_dcid,
-            },
-            &out,
-        ),
-    );
+    const result = (try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
+        191,
+        &client,
+        recovery_timer.deadline_millis,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &server_dcid,
+            .source_connection_id = &client_dcid,
+        },
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(out[0].datagram);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.?.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.backend.?.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 191), out[0].connection_id);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, client.connectionState());
     try std.testing.expect(client.pending_close != null);
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
-    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 }
 
 test "EndpointConnectionLifecycle single due-deadline backend OrClose stops before output poll" {
@@ -35244,28 +35236,27 @@ test "EndpointConnectionLifecycle single due-deadline backend OrClose stops befo
 
     var backend = BadBackend{};
     var scratch: [64]u8 = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
-            197,
-            &client,
-            recovery_timer.deadline_millis,
-            .handshake,
-            backend.backend(),
-            &scratch,
-            .{
-                .space = .handshake,
-                .destination_connection_id = &server_dcid,
-                .source_connection_id = &client_dcid,
-            },
-        ),
-    );
+    const result = (try lifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        197,
+        &client,
+        recovery_timer.deadline_millis,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &server_dcid,
+            .source_connection_id = &client_dcid,
+        },
+    )) orelse return error.TestUnexpectedResult;
+    const polled = result.backend.?.datagram.?;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 197), polled.connection_id);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, client.connectionState());
     try std.testing.expect(client.pending_close != null);
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
-    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 }
 
 test "EndpointConnectionLifecycle single due-deadline compatible backend drain applies peer information" {

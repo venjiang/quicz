@@ -2151,8 +2151,8 @@ close 和 route cleanup 事件。
   可以驱动 backend 并 drain 多个已排队 installed-key datagram；单连接
   compatible-version 形态证明 peer Version Information 会先应用再执行 bounded drain，
   其 OrClose 形态在未选出 compatible version 时会排队 CONNECTION_CLOSE 并在 output
-  draining 前停止；close-propagating
-  backend error 会在 output draining 前停止。单连接 output-polling 形态证明
+  draining 前停止；close-propagating backend error 现在会在调用方提供同连接 output view
+  时返回该连接的 close output，缺少匹配 view 时仍先返回错误且不消费无关连接输出。单连接 output-polling 形态证明
   one-datagram polling、close-before-poll suppression、compatible peer Version
   Information 处理，以及 compatible-version close-before-poll suppression。
 - 2026-07-02：新增 cross-space RFC 9368-compatible backend-drive primitive：
@@ -2204,7 +2204,7 @@ close 和 route cleanup 事件。
   probe 时不会驱动 backend；deadline 没有 datagram 时，backend progress 和
   bounded output draining 会在同一个 lifecycle-owned step 中执行；单连接形态在
   idle/close 这类终止清理后会停止，不再驱动 backend；它的 OrClose 形态会在 backend
-  peer-parameter 错误时排队 CONNECTION_CLOSE，并在 output drain 前返回；单连接
+  peer-parameter 错误时排队 CONNECTION_CLOSE，并在存在同连接 output view 时返回 close output；单连接
   compatible-version 形态证明无 installed-key datagram 的 Initial recovery wakeup 后会
   先应用 peer Version Information 再执行 bounded drain，其 OrClose 形态在未选出
   compatible version 时会排队 CONNECTION_CLOSE 并在 output draining 前停止。单元测试覆盖

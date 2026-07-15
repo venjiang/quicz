@@ -7806,6 +7806,90 @@ pub const EndpointConnectionLifecycle = struct {
         return result;
     }
 
+    fn pollDatagramForBackendClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        space: EndpointInstalledKeyDatagramSpace,
+    ) Error!?EndpointPolledDatagramResult {
+        for (connections) |view| {
+            if (view.connection_id != connection_id) continue;
+            const matching_views = [_]EndpointConnectionPollView{view};
+            return self.pollDatagramAcrossConnectionsAfterBackendDrive(
+                &matching_views,
+                now_millis,
+                space,
+            );
+        }
+        return error.InvalidPacket;
+    }
+
+    fn pollDatagramWithInstalledKeyOptionsForBackendClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connections: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+    ) Error!?EndpointPolledDatagramResult {
+        for (connections) |view| {
+            if (view.connection_id != connection_id) continue;
+            const matching_views = [_]EndpointConnectionInstalledKeyPollView{view};
+            return self.pollDatagramAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
+                &matching_views,
+                now_millis,
+            );
+        }
+        return error.InvalidPacket;
+    }
+
+    fn drainDatagramsForBackendClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connections: []const EndpointConnectionPollView,
+        now_millis: i64,
+        space: EndpointInstalledKeyDatagramSpace,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointDatagramDrainResult {
+        for (connections) |view| {
+            if (view.connection_id != connection_id) continue;
+            const matching_views = [_]EndpointConnectionPollView{view};
+            const drain = self.drainDatagramsAcrossConnectionsAfterBackendDrive(
+                &matching_views,
+                now_millis,
+                space,
+                out,
+            );
+            if (drain.datagrams_written == 0) {
+                if (drain.first_error) |err| return err;
+            }
+            return drain;
+        }
+        return error.InvalidPacket;
+    }
+
+    fn drainDatagramsWithInstalledKeyOptionsForBackendClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connections: []const EndpointConnectionInstalledKeyPollView,
+        now_millis: i64,
+        out: []EndpointPolledDatagramResult,
+    ) Error!EndpointDatagramDrainResult {
+        for (connections) |view| {
+            if (view.connection_id != connection_id) continue;
+            const matching_views = [_]EndpointConnectionInstalledKeyPollView{view};
+            const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
+                &matching_views,
+                now_millis,
+                out,
+            );
+            if (drain.datagrams_written == 0) {
+                if (drain.first_error) |err| return err;
+            }
+            return drain;
+        }
+        return error.InvalidPacket;
+    }
+
     /// Drive crypto backends across caller-owned connections.
     ///
     /// This is the socket-loop sweep form of
@@ -8678,10 +8762,28 @@ pub const EndpointConnectionLifecycle = struct {
         now_millis: i64,
         poll_space: EndpointInstalledKeyDatagramSpace,
     ) Error!EndpointCryptoBackendDriveDatagramResult {
-        var backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
-            space,
-            drive_views,
-        );
+        var backend = EndpointCryptoBackendDriveSweepResult{};
+        for (drive_views) |view| {
+            const progress = self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+                view.connection_id,
+                view.connection,
+                space,
+                view.backend,
+                view.scratch,
+            ) catch |err| {
+                if (err != error.InvalidPacket or view.connection.connectionState() != .closing) return err;
+                return .{
+                    .backend = backend,
+                    .datagram = try self.pollDatagramForBackendClose(
+                        view.connection_id,
+                        poll_views,
+                        now_millis,
+                        poll_space,
+                    ),
+                };
+            };
+            accumulateCryptoBackendProgress(&backend, progress);
+        }
         const retained_handshake_spaces_before_poll = countRetainedHandshakeSpaces(poll_views);
         const datagram = try self.pollDatagramAcrossConnectionsAfterBackendDrive(
             poll_views,
@@ -8711,10 +8813,27 @@ pub const EndpointConnectionLifecycle = struct {
         poll_views: []const EndpointConnectionInstalledKeyPollView,
         now_millis: i64,
     ) Error!EndpointCryptoBackendDriveDatagramResult {
-        var backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
-            space,
-            drive_views,
-        );
+        var backend = EndpointCryptoBackendDriveSweepResult{};
+        for (drive_views) |view| {
+            const progress = self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+                view.connection_id,
+                view.connection,
+                space,
+                view.backend,
+                view.scratch,
+            ) catch |err| {
+                if (err != error.InvalidPacket or view.connection.connectionState() != .closing) return err;
+                return .{
+                    .backend = backend,
+                    .datagram = try self.pollDatagramWithInstalledKeyOptionsForBackendClose(
+                        view.connection_id,
+                        poll_views,
+                        now_millis,
+                    ),
+                };
+            };
+            accumulateCryptoBackendProgress(&backend, progress);
+        }
         const retained_handshake_spaces_before_poll =
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
         const datagram = try self.pollDatagramAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
@@ -8809,10 +8928,29 @@ pub const EndpointConnectionLifecycle = struct {
         poll_space: EndpointInstalledKeyDatagramSpace,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
-        var backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
-            space,
-            drive_views,
-        );
+        var backend = EndpointCryptoBackendDriveSweepResult{};
+        for (drive_views) |view| {
+            const progress = self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+                view.connection_id,
+                view.connection,
+                space,
+                view.backend,
+                view.scratch,
+            ) catch |err| {
+                if (err != error.InvalidPacket or view.connection.connectionState() != .closing) return err;
+                return .{
+                    .backend = backend,
+                    .drain = try self.drainDatagramsForBackendClose(
+                        view.connection_id,
+                        poll_views,
+                        now_millis,
+                        poll_space,
+                        out,
+                    ),
+                };
+            };
+            accumulateCryptoBackendProgress(&backend, progress);
+        }
         const retained_handshake_spaces_before_drain = countRetainedHandshakeSpaces(poll_views);
         const drain = self.drainDatagramsAcrossConnectionsAfterBackendDrive(
             poll_views,
@@ -8843,10 +8981,28 @@ pub const EndpointConnectionLifecycle = struct {
         now_millis: i64,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
-        var backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
-            space,
-            drive_views,
-        );
+        var backend = EndpointCryptoBackendDriveSweepResult{};
+        for (drive_views) |view| {
+            const progress = self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+                view.connection_id,
+                view.connection,
+                space,
+                view.backend,
+                view.scratch,
+            ) catch |err| {
+                if (err != error.InvalidPacket or view.connection.connectionState() != .closing) return err;
+                return .{
+                    .backend = backend,
+                    .drain = try self.drainDatagramsWithInstalledKeyOptionsForBackendClose(
+                        view.connection_id,
+                        poll_views,
+                        now_millis,
+                        out,
+                    ),
+                };
+            };
+            accumulateCryptoBackendProgress(&backend, progress);
+        }
         const retained_handshake_spaces_before_drain =
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views);
         const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(

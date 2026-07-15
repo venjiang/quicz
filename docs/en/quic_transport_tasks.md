@@ -2498,7 +2498,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   These helpers run endpoint pending work before TLS backend progress and
   bounded output draining. Unit coverage proves a no-new-datagram loop tick can
   drive a backend and drain multiple queued installed-key datagrams, while
-  close-propagating backend errors stop before output draining. The
+  close-propagating backend errors now return same-connection close output when
+  the caller provided a matching output view; missing matching views still
+  return the error before unrelated output is consumed. The
   single-connection compatible-version form proves peer Version Information is
   applied before bounded drain, while its OrClose form queues CONNECTION_CLOSE
   and stops before output draining when no compatible version is selected.
@@ -2525,8 +2527,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   deadline has no datagram, backend progress and bounded output draining run in
   the same lifecycle-owned step. The single-connection form stops before
   backend progress after terminal idle/close cleanup; its OrClose form queues
-  CONNECTION_CLOSE on backend peer-parameter errors and returns before output
-  draining. The single compatible-version form proves peer Version Information
+  CONNECTION_CLOSE on backend peer-parameter errors and returns
+  same-connection close output when a matching output view exists. The single
+  compatible-version form proves peer Version Information
   is applied before bounded drain after an Initial recovery wakeup with no
   installed-key datagram, while its OrClose form queues CONNECTION_CLOSE and
   stops before output draining when no compatible version is selected. Unit
