@@ -5,7 +5,6 @@
 const std = @import("std");
 const quicz = @import("quicz");
 
-const EndpointConnectionLifecycle = quicz.EndpointConnectionLifecycle;
 const endpoint = quicz.endpoint;
 
 const original_dcid_base = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
@@ -74,11 +73,8 @@ pub fn main(init: std.process.Init) !void {
         .remote = endpoint.Udp4Address.init(server_address.ip4.bytes, server_address.ip4.port),
     };
     const client_handle: u64 = 1;
-    var lifecycle = EndpointConnectionLifecycle.init(allocator);
-    defer lifecycle.deinit();
-
     const alpn = [_][]const u8{"hq-interop"};
-    var transport = try quicz.Tls13ClientTransport.init(allocator, .{
+    var client_endpoint = try quicz.Tls13ClientEndpoint.init(allocator, client_handle, client_path, .{ .active_migration_disabled = true }, .{
         .initial_max_data = 8192,
         .initial_max_stream_data = 2048,
         .initial_max_streams_bidi = 8,
@@ -88,26 +84,23 @@ pub fn main(init: std.process.Init) !void {
         .server_name = "localhost",
         .skip_cert_verify = true,
     }, original_dcid, client_scid);
-    defer transport.deinit();
-    try lifecycle.registerConnectionId(client_handle, &client_scid, client_path, .{ .active_migration_disabled = true });
+    defer client_endpoint.deinit();
 
     var scratch: [8192]u8 = undefined;
     var receive_buffer: [client_max_datagram_size]u8 = undefined;
 
-    const client_initial = try transport.begin(nowMillis(io), &scratch);
+    const client_initial = try client_endpoint.begin(nowMillis(io), &scratch);
     defer allocator.free(client_initial);
     try socket.send(io, &server_address, client_initial);
-    try lifecycle.armRecoveryTimerFromConnection(client_handle, &transport.connection);
 
     var received_handshake_datagrams: usize = 0;
     var retry_received = false;
     var sent_finished = false;
-    while (received_handshake_datagrams < 8 and !transport.handshakeConfirmed()) : (received_handshake_datagrams += 1) {
+    while (received_handshake_datagrams < 8 and !client_endpoint.handshakeConfirmed()) : (received_handshake_datagrams += 1) {
         const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
-        const route = try lifecycle.routeDatagram(client_path, received.data);
-        try require(route.connection_id == client_handle);
-        const progress = try transport.receive(nowMillis(io), &scratch, received.data);
-        try lifecycle.armRecoveryTimerFromConnection(client_handle, &transport.connection);
+        const received_result = try client_endpoint.receive(nowMillis(io), &scratch, received.data);
+        try require(received_result.route.connection_id == client_handle);
+        const progress = received_result.transport;
         if (progress.retry_received) {
             if (!expect_retry or retry_received) return error.UnexpectedRetry;
             retry_received = true;
@@ -124,19 +117,18 @@ pub fn main(init: std.process.Init) !void {
     }
     if (expect_retry != retry_received) return error.MissingRetry;
     try require(sent_finished);
-    try require(transport.handshakeConfirmed());
+    try require(client_endpoint.handshakeConfirmed());
 
     var stream_ids: [echo_payloads.len]u64 = undefined;
     for (echo_payloads, 0..) |payload, index| {
-        stream_ids[index] = try transport.openStream();
-        try transport.sendStream(stream_ids[index], payload, true);
+        stream_ids[index] = try client_endpoint.openStream();
+        try client_endpoint.sendStream(stream_ids[index], payload, true);
     }
     var sent_application_packets: usize = 0;
     while (sent_application_packets < 4) : (sent_application_packets += 1) {
-        const stream_packet = (try transport.pollApplicationDatagram(nowMillis(io))) orelse break;
+        const stream_packet = (try client_endpoint.pollApplicationDatagram(nowMillis(io))) orelse break;
         defer allocator.free(stream_packet);
         try socket.send(io, &server_address, stream_packet);
-        try lifecycle.armRecoveryTimerFromConnection(client_handle, &transport.connection);
     }
     try require(sent_application_packets > 0);
 
@@ -147,19 +139,19 @@ pub fn main(init: std.process.Init) !void {
     var received_packets: usize = 0;
     var recovery_timer_services: usize = 0;
     while (received_packets < 16 and recovery_timer_services < 4) {
-        const next_deadline = if (transport.nextDeadline()) |deadline|
+        const next_deadline = if (client_endpoint.nextDeadline()) |deadline|
             deadline.deadlineMillis()
         else
             null;
         const received = socket.receiveTimeout(io, &receive_buffer, recvTimeoutForDeadline(io, next_deadline)) catch |err| switch (err) {
             error.Timeout => {
-                const serviced = (try transport.serviceDueDeadline(nowMillis(io))) orelse continue;
+                const serviced = (try client_endpoint.serviceDueDeadline(nowMillis(io))) orelse continue;
                 switch (serviced) {
                     .recovery => {
                         recovery_timer_services += 1;
                         var retransmission_count: usize = 0;
                         while (retransmission_count < 4) : (retransmission_count += 1) {
-                            const retransmission = (try transport.pollApplicationDatagram(nowMillis(io))) orelse break;
+                            const retransmission = (try client_endpoint.pollApplicationDatagram(nowMillis(io))) orelse break;
                             defer allocator.free(retransmission);
                             try socket.send(io, &server_address, retransmission);
                         }
@@ -175,10 +167,9 @@ pub fn main(init: std.process.Init) !void {
             dropped_responses += 1;
             continue;
         }
-        const route = try lifecycle.routeDatagram(client_path, received.data);
-        try require(route.connection_id == client_handle);
-        const progress = try transport.receive(nowMillis(io), &scratch, received.data);
-        try lifecycle.armRecoveryTimerFromConnection(client_handle, &transport.connection);
+        const received_result = try client_endpoint.receive(nowMillis(io), &scratch, received.data);
+        try require(received_result.route.connection_id == client_handle);
+        const progress = received_result.transport;
         if (progress.outbound_handshake) |client_finished| {
             defer allocator.free(client_finished);
             try socket.send(io, &server_address, client_finished);
@@ -186,11 +177,11 @@ pub fn main(init: std.process.Init) !void {
         if (!progress.application_processed) continue;
         received_packets += 1;
         inline for (stream_ids, echo_payloads, 0..) |stream_id, payload, index| {
-            if (try transport.recvStream(stream_id, &stream_buffer)) |echoed_len| {
+            if (try client_endpoint.recvStream(stream_id, &stream_buffer)) |echoed_len| {
                 try require(std.mem.eql(u8, stream_buffer[0..echoed_len], payload));
                 got_echo[index] = true;
             }
-            if (got_echo[index] and try transport.streamFinished(stream_id)) {
+            if (got_echo[index] and try client_endpoint.streamFinished(stream_id)) {
                 got_echo_fin[index] = true;
             }
         }
@@ -205,19 +196,15 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    try transport.connection.closeConnection(0, 0, "process echo complete");
-    const close_packet = (try transport.pollApplicationDatagram(nowMillis(io))) orelse return error.UnexpectedState;
+    try client_endpoint.transport.connection.closeConnection(0, 0, "process echo complete");
+    const close_packet = (try client_endpoint.pollApplicationDatagram(nowMillis(io))) orelse return error.UnexpectedState;
     defer allocator.free(close_packet);
     try socket.send(io, &server_address, close_packet);
-    const client_close_deadline = transport.connection.closeDeadlineMillis() orelse return error.UnexpectedState;
-    const client_retired = (try lifecycle.checkCloseTimeoutsAndRetireConnection(
-        client_handle,
-        &transport.connection,
-        client_close_deadline,
-    )) orelse return error.UnexpectedState;
+    const client_close_deadline = client_endpoint.transport.connection.closeDeadlineMillis() orelse return error.UnexpectedState;
+    const client_retired = (try client_endpoint.retireAtCloseDeadline(client_close_deadline)) orelse return error.UnexpectedState;
     try require(client_retired.routes_retired > 0);
-    try require(transport.connection.connectionState() == .closed);
-    try require(lifecycle.routeCount() == 0);
+    try require(client_endpoint.transport.connection.connectionState() == .closed);
+    try require(client_endpoint.lifecycle.routeCount() == 0);
 
     if (drop_initial_responses) {
         if (expect_retry) {

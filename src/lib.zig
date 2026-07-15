@@ -280,6 +280,12 @@ test {
     _ = tls13_client_transport_module;
 }
 
+const tls13_client_endpoint_module = @import("quic/tls13_client_endpoint.zig");
+pub const Tls13ClientEndpoint = tls13_client_endpoint_module.Tls13ClientEndpoint;
+test {
+    _ = tls13_client_endpoint_module;
+}
+
 const tls13_server_transport_module = @import("quic/tls13_server_transport.zig");
 pub const Tls13ServerTransport = tls13_server_transport_module.Tls13ServerTransport;
 test {
