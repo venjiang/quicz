@@ -153,7 +153,10 @@ default keeps the old behavior by using the completion target for both values.
 Passing `completion_target=0` in a concurrent mode creates a bounded
 long-lived endpoint: it serves until interrupted and requires an explicit,
 positive active-connection capacity. Retired close/idle records still release
-their slots before a later Initial can be accepted.
+their slots before a later Initial can be accepted. While full, it reissues a
+matching Retry when available and otherwise drops a new Initial instead of
+terminating the endpoint; a live one-slot run observed those drops, retired a
+quiet Go client, and then completed a second certificate-verified Go echo.
 `QUICZ_PROCESS_INTEROP_CONNECTIONS=3 QUICZ_PROCESS_INTEROP_MAX_ACTIVE_CONNECTIONS=1 QUICZ_PROCESS_INTEROP_MODE=rolling zig build run-tls13-process-interop`
 runs three independent TLS-owned echoes one after another through the
 concurrent lifecycle path. It proves that protected-close retirement releases
@@ -336,7 +339,7 @@ responses, TLS-owned Retry resumption, stateless-reset handling,
 PATH_CHALLENGE/PATH_RESPONSE route migration, and a bounded two-client
 concurrent process server with one UDP socket, one lifecycle owner, and
 monotonic-deadline idle cleanup. The RFC rows remain `Partial`: that server is
-a finite local proof, not an unbounded production endpoint policy; broader
+a bounded long-lived local proof, not a production endpoint policy; broader
 TLS-owned client/server policy, 0-RTT replay policy, and wider external
 behavior are still unproven.
 

@@ -281,9 +281,13 @@ fn serveConcurrent(
                             std.debug.print("zig_process_server: connection={d} concurrent=true retry_reissued=true\n", .{managed.*.handle});
                             continue :receive_loop;
                         }
-                        return error.ConnectionLimitReached;
+                        std.debug.print("zig_process_server: concurrent=true initial_dropped_capacity=true\n", .{});
+                        continue;
                     }
-                } else if (!connections.hasCapacity()) return error.ConnectionLimitReached;
+                } else if (!connections.hasCapacity()) {
+                    std.debug.print("zig_process_server: concurrent=true initial_dropped_capacity=true\n", .{});
+                    continue;
+                }
 
                 const handle = next_handle;
                 next_handle += 1;

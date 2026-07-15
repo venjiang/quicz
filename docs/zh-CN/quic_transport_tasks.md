@@ -123,10 +123,12 @@ due-recovery poll view 与 installed-key receive view，因此热路径收包和
 
 服务端现在把有限的 completion target 与同时活跃连接容量分开：可选的第五个 server
 参数 `max_active_connections` 指定活跃上限；省略时仍沿用旧行为，即 completion target
-同时也是容量上限。执行
+同时也是容量上限。
 在 concurrent 模式传入 `completion_target=0` 会创建有界的长生命周期 endpoint：它一直
 服务到被中断，且必须显式给出正数活跃连接上限。close/idle record 退役后仍会先释放槽位，
-随后才能接收新的 Initial。
+随后才能接收新的 Initial。容量已满时会重发匹配的 Retry；其余新的 Initial 会被丢弃而不会
+终止 endpoint。真实单槽位运行已观察到这些丢弃，静默 Go client 退役后第二个经证书校验的
+Go echo 成功完成。
 `QUICZ_PROCESS_INTEROP_CONNECTIONS=3 QUICZ_PROCESS_INTEROP_MAX_ACTIVE_CONNECTIONS=1 QUICZ_PROCESS_INTEROP_MODE=rolling zig build run-tls13-process-interop`
 会经同一个 concurrent lifecycle 路径依次运行三次 TLS-owned echo。它证明 protected close
 退役后会释放唯一的 route/map 槽位，下一条 Initial 才可被接收。这是可复用的有界容量证据，
@@ -263,7 +265,7 @@ HANDSHAKE_DONE、protected close、PTO probe 与 recovery-timer service——全
 NewReno/persistent-congestion 响应、TLS-owned Retry 重试、stateless reset 处理、
 PATH_CHALLENGE/PATH_RESPONSE 驱动的 route migration，以及单 UDP socket、单 lifecycle
 owner、具备单调 deadline idle cleanup 的有界双 client 并发进程服务端。RFC 行仍保持
-`Partial`：该服务端只是有限的本地证明，不是无限期生产 endpoint policy；更广泛的
+`Partial`：该服务端是有界的长生命周期本地证明，不是生产 endpoint policy；更广泛的
 TLS-owned client/server policy、0-RTT replay policy 和更宽的外部行为仍未证明。
 
 主线任务仍是 IETF QUIC transport 实现。下一阶段将有界 demo ownership 证明推进为生产级
