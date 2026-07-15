@@ -138,6 +138,23 @@ pub const Tls13ClientEndpoint = struct {
         return self.transport.streamFinished(stream_id);
     }
 
+    /// Queue a protected application CONNECTION_CLOSE and poll it for UDP send.
+    pub fn close(
+        self: *Tls13ClientEndpoint,
+        application_error_code: u64,
+        frame_type: u64,
+        reason: []const u8,
+        now_millis: i64,
+    ) !?[]u8 {
+        try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
+        return self.pollApplicationDatagram(now_millis);
+    }
+
+    /// Return the active close deadline after `close()` has queued a close.
+    pub fn closeDeadlineMillis(self: *const Tls13ClientEndpoint) ?i64 {
+        return self.transport.connection.closeDeadlineMillis();
+    }
+
     /// Retire the registered route after the close deadline has elapsed.
     pub fn retireAtCloseDeadline(self: *Tls13ClientEndpoint, now_millis: i64) !?endpoint_lifecycle.EndpointConnectionRetireResult {
         return self.lifecycle.checkCloseTimeoutsAndRetireConnection(

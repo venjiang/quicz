@@ -196,11 +196,10 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    try client_endpoint.transport.connection.closeConnection(0, 0, "process echo complete");
-    const close_packet = (try client_endpoint.pollApplicationDatagram(nowMillis(io))) orelse return error.UnexpectedState;
+    const close_packet = (try client_endpoint.close(0, 0, "process echo complete", nowMillis(io))) orelse return error.UnexpectedState;
     defer allocator.free(close_packet);
     try socket.send(io, &server_address, close_packet);
-    const client_close_deadline = client_endpoint.transport.connection.closeDeadlineMillis() orelse return error.UnexpectedState;
+    const client_close_deadline = client_endpoint.closeDeadlineMillis() orelse return error.UnexpectedState;
     const client_retired = (try client_endpoint.retireAtCloseDeadline(client_close_deadline)) orelse return error.UnexpectedState;
     try require(client_retired.routes_retired > 0);
     try require(client_endpoint.transport.connection.connectionState() == .closed);

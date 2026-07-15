@@ -241,5 +241,9 @@ pub fn main(init: std.process.Init) !void {
     }
     if (!std.mem.allEqual(bool, &got_echo, true)) return error.MissingStreamEcho;
     if (!std.mem.allEqual(bool, &got_echo_fin, true)) return error.MissingStreamFin;
+    if (try client_endpoint.close(0, 0, "external echo complete", nowMillis(io))) |close_datagram| {
+        defer allocator.free(close_datagram);
+        try socket.send(io, &server_address, close_datagram);
+    }
     std.debug.print("external_handshake_done=true certificate_verified=true alpn=hq-interop echo_streams=2 echo_bytes={d} pto_recovered={} version_negotiation={}\n", .{ echo_total_bytes, pto_recovered, version_negotiated });
 }
