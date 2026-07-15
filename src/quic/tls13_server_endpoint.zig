@@ -302,16 +302,59 @@ pub fn Tls13ServerEndpoint(
             now_millis: i64,
             out: []root.EndpointPolledDatagramResult,
         ) root.Error!?root.EndpointDueWorkDatagramDrainResult {
-            const result = (try self.records.processDueDeadlineAndDrainDatagrams(
-                &self.lifecycle,
-                allocator,
-                now_millis,
-                out,
-                destination_connection_id_of,
-                source_connection_id_of,
-            )) orelse return null;
-            self.retireRecordAfterTerminalPendingWork(result.deadline.connection_id, result.pending_work);
-            return result;
+            const deadline = (try self.nextDeadline(allocator)) orelse return null;
+            if (deadline.deadline_millis > now_millis) return null;
+            const record = self.records.get(deadline.connection_id) orelse return error.Internal;
+            const connection = connection_of(record);
+            const source_connection_id = source_connection_id_of(record);
+
+            const pending_drain = if (deadline.installedKeyPollOptions(
+                destination_connection_id_of(record),
+                source_connection_id,
+            )) |options|
+                try self.lifecycle.processPendingWorkAndDrainDatagrams(
+                    deadline.connection_id,
+                    connection,
+                    now_millis,
+                    options,
+                    out,
+                )
+            else if (deadline.kind == .recovery and deadline.recovery != null and deadline.recovery.?.space == .initial) pending: {
+                const pending = try self.lifecycle.processPendingWork(
+                    deadline.connection_id,
+                    connection,
+                    now_millis,
+                );
+                const serviced = pending.recovery_serviced orelse break :pending root.EndpointPendingWorkDatagramDrainResult{
+                    .pending_work = pending,
+                    .drain = .{},
+                };
+                if (serviced.timer.space != .initial) return error.InvalidPacket;
+                break :pending root.EndpointPendingWorkDatagramDrainResult{
+                    .pending_work = pending,
+                    .drain = self.drainInitialDatagrams(
+                        deadline.connection_id,
+                        record,
+                        connection,
+                        now_millis,
+                        out,
+                    ),
+                };
+            } else root.EndpointPendingWorkDatagramDrainResult{
+                .pending_work = try self.lifecycle.processPendingWork(
+                    deadline.connection_id,
+                    connection,
+                    now_millis,
+                ),
+                .drain = .{},
+            };
+
+            self.retireRecordAfterTerminalPendingWork(deadline.connection_id, pending_drain.pending_work);
+            return .{
+                .deadline = deadline,
+                .pending_work = pending_drain.pending_work,
+                .drain = pending_drain.drain,
+            };
         }
 
         /// Service the earliest due deadline and pair output with route paths.
@@ -428,6 +471,50 @@ pub fn Tls13ServerEndpoint(
                     .connection_id = connection_id,
                     .datagram = bytes,
                     .path = path,
+                };
+                result.datagrams_written += 1;
+            }
+            self.lifecycle.armRecoveryTimerFromConnection(connection_id, connection) catch |err| {
+                result.first_error = err;
+            };
+            return result;
+        }
+
+        fn drainInitialDatagrams(
+            self: *Self,
+            connection_id: u64,
+            record: *const Record,
+            connection: *Connection,
+            now_millis: i64,
+            out: []root.EndpointPolledDatagramResult,
+        ) root.EndpointDatagramDrainResult {
+            var result = root.EndpointDatagramDrainResult{};
+            const initial_secrets = protection.deriveInitialSecrets(
+                connection.chosenVersion(),
+                initial_destination_connection_id_of(record),
+            ) catch {
+                result.first_error = error.InvalidPacket;
+                return result;
+            };
+            const send_keys = switch (connection.side) {
+                .client => initial_secrets.client,
+                .server => initial_secrets.server,
+            };
+            while (result.datagrams_written < out.len) {
+                const datagram = connection.pollProtectedLongDatagram(
+                    now_millis,
+                    destination_connection_id_of(record),
+                    source_connection_id_of(record),
+                    &[_]u8{},
+                    .{ .initial = send_keys },
+                ) catch |err| {
+                    result.first_error = err;
+                    return result;
+                };
+                const bytes = datagram orelse break;
+                out[result.datagrams_written] = .{
+                    .connection_id = connection_id,
+                    .datagram = bytes,
                 };
                 result.datagrams_written += 1;
             }
@@ -3007,6 +3094,136 @@ test "Tls13ServerEndpoint pairs Initial due recovery output with committed route
     defer std.testing.allocator.free(due_out[0].datagram);
     try std.testing.expectEqual(record.handle, due_out[0].connection_id);
     try std.testing.expect(due_out[0].path.eql(new_path));
+    const info = try protection.peekProtectedLongPacketInfo(due_out[0].datagram);
+    try std.testing.expectEqual(quic_packet.PacketType.initial, info.packet_type);
+}
+
+test "Tls13ServerEndpoint drains Initial due recovery output without route metadata" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: root.CryptoBackend,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "client01";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "server01";
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "origin01";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 1,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer endpoint_owner.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+    };
+    const server_dcid = "server01";
+    const client_dcid = "client01";
+    const initial_dcid = "origin01";
+    const secrets = try protection.deriveInitialSecrets(.v1, initial_dcid);
+    var empty_backend = EmptyBackend{};
+
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer {
+        if (record_owned) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = 84,
+        .connection = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 }),
+        .backend = empty_backend.backend(),
+    };
+    record_initialized = true;
+    try record.connection.validatePeerAddress();
+    try record.connection.sendPingInSpace(.initial);
+    try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, path, .{});
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(record.handle);
+    try endpoint_owner.records.adopt(record.handle, record);
+    record_owned = false;
+
+    const first = (try record.connection.pollProtectedLongDatagram(
+        10,
+        client_dcid,
+        server_dcid,
+        &[_]u8{},
+        .{ .initial = secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    try endpoint_owner.lifecycle.armRecoveryTimerFromConnection(record.handle, &record.connection);
+
+    const deadline = (try endpoint_owner.nextDeadline(std.testing.allocator)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, deadline.kind);
+    const timer = deadline.recovery orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.PacketNumberSpace.initial, timer.space);
+
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    var due_out: [1]root.EndpointPolledDatagramResult = undefined;
+    const due = (try endpoint_owner.processDueDeadlineAndDrainDatagrams(
+        no_allocation_allocator.allocator(),
+        deadline.deadline_millis,
+        &due_out,
+    )) orelse return error.TestUnexpectedResult;
+    const serviced = due.pending_work.recovery_serviced orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, serviced.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.initial, serviced.timer.space);
+    try std.testing.expectEqual(@as(usize, 1), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), due.drain.first_error);
+    defer std.testing.allocator.free(due_out[0].datagram);
+    try std.testing.expectEqual(record.handle, due_out[0].connection_id);
     const info = try protection.peekProtectedLongPacketInfo(due_out[0].datagram);
     try std.testing.expectEqual(quic_packet.PacketType.initial, info.packet_type);
 }
