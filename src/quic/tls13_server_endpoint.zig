@@ -24,6 +24,7 @@ const EndpointConnectionLifecycle = endpoint_lifecycle.EndpointConnectionLifecyc
 pub fn Tls13ServerEndpoint(
     comptime Record: type,
     comptime connection_of: *const fn (*Record) *Connection,
+    comptime crypto_backend_of: *const fn (*Record) root.CryptoBackend,
     comptime deinit_record: *const fn (*Record) void,
 ) type {
     const Registry = endpoint_connection_registry.EndpointConnectionRegistry(
@@ -201,7 +202,7 @@ pub fn Tls13ServerEndpoint(
 
         /// Register an accepted Initial, drive its TLS backend, and drain its
         /// bounded Initial-space response datagrams.
-        pub fn acceptInitial(
+        fn acceptInitial(
             self: *Self,
             connection_id: u64,
             connection: *Connection,
@@ -242,7 +243,6 @@ pub fn Tls13ServerEndpoint(
             server_source_connection_id: []const u8,
             datagram: []const u8,
             options: endpoint.AcceptedInitialRouteOptions,
-            backend: root.CryptoBackend,
             scratch: []u8,
             out: []root.EndpointPolledDatagramResult,
         ) (root.EndpointProtectedInitialError || error{ConnectionLimitReached})!root.EndpointAcceptedInitialCryptoBackendDatagramDrainResult {
@@ -257,7 +257,7 @@ pub fn Tls13ServerEndpoint(
                 server_source_connection_id,
                 datagram,
                 options,
-                backend,
+                crypto_backend_of(record),
                 scratch,
                 out,
             ) catch |err| {
@@ -275,7 +275,6 @@ pub fn Tls13ServerEndpoint(
             self: *Self,
             connection_id: u64,
             space: root.PacketNumberSpace,
-            backend: root.CryptoBackend,
             scratch: []u8,
             now_millis: i64,
             poll_options: root.EndpointPollInstalledKeyDatagramOptions,
@@ -286,7 +285,7 @@ pub fn Tls13ServerEndpoint(
                 connection_id,
                 connection_of(record),
                 space,
-                backend,
+                crypto_backend_of(record),
                 scratch,
                 now_millis,
                 poll_options,
@@ -298,7 +297,6 @@ pub fn Tls13ServerEndpoint(
         pub fn driveInitialBackend(
             self: *Self,
             connection_id: u64,
-            backend: root.CryptoBackend,
             scratch: []u8,
             now_millis: i64,
             destination_connection_id: []const u8,
@@ -312,7 +310,7 @@ pub fn Tls13ServerEndpoint(
                 connection_id,
                 connection_of(record),
                 .initial,
-                backend,
+                crypto_backend_of(record),
                 scratch,
                 .initial,
                 now_millis,
@@ -374,7 +372,6 @@ pub fn Tls13ServerEndpoint(
             now_millis: i64,
             receive_keys: protection.Aes128PacketProtectionKeys,
             datagram: []const u8,
-            backend: root.CryptoBackend,
             scratch: []u8,
             destination_connection_id: []const u8,
             source_connection_id: []const u8,
@@ -391,7 +388,7 @@ pub fn Tls13ServerEndpoint(
                 now_millis,
                 receive_keys,
                 datagram,
-                backend,
+                crypto_backend_of(record),
                 scratch,
                 destination_connection_id,
                 source_connection_id,
@@ -408,7 +405,6 @@ pub fn Tls13ServerEndpoint(
             path: endpoint.Udp4Tuple,
             now_millis: i64,
             datagram: []const u8,
-            backend: root.CryptoBackend,
             scratch: []u8,
             destination_connection_id: []const u8,
             source_connection_id: []const u8,
@@ -421,7 +417,7 @@ pub fn Tls13ServerEndpoint(
                 path,
                 now_millis,
                 datagram,
-                backend,
+                crypto_backend_of(record),
                 scratch,
                 destination_connection_id,
                 source_connection_id,
@@ -435,9 +431,14 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     const TestRecord = struct {
         handle: u64,
         connection: Connection,
+        backend: root.CryptoBackend,
 
         fn connectionRef(self: *@This()) *Connection {
             return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
         }
 
         fn deinit(self: *@This()) void {
@@ -479,6 +480,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     const TestEndpoint = Tls13ServerEndpoint(
         TestRecord,
         TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
         TestRecord.deinit,
     );
 
@@ -489,6 +491,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     defer endpoint_owner.deinit();
     try std.testing.expect(endpoint_owner.records.hasCapacity());
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
+    var empty_backend = EmptyBackend{};
 
     const record = try std.testing.allocator.create(TestRecord);
     var record_initialized = false;
@@ -502,6 +505,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     record.* = .{
         .handle = 7,
         .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
     };
     record_initialized = true;
     try record.connection.validatePeerAddress();
@@ -535,6 +539,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     retry_record.* = .{
         .handle = 8,
         .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
     };
     retry_record_initialized = true;
     const retry_record_handle = retry_record.handle;
@@ -570,13 +575,11 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         .routed => |route| try std.testing.expectEqual(retry_record.handle, route.connection_id),
         else => return error.TestUnexpectedResult,
     }
-    var empty_backend = EmptyBackend{};
     var backend_scratch: [1]u8 = undefined;
     var backend_output: [1]root.EndpointPolledDatagramResult = undefined;
     const backend_progress = try endpoint_owner.driveBackend(
         retry_record.handle,
         .handshake,
-        empty_backend.backend(),
         &backend_scratch,
         1,
         .{
@@ -592,7 +595,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         endpoint_owner.driveBackend(
             99,
             .handshake,
-            empty_backend.backend(),
             &backend_scratch,
             1,
             .{
@@ -606,7 +608,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     const retry_initial_secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     const initial_backend_progress = try endpoint_owner.driveInitialBackend(
         retry_record.handle,
-        empty_backend.backend(),
         &backend_scratch,
         1,
         "peer",
@@ -620,7 +621,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         error.UnknownConnectionId,
         endpoint_owner.driveInitialBackend(
             99,
-            empty_backend.backend(),
             &backend_scratch,
             1,
             "peer",
@@ -662,7 +662,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             1,
             retry_initial_secrets.client,
             &[_]u8{},
-            empty_backend.backend(),
             &backend_scratch,
             "peer",
             "local",
@@ -678,7 +677,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             retry_path,
             1,
             &[_]u8{},
-            empty_backend.backend(),
             &backend_scratch,
             "peer",
             "local",
@@ -698,6 +696,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     duplicate_record.* = .{
         .handle = retry_record.handle,
         .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
     };
     duplicate_record_initialized = true;
     try std.testing.expectError(
@@ -727,6 +726,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     rollback_record.* = .{
         .handle = 9,
         .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
     };
     rollback_record_initialized = true;
     const rollback_original_dcid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7 };
@@ -787,9 +787,11 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     rejecting_record.* = .{
         .handle = 10,
         .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = undefined,
     };
     rejecting_record_initialized = true;
     var rejecting_backend = RejectingInitialBackend{};
+    rejecting_record.backend = rejecting_backend.backend();
     var rejecting_scratch: [256]u8 = undefined;
     var rejecting_output: [1]root.EndpointPolledDatagramResult = undefined;
     try std.testing.expectError(
@@ -802,7 +804,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             &accepted_server_scid,
             initial_datagram,
             .{ .active_migration_disabled = true },
-            rejecting_backend.backend(),
             &rejecting_scratch,
             &rejecting_output,
         ),

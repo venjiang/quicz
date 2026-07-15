@@ -137,6 +137,10 @@ const ManagedProcessConnection = struct {
         return self.transport.connectionRef();
     }
 
+    fn cryptoBackend(self: *ManagedProcessConnection) quicz.CryptoBackend {
+        return self.transport.cryptoBackend();
+    }
+
     fn destinationConnectionId(self: *const ManagedProcessConnection) []const u8 {
         return self.clientScid();
     }
@@ -155,6 +159,7 @@ const ProcessConnectionRegistry = quicz.EndpointConnectionRegistry(
 const ProcessServerEndpoint = quicz.Tls13ServerEndpoint(
     ManagedProcessConnection,
     ManagedProcessConnection.connectionRef,
+    ManagedProcessConnection.cryptoBackend,
     ManagedProcessConnection.deinit,
 );
 
@@ -384,7 +389,6 @@ fn serveConcurrent(
                     managed.transport.localInitialSourceConnectionId(),
                     received.data,
                     .{ .active_migration_disabled = true },
-                    managed.transport.cryptoBackend(),
                     &scratch,
                     &initial_outputs,
                 );
@@ -402,7 +406,6 @@ fn serveConcurrent(
                     const handshake = try server_endpoint.driveBackend(
                         handle,
                         .handshake,
-                        managed.transport.cryptoBackend(),
                         &scratch,
                         now_millis,
                         .{
@@ -441,7 +444,6 @@ fn serveConcurrent(
                     var retry_initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                     const retry_initial_progress = try server_endpoint.driveInitialBackend(
                         managed.handle,
-                        managed.transport.cryptoBackend(),
                         &retry_scratch,
                         now_millis,
                         managed.clientScid(),
@@ -461,7 +463,6 @@ fn serveConcurrent(
                     const retry_handshake_progress = try server_endpoint.driveBackend(
                         managed.handle,
                         .handshake,
-                        managed.transport.cryptoBackend(),
                         &retry_scratch,
                         now_millis,
                         .{
@@ -512,7 +513,6 @@ fn serveConcurrent(
                         const coalesced_handshake = try server_endpoint.driveBackend(
                             managed.handle,
                             .handshake,
-                            managed.transport.cryptoBackend(),
                             &coalesced_scratch,
                             now_millis,
                             .{
@@ -552,7 +552,6 @@ fn serveConcurrent(
                                     now_millis,
                                     initial_secrets.client,
                                     long_packet,
-                                    managed.transport.cryptoBackend(),
                                     &initial_scratch,
                                     managed.clientScid(),
                                     managed.transport.localInitialSourceConnectionId(),
@@ -571,7 +570,6 @@ fn serveConcurrent(
                                     const handshake = try server_endpoint.driveBackend(
                                         managed.handle,
                                         .handshake,
-                                        managed.transport.cryptoBackend(),
                                         &initial_scratch,
                                         now_millis,
                                         .{
@@ -601,7 +599,6 @@ fn serveConcurrent(
                                     path,
                                     now_millis,
                                     long_packet,
-                                    managed.transport.cryptoBackend(),
                                     &handshake_scratch,
                                     managed.clientScid(),
                                     managed.transport.localInitialSourceConnectionId(),
