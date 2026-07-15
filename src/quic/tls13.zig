@@ -1779,7 +1779,7 @@ pub const Tls13Handshake = struct {
                     const proto_len = ext[2];
                     if (proto_len == 0 or proto_len + 3 != el) return error.DecodeError;
                     const proto = ext[3 .. 3 + proto_len];
-                    var offered = self.config.alpn.len == 0;
+                    var offered = false;
                     for (self.config.alpn) |candidate| {
                         if (std.mem.eql(u8, proto, candidate)) {
                             offered = true;
@@ -3532,6 +3532,23 @@ test "Tls13Handshake client rejects unoffered server ALPN" {
 
     var ee_buf: [256]u8 = undefined;
     hs.provideData(ee_buf[0..buildEncryptedExtensions(&ee_buf, "other-proto", &[_]u8{})]);
+    try std.testing.expectError(error.NoApplicationProtocol, hs.step());
+}
+
+test "Tls13Handshake client rejects unsolicited server ALPN" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var sh_buf: [128]u8 = undefined;
+    hs.provideData(sh_buf[0..buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true)]);
+    _ = try hs.step();
+    _ = try hs.step();
+
+    var ee_buf: [256]u8 = undefined;
+    hs.provideData(ee_buf[0..buildEncryptedExtensions(&ee_buf, "hq-interop", &[_]u8{})]);
     try std.testing.expectError(error.NoApplicationProtocol, hs.step());
 }
 
