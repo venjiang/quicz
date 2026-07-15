@@ -1632,7 +1632,7 @@ pub const Tls13Handshake = struct {
             }
             switch (et) {
                 @intFromEnum(ExtType.supported_versions) => {
-                    if (el < 2) return error.DecodeError;
+                    if (el != 2) return error.DecodeError;
                     if (readU16(ext[0..2]) != version_tls_1_3) return error.UnsupportedVersion;
                     have_version = true;
                 },
@@ -2716,6 +2716,55 @@ fn appendDuplicateServerHelloExtension(buf: []u8, msg_len: usize, ext_type: u16)
     return error.TestUnexpectedResult;
 }
 
+fn extendServerHelloExtensionBody(buf: []u8, msg_len: usize, ext_type: u16, extra: []const u8) ![]u8 {
+    if (extra.len == 0 or extra.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
+    if (msg_len < 4 + 2 + 32 + 1 + 2 + 1 + 2) return error.TestUnexpectedResult;
+    var pos: usize = 4 + 2 + 32;
+    const sid_len = buf[pos];
+    pos += 1;
+    if (pos + sid_len + 2 + 1 + 2 > msg_len) return error.TestUnexpectedResult;
+    pos += sid_len;
+    pos += 2; // cipher_suite
+    pos += 1; // legacy_compression_method
+    const extensions_len_offset = pos;
+    const extensions_len = readU16(buf[pos..]);
+    pos += 2;
+    if (pos + extensions_len > msg_len) return error.TestUnexpectedResult;
+    const ext_end = pos + extensions_len;
+
+    while (pos < ext_end) {
+        if (pos + 4 > ext_end) return error.TestUnexpectedResult;
+        const header_offset = pos;
+        const current_type = readU16(buf[pos..]);
+        const current_len = readU16(buf[pos + 2 ..]);
+        pos += 4;
+        if (pos + current_len > ext_end) return error.TestUnexpectedResult;
+        if (current_type == ext_type) {
+            if (current_len + extra.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
+            if (msg_len + extra.len > buf.len) return error.TestUnexpectedResult;
+            const insert_offset = pos + current_len;
+            std.mem.copyBackwards(
+                u8,
+                buf[insert_offset + extra.len .. msg_len + extra.len],
+                buf[insert_offset..msg_len],
+            );
+            @memcpy(buf[insert_offset..][0..extra.len], extra);
+            writeU16(buf[header_offset + 2 ..][0..2], @as(u16, @intCast(current_len + extra.len)));
+            const new_body_len = msg_len - 4 + extra.len;
+            buf[1] = @as(u8, @intCast(new_body_len >> 16));
+            buf[2] = @as(u8, @intCast((new_body_len >> 8) & 0xFF));
+            buf[3] = @as(u8, @intCast(new_body_len & 0xFF));
+            writeU16(
+                buf[extensions_len_offset..][0..2],
+                @as(u16, @intCast(extensions_len + extra.len)),
+            );
+            return buf[0 .. msg_len + extra.len];
+        }
+        pos += current_len;
+    }
+    return error.TestUnexpectedResult;
+}
+
 test "Tls13Handshake client processes ServerHello and installs handshake keys" {
     const alpn = [_][]const u8{"hq-interop"};
     var hs = Tls13Handshake.initClient(.{
@@ -2796,6 +2845,27 @@ test "Tls13Handshake client rejects duplicate known ServerHello extensions" {
         &sh_buf,
         base_len,
         @intFromEnum(ExtType.supported_versions),
+    );
+    hs.provideData(server_hello);
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects malformed ServerHello supported_versions length" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [160]u8 = undefined;
+    const base_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    const server_hello = try extendServerHelloExtensionBody(
+        &sh_buf,
+        base_len,
+        @intFromEnum(ExtType.supported_versions),
+        &[_]u8{0x00},
     );
     hs.provideData(server_hello);
 
