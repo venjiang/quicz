@@ -22,9 +22,9 @@ import (
 	quic "github.com/quic-go/quic-go"
 )
 
-// dropInboundPacketBurstConn discards a bounded burst of post-handshake UDP
-// datagrams before exposing subsequent datagrams to quic-go. It is used only
-// by the PTO probe to force the server's recovery deadline to expire.
+// dropInboundPacketBurstConn discards a bounded burst of UDP datagrams before
+// exposing subsequent datagrams to quic-go. PTO probes choose whether that
+// burst begins before dialing or after the first stream is sent.
 type dropInboundPacketBurstConn struct {
 	net.PacketConn
 	droppingEnabled atomic.Bool
@@ -58,16 +58,17 @@ func main() {
 	expectStopSending := flag.Bool("expect-stop-sending", false, "require remote STOP_SENDING error 42 on stream 0, then echo stream 4")
 	expectUni := flag.Bool("expect-uni", false, "send client unidirectional stream 2 and require server unidirectional stream 3")
 	expectServerPTO := flag.Bool("expect-server-pto", false, "drop four post-stream Zig datagrams and require a PTO-recovered echo")
+	expectServerInitialPTO := flag.Bool("expect-server-initial-pto", false, "drop four server flight datagrams before handshake completion and require Initial-space PTO recovery")
 	expectFlowControl := flag.Bool("expect-flow-control", false, "send 12 KiB through the server's 2 KiB stream and 8 KiB connection windows")
 	flag.Parse()
 	selectedProbeCount := 0
-	for _, enabled := range []bool{*expectStreamLimit, *expectReset, *expectStopSending, *expectUni, *expectServerPTO, *expectFlowControl} {
+	for _, enabled := range []bool{*expectStreamLimit, *expectReset, *expectStopSending, *expectUni, *expectServerPTO, *expectServerInitialPTO, *expectFlowControl} {
 		if enabled {
 			selectedProbeCount++
 		}
 	}
 	if selectedProbeCount > 1 {
-		log.Fatal("stream-limit, reset, stop-sending, uni, server-PTO, and flow-control probes are mutually exclusive")
+		log.Fatal("stream-limit, reset, stop-sending, uni, server-PTO, server-Initial-PTO, and flow-control probes are mutually exclusive")
 	}
 
 	if *caPath == "" {
@@ -93,7 +94,7 @@ func main() {
 	}
 	var connection *quic.Conn
 	var dropConnection *dropInboundPacketBurstConn
-	if *expectServerPTO {
+	if *expectServerPTO || *expectServerInitialPTO {
 		udpConnection, err := net.ListenUDP("udp", nil)
 		if err != nil {
 			log.Fatalf("listen UDP for PTO probe: %v", err)
@@ -102,6 +103,9 @@ func main() {
 		dropConnection = &dropInboundPacketBurstConn{
 			PacketConn: udpConnection,
 			dropLimit:  4,
+		}
+		if *expectServerInitialPTO {
+			dropConnection.droppingEnabled.Store(true)
 		}
 		peerAddress, err := net.ResolveUDPAddr("udp", *address)
 		if err != nil {
@@ -212,7 +216,7 @@ func main() {
 		if err := stream.Close(); err != nil {
 			log.Fatalf("finish stream: %v", err)
 		}
-		if streamIndex == 0 && dropConnection != nil {
+		if streamIndex == 0 && *expectServerPTO && dropConnection != nil {
 			dropConnection.droppingEnabled.Store(true)
 		}
 
@@ -247,6 +251,13 @@ func main() {
 			log.Fatal("PTO probe did not drop the expected post-handshake Zig datagrams")
 		}
 		fmt.Printf("go_quic_server_pto_client: handshake_done=true dropped_datagrams=%d echo_streams=2 echo_bytes=%d\n", dropConnection.dropLimit, echoBytes)
+		return
+	}
+	if *expectServerInitialPTO {
+		if dropConnection.droppedCount.Load() < dropConnection.dropLimit {
+			log.Fatal("Initial-space PTO probe did not drop the expected server flight datagrams")
+		}
+		fmt.Printf("go_quic_server_initial_pto_client: handshake_done=true dropped_datagrams=%d echo_streams=2 echo_bytes=%d\n", dropConnection.dropLimit, echoBytes)
 		return
 	}
 	if *expectFlowControl {
