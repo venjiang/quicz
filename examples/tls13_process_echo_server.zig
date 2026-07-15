@@ -456,7 +456,7 @@ fn serveConcurrent(
                     managed.retry_validated = true;
                     if (!retry_initial_progress.backend.handshake_keys_installed) continue;
                     var retry_handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
-                    const retry_handshake_progress = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
+                    const retry_handshake_progress = try server_endpoint.driveBackend(
                         managed.handle,
                         &managed.transport.connection,
                         .handshake,
@@ -509,7 +509,7 @@ fn serveConcurrent(
                         );
                         var coalesced_scratch: [8192]u8 = undefined;
                         var coalesced_handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
-                        const coalesced_handshake = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
+                        const coalesced_handshake = try server_endpoint.driveBackend(
                             managed.handle,
                             &managed.transport.connection,
                             .handshake,
@@ -571,7 +571,7 @@ fn serveConcurrent(
                                 if (initial.backend.drain.first_error) |drain_error| return drain_error;
                                 if (initial.backend.backend.handshake_keys_installed) {
                                     var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
-                                    const handshake = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
+                                    const handshake = try server_endpoint.driveBackend(
                                         managed.handle,
                                         &managed.transport.connection,
                                         .handshake,
