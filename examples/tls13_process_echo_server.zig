@@ -160,6 +160,8 @@ const ProcessServerEndpoint = quicz.Tls13ServerEndpoint(
     ManagedProcessConnection,
     ManagedProcessConnection.connectionRef,
     ManagedProcessConnection.cryptoBackend,
+    ManagedProcessConnection.destinationConnectionId,
+    ManagedProcessConnection.sourceConnectionId,
     ManagedProcessConnection.deinit,
 );
 
@@ -239,8 +241,6 @@ fn serveConcurrent(
                     allocator,
                     nowMillis(io),
                     &due_datagrams,
-                    ManagedProcessConnection.destinationConnectionId,
-                    ManagedProcessConnection.sourceConnectionId,
                 )) orelse continue;
                 for (due_datagrams[0..due.drain.datagrams_written]) |output| {
                     defer allocator.free(output.datagram);

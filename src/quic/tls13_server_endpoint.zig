@@ -25,6 +25,8 @@ pub fn Tls13ServerEndpoint(
     comptime Record: type,
     comptime connection_of: *const fn (*Record) *Connection,
     comptime crypto_backend_of: *const fn (*Record) root.CryptoBackend,
+    comptime destination_connection_id_of: *const fn (*const Record) []const u8,
+    comptime source_connection_id_of: *const fn (*const Record) []const u8,
     comptime deinit_record: *const fn (*Record) void,
 ) type {
     const Registry = endpoint_connection_registry.EndpointConnectionRegistry(
@@ -114,16 +116,14 @@ pub fn Tls13ServerEndpoint(
             allocator: std.mem.Allocator,
             now_millis: i64,
             out: []root.EndpointPolledDatagramResult,
-            comptime destination_connection_id: *const fn (*const Record) []const u8,
-            comptime source_connection_id: *const fn (*const Record) []const u8,
         ) root.Error!?root.EndpointDueWorkDatagramDrainResult {
             return self.records.processDueDeadlineAndDrainDatagrams(
                 &self.lifecycle,
                 allocator,
                 now_millis,
                 out,
-                destination_connection_id,
-                source_connection_id,
+                destination_connection_id_of,
+                source_connection_id_of,
             );
         }
 
@@ -441,6 +441,14 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             return self.backend;
         }
 
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
         fn deinit(self: *@This()) void {
             self.connection.deinit();
         }
@@ -481,6 +489,8 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         TestRecord,
         TestRecord.connectionRef,
         TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
         TestRecord.deinit,
     );
 
