@@ -1462,7 +1462,9 @@ pub const Tls13Handshake = struct {
 
         // SNI (server_name)
         if (self.config.server_name) |sni| {
+            if (sni.len == 0 or sni.len > std.math.maxInt(u16) - 5) return error.DecodeError;
             const sni_ext_len = 2 + 1 + 2 + sni.len;
+            if (pos + 4 + sni_ext_len > buf.len) return error.DecodeError;
             pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.server_name), sni_ext_len);
             writeU16(buf[pos..], @intCast(1 + 2 + sni.len));
             pos += 2;
@@ -2633,6 +2635,24 @@ test "Tls13Handshake client builds ClientHello with transport parameters" {
         }
     }
     try std.testing.expect(found_tp);
+}
+
+test "Tls13Handshake client rejects empty local SNI" {
+    var hs = Tls13Handshake.initClient(.{
+        .server_name = "",
+    }, &[_]u8{});
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects oversized local SNI" {
+    var long_name: [16384]u8 = undefined;
+    @memset(&long_name, 'a');
+    var hs = Tls13Handshake.initClient(.{
+        .server_name = &long_name,
+    }, &[_]u8{});
+
+    try std.testing.expectError(error.DecodeError, hs.step());
 }
 
 test "Tls13Handshake client rejects oversized local ALPN protocol name" {
