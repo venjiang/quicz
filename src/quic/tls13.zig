@@ -2208,34 +2208,52 @@ pub const Tls13Handshake = struct {
                     const identities_len = readU16(ext[pp..]);
                     pp += 2;
                     if (pp + identities_len > el) return error.DecodeError;
-                    // First identity: identity_len(2) + identity + age(4).
-                    if (identities_len < 2) return error.DecodeError;
-                    const identity_len = readU16(ext[pp..]);
-                    pp += 2;
-                    if (pp + identity_len + 4 > 2 + identities_len) return error.DecodeError;
-                    const il = @min(identity_len, self.peer_psk_identity.len);
-                    @memcpy(self.peer_psk_identity[0..il], ext[pp..][0..il]);
-                    self.peer_psk_identity_len = il;
-                    pp += identity_len;
-                    pp += 4; // obfuscated_ticket_age
-                    // Skip remaining identities to reach the binder list.
-                    pp = 2 + identities_len;
+                    if (identities_len < 7) return error.DecodeError;
+                    const identities_end = pp + identities_len;
+                    var identity_count: usize = 0;
+                    while (pp < identities_end) {
+                        if (pp + 2 > identities_end) return error.DecodeError;
+                        const identity_len = readU16(ext[pp..]);
+                        pp += 2;
+                        if (identity_len == 0) return error.DecodeError;
+                        if (pp + identity_len + 4 > identities_end) return error.DecodeError;
+                        if (identity_count == 0) {
+                            if (identity_len > self.peer_psk_identity.len) return error.DecodeError;
+                            @memcpy(self.peer_psk_identity[0..identity_len], ext[pp..][0..identity_len]);
+                            self.peer_psk_identity_len = identity_len;
+                        }
+                        pp += identity_len;
+                        pp += 4; // obfuscated_ticket_age
+                        identity_count += 1;
+                    }
+                    if (pp != identities_end or identity_count == 0) return error.DecodeError;
                     if (pp + 2 > el) return error.DecodeError;
                     const binders_len = readU16(ext[pp..]);
                     pp += 2;
-                    if (pp + binders_len > el) return error.DecodeError;
-                    if (binders_len < 1) return error.DecodeError;
-                    const binder_len = ext[pp];
-                    pp += 1;
-                    if (binder_len != self.peer_psk_binder.len or pp + binder_len > el) {
-                        return error.DecodeError;
+                    if (binders_len < 33) return error.DecodeError;
+                    if (pp + binders_len != el) return error.DecodeError;
+                    const binders_end = pp + binders_len;
+                    var binder_count: usize = 0;
+                    while (pp < binders_end) {
+                        if (pp + 1 > binders_end) return error.DecodeError;
+                        const binder_len = ext[pp];
+                        pp += 1;
+                        if (binder_len < 32 or pp + binder_len > binders_end) {
+                            return error.DecodeError;
+                        }
+                        if (binder_count == 0) {
+                            if (binder_len != self.peer_psk_binder.len) return error.DecodeError;
+                            @memcpy(&self.peer_psk_binder, ext[pp..][0..binder_len]);
+                            // Record the binder's offset within the ClientHello
+                            // message so the truncated transcript hash can be
+                            // recomputed for verification. `ext` starts at body
+                            // offset (pos - el); binder starts at ext offset pp.
+                            self.peer_psk_binder_msg_offset = 4 + (pos - el) + pp;
+                        }
+                        pp += binder_len;
+                        binder_count += 1;
                     }
-                    @memcpy(&self.peer_psk_binder, ext[pp..][0..binder_len]);
-                    // Record the binder's offset within the ClientHello
-                    // message so the truncated transcript hash can be
-                    // recomputed for verification. `ext` starts at body
-                    // offset (pos - el); binder starts at ext offset pp.
-                    self.peer_psk_binder_msg_offset = 4 + (pos - el) + pp;
+                    if (pp != binders_end or binder_count != identity_count) return error.DecodeError;
                 },
                 else => {}, // ignore unrecognized extensions
             }
@@ -3747,6 +3765,104 @@ test "Tls13Handshake server rejects early_data without pre_shared_key" {
     );
 
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects malformed ClientHello PSK identity vector" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const psk_ext = try clientHelloExtension(hello, @intFromEnum(ExtType.pre_shared_key));
+    writeU16(hello[psk_ext.body_offset + 2 ..][0..2], 0);
+
+    var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects oversized ClientHello PSK identity" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hello_buf: [8192]u8 = undefined;
+    const base_hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const psk_ext = try clientHelloExtension(base_hello, @intFromEnum(ExtType.pre_shared_key));
+
+    const identity_len_offset = psk_ext.body_offset + 2;
+    const identity_len = readU16(hello_buf[identity_len_offset..]);
+    const probe_server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    const oversized_len = probe_server.peer_psk_identity.len + 1;
+    const extra_len = oversized_len - identity_len;
+    if (base_hello.len + extra_len > hello_buf.len) return error.TestUnexpectedResult;
+    const insert_offset = identity_len_offset + 2 + identity_len;
+    std.mem.copyBackwards(
+        u8,
+        hello_buf[insert_offset + extra_len .. base_hello.len + extra_len],
+        hello_buf[insert_offset..base_hello.len],
+    );
+    @memset(hello_buf[insert_offset..][0..extra_len], 0xee);
+
+    writeU16(hello_buf[identity_len_offset..][0..2], @as(u16, @intCast(identity_len + extra_len)));
+    const identities_len = readU16(hello_buf[psk_ext.body_offset..]);
+    writeU16(hello_buf[psk_ext.body_offset..][0..2], @as(u16, @intCast(identities_len + extra_len)));
+    writeU16(hello_buf[psk_ext.header_offset + 2 ..][0..2], @as(u16, @intCast(psk_ext.body_len + extra_len)));
+    try setClientHelloBodyLen(&hello_buf, base_hello.len - 4 + extra_len);
+    const extensions_len = readU16(hello_buf[psk_ext.extensions_len_offset..]);
+    writeU16(hello_buf[psk_ext.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + extra_len)));
+    const hello = hello_buf[0 .. base_hello.len + extra_len];
+
+    var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects mismatched PSK identity and binder counts" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const psk_ext = try clientHelloExtension(base_hello, @intFromEnum(ExtType.pre_shared_key));
+
+    const identities_len = readU16(hello_buf[psk_ext.body_offset..]);
+    const second_identity = [_]u8{
+        0x00, 0x01, 0xaa,
+        0x00, 0x00, 0x00,
+        0x00,
+    };
+    const insert_offset = psk_ext.body_offset + 2 + identities_len;
+    std.mem.copyBackwards(
+        u8,
+        hello_buf[insert_offset + second_identity.len .. base_hello.len + second_identity.len],
+        hello_buf[insert_offset..base_hello.len],
+    );
+    @memcpy(hello_buf[insert_offset..][0..second_identity.len], &second_identity);
+
+    writeU16(hello_buf[psk_ext.body_offset..][0..2], @as(u16, @intCast(identities_len + second_identity.len)));
+    writeU16(hello_buf[psk_ext.header_offset + 2 ..][0..2], @as(u16, @intCast(psk_ext.body_len + second_identity.len)));
+    try setClientHelloBodyLen(&hello_buf, base_hello.len - 4 + second_identity.len);
+    const extensions_len = readU16(hello_buf[psk_ext.extensions_len_offset..]);
+    writeU16(hello_buf[psk_ext.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + second_identity.len)));
+    const hello = hello_buf[0 .. base_hello.len + second_identity.len];
+
+    var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects trailing ClientHello PSK binder bytes" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const psk_ext = try clientHelloExtension(base_hello, @intFromEnum(ExtType.pre_shared_key));
+
+    const insert_offset = psk_ext.body_offset + psk_ext.body_len;
+    std.mem.copyBackwards(u8, hello_buf[insert_offset + 1 .. base_hello.len + 1], hello_buf[insert_offset..base_hello.len]);
+    hello_buf[insert_offset] = 0x00;
+    writeU16(hello_buf[psk_ext.header_offset + 2 ..][0..2], @as(u16, @intCast(psk_ext.body_len + 1)));
+    try setClientHelloBodyLen(&hello_buf, base_hello.len - 4 + 1);
+    const extensions_len = readU16(hello_buf[psk_ext.extensions_len_offset..]);
+    writeU16(hello_buf[psk_ext.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + 1)));
+    const hello = hello_buf[0 .. base_hello.len + 1];
+
+    var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
 }
