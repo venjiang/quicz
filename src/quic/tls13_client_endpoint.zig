@@ -301,7 +301,10 @@ pub const Tls13ClientEndpoint = struct {
     ) !?DueDeadlineDatagramPathDrainResult {
         const serviced = (try self.serviceDueDeadline(now_millis)) orelse return null;
         if (serviced != .recovery) {
-            return .{ .deadline = serviced };
+            return .{
+                .deadline = serviced,
+                .next_deadline = self.nextDeadline(),
+            };
         }
 
         const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
@@ -313,6 +316,7 @@ pub const Tls13ClientEndpoint = struct {
                 return .{
                     .deadline = serviced,
                     .drain = drain,
+                    .next_deadline = self.nextDeadline(),
                 };
             };
             out[drain.datagrams_written] = if (datagram) |bytes| .{
@@ -327,6 +331,7 @@ pub const Tls13ClientEndpoint = struct {
         return .{
             .deadline = serviced,
             .drain = drain,
+            .next_deadline = self.nextDeadline(),
         };
     }
 
@@ -554,6 +559,7 @@ pub const Tls13ClientEndpoint = struct {
     pub const DueDeadlineDatagramPathDrainResult = struct {
         deadline: client_transport.ClientTransportDeadline,
         drain: ApplicationDatagramPathDrainResult = .{},
+        next_deadline: ?client_transport.ClientTransportDeadline = null,
     };
 };
 
@@ -1068,6 +1074,9 @@ test "Tls13ClientEndpoint drains due recovery with committed route output" {
     defer std.testing.allocator.free(out[0].datagram);
     try std.testing.expect(out[0].path.eql(new_path));
     try std.testing.expect(out[0].datagram.len != 0);
+    const next_deadline = serviced.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expect(next_deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, next_deadline.recovery.space);
 }
 
 test "Tls13ClientEndpoint receive returns Retry output with committed route path" {
