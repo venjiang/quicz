@@ -314,6 +314,36 @@ pub fn EndpointConnectionRegistry(
             );
         }
 
+        /// Poll the first installed-key datagram from endpoint-owned records.
+        pub fn pollDatagramAcrossConnections(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            allocator: std.mem.Allocator,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+            comptime destination_connection_id: *const fn (*const Record) []const u8,
+            comptime source_connection_id: *const fn (*const Record) []const u8,
+        ) root.Error!?root.EndpointPolledDatagramResult {
+            if (self.poll_view_scratch) |views| {
+                return lifecycle.pollDatagramAcrossConnections(
+                    try self.fillPollViews(views, destination_connection_id, source_connection_id),
+                    now_millis,
+                    space,
+                );
+            }
+            const views = try self.pollViews(
+                allocator,
+                destination_connection_id,
+                source_connection_id,
+            );
+            defer allocator.free(views);
+            return lifecycle.pollDatagramAcrossConnections(
+                views,
+                now_millis,
+                space,
+            );
+        }
+
         /// Classify and process one installed-key datagram against the owned records.
         ///
         /// This retains the lifecycle's packet-space and close-propagation

@@ -800,6 +800,30 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Poll the first installed-key datagram across endpoint-owned records.
+        pub fn pollDatagramWithRoutePath(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+        ) (root.Error || endpoint.RouteError)!?DatagramPathResult {
+            const polled = (try self.records.pollDatagramAcrossConnections(
+                &self.lifecycle,
+                allocator,
+                now_millis,
+                space,
+                destination_connection_id_of,
+                source_connection_id_of,
+            )) orelse return null;
+            const record = self.records.get(polled.connection_id) orelse unreachable;
+            errdefer connection_of(record).allocator.free(polled.datagram);
+            return .{
+                .connection_id = polled.connection_id,
+                .datagram = polled.datagram,
+                .path = try self.currentRecordRoutePath(record),
+            };
+        }
+
         /// Queue a transport CONNECTION_CLOSE and return it with the route.
         pub fn closeWithRoutePath(
             self: *Self,
@@ -3020,6 +3044,159 @@ test "Tls13ServerEndpoint pairs due recovery output with committed route path" {
     try std.testing.expectEqual(record.handle, due_out[0].connection_id);
     try std.testing.expect(due_out[0].path.eql(new_path));
     try std.testing.expect(due_out[0].datagram.len != 0);
+}
+
+test "Tls13ServerEndpoint polls active record output with committed route path" {
+    const TestRecord = struct {
+        handle: u64,
+        local_id: []const u8,
+        peer_id: []const u8,
+        connection: Connection,
+        backend: root.CryptoBackend,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return self.peer_id;
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return self.local_id;
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "initial";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 2, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 2,
+    });
+    defer endpoint_owner.deinit();
+
+    const first_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+    };
+    const second_path = endpoint.Udp4Tuple{
+        .local = first_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_444),
+    };
+    const secrets = try protection.deriveInitialSecrets(.v1, "endpoint-poll");
+    var empty_backend = EmptyBackend{};
+
+    const first_record = try std.testing.allocator.create(TestRecord);
+    var first_initialized = false;
+    var first_owned = true;
+    errdefer {
+        if (first_owned) {
+            if (first_initialized) first_record.deinit();
+            std.testing.allocator.destroy(first_record);
+        }
+    }
+    first_record.* = .{
+        .handle = 91,
+        .local_id = "local-a",
+        .peer_id = "peer-a",
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    first_initialized = true;
+    try first_record.connection.validatePeerAddress();
+    try first_record.connection.confirmHandshake();
+    try first_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try endpoint_owner.lifecycle.registerConnectionId(first_record.handle, first_record.local_id, first_path, .{});
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(first_record.handle);
+    try endpoint_owner.records.adopt(first_record.handle, first_record);
+    first_owned = false;
+
+    const second_record = try std.testing.allocator.create(TestRecord);
+    var second_initialized = false;
+    var second_owned = true;
+    errdefer {
+        if (second_owned) {
+            if (second_initialized) second_record.deinit();
+            std.testing.allocator.destroy(second_record);
+        }
+    }
+    second_record.* = .{
+        .handle = 92,
+        .local_id = "local-b",
+        .peer_id = "peer-b",
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    second_initialized = true;
+    try second_record.connection.validatePeerAddress();
+    try second_record.connection.confirmHandshake();
+    try second_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try second_record.connection.sendPing();
+    try endpoint_owner.lifecycle.registerConnectionId(second_record.handle, second_record.local_id, second_path, .{});
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(second_record.handle);
+    try endpoint_owner.records.adopt(second_record.handle, second_record);
+    second_owned = false;
+
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    const polled = (try endpoint_owner.pollDatagramWithRoutePath(
+        no_allocation_allocator.allocator(),
+        10,
+        .application,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(second_record.handle, polled.connection_id);
+    try std.testing.expect(polled.path.eql(second_path));
+    try std.testing.expect(polled.datagram.len != 0);
+
+    try std.testing.expect((try endpoint_owner.pollDatagramWithRoutePath(
+        no_allocation_allocator.allocator(),
+        11,
+        .application,
+    )) == null);
 }
 
 test "Tls13ServerEndpoint pairs Initial due recovery output with committed route path" {
