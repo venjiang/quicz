@@ -58,6 +58,33 @@ pub fn Tls13ServerEndpoint(
             self.lifecycle.deinit();
         }
 
+        /// Classify one UDP datagram through this endpoint's lifecycle owner.
+        pub fn feedDatagram(
+            self: *const Self,
+            out: []u8,
+            path: endpoint.Udp4Tuple,
+            datagram: []const u8,
+            unpredictable_prefix: []const u8,
+            supported_versions: []const quic_packet.Version,
+        ) endpoint.RouteError!endpoint.DatagramAction {
+            return self.lifecycle.feedDatagram(
+                out,
+                path,
+                datagram,
+                unpredictable_prefix,
+                supported_versions,
+            );
+        }
+
+        /// Resolve one routed datagram without decrypting it.
+        pub fn routeDatagram(
+            self: *const Self,
+            path: endpoint.Udp4Tuple,
+            datagram: []const u8,
+        ) endpoint.RouteError!endpoint.RouteResult {
+            return self.lifecycle.routeDatagram(path, datagram);
+        }
+
         /// Retire one endpoint-owned record together with all lifecycle state.
         ///
         /// The route/timer retirement is idempotent because deadline processing
@@ -529,6 +556,20 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectEqual(retry_record.handle, retry_route.connection_id);
     try std.testing.expect(endpoint_owner.records.get(retry_record.handle) != null);
     try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
+    const routed_short = [_]u8{ 0x40, 0x90, 0x91, 0x92, 0x93 };
+    try std.testing.expectEqual(retry_record.handle, (try endpoint_owner.routeDatagram(retry_path, &routed_short)).connection_id);
+    var classification_out: [32]u8 = undefined;
+    const classified = try endpoint_owner.feedDatagram(
+        &classification_out,
+        retry_path,
+        &routed_short,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+    );
+    switch (classified) {
+        .routed => |route| try std.testing.expectEqual(retry_record.handle, route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
     var empty_backend = EmptyBackend{};
     var backend_scratch: [1]u8 = undefined;
     var backend_output: [1]root.EndpointPolledDatagramResult = undefined;
@@ -777,6 +818,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expect(endpoint_owner.records.get(retry_record_handle) == null);
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.retireRecord(retry_record_handle));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.routeDatagram(retry_path, &routed_short));
 
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);

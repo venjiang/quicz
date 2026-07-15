@@ -209,7 +209,6 @@ fn serveConcurrent(
         .max_stateless_reset_tokens = max_routes,
     });
     defer server_endpoint.deinit();
-    const lifecycle = &server_endpoint.lifecycle;
     var address_validation = endpoint.AddressValidationPolicy.init(allocator, retry_token_secret, .{});
     defer address_validation.deinit();
     const connections = &server_endpoint.records;
@@ -269,7 +268,7 @@ fn serveConcurrent(
         };
         const now_millis = nowMillis(io);
         const path = try serverPath(bind_address, received.from);
-        const action = try lifecycle.feedDatagram(
+        const action = try server_endpoint.feedDatagram(
             &endpoint_output,
             path,
             received.data,
@@ -488,7 +487,7 @@ fn serveConcurrent(
                         // Handshake packets after their keys are discarded.
                         // Keep lifecycle route ownership, but never decrypt a
                         // retired packet-number space.
-                        const late_route = try lifecycle.routeDatagram(path, received.data);
+                        const late_route = try server_endpoint.routeDatagram(path, received.data);
                         try require(late_route.connection_id == managed.handle);
                         continue;
                     }
