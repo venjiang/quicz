@@ -58,6 +58,8 @@ pub fn Tls13ServerEndpoint(
         ) !Self {
             var lifecycle = EndpointConnectionLifecycle.initWithRouterOptions(allocator, router_options);
             errdefer lifecycle.deinit();
+            try lifecycle.router.reserveConfiguredCapacity();
+            try lifecycle.recovery_timers.ensureCapacity(max_active_connections);
             return .{
                 .lifecycle = lifecycle,
                 .records = try Registry.initWithCapacity(allocator, max_active_connections),
@@ -538,6 +540,9 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     defer endpoint_owner.deinit();
     try std.testing.expect(endpoint_owner.records.hasCapacity());
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
+    try std.testing.expect(endpoint_owner.lifecycle.router.routes.capacity >= 3);
+    try std.testing.expect(endpoint_owner.lifecycle.router.reset_tokens.capacity >= 3);
+    try std.testing.expect(endpoint_owner.lifecycle.recovery_timers.entries.capacity >= 2);
     var empty_backend = EmptyBackend{};
 
     const record = try std.testing.allocator.create(TestRecord);

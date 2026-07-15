@@ -140,10 +140,10 @@ processes concurrently. The server keeps
 each `Connection` and its `Tls13Backend` record in the bounded,
 endpoint-owned `EndpointConnectionRegistry`, and uses one
 `EndpointConnectionLifecycle` to classify and route every datagram on one UDP
-socket. Its fixed-capacity form preallocates the record hash map and the
-lifecycle's deadline, due-recovery poll, and installed-key receive views, so
-record admission up to capacity and hot receive/timer paths do not allocate.
-The distinct client tags prevent Initial DCID and
+socket. Its fixed-capacity form preallocates the record hash map, configured
+route/reset-token tables, recovery timers, and lifecycle deadline, due-recovery
+poll, and installed-key receive views. Record admission, CID-route setup, and
+timer arming up to capacity therefore avoid storage growth. The distinct client tags prevent Initial DCID and
 SCID collisions. After each matching FIN-terminated echo, the client sends a protected
 `CONNECTION_CLOSE`; the server processes it through that connection's route,
 keeps it routable while draining, and retires only that handle's routes when

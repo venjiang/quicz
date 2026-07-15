@@ -621,6 +621,20 @@ pub const EndpointRouter = struct {
         self.routes.deinit(self.allocator);
     }
 
+    /// Reserve configured route and reset-token storage for a bounded endpoint.
+    ///
+    /// Unbounded compatibility-mode routers retain their lazy allocation
+    /// behavior. A caller that supplies explicit limits can reserve both
+    /// tables before accepting untrusted connections.
+    pub fn reserveConfiguredCapacity(self: *EndpointRouter) RouteError!void {
+        if (self.max_routes != std.math.maxInt(usize)) {
+            self.routes.ensureTotalCapacity(self.allocator, self.max_routes) catch return error.OutOfMemory;
+        }
+        if (self.max_stateless_reset_tokens != std.math.maxInt(usize)) {
+            self.reset_tokens.ensureTotalCapacity(self.allocator, self.max_stateless_reset_tokens) catch return error.OutOfMemory;
+        }
+    }
+
     /// Return the number of active destination-CID routes.
     pub fn routeCount(self: *const EndpointRouter) usize {
         return self.routes.items.len;

@@ -29,6 +29,11 @@ pub const EndpointLossDetectionTimers = struct {
         self.entries.deinit(self.allocator);
     }
 
+    /// Reserve timer entries for a bounded endpoint before connections arm timers.
+    pub fn ensureCapacity(self: *EndpointLossDetectionTimers, capacity: usize) Error!void {
+        self.entries.ensureTotalCapacity(self.allocator, capacity) catch return error.OutOfMemory;
+    }
+
     /// Return the number of connection timers currently armed by the endpoint.
     pub fn count(self: *const EndpointLossDetectionTimers) usize {
         return self.entries.items.len;
