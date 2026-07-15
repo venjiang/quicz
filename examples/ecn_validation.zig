@@ -33,12 +33,12 @@ pub fn main() !void {
         },
     });
     if (validated.ecnValidationState(.application) != .capable) return error.EcnValidationExampleFailed;
-    try path_policy.setStateForPath(old_path, .capable);
+    try path_policy.setStateForConnectionPath(1, old_path, .capable);
     std.debug.print(
         "[ecn] ECT0 ACK_ECN validated; bytes_in_flight={d}\n",
         .{validated.bytesInFlight(.application)},
     );
-    if (path_policy.stateForPath(migrated_path) != .unknown) return error.EcnValidationExampleFailed;
+    if (path_policy.stateForConnectionPath(1, migrated_path) != .unknown) return error.EcnValidationExampleFailed;
 
     var failed = try quicz.Connection.init(allocator, .client, .{});
     defer failed.deinit();
@@ -50,12 +50,12 @@ pub fn main() !void {
         .first_ack_range = 0,
     });
     if (failed.ecnValidationState(.application) != .failed) return error.EcnValidationExampleFailed;
-    try path_policy.setStateForPath(migrated_path, .failed);
-    if (path_policy.stateForPath(old_path) != .capable) return error.EcnValidationExampleFailed;
-    if (path_policy.mayUseEct(migrated_path)) return error.EcnValidationExampleFailed;
+    try path_policy.setStateForConnectionPath(1, migrated_path, .failed);
+    if (path_policy.stateForConnectionPath(1, old_path) != .capable) return error.EcnValidationExampleFailed;
+    if (path_policy.mayUseEctOnConnectionPath(1, migrated_path)) return error.EcnValidationExampleFailed;
     std.debug.print("[ecn] missing ACK_ECN disabled ECN validation\n", .{});
     std.debug.print("[ecn] endpoint_path old={s} migrated={s}\n", .{
-        @tagName(path_policy.stateForPath(old_path)),
-        @tagName(path_policy.stateForPath(migrated_path)),
+        @tagName(path_policy.stateForConnectionPath(1, old_path)),
+        @tagName(path_policy.stateForConnectionPath(1, migrated_path)),
     });
 }

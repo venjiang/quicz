@@ -217,11 +217,12 @@ pub const EcnPathValidationState = enum {
 };
 
 const EcnPathEntry = struct {
+    connection_id: u64,
     path: Udp4Tuple,
     state: EcnPathValidationState,
 };
 
-/// In-memory endpoint ECN policy keyed by UDP path identity.
+/// In-memory endpoint ECN policy keyed by connection handle and UDP path.
 ///
 /// The connection skeleton validates ACK_ECN counters per packet number space.
 /// This endpoint helper keeps the resulting ECN decision scoped to a concrete
@@ -241,40 +242,68 @@ pub const EcnPathPolicy = struct {
         self.paths.deinit(self.allocator);
     }
 
-    /// Return the ECN state for a path, or `unknown` when it has not been seen.
-    pub fn stateForPath(self: *const EcnPathPolicy, path: Udp4Tuple) EcnPathValidationState {
-        const index = self.findPathIndex(path) orelse return .unknown;
+    /// Return the ECN state for one connection path, or `unknown` when unseen.
+    pub fn stateForConnectionPath(
+        self: *const EcnPathPolicy,
+        connection_id: u64,
+        path: Udp4Tuple,
+    ) EcnPathValidationState {
+        const index = self.findPathIndex(connection_id, path) orelse return .unknown;
         return self.paths.items[index].state;
     }
 
-    /// Return whether endpoint packetization may set an ECT codepoint on this path.
-    pub fn mayUseEct(self: *const EcnPathPolicy, path: Udp4Tuple) bool {
-        return self.stateForPath(path) != .failed;
+    /// Return whether endpoint packetization may set ECT on one connection path.
+    pub fn mayUseEctOnConnectionPath(
+        self: *const EcnPathPolicy,
+        connection_id: u64,
+        path: Udp4Tuple,
+    ) bool {
+        return self.stateForConnectionPath(connection_id, path) != .failed;
     }
 
-    /// Store the current ECN validation state for one UDP path.
-    pub fn setStateForPath(
+    /// Store the current ECN validation state for one connection path.
+    pub fn setStateForConnectionPath(
         self: *EcnPathPolicy,
+        connection_id: u64,
         path: Udp4Tuple,
         state: EcnPathValidationState,
     ) RouteError!void {
-        if (self.findPathIndex(path)) |index| {
+        if (self.findPathIndex(connection_id, path)) |index| {
             self.paths.items[index].state = state;
             return;
         }
-        self.paths.append(self.allocator, .{ .path = path, .state = state }) catch return error.OutOfMemory;
+        self.paths.append(self.allocator, .{
+            .connection_id = connection_id,
+            .path = path,
+            .state = state,
+        }) catch return error.OutOfMemory;
     }
 
-    /// Remove stored ECN state for one UDP path.
-    pub fn resetPath(self: *EcnPathPolicy, path: Udp4Tuple) bool {
-        const index = self.findPathIndex(path) orelse return false;
+    /// Remove stored ECN state for one connection path.
+    pub fn resetConnectionPath(self: *EcnPathPolicy, connection_id: u64, path: Udp4Tuple) bool {
+        const index = self.findPathIndex(connection_id, path) orelse return false;
         _ = self.paths.orderedRemove(index);
         return true;
     }
 
-    fn findPathIndex(self: *const EcnPathPolicy, path: Udp4Tuple) ?usize {
+    /// Remove all ECN state for a retired connection handle.
+    pub fn resetConnection(self: *EcnPathPolicy, connection_id: u64) usize {
+        var removed: usize = 0;
+        var index: usize = 0;
+        while (index < self.paths.items.len) {
+            if (self.paths.items[index].connection_id == connection_id) {
+                _ = self.paths.orderedRemove(index);
+                removed += 1;
+            } else {
+                index += 1;
+            }
+        }
+        return removed;
+    }
+
+    fn findPathIndex(self: *const EcnPathPolicy, connection_id: u64, path: Udp4Tuple) ?usize {
         for (self.paths.items, 0..) |entry, index| {
-            if (entry.path.eql(path)) return index;
+            if (entry.connection_id == connection_id and entry.path.eql(path)) return index;
         }
         return null;
     }
@@ -1590,28 +1619,33 @@ test "AddressValidationPolicy exports and restores replay filter state" {
     _ = try trimmed.validateTokenForPathWithoutReplay(.new_token, 1_300, path, consumed_token);
 }
 
-test "EcnPathPolicy keeps ECN validation state scoped to UDP path identity" {
+test "EcnPathPolicy isolates and resets ECN state by connection path" {
     const path = testPath(50_000);
     const migrated_path = testPath(50_001);
+    const first_connection_id: u64 = 7;
+    const second_connection_id: u64 = 8;
     var policy = EcnPathPolicy.init(std.testing.allocator);
     defer policy.deinit();
 
-    try std.testing.expectEqual(EcnPathValidationState.unknown, policy.stateForPath(path));
-    try std.testing.expect(policy.mayUseEct(path));
+    try std.testing.expectEqual(EcnPathValidationState.unknown, policy.stateForConnectionPath(first_connection_id, path));
+    try std.testing.expect(policy.mayUseEctOnConnectionPath(first_connection_id, path));
 
-    try policy.setStateForPath(path, .capable);
-    try std.testing.expectEqual(EcnPathValidationState.capable, policy.stateForPath(path));
-    try std.testing.expectEqual(EcnPathValidationState.unknown, policy.stateForPath(migrated_path));
-    try std.testing.expect(policy.mayUseEct(migrated_path));
+    try policy.setStateForConnectionPath(first_connection_id, path, .capable);
+    try std.testing.expectEqual(EcnPathValidationState.capable, policy.stateForConnectionPath(first_connection_id, path));
+    try std.testing.expectEqual(EcnPathValidationState.unknown, policy.stateForConnectionPath(second_connection_id, path));
+    try std.testing.expectEqual(EcnPathValidationState.unknown, policy.stateForConnectionPath(first_connection_id, migrated_path));
+    try std.testing.expect(policy.mayUseEctOnConnectionPath(first_connection_id, migrated_path));
 
-    try policy.setStateForPath(migrated_path, .failed);
-    try std.testing.expectEqual(EcnPathValidationState.failed, policy.stateForPath(migrated_path));
-    try std.testing.expect(!policy.mayUseEct(migrated_path));
-    try std.testing.expectEqual(EcnPathValidationState.capable, policy.stateForPath(path));
+    try policy.setStateForConnectionPath(first_connection_id, migrated_path, .failed);
+    try std.testing.expectEqual(EcnPathValidationState.failed, policy.stateForConnectionPath(first_connection_id, migrated_path));
+    try std.testing.expect(!policy.mayUseEctOnConnectionPath(first_connection_id, migrated_path));
+    try std.testing.expectEqual(EcnPathValidationState.capable, policy.stateForConnectionPath(first_connection_id, path));
 
-    try std.testing.expect(policy.resetPath(migrated_path));
-    try std.testing.expectEqual(EcnPathValidationState.unknown, policy.stateForPath(migrated_path));
-    try std.testing.expect(!policy.resetPath(migrated_path));
+    try std.testing.expect(policy.resetConnectionPath(first_connection_id, migrated_path));
+    try std.testing.expectEqual(EcnPathValidationState.unknown, policy.stateForConnectionPath(first_connection_id, migrated_path));
+    try std.testing.expect(!policy.resetConnectionPath(first_connection_id, migrated_path));
+    try std.testing.expectEqual(@as(usize, 1), policy.resetConnection(first_connection_id));
+    try std.testing.expectEqual(EcnPathValidationState.unknown, policy.stateForConnectionPath(first_connection_id, path));
 }
 
 test "EndpointRouter routes long and short datagrams by destination CID" {

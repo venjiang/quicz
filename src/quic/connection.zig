@@ -42453,9 +42453,11 @@ test "EndpointConnectionLifecycle refreshes recovery timer when issuing connecti
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
 }
 
-test "EndpointConnectionLifecycle mirrors ECN validation by UDP path" {
+test "EndpointConnectionLifecycle mirrors and retires ECN validation by connection path" {
     var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer lifecycle.deinit();
+    const connection_id: u64 = 51;
+    const other_connection_id: u64 = 52;
 
     const old_path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
@@ -42466,8 +42468,8 @@ test "EndpointConnectionLifecycle mirrors ECN validation by UDP path" {
         .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
     };
 
-    try std.testing.expectEqual(endpoint.EcnPathValidationState.unknown, lifecycle.ecnPathState(old_path));
-    try std.testing.expect(lifecycle.mayUseEctOnPath(old_path));
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.unknown, lifecycle.ecnPathState(connection_id, old_path));
+    try std.testing.expect(lifecycle.mayUseEctOnPath(connection_id, old_path));
 
     var validated = try Connection.init(std.testing.allocator, .client, .{});
     defer validated.deinit();
@@ -42487,11 +42489,11 @@ test "EndpointConnectionLifecycle mirrors ECN validation by UDP path" {
     });
     try std.testing.expectEqual(
         endpoint.EcnPathValidationState.capable,
-        try lifecycle.refreshEcnPathStateFromConnection(old_path, &validated, .application),
+        try lifecycle.refreshEcnPathStateFromConnection(connection_id, old_path, &validated, .application),
     );
-    try std.testing.expectEqual(endpoint.EcnPathValidationState.capable, lifecycle.ecnPathState(old_path));
-    try std.testing.expectEqual(endpoint.EcnPathValidationState.unknown, lifecycle.ecnPathState(migrated_path));
-    try std.testing.expect(lifecycle.mayUseEctOnPath(migrated_path));
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.capable, lifecycle.ecnPathState(connection_id, old_path));
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.unknown, lifecycle.ecnPathState(connection_id, migrated_path));
+    try std.testing.expect(lifecycle.mayUseEctOnPath(connection_id, migrated_path));
 
     var failed = try Connection.init(std.testing.allocator, .client, .{});
     defer failed.deinit();
@@ -42504,11 +42506,23 @@ test "EndpointConnectionLifecycle mirrors ECN validation by UDP path" {
     });
     try std.testing.expectEqual(
         endpoint.EcnPathValidationState.failed,
-        try lifecycle.refreshEcnPathStateFromConnection(migrated_path, &failed, .application),
+        try lifecycle.refreshEcnPathStateFromConnection(connection_id, migrated_path, &failed, .application),
     );
-    try std.testing.expectEqual(endpoint.EcnPathValidationState.capable, lifecycle.ecnPathState(old_path));
-    try std.testing.expectEqual(endpoint.EcnPathValidationState.failed, lifecycle.ecnPathState(migrated_path));
-    try std.testing.expect(!lifecycle.mayUseEctOnPath(migrated_path));
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.capable, lifecycle.ecnPathState(connection_id, old_path));
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.failed, lifecycle.ecnPathState(connection_id, migrated_path));
+    try std.testing.expect(!lifecycle.mayUseEctOnPath(connection_id, migrated_path));
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.unknown, lifecycle.ecnPathState(other_connection_id, old_path));
+    try std.testing.expectEqual(
+        endpoint.EcnPathValidationState.failed,
+        try lifecycle.refreshEcnPathStateFromConnection(other_connection_id, old_path, &failed, .application),
+    );
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.capable, lifecycle.ecnPathState(connection_id, old_path));
+    _ = lifecycle.retireConnection(connection_id);
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.unknown, lifecycle.ecnPathState(connection_id, old_path));
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.unknown, lifecycle.ecnPathState(connection_id, migrated_path));
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.failed, lifecycle.ecnPathState(other_connection_id, old_path));
+    _ = lifecycle.retireConnection(other_connection_id);
+    try std.testing.expectEqual(endpoint.EcnPathValidationState.unknown, lifecycle.ecnPathState(other_connection_id, old_path));
 }
 
 test "EndpointConnectionLifecycle resets spin bit after route path update" {

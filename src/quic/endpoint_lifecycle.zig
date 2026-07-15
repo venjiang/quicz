@@ -335,14 +335,22 @@ pub const EndpointConnectionLifecycle = struct {
         return self.recovery_timers.count();
     }
 
-    /// Return the stored ECN validation state for one UDP path.
-    pub fn ecnPathState(self: *const EndpointConnectionLifecycle, path: endpoint.Udp4Tuple) endpoint.EcnPathValidationState {
-        return self.ecn_paths.stateForPath(path);
+    /// Return the stored ECN validation state for one connection path.
+    pub fn ecnPathState(
+        self: *const EndpointConnectionLifecycle,
+        connection_id: u64,
+        path: endpoint.Udp4Tuple,
+    ) endpoint.EcnPathValidationState {
+        return self.ecn_paths.stateForConnectionPath(connection_id, path);
     }
 
-    /// Return whether endpoint packetization may set ECT on this UDP path.
-    pub fn mayUseEctOnPath(self: *const EndpointConnectionLifecycle, path: endpoint.Udp4Tuple) bool {
-        return self.ecn_paths.mayUseEct(path);
+    /// Return whether endpoint packetization may set ECT on one connection path.
+    pub fn mayUseEctOnPath(
+        self: *const EndpointConnectionLifecycle,
+        connection_id: u64,
+        path: endpoint.Udp4Tuple,
+    ) bool {
+        return self.ecn_paths.mayUseEctOnConnectionPath(connection_id, path);
     }
 
     /// Mirror a connection packet-space ECN result onto one UDP path.
@@ -352,12 +360,13 @@ pub const EndpointConnectionLifecycle = struct {
     /// tuple so migration starts from an independent ECN validation state.
     pub fn refreshEcnPathStateFromConnection(
         self: *EndpointConnectionLifecycle,
+        connection_id: u64,
         path: endpoint.Udp4Tuple,
         connection: *const Connection,
         space: PacketNumberSpace,
     ) endpoint.RouteError!endpoint.EcnPathValidationState {
         const state = endpointEcnPathState(connection.ecnValidationState(space));
-        try self.ecn_paths.setStateForPath(path, state);
+        try self.ecn_paths.setStateForConnectionPath(connection_id, path, state);
         return state;
     }
 
@@ -22956,6 +22965,7 @@ pub const EndpointConnectionLifecycle = struct {
 
     /// Retire all routes and any armed recovery timer for one connection handle.
     pub fn retireConnection(self: *EndpointConnectionLifecycle, connection_id: u64) EndpointConnectionRetireResult {
+        _ = self.ecn_paths.resetConnection(connection_id);
         return .{
             .routes_retired = self.router.retireConnectionRoutes(connection_id),
             .recovery_timer_disarmed = self.recovery_timers.disarmConnection(connection_id),

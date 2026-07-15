@@ -283,11 +283,11 @@ pub fn main() !void {
     try require(client.ecnCounts(.application).ecn_ce_count == 1);
     try require(ce_cwnd == @max(no_ce_cwnd / 2, quicz.recovery.minimumCongestionWindow(1350)));
 
-    const refreshed_ecn_state = try client_lifecycle.refreshEcnPathStateFromConnection(client_path, &client, .application);
+    const refreshed_ecn_state = try client_lifecycle.refreshEcnPathStateFromConnection(41, client_path, &client, .application);
     try require(refreshed_ecn_state == .capable);
-    try require(client_lifecycle.ecnPathState(client_path) == .capable);
-    try require(client_lifecycle.ecnPathState(migrated_path) == .unknown);
-    try require(client_lifecycle.mayUseEctOnPath(migrated_path));
+    try require(client_lifecycle.ecnPathState(41, client_path) == .capable);
+    try require(client_lifecycle.ecnPathState(41, migrated_path) == .unknown);
+    try require(client_lifecycle.mayUseEctOnPath(41, migrated_path));
 
     std.debug.print("[udp-ecn] client_port={} server_port={} migrated_port={} ping_bytes={} ack_ecn_bytes={} ce_ping_bytes={} ce_ack_bytes={} client_ecn={s} path_ecn={s} migrated_ecn={s} ect0_count={} ce_count={} no_ce_cwnd={} ce_cwnd={} client_inflight={}\n", .{
         client_local.port,
@@ -298,8 +298,8 @@ pub fn main() !void {
         ce_ping.len,
         ce_ack.len,
         @tagName(client.ecnValidationState(.application)),
-        @tagName(client_lifecycle.ecnPathState(client_path)),
-        @tagName(client_lifecycle.ecnPathState(migrated_path)),
+        @tagName(client_lifecycle.ecnPathState(41, client_path)),
+        @tagName(client_lifecycle.ecnPathState(41, migrated_path)),
         client.ecnCounts(.application).ect0_count,
         client.ecnCounts(.application).ecn_ce_count,
         no_ce_cwnd,
