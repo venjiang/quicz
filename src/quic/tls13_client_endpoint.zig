@@ -192,6 +192,18 @@ pub const Tls13ClientEndpoint = struct {
         return self.pollApplicationDatagram(now_millis);
     }
 
+    /// Queue a protected application CONNECTION_CLOSE and return it with route.
+    pub fn closeWithRoutePath(
+        self: *Tls13ClientEndpoint,
+        application_error_code: u64,
+        frame_type: u64,
+        reason: []const u8,
+        now_millis: i64,
+    ) !?ApplicationDatagramPathResult {
+        try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
+        return self.pollApplicationDatagramWithRoutePath(now_millis);
+    }
+
     /// Return the active close deadline after `close()` has queued a close.
     pub fn closeDeadlineMillis(self: *const Tls13ClientEndpoint) ?i64 {
         return self.transport.connection.closeDeadlineMillis();
@@ -370,4 +382,54 @@ test "Tls13ClientEndpoint services due recovery with committed route output" {
     defer std.testing.allocator.free(output.datagram);
     try std.testing.expect(output.path.eql(new_path));
     try std.testing.expect(output.datagram.len != 0);
+}
+
+test "Tls13ClientEndpoint closes with committed route output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = old_path.remote,
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        10,
+        old_path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const traffic_secret = [_]u8{0x77} ** 32;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xca, 0xcb, 0xcc, 0xcd };
+    const reset_token = [_]u8{0x88} ** 16;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+    _ = try client.updatePath(new_path);
+
+    const close_datagram = (try client.closeWithRoutePath(0, 0, "done", 1)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_datagram.datagram);
+    try std.testing.expect(close_datagram.path.eql(new_path));
+    try std.testing.expect(close_datagram.datagram.len != 0);
+    try std.testing.expect(client.closeDeadlineMillis() != null);
 }
