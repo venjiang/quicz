@@ -2341,11 +2341,10 @@ pub const Tls13Handshake = struct {
                         if (pp + 1 > binders_end) return error.DecodeError;
                         const binder_len = ext[pp];
                         pp += 1;
-                        if (binder_len < 32 or pp + binder_len > binders_end) {
+                        if (binder_len != self.peer_psk_binder.len or pp + binder_len > binders_end) {
                             return error.DecodeError;
                         }
                         if (binder_count == 0) {
-                            if (binder_len != self.peer_psk_binder.len) return error.DecodeError;
                             @memcpy(&self.peer_psk_binder, ext[pp..][0..binder_len]);
                             // Record the binder's offset within the ClientHello
                             // message so the truncated transcript hash can be
@@ -4131,6 +4130,32 @@ test "Tls13Handshake server rejects mismatched PSK identity and binder counts" {
     const extensions_len = readU16(hello_buf[psk_ext.extensions_len_offset..]);
     writeU16(hello_buf[psk_ext.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + second_identity.len)));
     const hello = hello_buf[0 .. base_hello.len + second_identity.len];
+
+    var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects ClientHello PSK binder with invalid length" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const psk_ext = try clientHelloExtension(base_hello, @intFromEnum(ExtType.pre_shared_key));
+
+    const identities_len = readU16(hello_buf[psk_ext.body_offset..]);
+    const binders_len_offset = psk_ext.body_offset + 2 + identities_len;
+    const binder_len_offset = binders_len_offset + 2;
+    const binder_end = binder_len_offset + 1 + hello_buf[binder_len_offset];
+    std.mem.copyBackwards(u8, hello_buf[binder_end + 1 .. base_hello.len + 1], hello_buf[binder_end..base_hello.len]);
+    hello_buf[binder_end] = 0xee;
+    hello_buf[binder_len_offset] += 1;
+    const binders_len = readU16(hello_buf[binders_len_offset..]);
+    writeU16(hello_buf[binders_len_offset..][0..2], @as(u16, @intCast(binders_len + 1)));
+    writeU16(hello_buf[psk_ext.header_offset + 2 ..][0..2], @as(u16, @intCast(psk_ext.body_len + 1)));
+    try setClientHelloBodyLen(&hello_buf, base_hello.len - 4 + 1);
+    const extensions_len = readU16(hello_buf[psk_ext.extensions_len_offset..]);
+    writeU16(hello_buf[psk_ext.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + 1)));
+    const hello = hello_buf[0 .. base_hello.len + 1];
 
     var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
     server.provideData(hello);
