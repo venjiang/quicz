@@ -26,6 +26,7 @@ import (
 func main() {
 	address := flag.String("addr", "127.0.0.1:4433", "UDP listen address")
 	caOut := flag.String("ca-out", "", "PEM output path for the generated trust anchor (required)")
+	v1Only := flag.Bool("v1-only", false, "advertise only QUIC v1 and emit Version Negotiation for other versions")
 	flag.Parse()
 	if *caOut == "" {
 		log.Fatal("-ca-out is required")
@@ -42,7 +43,12 @@ func main() {
 		Certificates: []tls.Certificate{certificate},
 		NextProtos:   []string{"hq-interop"},
 		MinVersion:   tls.VersionTLS13,
-	}, &quic.Config{})
+	}, &quic.Config{Versions: func() []quic.Version {
+		if *v1Only {
+			return []quic.Version{quic.Version1}
+		}
+		return nil
+	}()})
 	if err != nil {
 		log.Fatalf("listen %s: %v", *address, err)
 	}

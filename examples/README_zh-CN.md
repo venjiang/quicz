@@ -12,11 +12,11 @@
 | `run-server` | `echo_server.zig` | 最小 frame-payload echo server。 |
 | `run-client` | `echo_client.zig` | 最小 frame-payload echo client。 |
 | `run-tls13-process-interop` | `tls13_process_echo_{client,server}.zig` | 独立纯 Zig TLS/QUIC 进程、两条 FIN stream、路由和 close cleanup。 |
-| `run-interop-external-client -- <ip> <port> <ca> [name]` | `interop_external_client.zig` | 连接独立 IPv4 QUIC server，校验 stream 0、4 的 FIN `hello`/`world` echo。 |
+| `run-interop-external-client -- <ip> <port> <ca> [name] [version-negotiation]` | `interop_external_client.zig` | 连接独立 IPv4 QUIC server，校验 stream 0、4 的 FIN `hello`/`world` echo；可选模式验证 v2 到 v1 Version Negotiation 后新建连接。 |
 | `run-interop-client -- <host> <port> [testcase]` | `interop_client.zig` | QUIC-Interop-Runner 风格 client 与本地回退探针。 |
 | `run-interop-event-loopback -- [handshake|transfer|loss|congestion|persistent|key-update|path|stream-control|stream-limit]` | `interop_event_loopback.zig` | TLS-owned UDP 事件循环，含 stream control 与额度释放。 |
 | Go client | `interop/go_echo_client/main.go` | quic-go FIN echo client；`-expect-stream-limit`、`-expect-reset`、`-expect-stop-sending` 分别配合对应并发模式验证额度、RESET_STREAM 与 STOP_SENDING。 |
-| Go server | `interop/go_echo_client/echo_server/main.go` | 一次性 quic-go peer，生成本地 CA PEM 并回显两条 FIN stream。 |
+| Go server | `interop/go_echo_client/echo_server/main.go` | 一次性 quic-go peer，生成本地 CA PEM、回显两条 FIN stream，并可通过 `-v1-only` 验证 Version Negotiation。 |
 | Rust client | `interop/rust_echo_client/src/main.rs` | quinn/rustls client 向 Zig server 发送 stream 0、4 的 FIN 数据。 |
 
 Go/Rust 使用本地测试 CA，先启动 server，再任选一个 client：

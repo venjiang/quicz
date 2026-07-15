@@ -1,6 +1,7 @@
 //! Pure-Zig TLS 1.3 QUIC client transport state without socket ownership.
 
 const std = @import("std");
+const buffer = @import("buffer.zig");
 const connection_module = @import("connection.zig");
 const connection_config = @import("connection_config.zig");
 const packet = @import("packet.zig");
@@ -20,6 +21,7 @@ pub const Tls13ClientTransport = struct {
     allocator: std.mem.Allocator,
     connection: Connection,
     backend: Tls13Backend,
+    version: packet.Version,
     original_destination_connection_id: [8]u8,
     local_source_connection_id: [8]u8,
     server_initial_keys: protection.Aes128PacketProtectionKeys,
@@ -37,11 +39,12 @@ pub const Tls13ClientTransport = struct {
         var connection = try Connection.init(allocator, .client, connection_config_value);
         errdefer connection.deinit();
         try connection.setLocalInitialSourceConnectionId(&local_source_connection_id);
-        const initial_keys = try protection.deriveInitialSecrets(.v1, &original_destination_connection_id);
+        const initial_keys = try protection.deriveInitialSecrets(connection_config_value.chosen_version, &original_destination_connection_id);
         return .{
             .allocator = allocator,
             .connection = connection,
             .backend = Tls13Backend.initClient(tls_config),
+            .version = connection_config_value.chosen_version,
             .original_destination_connection_id = original_destination_connection_id,
             .local_source_connection_id = local_source_connection_id,
             .server_initial_keys = initial_keys.server,
@@ -137,10 +140,18 @@ pub const Tls13ClientTransport = struct {
         return self.connection.serviceLossDetectionTimer(now_millis);
     }
 
+    /// Return the selected configuration for a fresh client attempt after a
+    /// validated Version Negotiation packet. The caller owns fresh connection
+    /// IDs and must construct a new transport; QUIC does not continue the
+    /// original connection attempt after Version Negotiation.
+    pub fn versionNegotiationFollowupConfig(self: *const Tls13ClientTransport) ClientTransportError!Config {
+        return self.connection.versionNegotiationFollowupConfig();
+    }
+
     /// Queue ClientHello and return the first protected Initial datagram.
     pub fn begin(self: *Tls13ClientTransport, now_millis: i64, scratch: []u8) ClientTransportError![]u8 {
         _ = try self.connection.driveCryptoBackendInSpace(.initial, self.backend.cryptoBackend(), scratch);
-        const initial_keys = try protection.deriveInitialSecrets(.v1, &self.original_destination_connection_id);
+        const initial_keys = try protection.deriveInitialSecrets(self.version, &self.original_destination_connection_id);
         return (try self.connection.pollProtectedLongCryptoDatagramInSpace(
             .initial,
             now_millis,
@@ -162,11 +173,20 @@ pub const Tls13ClientTransport = struct {
         scratch: []u8,
         datagram: []const u8,
     ) ClientTransportError!ReceiveResult {
+        if (isVersionNegotiationDatagram(datagram)) {
+            const selected = try self.connection.processVersionNegotiationDatagram(
+                now_millis,
+                &self.original_destination_connection_id,
+                &self.local_source_connection_id,
+                datagram,
+            );
+            return .{ .version_negotiation_selected_version = selected };
+        }
         if (isRetryDatagram(datagram)) {
             if (self.retry_received) return error.InvalidPacket;
             try self.connection.processRetryDatagram(now_millis, &self.original_destination_connection_id, datagram);
             const retry_scid = self.connection.retrySourceConnectionId() orelse return error.InvalidPacket;
-            const retry_keys = try protection.deriveInitialSecrets(.v1, retry_scid);
+            const retry_keys = try protection.deriveInitialSecrets(self.version, retry_scid);
             self.backend.retryReceived();
             try self.connection.resetInitialCryptoSendForRetry();
             _ = try self.connection.driveCryptoBackendInSpace(.initial, self.backend.cryptoBackend(), scratch);
@@ -229,8 +249,14 @@ pub const Tls13ClientTransport = struct {
         outbound_handshake: ?[]u8 = null,
         retry_received: bool = false,
         application_processed: bool = false,
+        version_negotiation_selected_version: ?packet.Version = null,
     };
 };
+
+fn isVersionNegotiationDatagram(datagram: []const u8) bool {
+    return datagram.len >= 5 and (datagram[0] & 0x80) != 0 and
+        std.mem.readInt(u32, datagram[1..5], .big) == 0;
+}
 
 fn isRetryDatagram(datagram: []const u8) bool {
     if (datagram.len < 5 or (datagram[0] & 0xc0) != 0xc0) return false;
@@ -268,6 +294,44 @@ test "Tls13ClientTransport recognizes Retry and zero-only padding boundaries" {
     try std.testing.expect(isZeroOnlyPadding(&[_]u8{ 0, 0, 0 }));
     try std.testing.expect(!isZeroOnlyPadding(&[_]u8{}));
     try std.testing.expect(!isZeroOnlyPadding(&[_]u8{ 0x40, 0 }));
+}
+
+test "Tls13ClientTransport selects a fresh v1 attempt after Version Negotiation" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const available_versions = [_]packet.Version{ .v2, .v1 };
+    const original_dcid = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    const client_scid = [_]u8{ 8, 7, 6, 5, 4, 3, 2, 1 };
+    var transport = try Tls13ClientTransport.init(
+        std.testing.allocator,
+        .{ .chosen_version = .v2, .available_versions = &available_versions },
+        .{ .alpn = &alpn },
+        original_dcid,
+        client_scid,
+    );
+    defer transport.deinit();
+
+    const expected_v2_keys = try protection.deriveInitialSecrets(.v2, &original_dcid);
+    try std.testing.expectEqualSlices(u8, &expected_v2_keys.server.secret, &transport.server_initial_keys.secret);
+
+    var scratch: [8192]u8 = undefined;
+    const initial = try transport.begin(1, &scratch);
+    defer std.testing.allocator.free(initial);
+    try std.testing.expectEqual(@as(u32, @intFromEnum(packet.Version.v2)), std.mem.readInt(u32, initial[1..5], .big));
+
+    const server_versions = [_]packet.Version{.v1};
+    var vnp_buf: [64]u8 = undefined;
+    var vnp_writer = buffer.fixedWriter(&vnp_buf);
+    try packet.encodeVersionNegotiationPacket(vnp_writer.writer(), .{
+        .dcid = &client_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+    const progress = try transport.receive(2, &scratch, vnp_writer.getWritten());
+    try std.testing.expectEqual(@as(?packet.Version, .v1), progress.version_negotiation_selected_version);
+
+    const followup_config = try transport.versionNegotiationFollowupConfig();
+    try std.testing.expectEqual(packet.Version.v1, followup_config.chosen_version);
+    try std.testing.expectEqual(@as(?packet.Version, .v1), followup_config.version_negotiation_selected_version);
 }
 
 test "Tls13ClientTransport exposes unidirectional and stream cancellation controls" {
