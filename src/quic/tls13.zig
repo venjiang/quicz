@@ -2183,6 +2183,7 @@ pub const Tls13Handshake = struct {
                         const group = readU16(ext[sp..]);
                         const klen = readU16(ext[sp + 2 ..]);
                         sp += 4;
+                        if (klen == 0) return error.DecodeError;
                         if (sp + klen > el) return error.DecodeError;
                         if (group == group_x25519) {
                             if (seen_x25519_key_share) return error.DecodeError;
@@ -4365,6 +4366,35 @@ test "Tls13Handshake server rejects duplicate ClientHello X25519 key_share entri
     const extensions_len = readU16(hello_buf[key_share.extensions_len_offset..]);
     writeU16(hello_buf[key_share.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + share_entry_len)));
     const hello = hello_buf[0 .. base_hello.len + share_entry_len];
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects empty ClientHello key_share entry" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const key_share = try clientHelloExtension(base_hello, @intFromEnum(ExtType.key_share));
+    const empty_unknown_share = [_]u8{
+        0x00, 0x17, // secp256r1, unsupported here
+        0x00, 0x00, // empty key_exchange is invalid for any group
+    };
+    const insert_offset = key_share.body_offset + key_share.body_len;
+    std.mem.copyBackwards(
+        u8,
+        hello_buf[insert_offset + empty_unknown_share.len .. base_hello.len + empty_unknown_share.len],
+        hello_buf[insert_offset..base_hello.len],
+    );
+    @memcpy(hello_buf[insert_offset..][0..empty_unknown_share.len], &empty_unknown_share);
+
+    const shares_len = readU16(hello_buf[key_share.body_offset..]);
+    writeU16(hello_buf[key_share.body_offset..][0..2], @as(u16, @intCast(shares_len + empty_unknown_share.len)));
+    writeU16(hello_buf[key_share.header_offset + 2 ..][0..2], @as(u16, @intCast(key_share.body_len + empty_unknown_share.len)));
+    try setClientHelloBodyLen(&hello_buf, base_hello.len - 4 + empty_unknown_share.len);
+    const extensions_len = readU16(hello_buf[key_share.extensions_len_offset..]);
+    writeU16(hello_buf[key_share.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + empty_unknown_share.len)));
+    const hello = hello_buf[0 .. base_hello.len + empty_unknown_share.len];
 
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
