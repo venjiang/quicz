@@ -406,47 +406,52 @@ fn serveConcurrent(
                     );
                     managed.retry_datagram_len = 0;
                     var retry_scratch: [8192]u8 = undefined;
-                    const retry_progress = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+                    const retry_secrets = try protection.deriveInitialSecrets(
+                        retry_initial.initial_accept.version,
+                        retry_initial.initial_accept.original_destination_connection_id,
+                    );
+                    var retry_initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
+                    const retry_initial_progress = try lifecycle.driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams(
                         managed.handle,
                         &managed.connection,
                         .initial,
                         managed.backend.cryptoBackend(),
                         &retry_scratch,
-                    );
-                    managed.retry_validated = true;
-                    if (!retry_progress.handshake_keys_installed) continue;
-                    const retry_secrets = try protection.deriveInitialSecrets(
-                        retry_initial.initial_accept.version,
-                        retry_initial.initial_accept.original_destination_connection_id,
-                    );
-                    const server_initial = (try lifecycle.pollProtectedLongCryptoDatagramInSpace(
-                        managed.handle,
-                        &managed.connection,
                         .initial,
                         now_millis,
                         managed.clientScid(),
                         &managed.server_scid,
                         &[_]u8{},
                         retry_secrets.server,
-                    )) orelse return error.UnexpectedState;
-                    defer allocator.free(server_initial);
-                    try socket.send(io, &managed.peer_address, server_initial);
-                    _ = try lifecycle.driveCryptoBackendInSpaceAndArmConnection(
+                        &retry_initial_outputs,
+                    );
+                    for (retry_initial_outputs[0..retry_initial_progress.drain.datagrams_written]) |output| {
+                        defer allocator.free(output.datagram);
+                        try socket.send(io, &managed.peer_address, output.datagram);
+                    }
+                    if (retry_initial_progress.drain.first_error) |drain_error| return drain_error;
+                    managed.retry_validated = true;
+                    if (!retry_initial_progress.backend.handshake_keys_installed) continue;
+                    var retry_handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
+                    const retry_handshake_progress = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
                         managed.handle,
                         &managed.connection,
                         .handshake,
                         managed.backend.cryptoBackend(),
                         &retry_scratch,
-                    );
-                    const server_handshake = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
-                        managed.handle,
-                        &managed.connection,
                         now_millis,
-                        managed.clientScid(),
-                        &managed.server_scid,
-                    )) orelse return error.UnexpectedState;
-                    defer allocator.free(server_handshake);
-                    try socket.send(io, &managed.peer_address, server_handshake);
+                        .{
+                            .space = .handshake,
+                            .destination_connection_id = managed.clientScid(),
+                            .source_connection_id = &managed.server_scid,
+                        },
+                        &retry_handshake_outputs,
+                    );
+                    for (retry_handshake_outputs[0..retry_handshake_progress.drain.datagrams_written]) |output| {
+                        defer allocator.free(output.datagram);
+                        try socket.send(io, &managed.peer_address, output.datagram);
+                    }
+                    if (retry_handshake_progress.drain.first_error) |drain_error| return drain_error;
                     accepted_count += 1;
                     managed.retry_accepted = true;
                     std.debug.print("zig_process_server: connection={d} concurrent=true retry_validated=true\n", .{managed.handle});
