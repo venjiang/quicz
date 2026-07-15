@@ -870,6 +870,7 @@ test "Tls13Handshake serverBuildNewSessionTicket emits ticket age add" {
 
     try std.testing.expect(nst.ticket_age_add != 0);
     try std.testing.expectEqual(@as(u32, 3600), nst.ticket_lifetime);
+    try std.testing.expect(nst.allows_quic_0rtt);
 }
 
 test "PSK binder computes via computeFinishedVerifyData over binder key" {
@@ -1079,6 +1080,33 @@ test "Tls13Handshake initServerWithPsk derives matching client early traffic sec
     // same ClientHello -> same transcript hash.
     const client_early = client.key_schedule.deriveEarlyTrafficSecret(client.transcript.current());
     try std.testing.expectEqualSlices(u8, &client_early, &server.server_early_traffic_secret);
+}
+
+test "Tls13Handshake server verifies PSK binder without deriving early secret when early_data absent" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+
+    var client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+    const action = try client.step();
+    const client_hello = action.send_data.data;
+
+    var server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+    }, &tp, psk);
+    server.provideData(client_hello);
+    _ = try server.step();
+
+    try std.testing.expect(server.peer_offered_psk);
+    try std.testing.expect(!server.peer_offered_early_data);
+    try std.testing.expect(server.peer_psk_binder_valid);
+    try std.testing.expect(!server.server_early_traffic_secret_derived);
 }
 
 test "Tls13Handshake server rejects mismatched PSK binder" {
@@ -2560,9 +2588,10 @@ pub const Tls13Handshake = struct {
             self.transcript.update(msg[0..binder_offset]);
             const truncated_hash = self.transcript.current();
             self.transcript.update(msg[binder_offset..]);
-            // If the server holds a PSK, verify the binder and, on success,
-            // derive the client early traffic secret over the (now complete)
-            // ClientHello transcript so 0-RTT can be opened.
+            // If the server holds a PSK, verify the binder. Derive the client
+            // early traffic secret only when the peer actually offered
+            // early_data; PSK-only resumption must not open a 0-RTT receive
+            // path.
             if (self.server_psk != null) {
                 const binder_key = self.key_schedule.deriveBinderKey();
                 const expected = KeySchedule.computeFinishedVerifyData(binder_key, truncated_hash);
@@ -2571,7 +2600,7 @@ pub const Tls13Handshake = struct {
                     expected,
                     self.peer_psk_binder,
                 );
-                if (self.peer_psk_binder_valid) {
+                if (self.peer_psk_binder_valid and self.peer_offered_early_data) {
                     self.server_early_traffic_secret = self.key_schedule.deriveEarlyTrafficSecret(self.transcript.current());
                     self.server_early_traffic_secret_derived = true;
                 }
@@ -2826,9 +2855,16 @@ pub const Tls13Handshake = struct {
         pos += 2;
         @memcpy(buf[pos..][0..nonce.len], &nonce);
         pos += nonce.len;
-        // extensions<0..2^16-2>: empty
-        writeU16(buf[pos..], 0);
+        // extensions<0..2^16-2>: QUIC permits 0-RTT with the 0xffffffff
+        // early_data sentinel (RFC 9001 §4.6.1).
+        writeU16(buf[pos..], 8);
         pos += 2;
+        writeU16(buf[pos..], @intFromEnum(ExtType.early_data));
+        pos += 2;
+        writeU16(buf[pos..], 4);
+        pos += 2;
+        writeU32(buf[pos..], 0xffffffff);
+        pos += 4;
 
         const msg_len = pos - 4;
         buf[0] = @intFromEnum(HandshakeType.new_session_ticket);

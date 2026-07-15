@@ -71818,6 +71818,7 @@ test "Tls13Backend + Connection: 0-RTT early data round-trip on TLS-owned path" 
     }, psk);
     @memcpy(client_backend.hs.session_ticket[0..ticket.len], &ticket);
     client_backend.hs.session_ticket_len = ticket.len;
+    client_backend.hs.session_ticket_allows_early_data = true;
 
     var server_backend = tls13_backend.Tls13Backend.initServerWithPsk(.{
         .alpn = &alpn,
@@ -72065,6 +72066,8 @@ test "Tls13Backend + Connection: resumption PSK from handshake drives 0-RTT roun
     }, resumption_psk);
     @memcpy(client2_backend.hs.session_ticket[0..ticket_len], ticket[0..ticket_len]);
     client2_backend.hs.session_ticket_len = ticket_len;
+    client2_backend.hs.session_ticket_age_add = client1_backend.hs.session_ticket_age_add;
+    client2_backend.hs.session_ticket_allows_early_data = client1_backend.hs.session_ticket_allows_early_data;
 
     var server2_backend = tls13_backend.Tls13Backend.initServerWithPsk(.{
         .alpn = &alpn,
@@ -72152,6 +72155,7 @@ test "Tls13Backend + Connection: rejectZeroRtt drops early data on TLS-owned pat
     }, psk);
     @memcpy(client_backend.hs.session_ticket[0..ticket.len], &ticket);
     client_backend.hs.session_ticket_len = ticket.len;
+    client_backend.hs.session_ticket_allows_early_data = true;
 
     var server_backend = tls13_backend.Tls13Backend.initServerWithPsk(.{
         .alpn = &alpn,
@@ -72252,6 +72256,7 @@ test "Tls13Backend + Connection: accept_zero_rtt config auto-accepts early data"
     }, psk);
     @memcpy(client_backend.hs.session_ticket[0..ticket.len], &ticket);
     client_backend.hs.session_ticket_len = ticket.len;
+    client_backend.hs.session_ticket_allows_early_data = true;
 
     var server_backend = tls13_backend.Tls13Backend.initServerWithPsk(.{
         .alpn = &alpn,
@@ -72342,6 +72347,7 @@ test "Tls13Backend + Connection: accept_zero_rtt=false ignores early data" {
     }, psk);
     @memcpy(client_backend.hs.session_ticket[0..ticket.len], &ticket);
     client_backend.hs.session_ticket_len = ticket.len;
+    client_backend.hs.session_ticket_allows_early_data = true;
 
     var server_backend = tls13_backend.Tls13Backend.initServerWithPsk(.{
         .alpn = &alpn,
