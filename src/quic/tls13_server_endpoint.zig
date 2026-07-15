@@ -97,6 +97,14 @@ pub fn Tls13ServerEndpoint(
             drain: root.EndpointDatagramDrainResult,
         };
 
+        /// Pending-work sweep result with every drained datagram paired to a route.
+        pub const PendingWorkDatagramPathDrainResult = struct {
+            /// Pending-work actions applied across endpoint-owned records.
+            pending_work: root.EndpointPendingWorkSweepResult,
+            /// Bounded output drain after pending recovery work, if any.
+            drain: DatagramPathDrainResult,
+        };
+
         /// Result from draining active-record output with committed route paths.
         pub const DatagramPathDrainResult = struct {
             /// Number of initialized entries written to the caller-provided output slice.
@@ -339,6 +347,34 @@ pub fn Tls13ServerEndpoint(
                 allocator,
                 now_millis,
             );
+        }
+
+        /// Sweep pending work across endpoint-owned records and drain route-bound output.
+        pub fn processPendingWorkAndDrainDatagramsWithRoutePath(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+            out: []DatagramPathResult,
+        ) root.Error!PendingWorkDatagramPathDrainResult {
+            const pending_work = try self.records.processPendingWork(
+                &self.lifecycle,
+                allocator,
+                now_millis,
+            );
+            const drain = if (pending_work.recovery_serviced_count == 0)
+                DatagramPathDrainResult{}
+            else
+                self.drainDatagramsAcrossRecordsWithRoutePath(
+                    allocator,
+                    now_millis,
+                    space,
+                    out,
+                );
+            return .{
+                .pending_work = pending_work,
+                .drain = drain,
+            };
         }
 
         /// Service the earliest due deadline and drain bounded protected output.
@@ -3286,6 +3322,36 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expectEqual(@as(usize, 0), empty_drain.datagrams_written);
     try std.testing.expectEqual(@as(?root.Error, null), empty_drain.first_error);
     try std.testing.expectEqual(@as(?endpoint.RouteError, null), empty_drain.first_route_error);
+
+    try second_record.connection.sendPing();
+    const recovery_first = (try endpoint_owner.pollDatagramWithRoutePath(
+        no_allocation_allocator.allocator(),
+        15,
+        .application,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(recovery_first.datagram);
+    const deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(second_record.handle, deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, deadline.kind);
+    try std.testing.expectEqual(root.PacketNumberSpace.application, deadline.recovery.?.space);
+
+    var pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const pending_drain = try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        deadline.deadline_millis,
+        .application,
+        &pending_out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), pending_drain.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), pending_drain.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), pending_drain.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 1), pending_drain.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), pending_drain.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), pending_drain.drain.first_route_error);
+    defer std.testing.allocator.free(pending_out[0].datagram);
+    try std.testing.expectEqual(second_record.handle, pending_out[0].connection_id);
+    try std.testing.expect(pending_out[0].path.eql(second_path));
+    try std.testing.expect(pending_out[0].datagram.len != 0);
 }
 
 test "Tls13ServerEndpoint pairs Initial due recovery output with committed route path" {

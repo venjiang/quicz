@@ -250,17 +250,16 @@ pub fn EndpointConnectionRegistry(
             return removed_count;
         }
 
-        /// Sweep endpoint-owned pending work and return the next live deadline.
+        /// Sweep endpoint-owned pending work and destroy records closed by it.
         ///
         /// Terminal idle/close transitions retire lifecycle state first, then
-        /// this registry destroys the matching endpoint-owned records before
-        /// selecting the next deadline.
-        pub fn processPendingWorkAndSelectNextDeadline(
+        /// this registry destroys the matching endpoint-owned records.
+        pub fn processPendingWork(
             self: *Self,
             lifecycle: *root.EndpointConnectionLifecycle,
             allocator: std.mem.Allocator,
             now_millis: i64,
-        ) root.Error!root.EndpointPendingWorkNextDeadlineResult {
+        ) root.Error!root.EndpointPendingWorkSweepResult {
             const pending_work = if (self.receive_view_scratch) |views|
                 try lifecycle.processPendingWorkAcrossConnections(
                     try self.fillReceiveViews(views),
@@ -275,8 +274,74 @@ pub fn EndpointConnectionRegistry(
                 );
             };
             _ = self.removeClosedRecords();
+            return pending_work;
+        }
+
+        /// Sweep pending work, destroy closed records, and drain installed-key output.
+        ///
+        /// Output is only drained when at least one recovery timer was serviced.
+        pub fn processPendingWorkAndDrainDatagrams(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            allocator: std.mem.Allocator,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+            out: []root.EndpointPolledDatagramResult,
+            comptime destination_connection_id: *const fn (*const Record) []const u8,
+            comptime source_connection_id: *const fn (*const Record) []const u8,
+        ) root.Error!root.EndpointPendingWorkSweepDatagramDrainResult {
+            const pending_work = try self.processPendingWork(
+                lifecycle,
+                allocator,
+                now_millis,
+            );
+            if (pending_work.recovery_serviced_count == 0) {
+                return .{
+                    .pending_work = pending_work,
+                    .drain = .{},
+                };
+            }
+
+            const drain = if (self.poll_view_scratch) |views|
+                lifecycle.drainDatagramsAcrossConnections(
+                    try self.fillPollViews(views, destination_connection_id, source_connection_id),
+                    now_millis,
+                    space,
+                    out,
+                )
+            else drain: {
+                const views = try self.pollViews(
+                    allocator,
+                    destination_connection_id,
+                    source_connection_id,
+                );
+                defer allocator.free(views);
+                break :drain lifecycle.drainDatagramsAcrossConnections(
+                    views,
+                    now_millis,
+                    space,
+                    out,
+                );
+            };
             return .{
                 .pending_work = pending_work,
+                .drain = drain,
+            };
+        }
+
+        /// Sweep endpoint-owned pending work and return the next live deadline.
+        ///
+        /// Terminal idle/close transitions retire lifecycle state first, then
+        /// this registry destroys the matching endpoint-owned records before
+        /// selecting the next deadline.
+        pub fn processPendingWorkAndSelectNextDeadline(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            allocator: std.mem.Allocator,
+            now_millis: i64,
+        ) root.Error!root.EndpointPendingWorkNextDeadlineResult {
+            return .{
+                .pending_work = try self.processPendingWork(lifecycle, allocator, now_millis),
                 .next_deadline = try self.nextDeadline(lifecycle, allocator),
             };
         }
@@ -480,6 +545,20 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
         TestRecord.destinationConnectionId,
         TestRecord.sourceConnectionId,
     )) == null);
+    const pending_drain = try registry.processPendingWorkAndDrainDatagrams(
+        &lifecycle,
+        no_allocation_allocator.allocator(),
+        0,
+        .application,
+        &due_datagrams,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    );
+    try std.testing.expectEqual(@as(usize, 0), pending_drain.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), pending_drain.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), pending_drain.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), pending_drain.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), pending_drain.drain.first_error);
 
     const second_record = try std.testing.allocator.create(TestRecord);
     var second_initialized = false;
