@@ -237,6 +237,7 @@ pub const HandshakeError = error{
     NoApplicationProtocol,
     MissingExtension,
     UnrecognizedName,
+    UnsupportedSignatureAlgorithm,
 };
 
 // ─── CertificateVerify signature verification ───────────────────────
@@ -867,6 +868,13 @@ const version_tls_1_3: u16 = 0x0304;
 const sig_ecdsa_secp256r1_sha256: u16 = 0x0403;
 const sig_ed25519: u16 = 0x0807;
 const sig_rsa_pss_rsae_sha256: u16 = 0x0804;
+
+fn signatureSchemeForPrivateKeyAlgorithm(algorithm: PrivateKeyAlgorithm) u16 {
+    return switch (algorithm) {
+        .ecdsa_p256_sha256 => sig_ecdsa_secp256r1_sha256,
+        .ed25519 => sig_ed25519,
+    };
+}
 
 fn clientHelloKnownExtensionBit(ext_type: u16) ?u4 {
     return switch (ext_type) {
@@ -1895,7 +1903,12 @@ pub const Tls13Handshake = struct {
         var have_key_share = false;
         var have_version = false;
         var have_server_name = false;
+        var have_supported_groups = false;
+        var have_signature_algorithms = false;
+        var client_supports_x25519 = false;
+        var client_supports_server_sig = false;
         var seen_known_extensions: u16 = 0;
+        const server_sig_scheme = signatureSchemeForPrivateKeyAlgorithm(self.config.private_key_algorithm);
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
             const et = readU16(body[pos..]);
@@ -1966,6 +1979,34 @@ pub const Tls13Handshake = struct {
                             }
                         }
                         ap += plen;
+                    }
+                },
+                @intFromEnum(ExtType.supported_groups) => {
+                    if (el < 2) return error.DecodeError;
+                    const groups_len = readU16(ext[0..2]);
+                    if (groups_len == 0 or 2 + groups_len != el or groups_len % 2 != 0) {
+                        return error.DecodeError;
+                    }
+                    have_supported_groups = true;
+                    var gp: usize = 2;
+                    while (gp + 2 <= el) : (gp += 2) {
+                        if (readU16(ext[gp..]) == group_x25519) {
+                            client_supports_x25519 = true;
+                        }
+                    }
+                },
+                @intFromEnum(ExtType.signature_algorithms) => {
+                    if (el < 2) return error.DecodeError;
+                    const schemes_len = readU16(ext[0..2]);
+                    if (schemes_len == 0 or 2 + schemes_len != el or schemes_len % 2 != 0) {
+                        return error.DecodeError;
+                    }
+                    have_signature_algorithms = true;
+                    var sp: usize = 2;
+                    while (sp + 2 <= el) : (sp += 2) {
+                        if (readU16(ext[sp..]) == server_sig_scheme) {
+                            client_supports_server_sig = true;
+                        }
                     }
                 },
                 @intFromEnum(ExtType.server_name) => {
@@ -2054,6 +2095,9 @@ pub const Tls13Handshake = struct {
 
         if (!have_version) return error.UnsupportedVersion;
         if (!have_key_share) return error.NoKeyShare;
+        if (have_supported_groups and !client_supports_x25519) return error.NoKeyShare;
+        if (self.config.cert_chain_der.len > 0 and !have_signature_algorithms) return error.MissingExtension;
+        if (have_signature_algorithms and !client_supports_server_sig) return error.UnsupportedSignatureAlgorithm;
         if (self.config.alpn.len > 0 and self.negotiated_alpn_len == 0) return error.NoApplicationProtocol;
         if (self.config.server_name != null and !have_server_name) return error.UnrecognizedName;
 
@@ -3232,6 +3276,48 @@ test "Tls13Handshake server rejects ClientHello pre_shared_key before trailing e
     var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects ClientHello supported_groups without X25519" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const groups = try clientHelloExtension(hello, @intFromEnum(ExtType.supported_groups));
+    writeU16(hello[groups.body_offset + 2 ..][0..2], 0x0017);
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.NoKeyShare, server.step());
+}
+
+test "Tls13Handshake server rejects missing signature_algorithms when sending a certificate" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const sig_algs = try clientHelloExtension(hello, @intFromEnum(ExtType.signature_algorithms));
+    writeU16(hello[sig_algs.header_offset..][0..2], 0xaaaa);
+
+    const cert_der = [_]u8{ 0x30, 0x03, 0x01 };
+    var server = Tls13Handshake.initServer(.{
+        .cert_chain_der = &.{&cert_der},
+    }, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.MissingExtension, server.step());
+}
+
+test "Tls13Handshake server rejects unsupported CertificateVerify signature scheme" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const sig_algs = try clientHelloExtension(hello, @intFromEnum(ExtType.signature_algorithms));
+    writeU16(hello[sig_algs.body_offset + 2 ..][0..2], 0x0805);
+    writeU16(hello[sig_algs.body_offset + 4 ..][0..2], 0x0806);
+    writeU16(hello[sig_algs.body_offset + 6 ..][0..2], sig_rsa_pss_rsae_sha256);
+
+    const cert_der = [_]u8{ 0x30, 0x03, 0x01 };
+    var server = Tls13Handshake.initServer(.{
+        .cert_chain_der = &.{&cert_der},
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    }, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.UnsupportedSignatureAlgorithm, server.step());
 }
 
 test "Tls13Handshake server rejects malformed ClientHello supported_versions length" {
