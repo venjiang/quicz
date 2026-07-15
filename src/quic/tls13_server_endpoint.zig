@@ -1,4 +1,4 @@
-//! Reusable endpoint ownership for bounded TLS 1.3 server connection records.
+//! Reusable endpoint ownership for TLS 1.3 server connection records.
 //!
 //! This type owns lifecycle routing/timers and record storage, but deliberately
 //! leaves UDP socket I/O, admission policy, and application dispatch with its
@@ -20,7 +20,7 @@ const EndpointConnectionLifecycle = endpoint_lifecycle.EndpointConnectionLifecyc
 /// Build an endpoint owner for one caller-defined TLS server record type.
 ///
 /// Records own their transport/backend and application metadata. The endpoint
-/// owns their bounded lifetime, CID routing, recovery timers, and path policy.
+/// owns their lifetime, CID routing, recovery timers, and path policy.
 pub fn Tls13ServerEndpoint(
     comptime Record: type,
     comptime connection_of: *const fn (*Record) *Connection,
@@ -47,6 +47,18 @@ pub fn Tls13ServerEndpoint(
             return switch (space) {
                 .handshake => .handshake,
                 .zero_rtt, .application => .application,
+            };
+        }
+
+        /// Create an endpoint with dynamically allocated record and route storage.
+        ///
+        /// The caller owns admission and resource policy. Use
+        /// `initWithCapacity()` when a fixed active-connection limit and
+        /// up-front lifecycle storage are required.
+        pub fn init(allocator: std.mem.Allocator) Self {
+            return .{
+                .lifecycle = EndpointConnectionLifecycle.init(allocator),
+                .records = Registry.init(allocator),
             };
         }
 
@@ -889,4 +901,11 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
     try std.testing.expect((try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) == null);
+
+    var dynamic_endpoint = TestEndpoint.init(std.testing.allocator);
+    defer dynamic_endpoint.deinit();
+    try std.testing.expect(dynamic_endpoint.records.hasCapacity());
+    try std.testing.expectEqual(std.math.maxInt(usize), dynamic_endpoint.records.max_records);
+    try std.testing.expectEqual(@as(usize, 0), dynamic_endpoint.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), try dynamic_endpoint.nextDeadline(std.testing.allocator));
 }
