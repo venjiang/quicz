@@ -9,7 +9,7 @@
 //! deadline 驱动事件循环，能处理 PTO 超时恢复，逼近真实网络行为。
 //!
 //! 命令行：interop_event_loopback [TESTCASE]
-//!   TESTCASE: handshake（默认）/ transfer / loss / congestion / persistent / key-update / path / stream-control
+//!   TESTCASE: handshake（默认）/ transfer / loss / congestion / persistent / key-update / path / stream-control / stream-limit
 //!
 //! 场景（本地 loopback 自测）：
 //!   handshake - 事件循环驱动 TLS 1.3 握手到两端 handshakeConfirmed
@@ -26,6 +26,8 @@
 //!                验证后，由 server endpoint lifecycle 提交路由迁移
 //!   stream-control - TLS-backed endpoint lifecycle 经真实 UDP 发送
 //!                    RESET_STREAM，并完成 STOP_SENDING 到 RESET_STREAM 的往返
+//!   stream-limit - TLS-backed endpoint lifecycle 经真实 UDP 完成双向流额度
+//!                  释放与 MAX_STREAMS_BIDI 更新
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -47,7 +49,7 @@ const client_handle: u64 = 1;
 const server_handle: u64 = 2;
 const max_key_update_datagrams: usize = 64;
 
-const Testcase = enum { handshake, transfer, loss, congestion, persistent, key_update, path, stream_control };
+const Testcase = enum { handshake, transfer, loss, congestion, persistent, key_update, path, stream_control, stream_limit };
 
 fn parseTestcase(name: []const u8) Testcase {
     if (std.mem.eql(u8, name, "handshake")) return .handshake;
@@ -58,6 +60,7 @@ fn parseTestcase(name: []const u8) Testcase {
     if (std.mem.eql(u8, name, "key-update")) return .key_update;
     if (std.mem.eql(u8, name, "path")) return .path;
     if (std.mem.eql(u8, name, "stream-control")) return .stream_control;
+    if (std.mem.eql(u8, name, "stream-limit")) return .stream_limit;
     return .handshake;
 }
 
@@ -393,10 +396,11 @@ pub fn main(init: std.process.Init) !void {
 
     // ─── Connection + Tls13Backend（client + server） ───
     // initial_rtt_ms=100 使 PTO deadline 可预测（约 300ms），事件循环能快速推进触发。
+    const initial_max_streams_bidi: u64 = if (testcase == .stream_limit) 1 else 8;
     var client = try Connection.init(allocator, .client, .{
         .initial_max_data = 8192,
         .initial_max_stream_data = 2048,
-        .initial_max_streams_bidi = 8,
+        .initial_max_streams_bidi = initial_max_streams_bidi,
         .initial_rtt_ms = 100,
         // Keep the RFC 9002 minimum window below the initial window so the
         // congestion testcases can observe a genuine RFC 9002 reduction.
@@ -406,7 +410,7 @@ pub fn main(init: std.process.Init) !void {
     var server = try Connection.init(allocator, .server, .{
         .initial_max_data = 8192,
         .initial_max_stream_data = 2048,
-        .initial_max_streams_bidi = 8,
+        .initial_max_streams_bidi = initial_max_streams_bidi,
         .initial_rtt_ms = 100,
         .max_datagram_size = 1200,
     });
@@ -968,6 +972,53 @@ pub fn main(init: std.process.Init) !void {
         try require(stopped_server_stream.receive_reset_error_code.? == 42);
 
         std.debug.print("tls_stream_control=true reset_error=41 stop_error=42\n", .{});
+        return;
+    }
+
+    if (testcase == .stream_limit) {
+        // Keep the flow-control exchange separate from residual handshake ACK
+        // and HANDSHAKE_DONE packets, then prove the peer's advertised limit
+        // is initially exhausted.
+        try drainReadyOutput(io, &client_ep, &server_ep, now, secrets, &scratch, &recv_buf);
+        now += 1;
+        const first_stream = try client.openStream();
+        try require(first_stream == 0);
+        const limit_blocked = if (client.openStream()) |_| false else |err| switch (err) {
+            error.FlowControlBlocked => true,
+            else => return err,
+        };
+        try require(limit_blocked);
+        try client.sendOnStream(first_stream, "limit", true);
+        try driveAndPoll(&client_ep, io, now, secrets, &scratch);
+
+        var request_received = false;
+        var stream_buf: [16]u8 = undefined;
+        var request_round: usize = 0;
+        while (!request_received and request_round < 32) : (request_round += 1) {
+            try stepEventLoop(io, &client_ep, &server_ep, &now, secrets, &scratch, &recv_buf, &pto_fired);
+            if ((try server.recvOnStream(first_stream, &stream_buf))) |n| {
+                try require(std.mem.eql(u8, stream_buf[0..n], "limit"));
+                request_received = try server.recvStreamFinished(first_stream);
+            }
+        }
+        try require(request_received);
+
+        // Reading the peer FIN releases one receive-side stream credit. The
+        // server emits that MAX_STREAMS_BIDI update as a protected 1-RTT UDP
+        // datagram, after which the client can allocate stream ID 4.
+        try driveAndPoll(&server_ep, io, now, secrets, &scratch);
+        var next_stream: ?u64 = null;
+        var release_round: usize = 0;
+        while (next_stream == null and release_round < 32) : (release_round += 1) {
+            const received = client_socket.receiveTimeout(io, &recv_buf, shortTimeout()) catch continue;
+            processRecv(&client_ep, received.data, now);
+            next_stream = client.openStream() catch |err| switch (err) {
+                error.FlowControlBlocked => null,
+                else => return err,
+            };
+        }
+        try require(next_stream.? == 4);
+        std.debug.print("tls_stream_limit=true released_stream=4\n", .{});
         return;
     }
 
