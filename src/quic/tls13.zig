@@ -346,6 +346,11 @@ pub const NewSessionTicket = struct {
 /// resumption PSK. Slices reference `msg` and remain valid while it does.
 pub fn parseNewSessionTicket(msg: []const u8) HandshakeError!NewSessionTicket {
     if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.new_session_ticket)) return error.UnexpectedMessage;
+    const body_len = (@as(usize, msg[1]) << 16) |
+        (@as(usize, msg[2]) << 8) |
+        @as(usize, msg[3]);
+    if (body_len != msg.len - 4) return error.DecodeError;
+
     var pos: usize = 4;
     if (pos + 4 > msg.len) return error.DecodeError;
     const ticket_lifetime = readU32(msg[pos..]);
@@ -362,8 +367,14 @@ pub fn parseNewSessionTicket(msg: []const u8) HandshakeError!NewSessionTicket {
     if (pos + 2 > msg.len) return error.DecodeError;
     const ticket_len = readU16(msg[pos..]);
     pos += 2;
+    if (ticket_len == 0) return error.DecodeError;
     if (pos + ticket_len > msg.len) return error.DecodeError;
     const ticket = msg[pos .. pos + ticket_len];
+    pos += ticket_len;
+    if (pos + 2 > msg.len) return error.DecodeError;
+    const extensions_len = readU16(msg[pos..]);
+    pos += 2;
+    if (pos + extensions_len != msg.len) return error.DecodeError;
     return .{
         .ticket_lifetime = ticket_lifetime,
         .ticket_age_add = ticket_age_add,
@@ -454,11 +465,12 @@ test "KeySchedule derivePskFromTicket is deterministic and nonce-dependent" {
 
 test "parseNewSessionTicket parses fields" {
     const msg = [_]u8{
-        0x04, 0x00, 0x00, 0x18, // type=new_session_ticket, length=24
+        0x04, 0x00, 0x00, 0x13, // type=new_session_ticket, length=19
         0x00, 0x00, 0x0e, 0x10, // ticket_lifetime=3600
         0x00, 0x00, 0x00, 0x01, // ticket_age_add=1
         0x02, 0xaa, 0xbb, // nonce_len=2, nonce=0xaabb
         0x00, 0x04, 0xcc, 0xdd, 0xee, 0xff, // ticket_len=4, ticket=0xccddeeff
+        0x00, 0x00, // extensions_len=0
     };
     const nst = try parseNewSessionTicket(&msg);
     try std.testing.expectEqual(@as(u32, 3600), nst.ticket_lifetime);
@@ -476,6 +488,47 @@ test "parseNewSessionTicket rejects wrong type and truncation" {
     try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&truncated));
 }
 
+test "parseNewSessionTicket rejects invalid vector boundaries" {
+    const missing_extensions = [_]u8{
+        0x04, 0x00, 0x00, 0x11,
+        0x00, 0x00, 0x0e, 0x10,
+        0x00, 0x00, 0x00, 0x01,
+        0x02, 0xaa, 0xbb, 0x00,
+        0x04, 0xcc, 0xdd, 0xee,
+        0xff,
+    };
+    try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&missing_extensions));
+
+    const trailing_after_extensions = [_]u8{
+        0x04, 0x00, 0x00, 0x14,
+        0x00, 0x00, 0x0e, 0x10,
+        0x00, 0x00, 0x00, 0x01,
+        0x02, 0xaa, 0xbb, 0x00,
+        0x04, 0xcc, 0xdd, 0xee,
+        0xff, 0x00, 0x00, 0x00,
+    };
+    try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&trailing_after_extensions));
+
+    const header_length_mismatch = [_]u8{
+        0x04, 0x00, 0x00, 0x12,
+        0x00, 0x00, 0x0e, 0x10,
+        0x00, 0x00, 0x00, 0x01,
+        0x02, 0xaa, 0xbb, 0x00,
+        0x04, 0xcc, 0xdd, 0xee,
+        0xff, 0x00, 0x00,
+    };
+    try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&header_length_mismatch));
+
+    const empty_ticket = [_]u8{
+        0x04, 0x00, 0x00, 0x0d,
+        0x00, 0x00, 0x0e, 0x10,
+        0x00, 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x00,
+        0x00,
+    };
+    try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&empty_ticket));
+}
+
 test "Tls13Handshake clientProcessNewSessionTicket derives and stores PSK" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -491,11 +544,12 @@ test "Tls13Handshake clientProcessNewSessionTicket derives and stores PSK" {
     hs.state = .connected;
 
     const nst_msg = [_]u8{
-        0x04, 0x00, 0x00, 0x12, // type=new_session_ticket, length=18
+        0x04, 0x00, 0x00, 0x13, // type=new_session_ticket, length=19
         0x00, 0x00, 0x0e, 0x10, // ticket_lifetime=3600
         0x00, 0x00, 0x00, 0x01, // ticket_age_add=1
         0x02, 0xaa, 0xbb, // nonce_len=2, nonce=0xaabb
         0x00, 0x04, 0xcc, 0xdd, 0xee, 0xff, // ticket_len=4, ticket
+        0x00, 0x00, // extensions_len=0
     };
     try hs.clientProcessNewSessionTicket(&nst_msg);
     try std.testing.expect(hs.resumption_psk != null);
@@ -514,11 +568,12 @@ test "Tls13Handshake clientProcessPostHandshake drains NewSessionTicket from inp
     hs.state = .connected;
 
     const nst_msg = [_]u8{
-        0x04, 0x00, 0x00, 0x11, // type=new_session_ticket, length=17
+        0x04, 0x00, 0x00, 0x13, // type=new_session_ticket, length=19
         0x00, 0x00, 0x0e, 0x10, // ticket_lifetime=3600
         0x00, 0x00, 0x00, 0x01, // ticket_age_add=1
         0x02, 0xaa, 0xbb, // nonce_len=2, nonce=0xaabb
         0x00, 0x04, 0xcc, 0xdd, 0xee, 0xff, // ticket_len=4, ticket
+        0x00, 0x00, // extensions_len=0
     };
     hs.provideData(&nst_msg);
     try std.testing.expect(hs.resumption_psk == null);
@@ -608,16 +663,53 @@ test "Tls13Handshake clientProcessNewSessionTicket stores session ticket" {
     hs.state = .connected;
 
     const nst_msg = [_]u8{
-        0x04, 0x00, 0x00, 0x11,
+        0x04, 0x00, 0x00, 0x13,
         0x00, 0x00, 0x0e, 0x10,
         0x00, 0x00, 0x00, 0x01,
         0x02, 0xaa, 0xbb, 0x00,
         0x04, 0xcc, 0xdd, 0xee,
-        0xff,
+        0xff, 0x00, 0x00,
     };
     try hs.clientProcessNewSessionTicket(&nst_msg);
     try std.testing.expectEqual(@as(usize, 4), hs.session_ticket_len);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xcc, 0xdd, 0xee, 0xff }, hs.session_ticket[0..4]);
+}
+
+test "Tls13Handshake clientProcessNewSessionTicket rejects oversized session ticket" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp);
+    const shared_secret = [_]u8{0x01} ** 32;
+    hs.key_schedule.deriveHandshakeSecrets(&shared_secret, hs.transcript.current());
+    hs.key_schedule.deriveAppSecrets(hs.transcript.current());
+    hs.state = .connected;
+
+    const oversized_ticket_len = 4097;
+    const body_len = 4 + 4 + 1 + 2 + oversized_ticket_len + 2;
+    var nst_msg: [4 + body_len]u8 = undefined;
+    nst_msg[0] = @intFromEnum(HandshakeType.new_session_ticket);
+    nst_msg[1] = @intCast((body_len >> 16) & 0xff);
+    nst_msg[2] = @intCast((body_len >> 8) & 0xff);
+    nst_msg[3] = @intCast(body_len & 0xff);
+    var pos: usize = 4;
+    writeU32(nst_msg[pos..], 3600);
+    pos += 4;
+    writeU32(nst_msg[pos..], 1);
+    pos += 4;
+    nst_msg[pos] = 0;
+    pos += 1;
+    writeU16(nst_msg[pos..], oversized_ticket_len);
+    pos += 2;
+    @memset(nst_msg[pos..][0..oversized_ticket_len], 0xcc);
+    pos += oversized_ticket_len;
+    writeU16(nst_msg[pos..], 0);
+    pos += 2;
+    try std.testing.expectEqual(nst_msg.len, pos);
+
+    try std.testing.expectError(error.DecodeError, hs.clientProcessNewSessionTicket(&nst_msg));
 }
 
 test "PSK binder computes via computeFinishedVerifyData over binder key" {
@@ -1260,7 +1352,8 @@ pub const Tls13Handshake = struct {
         const nst = try parseNewSessionTicket(msg);
         const rms = self.key_schedule.deriveResumptionMasterSecret(self.transcript.current());
         self.resumption_psk = KeySchedule.derivePskFromTicket(rms, nst.ticket_nonce);
-        const ticket_len = @min(nst.ticket.len, self.session_ticket.len);
+        if (nst.ticket.len > self.session_ticket.len) return error.DecodeError;
+        const ticket_len = nst.ticket.len;
         @memcpy(self.session_ticket[0..ticket_len], nst.ticket[0..ticket_len]);
         self.session_ticket_len = ticket_len;
     }
