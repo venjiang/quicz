@@ -1646,6 +1646,7 @@ pub const Tls13Handshake = struct {
         if (pos + 1 > msg.len) return error.DecodeError;
         const ctx_len = msg[pos];
         pos += 1;
+        if (ctx_len != 0) return error.DecodeError;
         if (pos + ctx_len > msg.len) return error.DecodeError;
         pos += ctx_len;
         // certificate_list (3-byte length + entries)
@@ -2983,6 +2984,31 @@ test "Tls13Handshake rejects malformed certificate chains when verification is s
     };
     var handshake = Tls13Handshake.initClient(.{}, &.{});
     handshake.provideData(&malformed);
+    try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificate());
+}
+
+test "Tls13Handshake rejects non-empty server Certificate request context" {
+    const cert_der = [_]u8{0x30};
+    var certificate_message: [64]u8 = undefined;
+    const certificate_len = buildCertificate(&certificate_message, &cert_der);
+    const context_offset = 4;
+    const insert_offset = context_offset + 1;
+    std.mem.copyBackwards(
+        u8,
+        certificate_message[insert_offset + 1 .. certificate_len + 1],
+        certificate_message[insert_offset..certificate_len],
+    );
+    certificate_message[context_offset] = 1;
+    certificate_message[insert_offset] = 0xaa;
+    const new_body_len = certificate_len + 1 - 4;
+    certificate_message[1] = @intCast((new_body_len >> 16) & 0xFF);
+    certificate_message[2] = @intCast((new_body_len >> 8) & 0xFF);
+    certificate_message[3] = @intCast(new_body_len & 0xFF);
+
+    var handshake = Tls13Handshake.initClient(.{ .skip_cert_verify = true }, &[_]u8{});
+    handshake.state = .client_wait_certificate;
+    handshake.provideData(certificate_message[0 .. certificate_len + 1]);
+
     try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificate());
 }
 
