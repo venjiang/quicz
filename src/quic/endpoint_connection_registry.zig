@@ -83,6 +83,13 @@ pub fn EndpointConnectionRegistry(
             return self.records.count();
         }
 
+        /// Return the configured active-record limit.
+        ///
+        /// Dynamically sized registries report `std.math.maxInt(usize)`.
+        pub fn capacityLimit(self: *const Self) usize {
+            return self.max_records;
+        }
+
         /// Return whether this registry can own one additional record.
         pub fn hasCapacity(self: *const Self) bool {
             return self.count() < self.max_records;
@@ -310,6 +317,7 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
 
     var registry = try Registry.initWithCapacity(std.testing.allocator, 1);
     defer registry.deinit();
+    try std.testing.expectEqual(@as(usize, 1), registry.capacityLimit());
     try std.testing.expect(registry.records.capacity() >= 1);
     var connection = try root.Connection.init(std.testing.allocator, .client, .{});
     var connection_owned = true;
@@ -333,6 +341,7 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
     const views = try registry.deadlineViews(std.testing.allocator);
     defer std.testing.allocator.free(views);
     try std.testing.expectEqual(@as(usize, 1), registry.count());
+    try std.testing.expectEqual(@as(usize, 1), registry.capacityLimit());
     try std.testing.expect(!registry.hasCapacity());
     try std.testing.expectEqual(@as(usize, 1), views.len);
     try std.testing.expectEqual(@as(u64, 7), views[0].connection_id);

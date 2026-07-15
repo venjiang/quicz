@@ -215,6 +215,23 @@ pub fn Tls13ServerEndpoint(
             self.lifecycle.deinit();
         }
 
+        /// Return the number of endpoint-owned active connection records.
+        pub fn activeConnectionCount(self: *const Self) usize {
+            return self.records.count();
+        }
+
+        /// Return the configured active-connection limit.
+        ///
+        /// Dynamically sized endpoints report `std.math.maxInt(usize)`.
+        pub fn activeConnectionLimit(self: *const Self) usize {
+            return self.records.capacityLimit();
+        }
+
+        /// Return whether this endpoint can accept one more connection record.
+        pub fn hasConnectionCapacity(self: *const Self) bool {
+            return self.records.hasCapacity();
+        }
+
         /// Classify one UDP datagram through this endpoint's lifecycle owner.
         pub fn feedDatagram(
             self: *const Self,
@@ -1515,6 +1532,9 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     });
     defer endpoint_owner.deinit();
     try std.testing.expect(endpoint_owner.records.hasCapacity());
+    try std.testing.expect(endpoint_owner.hasConnectionCapacity());
+    try std.testing.expectEqual(@as(usize, 0), endpoint_owner.activeConnectionCount());
+    try std.testing.expectEqual(@as(usize, 2), endpoint_owner.activeConnectionLimit());
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
     try std.testing.expect(endpoint_owner.lifecycle.router.routes.capacity >= 3);
     try std.testing.expect(endpoint_owner.lifecycle.router.reset_tokens.capacity >= 3);
@@ -1548,11 +1568,15 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try endpoint_owner.records.adopt(record_handle, record);
     record_owned = false;
     try std.testing.expect(endpoint_owner.records.hasCapacity());
+    try std.testing.expect(endpoint_owner.hasConnectionCapacity());
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.activeConnectionCount());
     const one_rtt = (try endpoint_owner.pollOneRttDatagram(record_handle, 1)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(one_rtt);
     try std.testing.expect(one_rtt.len != 0);
     try endpoint_owner.records.remove(record_handle);
     try std.testing.expect(endpoint_owner.records.hasCapacity());
+    try std.testing.expect(endpoint_owner.hasConnectionCapacity());
+    try std.testing.expectEqual(@as(usize, 0), endpoint_owner.activeConnectionCount());
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.pollOneRttDatagram(record_handle, 2));
 
     const retry_record = try std.testing.allocator.create(TestRecord);
@@ -1588,6 +1612,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     retry_record_owned = false;
     try std.testing.expectEqual(retry_record.handle, retry_route.connection_id);
     try std.testing.expect(endpoint_owner.records.get(retry_record.handle) != null);
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.activeConnectionCount());
     try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
     const routed_short = [_]u8{ 0x40, 0x90, 0x91, 0x92, 0x93 };
     try std.testing.expectEqual(retry_record.handle, (try endpoint_owner.routeDatagram(retry_path, &routed_short)).connection_id);
@@ -1831,14 +1856,24 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.retireRecord(retry_record_handle));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.routeDatagram(retry_path, &routed_short));
 
+    var full_endpoint = try TestEndpoint.initWithCapacity(std.testing.allocator, 0, .{
+        .max_routes = 0,
+        .max_stateless_reset_tokens = 0,
+    });
+    defer full_endpoint.deinit();
+    try std.testing.expect(!full_endpoint.hasConnectionCapacity());
+    try std.testing.expectEqual(@as(usize, 0), full_endpoint.activeConnectionCount());
+    try std.testing.expectEqual(@as(usize, 0), full_endpoint.activeConnectionLimit());
+
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
     try std.testing.expect((try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) == null);
 
     var dynamic_endpoint = TestEndpoint.init(std.testing.allocator);
     defer dynamic_endpoint.deinit();
-    try std.testing.expect(dynamic_endpoint.records.hasCapacity());
-    try std.testing.expectEqual(std.math.maxInt(usize), dynamic_endpoint.records.max_records);
+    try std.testing.expect(dynamic_endpoint.hasConnectionCapacity());
+    try std.testing.expectEqual(@as(usize, 0), dynamic_endpoint.activeConnectionCount());
+    try std.testing.expectEqual(std.math.maxInt(usize), dynamic_endpoint.activeConnectionLimit());
     try std.testing.expectEqual(@as(usize, 0), dynamic_endpoint.lifecycle.routeCount());
     try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), try dynamic_endpoint.nextDeadline(std.testing.allocator));
 }
