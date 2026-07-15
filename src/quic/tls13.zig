@@ -1772,8 +1772,10 @@ pub const Tls13Handshake = struct {
         const sig_len = readU16(msg[pos..]);
         pos += 2;
         if (pos + sig_len > msg.len) return error.DecodeError;
-        self.cert_verify_sig_len = @min(sig_len, self.cert_verify_sig.len);
-        @memcpy(self.cert_verify_sig[0..self.cert_verify_sig_len], msg[pos .. pos + self.cert_verify_sig_len]);
+        if (pos + sig_len != msg.len) return error.DecodeError;
+        if (sig_len > self.cert_verify_sig.len) return error.DecodeError;
+        self.cert_verify_sig_len = sig_len;
+        @memcpy(self.cert_verify_sig[0..self.cert_verify_sig_len], msg[pos .. pos + sig_len]);
 
         // The signature covers the transcript up to (not including) this
         // message, so snapshot before updating the transcript.
@@ -3250,6 +3252,34 @@ test "Tls13Handshake client rejects server Finished with wrong verify_data" {
     var fin_buf: [64]u8 = undefined;
     hs.provideData(fin_buf[0..buildFinished(&fin_buf, bad)]);
     try std.testing.expectError(error.BadFinished, hs.step());
+}
+
+test "Tls13Handshake client rejects CertificateVerify with trailing bytes" {
+    var cv_buf: [64]u8 = undefined;
+    const base_len = buildCertificateVerify(&cv_buf, 0x0807, &[_]u8{0x01});
+    cv_buf[base_len] = 0xaa;
+    const new_body_len = base_len + 1 - 4;
+    cv_buf[1] = @intCast((new_body_len >> 16) & 0xFF);
+    cv_buf[2] = @intCast((new_body_len >> 8) & 0xFF);
+    cv_buf[3] = @intCast(new_body_len & 0xFF);
+
+    var handshake = Tls13Handshake.initClient(.{ .skip_cert_verify = true }, &[_]u8{});
+    handshake.state = .client_wait_certificate_verify;
+    handshake.provideData(cv_buf[0 .. base_len + 1]);
+
+    try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificateVerify());
+}
+
+test "Tls13Handshake client rejects oversized CertificateVerify signature" {
+    const oversized_sig = [_]u8{0xaa} ** 1025;
+    var cv_buf: [1100]u8 = undefined;
+    const cv_len = buildCertificateVerify(&cv_buf, 0x0807, &oversized_sig);
+
+    var handshake = Tls13Handshake.initClient(.{ .skip_cert_verify = true }, &[_]u8{});
+    handshake.state = .client_wait_certificate_verify;
+    handshake.provideData(cv_buf[0..cv_len]);
+
+    try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificateVerify());
 }
 
 // ─── Tests for CertificateVerify signature verification ─────────────
