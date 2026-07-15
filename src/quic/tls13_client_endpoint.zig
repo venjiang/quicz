@@ -209,6 +209,32 @@ pub const Tls13ClientEndpoint = struct {
         };
     }
 
+    /// Drain protected application datagrams with the committed UDP route.
+    ///
+    /// Each initialized output slot owns its datagram. If `first_error` is set,
+    /// the caller still owns the first `datagrams_written` entries.
+    pub fn drainApplicationDatagramsWithRoutePath(
+        self: *Tls13ClientEndpoint,
+        now_millis: i64,
+        out: []ApplicationDatagramPathResult,
+    ) !ApplicationDatagramPathDrainResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        var result = ApplicationDatagramPathDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const datagram = self.pollApplicationDatagram(now_millis) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = if (datagram) |bytes| .{
+                .datagram = bytes,
+                .path = path,
+            } else return result;
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
     /// Select the next client transport lifecycle deadline.
     pub fn nextDeadline(self: *const Tls13ClientEndpoint) ?client_transport.ClientTransportDeadline {
         return self.transport.nextDeadline();
@@ -460,6 +486,17 @@ pub const Tls13ClientEndpoint = struct {
         path: endpoint.Udp4Tuple,
     };
 
+    /// Error set returned while polling client application datagrams.
+    pub const ApplicationDatagramPollError = @typeInfo(@typeInfo(@TypeOf(pollApplicationDatagram)).@"fn".return_type.?).error_union.error_set;
+
+    /// Result from draining client application datagrams into caller-owned slots.
+    pub const ApplicationDatagramPathDrainResult = struct {
+        /// Number of initialized entries written to the caller-provided output slice.
+        datagrams_written: usize = 0,
+        /// First polling error observed after any earlier entries were written.
+        first_error: ?ApplicationDatagramPollError = null,
+    };
+
     /// Client Version Negotiation restart result.
     pub const VersionNegotiationRestartResult = struct {
         followup: endpoint_lifecycle.EndpointVersionNegotiationFollowupResult,
@@ -592,6 +629,24 @@ test "Tls13ClientEndpoint polls application output with committed route path" {
     try std.testing.expect(polled.path.eql(new_path));
     try std.testing.expect(polled.datagram.len != 0);
     try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
+
+    try client.transport.connection.sendPing();
+    var zero_drain_out: [0]Tls13ClientEndpoint.ApplicationDatagramPathResult = .{};
+    const zero_drain = try client.drainApplicationDatagramsWithRoutePath(2, &zero_drain_out);
+    try std.testing.expectEqual(@as(usize, 0), zero_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), zero_drain.first_error);
+
+    var drain_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const drain = try client.drainApplicationDatagramsWithRoutePath(3, &drain_out);
+    try std.testing.expectEqual(@as(usize, 1), drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), drain.first_error);
+    defer std.testing.allocator.free(drain_out[0].datagram);
+    try std.testing.expect(drain_out[0].path.eql(new_path));
+    try std.testing.expect(drain_out[0].datagram.len != 0);
+
+    const empty_drain = try client.drainApplicationDatagramsWithRoutePath(4, &drain_out);
+    try std.testing.expectEqual(@as(usize, 0), empty_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), empty_drain.first_error);
 }
 
 test "Tls13ClientEndpoint receive returns route-bound close on frame error" {
