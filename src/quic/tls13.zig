@@ -236,6 +236,7 @@ pub const HandshakeError = error{
     UnsupportedVersion,
     NoApplicationProtocol,
     MissingExtension,
+    UnrecognizedName,
 };
 
 // ─── CertificateVerify signature verification ───────────────────────
@@ -934,6 +935,10 @@ pub const Tls13Handshake = struct {
     negotiated_alpn: [256]u8 = undefined,
     negotiated_alpn_len: usize = 0,
 
+    // Server-side: SNI host_name offered by the client.
+    client_sni: [256]u8 = undefined,
+    client_sni_len: usize = 0,
+
     // Pending key installation flags
     pending_install_handshake: bool = false,
     pending_install_app: bool = false,
@@ -1014,6 +1019,7 @@ pub const Tls13Handshake = struct {
         self.pending_install_handshake = false;
         self.pending_install_app = false;
         self.negotiated_alpn_len = 0;
+        self.client_sni_len = 0;
         self.peer_tp_len = 0;
         self.server_cert_len = 0;
         self.cert_verify_scheme = 0;
@@ -1070,6 +1076,7 @@ pub const Tls13Handshake = struct {
         self.pending_install_handshake = false;
         self.pending_install_app = false;
         self.negotiated_alpn_len = 0;
+        self.client_sni_len = 0;
         self.peer_tp_len = 0;
         self.server_cert_len = 0;
         self.cert_verify_scheme = 0;
@@ -1871,6 +1878,7 @@ pub const Tls13Handshake = struct {
 
         var have_key_share = false;
         var have_version = false;
+        var have_server_name = false;
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
             const et = readU16(body[pos..]);
@@ -1930,6 +1938,35 @@ pub const Tls13Handshake = struct {
                         ap += plen;
                     }
                 },
+                @intFromEnum(ExtType.server_name) => {
+                    if (el < 2) return error.DecodeError;
+                    const list_len = readU16(ext[0..2]);
+                    if (list_len == 0 or 2 + list_len != el) return error.DecodeError;
+                    var sp: usize = 2;
+                    var saw_host_name = false;
+                    while (sp < el) {
+                        if (sp + 3 > el) return error.DecodeError;
+                        const name_type = ext[sp];
+                        const name_len = readU16(ext[sp + 1 ..]);
+                        sp += 3;
+                        if (name_len == 0 or sp + name_len > el) return error.DecodeError;
+                        const offered_name = ext[sp .. sp + name_len];
+                        sp += name_len;
+                        if (name_type == 0) {
+                            if (saw_host_name) return error.DecodeError;
+                            saw_host_name = true;
+                            have_server_name = true;
+                            const copy_len = @min(offered_name.len, self.client_sni.len);
+                            @memcpy(self.client_sni[0..copy_len], offered_name[0..copy_len]);
+                            self.client_sni_len = copy_len;
+                            if (self.config.server_name) |expected_name| {
+                                if (!std.ascii.eqlIgnoreCase(offered_name, expected_name)) {
+                                    return error.UnrecognizedName;
+                                }
+                            }
+                        }
+                    }
+                },
                 @intFromEnum(ExtType.quic_transport_parameters) => {
                     self.peer_tp_len = @min(el, self.peer_tp.len);
                     @memcpy(self.peer_tp[0..self.peer_tp_len], ext[0..self.peer_tp_len]);
@@ -1986,6 +2023,7 @@ pub const Tls13Handshake = struct {
         if (!have_version) return error.UnsupportedVersion;
         if (!have_key_share) return error.NoKeyShare;
         if (self.config.alpn.len > 0 and self.negotiated_alpn_len == 0) return error.NoApplicationProtocol;
+        if (self.config.server_name != null and !have_server_name) return error.UnrecognizedName;
 
         // Update the transcript. When the client offered a PSK, split the
         // update at the binder so the truncated transcript hash can be used
@@ -2985,6 +3023,50 @@ test "verifyCertificateVerifySignature rejects an unsupported scheme" {
 }
 
 // ─── Tests for server-side handshake + loopback ──────────────────────
+
+test "Tls13Handshake server accepts matching ClientHello SNI" {
+    var client = Tls13Handshake.initClient(.{
+        .server_name = "Example.COM",
+    }, &[_]u8{});
+    var server = Tls13Handshake.initServer(.{
+        .server_name = "example.com",
+    }, &[_]u8{});
+
+    const client_hello_action = try client.step();
+    try std.testing.expect(std.meta.activeTag(client_hello_action) == .send_data);
+
+    server.provideData(client_hello_action.send_data.data);
+    try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
+    try std.testing.expectEqualStrings("Example.COM", server.client_sni[0..server.client_sni_len]);
+}
+
+test "Tls13Handshake server rejects missing ClientHello SNI when configured" {
+    var client = Tls13Handshake.initClient(.{}, &[_]u8{});
+    var server = Tls13Handshake.initServer(.{
+        .server_name = "example.com",
+    }, &[_]u8{});
+
+    const client_hello_action = try client.step();
+    try std.testing.expect(std.meta.activeTag(client_hello_action) == .send_data);
+
+    server.provideData(client_hello_action.send_data.data);
+    try std.testing.expectError(error.UnrecognizedName, server.step());
+}
+
+test "Tls13Handshake server rejects mismatched ClientHello SNI when configured" {
+    var client = Tls13Handshake.initClient(.{
+        .server_name = "other.example",
+    }, &[_]u8{});
+    var server = Tls13Handshake.initServer(.{
+        .server_name = "example.com",
+    }, &[_]u8{});
+
+    const client_hello_action = try client.step();
+    try std.testing.expect(std.meta.activeTag(client_hello_action) == .send_data);
+
+    server.provideData(client_hello_action.send_data.data);
+    try std.testing.expectError(error.UnrecognizedName, server.step());
+}
 
 test "Tls13Handshake client↔server loopback completes with matching secrets" {
     // Server ECDSA P-256 key pair (real private key for CertificateVerify).
