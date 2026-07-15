@@ -1558,8 +1558,8 @@ pub const Tls13Handshake = struct {
         return ._continue;
     }
 
-    /// Parse the server Certificate message and store the first certificate
-    /// (DER) for later verification (RFC 8446 §4.4.2).
+    /// Parse the server Certificate message and retain its leaf certificate
+    /// for CertificateVerify (RFC 8446 §4.4.2).
     fn clientProcessCertificate(self: *Tls13Handshake) HandshakeError!Action {
         const msg = self.readHandshakeMsg() orelse return .wait_for_data;
         if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.certificate)) return error.UnexpectedMessage;
@@ -1577,23 +1577,22 @@ pub const Tls13Handshake = struct {
             (@as(usize, msg[pos + 1]) << 8) |
             @as(usize, msg[pos + 2]);
         pos += 3;
-        if (pos + list_len > msg.len) return error.DecodeError;
-        // first entry: 3-byte cert length + cert + 2-byte extensions length
-        if (pos + 3 > msg.len) return error.DecodeError;
-        const cert_len = (@as(usize, msg[pos]) << 16) |
-            (@as(usize, msg[pos + 1]) << 8) |
-            @as(usize, msg[pos + 2]);
-        pos += 3;
-        if (pos + cert_len > msg.len) return error.DecodeError;
-        self.server_cert_len = @min(cert_len, self.server_cert.len);
-        @memcpy(self.server_cert[0..self.server_cert_len], msg[pos .. pos + self.server_cert_len]);
+        const list_end = std.math.add(usize, pos, list_len) catch return error.DecodeError;
+        if (list_end != msg.len) return error.DecodeError;
+        const leaf_der = try nextCertificateEntry(msg, &pos, list_end);
+        if (leaf_der.len > self.server_cert.len) return error.BadCertificate;
+        self.server_cert_len = leaf_der.len;
+        @memcpy(self.server_cert[0..self.server_cert_len], leaf_der);
 
-        // When verification is enabled, parse the leaf certificate and check
-        // the hostname (RFC 6125). Validity-period and chain-to-anchor
-        // checks require a wall-clock timestamp and a trust bundle, which are
-        // deferred until the TLS backend is wired into the endpoint I/O loop.
+        const chain_start = pos;
+        while (pos < list_end) {
+            _ = try nextCertificateEntry(msg, &pos, list_end);
+        }
+
+        // CertificateVerify uses the retained leaf. Chain validation consumes
+        // the remaining leaf-to-issuer entries while their message bytes live.
         if (!self.config.skip_cert_verify) {
-            try self.verifyServerCertificate();
+            try self.verifyServerCertificateChain(msg, chain_start, list_end);
         }
 
         self.transcript.update(msg);
@@ -1601,9 +1600,26 @@ pub const Tls13Handshake = struct {
         return ._continue;
     }
 
-    /// Parse the stored server certificate and verify the SNI hostname against
-    /// its SAN/CN (RFC 8446 §4.4.2 + RFC 6125).
+    /// Verify a retained leaf certificate with no peer-supplied intermediates.
+    ///
+    /// This preserves the public direct-anchor check for callers that provide
+    /// a leaf out of band. Handshake processing uses the complete received
+    /// certificate_list through `verifyServerCertificateChain` instead.
     pub fn verifyServerCertificate(self: *Tls13Handshake) HandshakeError!void {
+        return self.verifyServerCertificateChain(&.{}, 0, 0);
+    }
+
+    /// Verify the retained leaf, peer-supplied issuers, and configured trust
+    /// bundle. Each supplied edge validates issuer name, validity, and
+    /// signature; the final supplied certificate is then verified by the
+    /// bundle. Without a bundle, preserve hostname-only and optional leaf-time
+    /// verification for existing callers.
+    fn verifyServerCertificateChain(
+        self: *Tls13Handshake,
+        certificate_message: []const u8,
+        chain_pos: usize,
+        chain_end: usize,
+    ) HandshakeError!void {
         const cert: Certificate = .{
             .buffer = self.server_cert[0..self.server_cert_len],
             .index = 0,
@@ -1615,19 +1631,50 @@ pub const Tls13Handshake = struct {
             parsed.verifyHostName(host) catch return error.BadCertificate;
         }
 
-        // Validity period (RFC 5280 §4.1.2.5).
+        if (self.config.ca_bundle) |bundle| {
+            const now = self.config.now_sec orelse return error.BadCertificate;
+            var subject = parsed;
+            var pos = chain_pos;
+            while (pos < chain_end) {
+                const issuer_der = try nextCertificateEntry(certificate_message, &pos, chain_end);
+                const issuer = (Certificate{ .buffer = issuer_der, .index = 0 }).parse() catch return error.BadCertificate;
+                subject.verify(issuer, now) catch return error.BadCertificate;
+                subject = issuer;
+            }
+            bundle.verify(subject, now) catch return error.BadCertificate;
+            return;
+        }
+
+        // Preserve validity-only behavior when no trust anchor is configured.
         if (self.config.now_sec) |now| {
             const not_before = @as(i64, @intCast(parsed.validity.not_before));
             const not_after = @as(i64, @intCast(parsed.validity.not_after));
             if (now < not_before or now > not_after) return error.BadCertificate;
         }
+    }
 
-        // Chain to a trusted anchor (RFC 8446 §4.4.2). Requires a wall-clock
-        // timestamp for the bundle's own validity check.
-        if (self.config.ca_bundle) |bundle| {
-            const now = self.config.now_sec orelse return error.BadCertificate;
-            bundle.verify(parsed, now) catch return error.BadCertificate;
-        }
+    /// Read one TLS CertificateEntry and advance `pos` past its DER bytes and
+    /// per-entry extensions. The caller supplies the enclosing certificate_list
+    /// end so malformed lengths cannot reach the next handshake message.
+    fn nextCertificateEntry(
+        certificate_message: []const u8,
+        pos: *usize,
+        list_end: usize,
+    ) HandshakeError![]const u8 {
+        if (list_end > certificate_message.len or pos.* > list_end or list_end - pos.* < 3) return error.DecodeError;
+        const cert_len = (@as(usize, certificate_message[pos.*]) << 16) |
+            (@as(usize, certificate_message[pos.* + 1]) << 8) |
+            @as(usize, certificate_message[pos.* + 2]);
+        pos.* += 3;
+        if (cert_len > list_end - pos.*) return error.DecodeError;
+        const cert_der = certificate_message[pos.* .. pos.* + cert_len];
+        pos.* += cert_len;
+        if (list_end - pos.* < 2) return error.DecodeError;
+        const extensions_len = readU16(certificate_message[pos.*..]);
+        pos.* += 2;
+        if (extensions_len > list_end - pos.*) return error.DecodeError;
+        pos.* += extensions_len;
+        return cert_der;
     }
 
     /// Parse CertificateVerify and store the signature, then (when
@@ -2551,6 +2598,56 @@ test "buildCertificateChain writes multi-byte vector lengths" {
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 53 }, buf[1..4]);
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 49 }, buf[5..8]);
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 44 }, buf[8..11]);
+}
+
+test "Tls13Handshake validates supplied certificate entries to a trust anchor" {
+    const pem = @embedFile("testdata/quicz-echo-ca.pem");
+    const begin_marker = "-----BEGIN CERTIFICATE-----";
+    const end_marker = "-----END CERTIFICATE-----";
+    const begin = std.mem.indexOf(u8, pem, begin_marker) orelse return error.TestUnexpectedResult;
+    const encoded_start = begin + begin_marker.len;
+    const encoded_end = std.mem.indexOfPos(u8, pem, encoded_start, end_marker) orelse return error.TestUnexpectedResult;
+    const encoded = std.mem.trim(u8, pem[encoded_start..encoded_end], " \t\r\n");
+    var der_storage: [512]u8 = undefined;
+    const decoder = std.base64.standard.decoderWithIgnore("\r\n");
+    const der_len = try decoder.decode(&der_storage, encoded);
+    const der = der_storage[0..der_len];
+
+    const now_sec: i64 = 1_800_000_000;
+    var bundle = Certificate.Bundle.empty;
+    defer bundle.deinit(std.testing.allocator);
+    try bundle.bytes.appendSlice(std.testing.allocator, der);
+    try bundle.parseCert(std.testing.allocator, 0, now_sec);
+
+    var certificate_message: [2048]u8 = undefined;
+    const certificate_len = buildCertificateChain(&certificate_message, &.{ der, der }) orelse return error.TestUnexpectedResult;
+    var handshake = Tls13Handshake.initClient(.{
+        .server_name = "localhost",
+        .skip_cert_verify = false,
+        .now_sec = now_sec,
+        .ca_bundle = &bundle,
+    }, &.{});
+    handshake.provideData(certificate_message[0..certificate_len]);
+    try std.testing.expect(std.meta.activeTag(try handshake.clientProcessCertificate()) == ._continue);
+    try std.testing.expectEqualSlices(u8, der, handshake.server_cert[0..handshake.server_cert_len]);
+}
+
+test "nextCertificateEntry rejects truncated extensions" {
+    const malformed = [_]u8{ 0, 0, 1, 0xaa, 0 };
+    var pos: usize = 0;
+    try std.testing.expectError(error.DecodeError, Tls13Handshake.nextCertificateEntry(&malformed, &pos, malformed.len));
+}
+
+test "Tls13Handshake rejects malformed certificate chains when verification is skipped" {
+    const malformed = [_]u8{
+        @intFromEnum(HandshakeType.certificate), 0, 0, 9,
+        0,                                       0, 0, 5,
+        0,                                       0, 1, 0xaa,
+        0,
+    };
+    var handshake = Tls13Handshake.initClient(.{}, &.{});
+    handshake.provideData(&malformed);
+    try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificate());
 }
 
 /// Build a CertificateVerify message with a signature scheme and signature.
