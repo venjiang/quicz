@@ -65,10 +65,10 @@ packet/key/token and RFC 9368 version-information primitives:
 The concurrent pure-Zig server now dispatches routed 1-RTT short packets through
 its owned `EndpointConnectionRegistry`, including lifecycle route lookup,
 installed-key receive, and stateless-reset handling. `Tls13ServerEndpoint`
-drives retained coalesced Initial/Handshake input and its Handshake backend
-output on the same record boundary; accepted/routed Initial follow-up,
-Retry follow-up, and routed Initial plus Handshake input retain bounded
-protected-output draining. This is
+drives every routed Initial that installs Handshake keys, including retained
+coalesced Initial/Handshake input, through that record's Handshake backend and
+bounded output drain; Retry follow-up and routed Handshake input use the same
+record boundary. This is
 incremental endpoint ownership rather than a complete production event loop.
 
 ### Packet-number reordering evidence

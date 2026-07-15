@@ -58,10 +58,10 @@ version-information 原语）：
 
 并发纯 Zig server 现经由其拥有的 `EndpointConnectionRegistry` 分发已路由的
 1-RTT short packet，涵盖 lifecycle route lookup、installed-key 接收和
-stateless-reset 处理。`Tls13ServerEndpoint` 会在同一 record 边界完成保留的
-coalesced Initial/Handshake 接收和 Handshake backend output；已接受/已路由 Initial
-的后续 Handshake 输出、Retry follow-up 及已路由 Initial/Handshake 仍保留有界
-protected-output drain。这只是
+stateless-reset 处理。`Tls13ServerEndpoint` 会在同一 record 边界完成所有安装
+Handshake key 的已路由 Initial（包括保留的 coalesced Initial/Handshake）及其
+Handshake backend output 和有界 drain；Retry follow-up 与已路由 Handshake input
+也使用同一 record boundary。这只是
 endpoint ownership 的增量证据，并非完整生产级 event loop。
 
 ### Packet number 重排证据

@@ -395,7 +395,20 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Result of processing one routed Initial and any resulting Handshake drive.
+        pub const InitialProcessResult = struct {
+            /// Initial-space receive, backend drive, and bounded output drain.
+            initial: root.EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult,
+            /// Handshake-space backend drive after Initial processing installed keys.
+            handshake: ?root.EndpointCryptoBackendDriveDatagramDrainResult = null,
+        };
+
         /// Authenticate a routed Initial, drive TLS, and drain bounded output.
+        ///
+        /// If Initial processing installs Handshake keys without an Initial
+        /// drain error, the endpoint immediately drives the same record's
+        /// Handshake backend into `handshake_out`. Separate output buffers
+        /// preserve the caller's existing per-space bounds.
         pub fn processInitial(
             self: *Self,
             connection_id: u64,
@@ -404,8 +417,9 @@ pub fn Tls13ServerEndpoint(
             datagram: []const u8,
             scratch: []u8,
             initial_token: []const u8,
-            out: []root.EndpointPolledDatagramResult,
-        ) (root.EndpointProtectedDatagramError || error{UnknownConnectionId})!root.EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult {
+            initial_out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedDatagramError || root.Error || error{UnknownConnectionId})!InitialProcessResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             const info = protection.peekProtectedLongPacketInfo(datagram) catch return error.InvalidPacket;
             if (info.packet_type != .initial) return error.InvalidPacket;
@@ -421,7 +435,7 @@ pub fn Tls13ServerEndpoint(
                 .client => initial_secrets.client,
                 .server => initial_secrets.server,
             };
-            return self.lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
+            const initial = try self.lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
                 connection_id,
                 connection_of(record),
                 .initial,
@@ -435,8 +449,15 @@ pub fn Tls13ServerEndpoint(
                 source_connection_id_of(record),
                 initial_token,
                 send_keys,
-                out,
+                initial_out,
             );
+            if (initial.backend.drain.first_error != null or !initial.backend.backend.handshake_keys_installed) {
+                return .{ .initial = initial };
+            }
+            return .{
+                .initial = initial,
+                .handshake = try self.driveBackend(connection_id, .handshake, scratch, now_millis, handshake_out),
+            };
         }
 
         /// Authenticate a routed Handshake packet, drive TLS, and drain output.
@@ -712,6 +733,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             &[_]u8{},
             &backend_scratch,
             &[_]u8{},
+            &backend_output,
             &backend_output,
         ),
     );

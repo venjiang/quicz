@@ -513,6 +513,7 @@ fn serveConcurrent(
                         switch (long_info.packet_type) {
                             .initial => {
                                 var initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
+                                var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                                 var initial_scratch: [8192]u8 = undefined;
                                 const initial = try server_endpoint.processInitial(
                                     managed.handle,
@@ -522,22 +523,15 @@ fn serveConcurrent(
                                     &initial_scratch,
                                     &[_]u8{},
                                     &initial_outputs,
+                                    &handshake_outputs,
                                 );
-                                try require(initial.route.connection_id == managed.handle);
-                                for (initial_outputs[0..initial.backend.drain.datagrams_written]) |output| {
+                                try require(initial.initial.route.connection_id == managed.handle);
+                                for (initial_outputs[0..initial.initial.backend.drain.datagrams_written]) |output| {
                                     defer allocator.free(output.datagram);
                                     try socket.send(io, &managed.peer_address, output.datagram);
                                 }
-                                if (initial.backend.drain.first_error) |drain_error| return drain_error;
-                                if (initial.backend.backend.handshake_keys_installed) {
-                                    var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
-                                    const handshake = try server_endpoint.driveBackend(
-                                        managed.handle,
-                                        .handshake,
-                                        &initial_scratch,
-                                        now_millis,
-                                        &handshake_outputs,
-                                    );
+                                if (initial.initial.backend.drain.first_error) |drain_error| return drain_error;
+                                if (initial.handshake) |handshake| {
                                     for (handshake_outputs[0..handshake.drain.datagrams_written]) |output| {
                                         defer allocator.free(output.datagram);
                                         try socket.send(io, &managed.peer_address, output.datagram);
