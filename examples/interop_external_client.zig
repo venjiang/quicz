@@ -87,7 +87,6 @@ pub fn main(init: std.process.Init) !void {
         client_scid,
     );
     defer transport.deinit();
-    const connection = &transport.connection;
     var scratch: [8192]u8 = undefined;
     var receive_buffer: [8192]u8 = undefined;
 
@@ -97,7 +96,7 @@ pub fn main(init: std.process.Init) !void {
 
     var sent_finished = false;
     var datagrams_received: usize = 0;
-    while (datagrams_received < 8 and !connection.handshakeConfirmed()) : (datagrams_received += 1) {
+    while (datagrams_received < 8 and !transport.handshakeConfirmed()) : (datagrams_received += 1) {
         const received = try socket.receiveTimeout(io, &receive_buffer, recvTimeout());
         const progress = try transport.receive(nowMillis(io), &scratch, received.data);
         if (progress.outbound_initial) |retry_initial| {
@@ -112,22 +111,18 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    if (!sent_finished or !connection.handshakeConfirmed()) return error.HandshakeNotConfirmed;
+    if (!sent_finished or !transport.handshakeConfirmed()) return error.HandshakeNotConfirmed;
 
     // The independent peer must parse both protected 1-RTT STREAMs and finish
     // each matching response. This is intentionally not a local-only contract.
-    const peer_connection_id = connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
     var stream_ids: [echo_payloads.len]u64 = undefined;
     for (echo_payloads, 0..) |payload, index| {
-        stream_ids[index] = try connection.openStream();
-        try connection.sendOnStream(stream_ids[index], payload, true);
+        stream_ids[index] = try transport.openStream();
+        try transport.sendStream(stream_ids[index], payload, true);
     }
     var sent_application_datagrams: usize = 0;
     while (sent_application_datagrams < 8) : (sent_application_datagrams += 1) {
-        const datagram = (try connection.pollProtectedShortDatagramWithInstalledKeys(
-            nowMillis(io),
-            peer_connection_id,
-        )) orelse break;
+        const datagram = (try transport.pollApplicationDatagram(nowMillis(io))) orelse break;
         defer allocator.free(datagram);
         try socket.send(io, &server_address, datagram);
     }
@@ -139,22 +134,19 @@ pub fn main(init: std.process.Init) !void {
     var got_echo_fin: [echo_payloads.len]bool = .{ false, false };
     var pto_recovered = false;
     while (received_application_datagrams < 16 and recovery_timer_services < 4) {
-        const next_recovery_deadline = if (connection.lossDetectionTimerDeadlineMillis()) |deadline|
+        const next_recovery_deadline = if (transport.lossDetectionTimerDeadlineMillis()) |deadline|
             deadline.deadline_millis
         else
             null;
         const received = socket.receiveTimeout(io, &receive_buffer, recvTimeoutForDeadline(io, next_recovery_deadline)) catch |err| switch (err) {
             error.Timeout => {
-                const serviced = (try connection.serviceLossDetectionTimer(nowMillis(io))) orelse continue;
+                const serviced = (try transport.serviceLossDetectionTimer(nowMillis(io))) orelse continue;
                 recovery_timer_services += 1;
                 if (serviced.kind == .pto) pto_recovered = true;
 
                 var retransmission_count: usize = 0;
                 while (retransmission_count < 4) : (retransmission_count += 1) {
-                    const retransmission = (try connection.pollProtectedShortDatagramWithInstalledKeys(
-                        nowMillis(io),
-                        peer_connection_id,
-                    )) orelse break;
+                    const retransmission = (try transport.pollApplicationDatagram(nowMillis(io))) orelse break;
                     defer allocator.free(retransmission);
                     try socket.send(io, &server_address, retransmission);
                 }
@@ -173,11 +165,11 @@ pub fn main(init: std.process.Init) !void {
         if (!progress.application_processed) continue;
         received_application_datagrams += 1;
         inline for (stream_ids, echo_payloads, 0..) |stream_id, payload, index| {
-            if (try connection.recvOnStream(stream_id, &stream_buffer)) |echoed_len| {
+            if (try transport.recvStream(stream_id, &stream_buffer)) |echoed_len| {
                 try require(std.mem.eql(u8, stream_buffer[0..echoed_len], payload));
                 got_echo[index] = true;
             }
-            if (got_echo[index] and try connection.recvStreamFinished(stream_id)) {
+            if (got_echo[index] and try transport.streamFinished(stream_id)) {
                 got_echo_fin[index] = true;
             }
         }

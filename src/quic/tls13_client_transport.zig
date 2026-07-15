@@ -13,6 +13,7 @@ const Connection = connection_module.Connection;
 const Config = connection_config.Config;
 const Tls13Backend = tls13_backend.Tls13Backend;
 const Error = transport_types.Error;
+const LossDetectionTimerDeadline = transport_types.LossDetectionTimerDeadline;
 const ClientTransportError = Error || protection.ProtectionError || packet.PacketError || error{EndOfStream};
 
 pub const Tls13ClientTransport = struct {
@@ -49,6 +50,68 @@ pub const Tls13ClientTransport = struct {
 
     pub fn deinit(self: *Tls13ClientTransport) void {
         self.connection.deinit();
+    }
+
+    /// Report whether the TLS-owned handshake reached confirmed 1-RTT state.
+    pub fn handshakeConfirmed(self: *const Tls13ClientTransport) bool {
+        return self.connection.handshakeConfirmed();
+    }
+
+    /// Open a locally initiated bidirectional application stream.
+    pub fn openStream(self: *Tls13ClientTransport) ClientTransportError!u64 {
+        return self.connection.openStream();
+    }
+
+    /// Queue stream bytes for protected 1-RTT transmission.
+    ///
+    /// Call `pollApplicationDatagram()` until it returns null, then send and
+    /// free each returned datagram through the caller's UDP socket.
+    pub fn sendStream(
+        self: *Tls13ClientTransport,
+        stream_id: u64,
+        data: []const u8,
+        fin: bool,
+    ) ClientTransportError!void {
+        try self.connection.sendOnStream(stream_id, data, fin);
+    }
+
+    /// Return one protected 1-RTT application datagram queued by this transport.
+    pub fn pollApplicationDatagram(
+        self: *Tls13ClientTransport,
+        now_millis: i64,
+    ) ClientTransportError!?[]u8 {
+        const peer_connection_id = self.connection.peerInitialSourceConnectionId() orelse return error.InvalidPacket;
+        return self.connection.pollProtectedShortDatagramWithInstalledKeys(
+            now_millis,
+            peer_connection_id,
+        );
+    }
+
+    /// Read received bytes from one application stream into `out`.
+    pub fn recvStream(
+        self: *Tls13ClientTransport,
+        stream_id: u64,
+        out: []u8,
+    ) ClientTransportError!?usize {
+        return self.connection.recvOnStream(stream_id, out);
+    }
+
+    /// Return whether the peer has FIN-completed one application stream.
+    pub fn streamFinished(self: *const Tls13ClientTransport, stream_id: u64) ClientTransportError!bool {
+        return self.connection.recvStreamFinished(stream_id);
+    }
+
+    /// Return the transport's current loss/PTO wakeup deadline.
+    pub fn lossDetectionTimerDeadlineMillis(self: *const Tls13ClientTransport) ?LossDetectionTimerDeadline {
+        return self.connection.lossDetectionTimerDeadlineMillis();
+    }
+
+    /// Service a due loss/PTO timer before polling retransmission output.
+    pub fn serviceLossDetectionTimer(
+        self: *Tls13ClientTransport,
+        now_millis: i64,
+    ) ClientTransportError!?LossDetectionTimerDeadline {
+        return self.connection.serviceLossDetectionTimer(now_millis);
     }
 
     /// Queue ClientHello and return the first protected Initial datagram.
