@@ -49781,7 +49781,7 @@ test "EndpointConnectionLifecycle routes installed-key short backend drive and p
     try std.testing.expectEqualStrings("routed app response", recv_buf[0..recv_len]);
 }
 
-test "EndpointConnectionLifecycle installed-key short backend OrClose stops before poll on peer parameters" {
+test "EndpointConnectionLifecycle installed-key short backend OrClose polls close output on peer parameters" {
     const BadBackend = struct {
         received: [64]u8 = undefined,
         received_len: usize = 0,
@@ -49860,7 +49860,7 @@ test "EndpointConnectionLifecycle installed-key short backend OrClose stops befo
 
     var backend = BadBackend{};
     var scratch: [64]u8 = undefined;
-    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
+    const result = try server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndPollDatagram(
         68,
         &server,
         11,
@@ -49874,13 +49874,25 @@ test "EndpointConnectionLifecycle installed-key short backend OrClose stops befo
             .space = .application,
             .destination_connection_id = &client_dcid,
         },
-    ));
+    );
     try std.testing.expectEqualStrings("bad poll peer tp", backend.received[0..backend.received_len]);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
-    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), result.backend.connections_driven);
+    const close_packet = result.datagram orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 68), close_packet.connection_id);
+    defer std.testing.allocator.free(close_packet.datagram);
+
+    try client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
+        58,
+        &client,
+        13,
+        client_dcid.len,
+        close_packet.datagram,
+    );
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
 }
 
 test "EndpointConnectionLifecycle routed installed-key short backend OrClose poll validates route before backend" {
@@ -50252,7 +50264,7 @@ test "EndpointConnectionLifecycle routes installed-key short backend drive and d
     try std.testing.expectEqualStrings("routed drain response", recv_buf[0..recv_len]);
 }
 
-test "EndpointConnectionLifecycle installed-key short backend OrClose stops before drain on peer parameters" {
+test "EndpointConnectionLifecycle installed-key short backend OrClose drains close output on peer parameters" {
     const BadBackend = struct {
         received: [64]u8 = undefined,
         received_len: usize = 0,
@@ -50332,7 +50344,7 @@ test "EndpointConnectionLifecycle installed-key short backend OrClose stops befo
     var backend = BadBackend{};
     var scratch: [64]u8 = undefined;
     var out: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
+    const result = try server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndDrainDatagrams(
         70,
         &server,
         11,
@@ -50347,13 +50359,27 @@ test "EndpointConnectionLifecycle installed-key short backend OrClose stops befo
             .destination_connection_id = &client_dcid,
         },
         &out,
-    ));
+    );
+    defer for (out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
     try std.testing.expectEqualStrings("bad drain peer tp", backend.received[0..backend.received_len]);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
-    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+
+    try client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
+        60,
+        &client,
+        13,
+        client_dcid.len,
+        out[0].datagram,
+    );
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
 }
 
 test "EndpointConnectionLifecycle routed installed-key short backend OrClose drain validates route before backend" {
@@ -50461,7 +50487,7 @@ test "EndpointConnectionLifecycle routed installed-key short backend OrClose dra
     try std.testing.expectEqual(@as(?i64, null), server.idleTimeoutDeadlineMillis());
 }
 
-test "EndpointConnectionLifecycle installed-key short OrClose receive stops before direct poll" {
+test "EndpointConnectionLifecycle installed-key short OrClose receive polls close output directly" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const server_dcid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
@@ -50488,7 +50514,7 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive stops befo
     }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
     defer std.testing.allocator.free(invalid_short);
 
-    try std.testing.expectError(error.InvalidPacket, lifecycle.processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram(
+    const result = (try lifecycle.processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram(
         62,
         &server,
         11,
@@ -50498,12 +50524,15 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive stops befo
             .space = .application,
             .destination_connection_id = &client_dcid,
         },
-    ));
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(result.datagram);
+
+    try std.testing.expectEqual(@as(u64, 62), result.connection_id);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
-    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expect(result.datagram.len != 0);
 }
 
 test "EndpointConnectionLifecycle installed-key short receive drains ACK output" {
@@ -50581,7 +50610,7 @@ test "EndpointConnectionLifecycle installed-key short receive drains ACK output"
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
 }
 
-test "EndpointConnectionLifecycle installed-key short OrClose receive stops before direct drain" {
+test "EndpointConnectionLifecycle installed-key short OrClose receive drains close output directly" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
     const server_dcid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
@@ -50609,7 +50638,7 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive stops befo
     defer std.testing.allocator.free(invalid_short);
 
     var out: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(error.InvalidPacket, lifecycle.processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+    const result = try lifecycle.processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions(
         64,
         &server,
         11,
@@ -50620,12 +50649,17 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive stops befo
             .destination_connection_id = &client_dcid,
         },
         &out,
-    ));
+    );
+    defer for (out[0..result.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
-    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), result.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.first_error);
+    try std.testing.expectEqual(@as(u64, 64), out[0].connection_id);
 }
 
 test "EndpointConnectionLifecycle routes installed-key short receive and polls ACK output" {
@@ -50840,7 +50874,7 @@ test "EndpointConnectionLifecycle routes installed-key short receive and selects
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
 }
 
-test "EndpointConnectionLifecycle installed-key short OrClose receive stops before poll" {
+test "EndpointConnectionLifecycle installed-key short OrClose receive polls close output" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
@@ -50878,7 +50912,7 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive stops befo
     }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
     defer std.testing.allocator.free(invalid_short);
 
-    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram(
+    const result = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram(
         server_connection_id,
         &server,
         server_receive_path,
@@ -50888,7 +50922,11 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive stops befo
             .space = .application,
             .destination_connection_id = &client_dcid,
         },
-    ));
+    );
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    const close_packet = result.datagram orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, close_packet.connection_id);
+    defer std.testing.allocator.free(close_packet.datagram);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
@@ -51003,7 +51041,7 @@ test "EndpointConnectionLifecycle routes installed-key short receive and drains 
     try std.testing.expectEqual(@as(usize, 0), client_lifecycle.recoveryTimerCount());
 }
 
-test "EndpointConnectionLifecycle installed-key short OrClose receive stops before drain" {
+test "EndpointConnectionLifecycle installed-key short OrClose receive drains close output" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
@@ -51042,7 +51080,7 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive stops befo
     defer std.testing.allocator.free(invalid_short);
 
     var out: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+    const result = try lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions(
         server_connection_id,
         &server,
         server_receive_path,
@@ -51053,11 +51091,18 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive stops befo
             .destination_connection_id = &client_dcid,
         },
         &out,
-    ));
+    );
+    defer for (out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(server_connection_id, out[0].connection_id);
 }
 
 test "EndpointConnectionLifecycle installed-key Handshake receive polls output" {

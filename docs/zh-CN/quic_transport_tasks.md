@@ -92,6 +92,9 @@ poll output。
 installed-key Handshake OrClose helper 也采用同一边界：receive-side frame 错误和 backend
 peer-parameter 错误会直接返回或 drain 触发连接上的 protected Handshake close datagram，
 包括 routed backend drain/poll wrapper。
+installed-key 1-RTT short OrClose helper 对 Application-space receive 和 backend 错误也
+采用同一边界：direct/routed poll/drain helper 会从选中的连接返回 protected short close
+datagram；route mismatch 和未进入 closing 的 invalid packet 仍在输出前失败。
 
 ### Packet number 重排证据
 
