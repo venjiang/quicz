@@ -312,6 +312,20 @@ pub fn Tls13ServerEndpoint(
             return self.records.nextDeadline(&self.lifecycle, allocator);
         }
 
+        /// Sweep all endpoint-owned records, retire closed records, and return
+        /// the next endpoint-visible deadline.
+        pub fn processPendingWorkAndSelectNextDeadline(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            now_millis: i64,
+        ) root.Error!root.EndpointPendingWorkNextDeadlineResult {
+            return self.records.processPendingWorkAndSelectNextDeadline(
+                &self.lifecycle,
+                allocator,
+                now_millis,
+            );
+        }
+
         /// Service the earliest due deadline and drain bounded protected output.
         pub fn processDueDeadlineAndDrainDatagrams(
             self: *Self,
@@ -3396,6 +3410,183 @@ test "Tls13ServerEndpoint retires record when idle deadline closes server" {
     try std.testing.expect(endpoint_owner.records.get(record_handle) == null);
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.recoveryTimerCount());
+}
+
+test "Tls13ServerEndpoint sweeps pending work and keeps next live deadline" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: root.CryptoBackend,
+        destination_connection_id: []const u8,
+        source_connection_id: []const u8,
+        initial_destination_connection_id: []const u8,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return self.destination_connection_id;
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return self.source_connection_id;
+        }
+
+        fn initialDestinationConnectionId(self: *const @This()) []const u8 {
+            return self.initial_destination_connection_id;
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 2, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 2,
+    });
+    defer endpoint_owner.deinit();
+
+    var empty_backend = EmptyBackend{};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+    };
+    const secrets = try protection.deriveInitialSecrets(.v1, "sweep-id");
+
+    const idle_record = try std.testing.allocator.create(TestRecord);
+    var idle_initialized = false;
+    var idle_owned = true;
+    errdefer {
+        if (idle_owned) {
+            if (idle_initialized) idle_record.deinit();
+            std.testing.allocator.destroy(idle_record);
+        }
+    }
+    idle_record.* = .{
+        .handle = 91,
+        .connection = try Connection.init(std.testing.allocator, .server, .{ .max_idle_timeout_ms = 10 }),
+        .backend = empty_backend.backend(),
+        .destination_connection_id = "peer-a",
+        .source_connection_id = "local-a",
+        .initial_destination_connection_id = "initial-a",
+    };
+    idle_initialized = true;
+    try idle_record.connection.validatePeerAddress();
+    try idle_record.connection.confirmHandshake();
+    try idle_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try idle_record.connection.sendPing();
+    const idle_first = (try idle_record.connection.pollProtectedShortDatagramWithInstalledKeys(
+        10,
+        idle_record.destination_connection_id,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(idle_first);
+    try endpoint_owner.lifecycle.registerConnectionId(
+        idle_record.handle,
+        idle_record.source_connection_id,
+        path,
+        .{},
+    );
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(idle_record.handle);
+    try endpoint_owner.records.adopt(idle_record.handle, idle_record);
+    idle_owned = false;
+
+    const live_record = try std.testing.allocator.create(TestRecord);
+    var live_initialized = false;
+    var live_owned = true;
+    errdefer {
+        if (live_owned) {
+            if (live_initialized) live_record.deinit();
+            std.testing.allocator.destroy(live_record);
+        }
+    }
+    live_record.* = .{
+        .handle = 92,
+        .connection = try Connection.init(std.testing.allocator, .server, .{ .max_idle_timeout_ms = 100 }),
+        .backend = empty_backend.backend(),
+        .destination_connection_id = "peer-b",
+        .source_connection_id = "local-b",
+        .initial_destination_connection_id = "initial-b",
+    };
+    live_initialized = true;
+    try live_record.connection.validatePeerAddress();
+    try live_record.connection.confirmHandshake();
+    try live_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try live_record.connection.sendPing();
+    const live_first = (try live_record.connection.pollProtectedShortDatagramWithInstalledKeys(
+        10,
+        live_record.destination_connection_id,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(live_first);
+    try endpoint_owner.lifecycle.registerConnectionId(
+        live_record.handle,
+        live_record.source_connection_id,
+        path,
+        .{},
+    );
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(live_record.handle);
+    try endpoint_owner.records.adopt(live_record.handle, live_record);
+    live_owned = false;
+
+    try std.testing.expectEqual(@as(usize, 2), endpoint_owner.activeConnectionCount());
+    const first_deadline = (try endpoint_owner.nextDeadline(std.testing.allocator)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(idle_record.handle, first_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.idle_timeout, first_deadline.kind);
+    try std.testing.expectEqual(@as(i64, 20), first_deadline.deadline_millis);
+
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    const swept = try endpoint_owner.processPendingWorkAndSelectNextDeadline(
+        no_allocation_allocator.allocator(),
+        20,
+    );
+    try std.testing.expectEqual(@as(usize, 1), swept.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), swept.pending_work.close_retired_count);
+    try std.testing.expect(endpoint_owner.records.get(91) == null);
+    try std.testing.expect(endpoint_owner.records.get(92) != null);
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.activeConnectionCount());
+    const next = swept.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 92), next.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.idle_timeout, next.kind);
+    try std.testing.expectEqual(@as(i64, 110), next.deadline_millis);
 }
 
 test "Tls13ServerEndpoint closes with route output and retires record at close deadline" {

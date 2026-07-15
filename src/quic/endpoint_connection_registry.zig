@@ -220,6 +220,56 @@ pub fn EndpointConnectionRegistry(
             return lifecycle.nextDeadlineAcrossConnections(views);
         }
 
+        /// Remove every record whose connection has reached the closed state.
+        pub fn removeClosedRecords(self: *Self) usize {
+            var removed_count: usize = 0;
+            while (true) {
+                var closed_connection_id: ?u64 = null;
+                var iterator = self.records.iterator();
+                while (iterator.next()) |entry| {
+                    if (connection_of(entry.value_ptr.*).connectionState() == .closed) {
+                        closed_connection_id = entry.key_ptr.*;
+                        break;
+                    }
+                }
+                const connection_id = closed_connection_id orelse break;
+                self.remove(connection_id) catch unreachable;
+                removed_count += 1;
+            }
+            return removed_count;
+        }
+
+        /// Sweep endpoint-owned pending work and return the next live deadline.
+        ///
+        /// Terminal idle/close transitions retire lifecycle state first, then
+        /// this registry destroys the matching endpoint-owned records before
+        /// selecting the next deadline.
+        pub fn processPendingWorkAndSelectNextDeadline(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            allocator: std.mem.Allocator,
+            now_millis: i64,
+        ) root.Error!root.EndpointPendingWorkNextDeadlineResult {
+            const pending_work = if (self.receive_view_scratch) |views|
+                try lifecycle.processPendingWorkAcrossConnections(
+                    try self.fillReceiveViews(views),
+                    now_millis,
+                )
+            else pending: {
+                const views = try self.receiveViews(allocator);
+                defer allocator.free(views);
+                break :pending try lifecycle.processPendingWorkAcrossConnections(
+                    views,
+                    now_millis,
+                );
+            };
+            _ = self.removeClosedRecords();
+            return .{
+                .pending_work = pending_work,
+                .next_deadline = try self.nextDeadline(lifecycle, allocator),
+            };
+        }
+
         /// Service the earliest due lifecycle deadline using this registry's records.
         ///
         /// The returned datagrams remain caller-owned and retain the existing
