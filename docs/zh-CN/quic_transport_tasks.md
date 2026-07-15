@@ -96,6 +96,9 @@ Server endpoint 的 installed-key feed 也遵循同一规则：
 `Tls13ServerEndpoint.feedInstalledKeyDatagramWithRoutePath()` 只有在选中 record 的连接进入
 `closing` 后才为 `InvalidPacket` poll route-bound 1-RTT datagram，避免解密/认证失败消耗
 无关已排队输出。
+这个 server feed/poll result 现在也会在 routed success、protected close emission、
+active stateless-reset receive 和未进入 closing 的 invalid input 后返回 feed 后下一
+endpoint deadline。
 底层 lifecycle helper
 `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram()`
 也会把认证后的 close-on-frame-error 表示为 `feed_error` 和可选 close datagram，同时保留

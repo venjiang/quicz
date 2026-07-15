@@ -85,6 +85,8 @@ pub fn Tls13ServerEndpoint(
             stateless_reset_sequence_number: ?u64 = null,
             /// Protected output emitted after feed or close-on-error handling.
             datagram: ?DatagramPathResult = null,
+            /// Next endpoint-visible deadline after receive processing and optional output.
+            next_deadline: ?root.EndpointConnectionDeadline = null,
         };
 
         /// Due-work result with every drained datagram paired to a route.
@@ -748,10 +750,22 @@ pub fn Tls13ServerEndpoint(
             );
             const route = switch (action) {
                 .routed => |value| value,
-                .accept_initial => |initial| return .{ .feed = .{ .feed = .{ .accept_initial = initial } } },
-                .version_negotiation => |response| return .{ .feed = .{ .feed = .{ .version_negotiation = response } } },
-                .stateless_reset => |reset| return .{ .feed = .{ .feed = .{ .stateless_reset = reset } } },
-                .dropped => return .{ .feed = .{ .feed = .dropped } },
+                .accept_initial => |initial| return .{
+                    .feed = .{ .feed = .{ .accept_initial = initial } },
+                    .next_deadline = try self.nextDeadline(self.records.allocator),
+                },
+                .version_negotiation => |response| return .{
+                    .feed = .{ .feed = .{ .version_negotiation = response } },
+                    .next_deadline = try self.nextDeadline(self.records.allocator),
+                },
+                .stateless_reset => |reset| return .{
+                    .feed = .{ .feed = .{ .stateless_reset = reset } },
+                    .next_deadline = try self.nextDeadline(self.records.allocator),
+                },
+                .dropped => return .{
+                    .feed = .{ .feed = .dropped },
+                    .next_deadline = try self.nextDeadline(self.records.allocator),
+                },
             };
             const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
             const connection = connection_of(record);
@@ -762,6 +776,7 @@ pub fn Tls13ServerEndpoint(
                     return .{
                         .feed = .{ .feed = .dropped },
                         .stateless_reset_sequence_number = sequence_number,
+                        .next_deadline = try self.nextDeadline(self.records.allocator),
                     };
                 }
             }
@@ -785,11 +800,15 @@ pub fn Tls13ServerEndpoint(
                         .datagram = value.datagram,
                         .path = value.path,
                     } else null,
+                    .next_deadline = try self.nextDeadline(self.records.allocator),
                 };
             };
             switch (feed.feed) {
                 .routed => {},
-                else => return .{ .feed = feed },
+                else => return .{
+                    .feed = feed,
+                    .next_deadline = try self.nextDeadline(self.records.allocator),
+                },
             }
             const output_path = feed.selected_output_path orelse
                 try self.lifecycle.currentRoutePath(route.destination_connection_id.asSlice());
@@ -809,6 +828,7 @@ pub fn Tls13ServerEndpoint(
                     .datagram = protected_datagram,
                     .path = output_path,
                 } else null,
+                .next_deadline = try self.nextDeadline(self.records.allocator),
             };
         }
 
@@ -4275,6 +4295,9 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     defer std.testing.allocator.free(routed_ack.datagram);
     try std.testing.expectEqual(record.handle, routed_ack.connection_id);
     try std.testing.expect(routed_ack.path.eql(new_path));
+    const routed_next_deadline = routed_result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, routed_next_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, routed_next_deadline.kind);
 
     try record.connection.sendPing();
     const malformed_on_route = [_]u8{ 0x40, 'l', 'o', 'c', 'a', 'l', 0x00 };
@@ -4288,6 +4311,9 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     try std.testing.expect(malformed_result.feed == null);
     try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
     try std.testing.expect(malformed_result.datagram == null);
+    const malformed_next_deadline = malformed_result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, malformed_next_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, malformed_next_deadline.kind);
 
     const queued_server_ping = (try endpoint_owner.pollOneRttDatagramWithRoutePath(record.handle, 10)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(queued_server_ping.datagram);
@@ -4318,6 +4344,9 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     defer std.testing.allocator.free(close_output.datagram);
     try std.testing.expectEqual(record.handle, close_output.connection_id);
     try std.testing.expect(close_output.path.eql(new_path));
+    const close_next_deadline = error_result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, close_next_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.close_timeout, close_next_deadline.kind);
     try client.processProtectedShortDatagramWithInstalledKeys(12, client_dcid.len, close_output.datagram);
     try std.testing.expectEqual(connection_module.ConnectionState.draining, client.connectionState());
 }
@@ -4454,6 +4483,9 @@ test "Tls13ServerEndpoint feed reports active stateless reset and retires record
     try std.testing.expect(feed.feed == .dropped);
     try std.testing.expect(reset.datagram == null);
     try std.testing.expectEqual(@as(?u64, 0), reset.stateless_reset_sequence_number);
+    const reset_next_deadline = reset.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record_handle, reset_next_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.close_timeout, reset_next_deadline.kind);
     try std.testing.expectEqual(connection_module.ConnectionState.draining, record.connection.connectionState());
     try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.recoveryTimerCount());
