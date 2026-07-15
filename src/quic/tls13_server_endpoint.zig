@@ -27,6 +27,8 @@ pub fn Tls13ServerEndpoint(
     comptime crypto_backend_of: *const fn (*Record) root.CryptoBackend,
     comptime destination_connection_id_of: *const fn (*const Record) []const u8,
     comptime source_connection_id_of: *const fn (*const Record) []const u8,
+    comptime initial_destination_connection_id_of: *const fn (*const Record) []const u8,
+    comptime mark_retry_validated: *const fn (*Record) void,
     comptime deinit_record: *const fn (*Record) void,
 ) type {
     const Registry = endpoint_connection_registry.EndpointConnectionRegistry(
@@ -309,10 +311,18 @@ pub fn Tls13ServerEndpoint(
             scratch: []u8,
             now_millis: i64,
             initial_token: []const u8,
-            keys: protection.Aes128PacketProtectionKeys,
+            version: quic_packet.Version,
             out: []root.EndpointPolledDatagramResult,
         ) (root.Error || error{UnknownConnectionId})!root.EndpointCryptoBackendDriveProtectedLongDatagramDrainResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const initial_secrets = protection.deriveInitialSecrets(
+                version,
+                initial_destination_connection_id_of(record),
+            ) catch return error.InvalidPacket;
+            const keys = switch (connection_of(record).side) {
+                .client => initial_secrets.client,
+                .server => initial_secrets.server,
+            };
             return self.lifecycle.driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams(
                 connection_id,
                 connection_of(record),
@@ -340,7 +350,7 @@ pub fn Tls13ServerEndpoint(
             supported_versions: []const quic_packet.Version,
         ) (root.EndpointRetryProtectedInitialError || error{UnknownConnectionId})!root.EndpointRetryProtectedInitialResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
-            return self.lifecycle.processRetryValidatedProtectedInitialDatagram(
+            const result = try self.lifecycle.processRetryValidatedProtectedInitialDatagram(
                 policy,
                 connection_id,
                 connection_of(record),
@@ -349,6 +359,8 @@ pub fn Tls13ServerEndpoint(
                 datagram,
                 supported_versions,
             );
+            mark_retry_validated(record);
+            return result;
         }
 
         /// Authenticate a routed Initial after Handshake keys are available.
@@ -357,7 +369,6 @@ pub fn Tls13ServerEndpoint(
             connection_id: u64,
             path: endpoint.Udp4Tuple,
             now_millis: i64,
-            original_destination_connection_id: []const u8,
             datagram: []const u8,
         ) (root.EndpointProtectedInitialError || error{UnknownConnectionId})!endpoint.RouteResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
@@ -366,7 +377,7 @@ pub fn Tls13ServerEndpoint(
                 connection_of(record),
                 path,
                 now_millis,
-                original_destination_connection_id,
+                initial_destination_connection_id_of(record),
                 datagram,
             );
         }
@@ -377,14 +388,26 @@ pub fn Tls13ServerEndpoint(
             connection_id: u64,
             path: endpoint.Udp4Tuple,
             now_millis: i64,
-            receive_keys: protection.Aes128PacketProtectionKeys,
             datagram: []const u8,
             scratch: []u8,
             initial_token: []const u8,
-            send_keys: protection.Aes128PacketProtectionKeys,
             out: []root.EndpointPolledDatagramResult,
         ) (root.EndpointProtectedDatagramError || error{UnknownConnectionId})!root.EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const info = protection.peekProtectedLongPacketInfo(datagram) catch return error.InvalidPacket;
+            if (info.packet_type != .initial) return error.InvalidPacket;
+            const initial_secrets = protection.deriveInitialSecrets(
+                info.version,
+                initial_destination_connection_id_of(record),
+            ) catch return error.InvalidPacket;
+            const receive_keys = switch (connection_of(record).side) {
+                .client => initial_secrets.server,
+                .server => initial_secrets.client,
+            };
+            const send_keys = switch (connection_of(record).side) {
+                .client => initial_secrets.client,
+                .server => initial_secrets.server,
+            };
             return self.lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
                 connection_id,
                 connection_of(record),
@@ -435,6 +458,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         handle: u64,
         connection: Connection,
         backend: root.CryptoBackend,
+        retry_validated: bool = false,
 
         fn connectionRef(self: *@This()) *Connection {
             return &self.connection;
@@ -450,6 +474,14 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
 
         fn sourceConnectionId(_: *const @This()) []const u8 {
             return "local";
+        }
+
+        fn initialDestinationConnectionId(self: *const @This()) []const u8 {
+            return if (self.retry_validated) "retry" else "initial";
+        }
+
+        fn markRetryValidated(self: *@This()) void {
+            self.retry_validated = true;
         }
 
         fn deinit(self: *@This()) void {
@@ -494,6 +526,8 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         TestRecord.cryptoBackend,
         TestRecord.destinationConnectionId,
         TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
         TestRecord.deinit,
     );
 
@@ -608,13 +642,12 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             &backend_output,
         ),
     );
-    const retry_initial_secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
     const initial_backend_progress = try endpoint_owner.driveInitialBackend(
         retry_record.handle,
         &backend_scratch,
         1,
         &[_]u8{},
-        retry_initial_secrets.server,
+        .v1,
         &backend_output,
     );
     try std.testing.expectEqual(@as(usize, 0), initial_backend_progress.backend.outbound_chunks);
@@ -625,7 +658,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             &backend_scratch,
             1,
             &[_]u8{},
-            retry_initial_secrets.server,
+            .v1,
             &backend_output,
         ),
     );
@@ -649,7 +682,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             99,
             retry_path,
             1,
-            &original_dcid,
             &[_]u8{},
         ),
     );
@@ -659,11 +691,9 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             99,
             retry_path,
             1,
-            retry_initial_secrets.client,
             &[_]u8{},
             &backend_scratch,
             &[_]u8{},
-            retry_initial_secrets.server,
             &backend_output,
         ),
     );

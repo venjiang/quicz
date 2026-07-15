@@ -148,6 +148,17 @@ const ManagedProcessConnection = struct {
     fn sourceConnectionId(self: *const ManagedProcessConnection) []const u8 {
         return self.transport.localInitialSourceConnectionId();
     }
+
+    fn initialDestinationConnectionId(self: *const ManagedProcessConnection) []const u8 {
+        return if (self.retry_validated)
+            self.transport.localInitialSourceConnectionId()
+        else
+            self.transport.originalDestinationConnectionId();
+    }
+
+    fn markRetryValidated(self: *ManagedProcessConnection) void {
+        self.retry_validated = true;
+    }
 };
 
 const ProcessConnectionRegistry = quicz.EndpointConnectionRegistry(
@@ -162,6 +173,8 @@ const ProcessServerEndpoint = quicz.Tls13ServerEndpoint(
     ManagedProcessConnection.cryptoBackend,
     ManagedProcessConnection.destinationConnectionId,
     ManagedProcessConnection.sourceConnectionId,
+    ManagedProcessConnection.initialDestinationConnectionId,
+    ManagedProcessConnection.markRetryValidated,
     ManagedProcessConnection.deinit,
 );
 
@@ -420,8 +433,6 @@ fn serveConcurrent(
             .routed => |route| {
                 const managed = connections.get(route.connection_id) orelse return error.UnknownConnectionId;
                 if (retry_enabled and managed.transport.connection.pendingRetryTokenCount() != 0) {
-                    const retry_info = try protection.peekProtectedLongPacketInfo(received.data);
-                    if (retry_info.packet_type != .initial) return error.InvalidPacket;
                     const retry_initial = try server_endpoint.validateRetryInitial(
                         &address_validation,
                         managed.handle,
@@ -432,17 +443,13 @@ fn serveConcurrent(
                     );
                     managed.retry_datagram_len = 0;
                     var retry_scratch: [8192]u8 = undefined;
-                    const retry_secrets = try protection.deriveInitialSecrets(
-                        retry_initial.initial_accept.version,
-                        retry_initial.initial_accept.original_destination_connection_id,
-                    );
                     var retry_initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                     const retry_initial_progress = try server_endpoint.driveInitialBackend(
                         managed.handle,
                         &retry_scratch,
                         now_millis,
                         &[_]u8{},
-                        retry_secrets.server,
+                        retry_initial.initial_accept.version,
                         &retry_initial_outputs,
                     );
                     for (retry_initial_outputs[0..retry_initial_progress.drain.datagrams_written]) |output| {
@@ -450,7 +457,6 @@ fn serveConcurrent(
                         try socket.send(io, &managed.peer_address, output.datagram);
                     }
                     if (retry_initial_progress.drain.first_error) |drain_error| return drain_error;
-                    managed.retry_validated = true;
                     if (!retry_initial_progress.backend.handshake_keys_installed) continue;
                     var retry_handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                     const retry_handshake_progress = try server_endpoint.driveBackend(
@@ -485,15 +491,10 @@ fn serveConcurrent(
                         first_long_info.len < received.data.len and
                         managed.transport.connection.hasHandshakeProtectionKeys())
                     {
-                        const initial_destination_connection_id = if (managed.retry_validated)
-                            managed.transport.localInitialSourceConnectionId()
-                        else
-                            managed.transport.originalDestinationConnectionId();
                         _ = try server_endpoint.processInitialWithHandshakeKeys(
                             managed.handle,
                             path,
                             now_millis,
-                            initial_destination_connection_id,
                             received.data,
                         );
                         var coalesced_scratch: [8192]u8 = undefined;
@@ -519,25 +520,15 @@ fn serveConcurrent(
                         const long_packet = packet_bytes[0..long_info.len];
                         switch (long_info.packet_type) {
                             .initial => {
-                                const initial_destination_connection_id = if (managed.retry_validated)
-                                    managed.transport.localInitialSourceConnectionId()
-                                else
-                                    managed.transport.originalDestinationConnectionId();
-                                const initial_secrets = try protection.deriveInitialSecrets(
-                                    long_info.version,
-                                    initial_destination_connection_id,
-                                );
                                 var initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                                 var initial_scratch: [8192]u8 = undefined;
                                 const initial = try server_endpoint.processInitial(
                                     managed.handle,
                                     path,
                                     now_millis,
-                                    initial_secrets.client,
                                     long_packet,
                                     &initial_scratch,
                                     &[_]u8{},
-                                    initial_secrets.server,
                                     &initial_outputs,
                                 );
                                 try require(initial.route.connection_id == managed.handle);
