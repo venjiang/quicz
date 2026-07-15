@@ -9,7 +9,7 @@
 //! deadline 驱动事件循环，能处理 PTO 超时恢复，逼近真实网络行为。
 //!
 //! 命令行：interop_event_loopback [TESTCASE]
-//!   TESTCASE: handshake（默认）/ transfer / loss / congestion / persistent / key-update / path
+//!   TESTCASE: handshake（默认）/ transfer / loss / congestion / persistent / key-update / path / stream-control
 //!
 //! 场景（本地 loopback 自测）：
 //!   handshake - 事件循环驱动 TLS 1.3 握手到两端 handshakeConfirmed
@@ -24,6 +24,8 @@
 //!                endpoint key-discard deadline 到期后拒绝旧 key 重放包
 //!   path      - TLS-owned 1-RTT PATH_CHALLENGE/PATH_RESPONSE 经新 UDP tuple
 //!                验证后，由 server endpoint lifecycle 提交路由迁移
+//!   stream-control - TLS-backed endpoint lifecycle 经真实 UDP 发送
+//!                    RESET_STREAM，并完成 STOP_SENDING 到 RESET_STREAM 的往返
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -45,7 +47,7 @@ const client_handle: u64 = 1;
 const server_handle: u64 = 2;
 const max_key_update_datagrams: usize = 64;
 
-const Testcase = enum { handshake, transfer, loss, congestion, persistent, key_update, path };
+const Testcase = enum { handshake, transfer, loss, congestion, persistent, key_update, path, stream_control };
 
 fn parseTestcase(name: []const u8) Testcase {
     if (std.mem.eql(u8, name, "handshake")) return .handshake;
@@ -55,6 +57,7 @@ fn parseTestcase(name: []const u8) Testcase {
     if (std.mem.eql(u8, name, "persistent")) return .persistent;
     if (std.mem.eql(u8, name, "key-update")) return .key_update;
     if (std.mem.eql(u8, name, "path")) return .path;
+    if (std.mem.eql(u8, name, "stream-control")) return .stream_control;
     return .handshake;
 }
 
@@ -864,6 +867,107 @@ pub fn main(init: std.process.Init) !void {
             client_socket.address.getPort(),
             migrated_client_socket.address.getPort(),
         });
+        return;
+    }
+
+    if (testcase == .stream_control) {
+        // Ensure each asserted datagram belongs to the control exchange rather
+        // than residual handshake ACK or HANDSHAKE_DONE output.
+        try drainReadyOutput(io, &client_ep, &server_ep, now, secrets, &scratch, &recv_buf);
+        now += 1;
+
+        // A client-initiated unidirectional stream is send-only at the client
+        // and receive-only at the server. RESET_STREAM must cross the protected
+        // UDP/lifecycle path and create the peer receive reset state.
+        const reset_stream_id = try client.openUniStream();
+        try client.resetStream(reset_stream_id, 41);
+        const reset_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            client_handle,
+            &client,
+            now,
+            &server_scid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(reset_datagram);
+        try client_socket.send(io, &server_socket.address, reset_datagram);
+        const reset_received = try server_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+        const reset_route = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &server,
+            server_path,
+            now,
+            reset_received.data,
+        );
+        try require(reset_route.connection_id == server_handle);
+        const reset_state = (try server.streamState(reset_stream_id)) orelse return error.UnexpectedState;
+        try require(reset_state.receive == .reset_received);
+        try require(reset_state.receive_reset_error_code.? == 41);
+
+        // The server asks the client to stop a live bidirectional send side.
+        // The client must emit the matching RESET_STREAM, which the server
+        // receives through the same protected endpoint path.
+        const stop_stream_id = try client.openStream();
+        try client.sendOnStream(stop_stream_id, "stop", false);
+        const stream_datagram = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            client_handle,
+            &client,
+            now + 1,
+            &server_scid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(stream_datagram);
+        try client_socket.send(io, &server_socket.address, stream_datagram);
+        const stream_received = try server_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+        _ = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &server,
+            server_path,
+            now + 1,
+            stream_received.data,
+        );
+        const received_stream = (try server.streamState(stop_stream_id)) orelse return error.UnexpectedState;
+        try require(received_stream.receive == .receiving);
+        try require(received_stream.receive_buffered.? == 4);
+
+        try server.stopSending(stop_stream_id, 42);
+        const stop_datagram = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &server,
+            now + 2,
+            &client_scid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(stop_datagram);
+        try server_socket.send(io, &client_socket.address, stop_datagram);
+        const stop_received = try client_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+        _ = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            client_handle,
+            &client,
+            client_path,
+            now + 2,
+            stop_received.data,
+        );
+        const stopped_client_stream = (try client.streamState(stop_stream_id)) orelse return error.UnexpectedState;
+        try require(stopped_client_stream.send == .reset_sent);
+
+        const reset_response = (try client_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            client_handle,
+            &client,
+            now + 3,
+            &server_scid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(reset_response);
+        try client_socket.send(io, &server_socket.address, reset_response);
+        const reset_response_received = try server_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+        _ = try server_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &server,
+            server_path,
+            now + 3,
+            reset_response_received.data,
+        );
+        const stopped_server_stream = (try server.streamState(stop_stream_id)) orelse return error.UnexpectedState;
+        try require(stopped_server_stream.receive == .reset_received);
+        try require(stopped_server_stream.receive_reset_error_code.? == 42);
+
+        std.debug.print("tls_stream_control=true reset_error=41 stop_error=42\n", .{});
         return;
     }
 

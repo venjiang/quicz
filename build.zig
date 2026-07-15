@@ -1545,7 +1545,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // zig build run-interop-event-loopback -- [TESTCASE]
-    const run_interop_event_loopback = b.step("run-interop-event-loopback", "Run event-driven interop loopback (TESTCASE: handshake/transfer/loss/congestion/persistent/key-update/path)");
+    const run_interop_event_loopback = b.step("run-interop-event-loopback", "Run event-driven interop loopback (TESTCASE: handshake/transfer/loss/congestion/persistent/key-update/path/stream-control)");
     const run_interop_event_loopback_cmd = b.addRunArtifact(exe_interop_event_loopback);
     run_interop_event_loopback.dependOn(&run_interop_event_loopback_cmd.step);
     run_interop_event_loopback_cmd.step.dependOn(b.getInstallStep());
