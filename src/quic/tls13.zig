@@ -2005,12 +2005,14 @@ pub const Tls13Handshake = struct {
                     // Empty extension (RFC 8446 §4.2.10): the client signals
                     // 0-RTT intent. The server only records the offer here;
                     // acceptance is gated on a matching PSK and policy.
+                    if (el != 0) return error.DecodeError;
                     self.peer_offered_early_data = true;
                 },
                 @intFromEnum(ExtType.pre_shared_key) => {
                     // RFC 8446 §4.2.11. Must be the last extension; parse the
                     // first offered identity + binder. identities<7..2^16-1>
                     // then binders<33..2^16-1>.
+                    if (pos != ext_end) return error.DecodeError;
                     self.peer_offered_psk = true;
                     var pp: usize = 0;
                     if (pp + 2 > el) return error.DecodeError;
@@ -3116,6 +3118,25 @@ fn clientHelloBytes(config: TlsConfig, out: []u8) ![]u8 {
     return out[0..action.send_data.data.len];
 }
 
+fn clientHelloPskBytes(config: TlsConfig, psk: [secret_len]u8, out: []u8) ![]u8 {
+    var client = Tls13Handshake.initClientWithPsk(config, &[_]u8{}, psk);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+    const action = try client.step();
+    if (std.meta.activeTag(action) != .send_data) return error.TestUnexpectedResult;
+    if (action.send_data.data.len > out.len) return error.TestUnexpectedResult;
+    @memcpy(out[0..action.send_data.data.len], action.send_data.data);
+    return out[0..action.send_data.data.len];
+}
+
+fn setClientHelloBodyLen(buf: []u8, new_body_len: usize) !void {
+    if (new_body_len > 0xFF_FF_FF) return error.TestUnexpectedResult;
+    buf[1] = @as(u8, @intCast(new_body_len >> 16));
+    buf[2] = @as(u8, @intCast((new_body_len >> 8) & 0xFF));
+    buf[3] = @as(u8, @intCast(new_body_len & 0xFF));
+}
+
 fn appendDuplicateClientHelloExtension(buf: []u8, msg_len: usize, ext_type: u16) ![]u8 {
     const msg = buf[0..msg_len];
     const ext = try clientHelloExtension(msg, ext_type);
@@ -3124,21 +3145,56 @@ fn appendDuplicateClientHelloExtension(buf: []u8, msg_len: usize, ext_type: u16)
 
     const old_body_len = msg_len - 4;
     const new_body_len = old_body_len + duplicate_len;
-    if (new_body_len > 0xFF_FF_FF) return error.TestUnexpectedResult;
 
     std.mem.copyForwards(
         u8,
         buf[msg_len..][0..duplicate_len],
         buf[ext.header_offset..][0..duplicate_len],
     );
-    buf[1] = @as(u8, @intCast(new_body_len >> 16));
-    buf[2] = @as(u8, @intCast((new_body_len >> 8) & 0xFF));
-    buf[3] = @as(u8, @intCast(new_body_len & 0xFF));
+    try setClientHelloBodyLen(buf, new_body_len);
 
     const old_extensions_len = readU16(buf[ext.extensions_len_offset..]);
     const new_extensions_len = old_extensions_len + duplicate_len;
     writeU16(buf[ext.extensions_len_offset..][0..2], @as(u16, @intCast(new_extensions_len)));
     return buf[0 .. msg_len + duplicate_len];
+}
+
+fn appendClientHelloRawExtension(buf: []u8, msg_len: usize, ext_type: u16, payload: []const u8) ![]u8 {
+    if (payload.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
+    const duplicate_len = 4 + payload.len;
+    if (msg_len + duplicate_len > buf.len) return error.TestUnexpectedResult;
+    const ext = try clientHelloExtension(buf[0..msg_len], @intFromEnum(ExtType.supported_versions));
+
+    writeU16(buf[msg_len..][0..2], ext_type);
+    writeU16(buf[msg_len + 2 ..][0..2], @as(u16, @intCast(payload.len)));
+    @memcpy(buf[msg_len + 4 ..][0..payload.len], payload);
+    try setClientHelloBodyLen(buf, msg_len - 4 + duplicate_len);
+
+    const old_extensions_len = readU16(buf[ext.extensions_len_offset..]);
+    const new_extensions_len = old_extensions_len + duplicate_len;
+    writeU16(buf[ext.extensions_len_offset..][0..2], @as(u16, @intCast(new_extensions_len)));
+    return buf[0 .. msg_len + duplicate_len];
+}
+
+fn extendClientHelloExtensionBody(buf: []u8, msg_len: usize, ext_type: u16, extra: []const u8) ![]u8 {
+    if (extra.len == 0 or extra.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
+    const ext = try clientHelloExtension(buf[0..msg_len], ext_type);
+    if (ext.body_len + extra.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
+    if (msg_len + extra.len > buf.len) return error.TestUnexpectedResult;
+
+    std.mem.copyBackwards(
+        u8,
+        buf[ext.body_offset + extra.len ..][0 .. msg_len - ext.body_offset],
+        buf[ext.body_offset..msg_len],
+    );
+    @memcpy(buf[ext.body_offset..][0..extra.len], extra);
+    writeU16(buf[ext.header_offset + 2 ..][0..2], @as(u16, @intCast(ext.body_len + extra.len)));
+    try setClientHelloBodyLen(buf, msg_len - 4 + extra.len);
+
+    const old_extensions_len = readU16(buf[ext.extensions_len_offset..]);
+    const new_extensions_len = old_extensions_len + extra.len;
+    writeU16(buf[ext.extensions_len_offset..][0..2], @as(u16, @intCast(new_extensions_len)));
+    return buf[0 .. msg_len + extra.len];
 }
 
 test "Tls13Handshake server rejects duplicate known ClientHello extensions" {
@@ -3147,6 +3203,33 @@ test "Tls13Handshake server rejects duplicate known ClientHello extensions" {
     const hello = try appendDuplicateClientHelloExtension(&hello_buf, base_hello.len, @intFromEnum(ExtType.supported_versions));
 
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects non-empty ClientHello early_data extension" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const hello = try extendClientHelloExtensionBody(
+        &hello_buf,
+        base_hello.len,
+        @intFromEnum(ExtType.early_data),
+        &[_]u8{0x00},
+    );
+
+    var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects ClientHello pre_shared_key before trailing extension" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const hello = try appendClientHelloRawExtension(&hello_buf, base_hello.len, 0xaaaa, &[_]u8{});
+
+    var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
 }
