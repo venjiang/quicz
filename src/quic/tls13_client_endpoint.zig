@@ -133,6 +133,7 @@ pub const Tls13ClientEndpoint = struct {
                 .datagram = bytes,
                 .path = path,
             } else null,
+            .next_deadline = self.nextDeadline(),
         };
     }
 
@@ -156,6 +157,7 @@ pub const Tls13ClientEndpoint = struct {
                     try self.pollApplicationDatagramWithRoutePath(now_millis)
                 else
                     null,
+                .next_deadline = self.nextDeadline(),
             };
         };
         const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
@@ -174,6 +176,7 @@ pub const Tls13ClientEndpoint = struct {
                 try self.pollApplicationDatagramWithRoutePath(now_millis)
             else
                 null,
+            .next_deadline = self.nextDeadline(),
         };
     }
 
@@ -560,6 +563,8 @@ pub const Tls13ClientEndpoint = struct {
         receive: ReceiveResult,
         outbound_initial: ?ApplicationDatagramPathResult = null,
         outbound_handshake: ?ApplicationDatagramPathResult = null,
+        /// Next client-visible deadline after receive processing and immediate output.
+        next_deadline: ?client_transport.ClientTransportDeadline = null,
     };
 
     /// Client receive result that can carry close-on-frame-error output.
@@ -569,6 +574,8 @@ pub const Tls13ClientEndpoint = struct {
         outbound_initial: ?ApplicationDatagramPathResult = null,
         outbound_handshake: ?ApplicationDatagramPathResult = null,
         outbound_application: ?ApplicationDatagramPathResult = null,
+        /// Next client-visible deadline after receive or close-on-error output.
+        next_deadline: ?client_transport.ClientTransportDeadline = null,
     };
 
     /// Client receive result that can drain close-on-frame-error output.
@@ -822,6 +829,8 @@ test "Tls13ClientEndpoint receive returns route-bound close on frame error" {
     defer std.testing.allocator.free(close_datagram.datagram);
     try std.testing.expect(close_datagram.path.eql(new_path));
     try std.testing.expect(close_datagram.datagram.len != 0);
+    const close_deadline = received.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expect(close_deadline == .close_timeout);
 }
 
 test "Tls13ClientEndpoint receive drains route-bound close on frame error" {
@@ -942,6 +951,7 @@ test "Tls13ClientEndpoint receive does not drain queued application output on ro
     try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), received.receive_error);
     try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
     try std.testing.expect(received.outbound_application == null);
+    try std.testing.expectEqual(@as(?client_transport.ClientTransportDeadline, null), received.next_deadline);
 
     const queued = (try client.pollApplicationDatagramWithRoutePath(11)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(queued.datagram);
@@ -1282,6 +1292,8 @@ test "Tls13ClientEndpoint receive returns Retry output with committed route path
     defer std.testing.allocator.free(outbound_initial.datagram);
     try std.testing.expect(outbound_initial.path.eql(new_path));
     try std.testing.expect(outbound_initial.datagram.len >= 1200);
+    const next_deadline = received.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expect(next_deadline == .recovery);
 }
 
 test "Tls13ClientEndpoint installs Version Negotiation follow-up route" {

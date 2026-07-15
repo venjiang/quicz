@@ -95,6 +95,10 @@ errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
 route-bound application datagram after `InvalidPacket` if the connection has
 entered `closing`. Route mismatches and other non-closing invalid inputs keep
 already queued application output pending for normal polling.
+The route-bound client receive and close-on-error poll results now also expose
+the post-receive next deadline, so socket loops can update their wait target
+without a separate lifecycle query after Retry follow-up, protected close
+emission, or preserved-output route mismatch with no newly armed timer.
 The bounded variant
 `Tls13ClientEndpoint.receiveWithRoutePathOrCloseAndDrainDatagrams()` follows
 the same close boundary, drains route-bound protected close output into
