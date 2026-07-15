@@ -1518,7 +1518,7 @@ pub const Tls13Handshake = struct {
         if (pos + 2 > msg.len) return error.DecodeError;
         const ext_total = readU16(msg[pos..]);
         pos += 2;
-        if (pos + ext_total > msg.len) return error.DecodeError;
+        if (pos + ext_total != msg.len) return error.DecodeError;
         const ext_end = pos + ext_total;
 
         var have_version = false;
@@ -1581,7 +1581,7 @@ pub const Tls13Handshake = struct {
         if (pos + 2 > msg.len) return error.DecodeError;
         const ext_total = readU16(msg[pos..]);
         pos += 2;
-        if (pos + ext_total > msg.len) return error.DecodeError;
+        if (pos + ext_total != msg.len) return error.DecodeError;
         const ext_end = pos + ext_total;
 
         var have_alpn = false;
@@ -1937,7 +1937,7 @@ pub const Tls13Handshake = struct {
         if (pos + 2 > body.len) return error.DecodeError;
         const ext_total = readU16(body[pos..]);
         pos += 2;
-        if (pos + ext_total > body.len) return error.DecodeError;
+        if (pos + ext_total != body.len) return error.DecodeError;
         const ext_end = pos + ext_total;
 
         var have_key_share = false;
@@ -2690,6 +2690,22 @@ test "Tls13Handshake client rejects duplicate known ServerHello extensions" {
     try std.testing.expectError(error.DecodeError, hs.step());
 }
 
+test "Tls13Handshake client rejects trailing bytes after ServerHello extensions" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [160]u8 = undefined;
+    const base_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    const server_hello = try appendTrailingHandshakeByte(&sh_buf, base_len, 0xaa);
+    hs.provideData(server_hello);
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
 test "Tls13Handshake client rejects ServerHello invalid legacy_version" {
     var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
     _ = try hs.step();
@@ -3227,6 +3243,25 @@ test "Tls13Handshake client rejects duplicate known EncryptedExtensions extensio
     try std.testing.expectError(error.DecodeError, hs.step());
 }
 
+test "Tls13Handshake client rejects trailing bytes after EncryptedExtensions extensions" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var sh_buf: [128]u8 = undefined;
+    hs.provideData(sh_buf[0..buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true)]);
+    _ = try hs.step();
+    _ = try hs.step();
+
+    var ee_buf: [256]u8 = undefined;
+    const base_len = buildEncryptedExtensions(&ee_buf, "", &[_]u8{});
+    const encrypted_extensions = try appendTrailingHandshakeByte(&ee_buf, base_len, 0xaa);
+    hs.provideData(encrypted_extensions);
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
 test "Tls13Handshake client rejects server Finished with wrong verify_data" {
     var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
     _ = try hs.step(); // ClientHello
@@ -3469,6 +3504,13 @@ fn setClientHelloBodyLen(buf: []u8, new_body_len: usize) !void {
     buf[3] = @as(u8, @intCast(new_body_len & 0xFF));
 }
 
+fn appendTrailingHandshakeByte(buf: []u8, msg_len: usize, byte: u8) ![]u8 {
+    if (msg_len < 4 or msg_len + 1 > buf.len) return error.TestUnexpectedResult;
+    buf[msg_len] = byte;
+    try setClientHelloBodyLen(buf, msg_len + 1 - 4);
+    return buf[0 .. msg_len + 1];
+}
+
 fn appendDuplicateClientHelloExtension(buf: []u8, msg_len: usize, ext_type: u16) ![]u8 {
     const msg = buf[0..msg_len];
     const ext = try clientHelloExtension(msg, ext_type);
@@ -3533,6 +3575,16 @@ test "Tls13Handshake server rejects duplicate known ClientHello extensions" {
     var hello_buf: [1024]u8 = undefined;
     const base_hello = try clientHelloBytes(.{}, &hello_buf);
     const hello = try appendDuplicateClientHelloExtension(&hello_buf, base_hello.len, @intFromEnum(ExtType.supported_versions));
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects trailing bytes after ClientHello extensions" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const hello = try appendTrailingHandshakeByte(&hello_buf, base_hello.len, 0xaa);
 
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
