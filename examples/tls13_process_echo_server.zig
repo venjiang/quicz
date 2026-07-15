@@ -203,7 +203,7 @@ fn serveConcurrent(
     defer lifecycle.deinit();
     var address_validation = endpoint.AddressValidationPolicy.init(allocator, retry_token_secret, .{});
     defer address_validation.deinit();
-    var connections = ProcessConnectionRegistry.initWithCapacity(allocator, max_active_connections);
+    var connections = try ProcessConnectionRegistry.initWithCapacity(allocator, max_active_connections);
     defer connections.deinit();
 
     var receive_buffer: [2048]u8 = undefined;

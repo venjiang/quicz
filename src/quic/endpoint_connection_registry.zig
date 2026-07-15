@@ -24,6 +24,9 @@ pub fn EndpointConnectionRegistry(
         allocator: std.mem.Allocator,
         records: std.AutoHashMap(u64, *Record),
         max_records: usize,
+        deadline_view_scratch: ?[]root.EndpointConnectionView,
+        receive_view_scratch: ?[]root.EndpointConnectionReceiveView,
+        poll_view_scratch: ?[]root.EndpointConnectionPollView,
 
         /// Create an empty registry. Record handles must be unique while active.
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -31,15 +34,30 @@ pub fn EndpointConnectionRegistry(
                 .allocator = allocator,
                 .records = std.AutoHashMap(u64, *Record).init(allocator),
                 .max_records = std.math.maxInt(usize),
+                .deadline_view_scratch = null,
+                .receive_view_scratch = null,
+                .poll_view_scratch = null,
             };
         }
 
         /// Create a registry that rejects new records once `max_records` are active.
-        pub fn initWithCapacity(allocator: std.mem.Allocator, max_records: usize) Self {
+        ///
+        /// Fixed-capacity registries allocate lifecycle view scratch space once,
+        /// so receive and deadline paths do not allocate per datagram.
+        pub fn initWithCapacity(allocator: std.mem.Allocator, max_records: usize) !Self {
+            const deadline_view_scratch = try allocator.alloc(root.EndpointConnectionView, max_records);
+            errdefer allocator.free(deadline_view_scratch);
+            const receive_view_scratch = try allocator.alloc(root.EndpointConnectionReceiveView, max_records);
+            errdefer allocator.free(receive_view_scratch);
+            const poll_view_scratch = try allocator.alloc(root.EndpointConnectionPollView, max_records);
+            errdefer allocator.free(poll_view_scratch);
             return .{
                 .allocator = allocator,
                 .records = std.AutoHashMap(u64, *Record).init(allocator),
                 .max_records = max_records,
+                .deadline_view_scratch = deadline_view_scratch,
+                .receive_view_scratch = receive_view_scratch,
+                .poll_view_scratch = poll_view_scratch,
             };
         }
 
@@ -51,6 +69,9 @@ pub fn EndpointConnectionRegistry(
                 self.allocator.destroy(record.*);
             }
             self.records.deinit();
+            if (self.deadline_view_scratch) |views| self.allocator.free(views);
+            if (self.receive_view_scratch) |views| self.allocator.free(views);
+            if (self.poll_view_scratch) |views| self.allocator.free(views);
         }
 
         /// Return the number of active records.
@@ -92,29 +113,15 @@ pub fn EndpointConnectionRegistry(
         /// Build caller-owned lifecycle deadline views for all active records.
         pub fn deadlineViews(self: *Self, allocator: std.mem.Allocator) ![]root.EndpointConnectionView {
             const views = try allocator.alloc(root.EndpointConnectionView, self.count());
-            var iterator = self.records.valueIterator();
-            var index: usize = 0;
-            while (iterator.next()) |record| : (index += 1) {
-                views[index] = .{
-                    .connection_id = record.*.handle,
-                    .connection = connection_of(record.*),
-                };
-            }
-            return views;
+            errdefer allocator.free(views);
+            return self.fillDeadlineViews(views);
         }
 
         /// Build caller-owned lifecycle receive views for all active records.
         pub fn receiveViews(self: *Self, allocator: std.mem.Allocator) ![]root.EndpointConnectionReceiveView {
             const views = try allocator.alloc(root.EndpointConnectionReceiveView, self.count());
-            var iterator = self.records.valueIterator();
-            var index: usize = 0;
-            while (iterator.next()) |record| : (index += 1) {
-                views[index] = .{
-                    .connection_id = record.*.handle,
-                    .connection = connection_of(record.*),
-                };
-            }
-            return views;
+            errdefer allocator.free(views);
+            return self.fillReceiveViews(views);
         }
 
         /// Build lifecycle recovery-poll views using record-specific connection IDs.
@@ -125,17 +132,63 @@ pub fn EndpointConnectionRegistry(
             comptime source_connection_id: *const fn (*const Record) []const u8,
         ) ![]root.EndpointConnectionPollView {
             const views = try allocator.alloc(root.EndpointConnectionPollView, self.count());
+            errdefer allocator.free(views);
+            return self.fillPollViews(views, destination_connection_id, source_connection_id);
+        }
+
+        /// Populate caller-owned deadline views without allocating.
+        pub fn fillDeadlineViews(
+            self: *Self,
+            out: []root.EndpointConnectionView,
+        ) root.Error![]root.EndpointConnectionView {
+            if (out.len < self.count()) return error.BufferTooSmall;
             var iterator = self.records.valueIterator();
             var index: usize = 0;
             while (iterator.next()) |record| : (index += 1) {
-                views[index] = .{
+                out[index] = .{
+                    .connection_id = record.*.handle,
+                    .connection = connection_of(record.*),
+                };
+            }
+            return out[0..index];
+        }
+
+        /// Populate caller-owned receive views without allocating.
+        pub fn fillReceiveViews(
+            self: *Self,
+            out: []root.EndpointConnectionReceiveView,
+        ) root.Error![]root.EndpointConnectionReceiveView {
+            if (out.len < self.count()) return error.BufferTooSmall;
+            var iterator = self.records.valueIterator();
+            var index: usize = 0;
+            while (iterator.next()) |record| : (index += 1) {
+                out[index] = .{
+                    .connection_id = record.*.handle,
+                    .connection = connection_of(record.*),
+                };
+            }
+            return out[0..index];
+        }
+
+        /// Populate caller-owned recovery-poll views without allocating.
+        pub fn fillPollViews(
+            self: *Self,
+            out: []root.EndpointConnectionPollView,
+            comptime destination_connection_id: *const fn (*const Record) []const u8,
+            comptime source_connection_id: *const fn (*const Record) []const u8,
+        ) root.Error![]root.EndpointConnectionPollView {
+            if (out.len < self.count()) return error.BufferTooSmall;
+            var iterator = self.records.valueIterator();
+            var index: usize = 0;
+            while (iterator.next()) |record| : (index += 1) {
+                out[index] = .{
                     .connection_id = record.*.handle,
                     .connection = connection_of(record.*),
                     .destination_connection_id = destination_connection_id(record.*),
                     .source_connection_id = source_connection_id(record.*),
                 };
             }
-            return views;
+            return out[0..index];
         }
 
         /// Select the earliest lifecycle deadline from the records owned by this registry.
@@ -144,6 +197,9 @@ pub fn EndpointConnectionRegistry(
             lifecycle: *const root.EndpointConnectionLifecycle,
             allocator: std.mem.Allocator,
         ) !?root.EndpointConnectionDeadline {
+            if (self.deadline_view_scratch) |views| {
+                return lifecycle.nextDeadlineAcrossConnections(try self.fillDeadlineViews(views));
+            }
             const views = try self.deadlineViews(allocator);
             defer allocator.free(views);
             return lifecycle.nextDeadlineAcrossConnections(views);
@@ -162,6 +218,13 @@ pub fn EndpointConnectionRegistry(
             comptime destination_connection_id: *const fn (*const Record) []const u8,
             comptime source_connection_id: *const fn (*const Record) []const u8,
         ) root.Error!?root.EndpointDueWorkDatagramDrainResult {
+            if (self.poll_view_scratch) |views| {
+                return lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
+                    try self.fillPollViews(views, destination_connection_id, source_connection_id),
+                    now_millis,
+                    out,
+                );
+            }
             const views = try self.pollViews(
                 allocator,
                 destination_connection_id,
@@ -188,6 +251,15 @@ pub fn EndpointConnectionRegistry(
             datagram: []const u8,
             options: root.EndpointFeedInstalledKeyDatagramOptions,
         ) root.EndpointProtectedDatagramError!root.EndpointFeedInstalledKeyDatagramResult {
+            if (self.receive_view_scratch) |views| {
+                return lifecycle.feedDatagramWithInstalledKeysAcrossConnections(
+                    try self.fillReceiveViews(views),
+                    path,
+                    now_millis,
+                    datagram,
+                    options,
+                );
+            }
             const views = try self.receiveViews(allocator);
             defer allocator.free(views);
             return lifecycle.feedDatagramWithInstalledKeysAcrossConnections(
@@ -210,6 +282,14 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
             return &self.connection;
         }
 
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
         fn deinit(self: *@This()) void {
             self.connection.deinit();
         }
@@ -220,7 +300,7 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
         TestRecord.deinit,
     );
 
-    var registry = Registry.initWithCapacity(std.testing.allocator, 1);
+    var registry = try Registry.initWithCapacity(std.testing.allocator, 1);
     defer registry.deinit();
     var connection = try root.Connection.init(std.testing.allocator, .client, .{});
     var connection_owned = true;
@@ -251,12 +331,14 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
 
     var lifecycle = root.EndpointConnectionLifecycle.init(std.testing.allocator);
     defer lifecycle.deinit();
-    try std.testing.expect((try registry.nextDeadline(&lifecycle, std.testing.allocator)) == null);
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    try std.testing.expect((try registry.nextDeadline(&lifecycle, no_allocation_allocator.allocator())) == null);
 
     var endpoint_output: [64]u8 = undefined;
     const feed = try registry.feedDatagramWithInstalledKeys(
         &lifecycle,
-        std.testing.allocator,
+        no_allocation_allocator.allocator(),
         .{
             .local = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
             .remote = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
@@ -271,6 +353,16 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
         },
     );
     try std.testing.expect(feed == .dropped);
+
+    var due_datagrams: [1]root.EndpointPolledDatagramResult = undefined;
+    try std.testing.expect((try registry.processDueDeadlineAndDrainDatagrams(
+        &lifecycle,
+        no_allocation_allocator.allocator(),
+        0,
+        &due_datagrams,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    )) == null);
 
     const second_record = try std.testing.allocator.create(TestRecord);
     var second_initialized = false;

@@ -136,8 +136,9 @@ command starts two tagged client processes concurrently. The server keeps
 each `Connection` and its `Tls13Backend` record in the bounded,
 endpoint-owned `EndpointConnectionRegistry`, and uses one
 `EndpointConnectionLifecycle` to classify and route every datagram on one UDP
-socket. The registry also derives the lifecycle's deadline and due-recovery
-poll views and installed-key receive dispatch from that same record set. The distinct client tags prevent Initial DCID and
+socket. Its fixed-capacity form preallocates the lifecycle's deadline,
+due-recovery poll, and installed-key receive views from that same record set,
+so the hot receive/timer paths do not allocate. The distinct client tags prevent Initial DCID and
 SCID collisions. After each matching FIN-terminated echo, the client sends a protected
 `CONNECTION_CLOSE`; the server processes it through that connection's route,
 enters draining, and retires only that handle's routes at the close deadline
