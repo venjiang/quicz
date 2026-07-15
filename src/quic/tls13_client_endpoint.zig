@@ -10,6 +10,7 @@ const endpoint = @import("endpoint.zig");
 const endpoint_lifecycle = @import("endpoint_lifecycle.zig");
 const frame = @import("frame.zig");
 const packet = @import("packet.zig");
+const protection = @import("protection.zig");
 const tls13 = @import("tls13.zig");
 const client_transport = @import("tls13_client_transport.zig");
 const transport_types = @import("transport_types.zig");
@@ -97,6 +98,30 @@ pub const Tls13ClientEndpoint = struct {
         const progress = try self.transport.receive(now_millis, scratch, datagram);
         try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
         return .{ .route = route, .transport = progress };
+    }
+
+    /// Route/process one peer datagram and pair any immediate outbound output
+    /// with the endpoint's committed UDP route.
+    pub fn receiveWithRoutePath(
+        self: *Tls13ClientEndpoint,
+        now_millis: i64,
+        scratch: []u8,
+        datagram: []const u8,
+    ) !ReceiveDatagramPathResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        const received = try self.receive(now_millis, scratch, datagram);
+        return .{
+            .receive = received,
+            .outbound_initial = if (received.transport.outbound_initial) |bytes| .{
+                .datagram = bytes,
+                .path = path,
+            } else null,
+            .outbound_handshake = if (received.transport.outbound_handshake) |bytes| .{
+                .datagram = bytes,
+                .path = path,
+            } else null,
+        };
     }
 
     /// Move the client's registered UDP route after caller-selected migration.
@@ -258,6 +283,13 @@ pub const Tls13ClientEndpoint = struct {
         stateless_reset_sequence_number: ?u64 = null,
     };
 
+    /// Client receive result with immediate outbound datagrams paired to route.
+    pub const ReceiveDatagramPathResult = struct {
+        receive: ReceiveResult,
+        outbound_initial: ?ApplicationDatagramPathResult = null,
+        outbound_handshake: ?ApplicationDatagramPathResult = null,
+    };
+
     /// Client endpoint application datagram paired with the committed route.
     pub const ApplicationDatagramPathResult = struct {
         datagram: []u8,
@@ -416,6 +448,60 @@ test "Tls13ClientEndpoint services due recovery with committed route output" {
     defer std.testing.allocator.free(output.datagram);
     try std.testing.expect(output.path.eql(new_path));
     try std.testing.expect(output.datagram.len != 0);
+}
+
+test "Tls13ClientEndpoint receive returns Retry output with committed route path" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70 };
+    const retry_scid = [_]u8{ 0xca, 0xcb, 0xcc, 0xcd };
+    const alpn = [_][]const u8{"hq-interop"};
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = old_path.remote,
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        14,
+        old_path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    var scratch: [8192]u8 = undefined;
+    const initial = try client.begin(1, &scratch);
+    defer std.testing.allocator.free(initial);
+    _ = try client.updatePath(new_path);
+
+    const retry = packet.RetryPacket{
+        .version = .v1,
+        .dcid = &client_scid,
+        .scid = &retry_scid,
+        .token = "retry-token-for-client-address",
+        .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+    };
+    const retry_datagram = try protection.encodeRetryPacketWithIntegrity(
+        std.testing.allocator,
+        &original_dcid,
+        retry,
+    );
+    defer std.testing.allocator.free(retry_datagram);
+
+    const received = try client.receiveWithRoutePath(2, &scratch, retry_datagram);
+    try std.testing.expect(received.receive.transport.retry_received);
+    try std.testing.expect(received.receive.transport.outbound_initial != null);
+    try std.testing.expect(received.outbound_handshake == null);
+    const outbound_initial = received.outbound_initial orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(outbound_initial.datagram);
+    try std.testing.expect(outbound_initial.path.eql(new_path));
+    try std.testing.expect(outbound_initial.datagram.len >= 1200);
 }
 
 test "Tls13ClientEndpoint receive enters draining on active stateless reset" {
