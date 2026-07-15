@@ -1937,7 +1937,7 @@ pub const Tls13Handshake = struct {
             (@as(usize, certificate_message[pos.* + 1]) << 8) |
             @as(usize, certificate_message[pos.* + 2]);
         pos.* += 3;
-        if (cert_len > list_end - pos.*) return error.DecodeError;
+        if (cert_len == 0 or cert_len > list_end - pos.*) return error.DecodeError;
         const cert_der = certificate_message[pos.* .. pos.* + cert_len];
         pos.* += cert_len;
         if (list_end - pos.* < 2) return error.DecodeError;
@@ -3318,8 +3318,8 @@ fn encryptedExtensionsExtension(msg: []const u8, ext_type: u16) !EncryptedExtens
 /// Build a Certificate message carrying a leaf-first DER certificate chain.
 ///
 /// Every entry is emitted with empty per-certificate extensions. `null` means
-/// the chain is empty, an entry exceeds the TLS 24-bit vector limit, or the
-/// output buffer cannot hold the complete message.
+/// the chain is empty, an entry is empty or exceeds the TLS 24-bit vector
+/// limit, or the output buffer cannot hold the complete message.
 pub fn buildCertificateChain(buf: []u8, cert_chain_der: []const []const u8) ?usize {
     if (cert_chain_der.len == 0 or buf.len < 8) return null;
 
@@ -3333,6 +3333,7 @@ pub fn buildCertificateChain(buf: []u8, cert_chain_der: []const []const u8) ?usi
     p += 3; // certificate_list length placeholder
 
     for (cert_chain_der) |cert_der| {
+        if (cert_der.len == 0) return null;
         if (cert_der.len > 0xFF_FF_FF) return null;
         const entry_len = std.math.add(usize, cert_der.len, 5) catch return null;
         const next = std.math.add(usize, p, entry_len) catch return null;
@@ -3389,6 +3390,10 @@ test "buildCertificateChain rejects empty and oversized output" {
     var empty_buf: [8]u8 = undefined;
     try std.testing.expect(buildCertificateChain(&empty_buf, &.{}) == null);
 
+    const empty_leaf = [_]u8{};
+    var empty_leaf_buf: [16]u8 = undefined;
+    try std.testing.expect(buildCertificateChain(&empty_leaf_buf, &.{&empty_leaf}) == null);
+
     const leaf = [_]u8{0x01};
     var too_small: [8]u8 = undefined;
     try std.testing.expect(buildCertificateChain(&too_small, &.{&leaf}) == null);
@@ -3443,11 +3448,29 @@ test "nextCertificateEntry rejects truncated extensions" {
     try std.testing.expectError(error.DecodeError, Tls13Handshake.nextCertificateEntry(&malformed, &pos, malformed.len));
 }
 
+test "nextCertificateEntry rejects empty certificate entries" {
+    const malformed = [_]u8{ 0, 0, 0, 0, 0 };
+    var pos: usize = 0;
+    try std.testing.expectError(error.DecodeError, Tls13Handshake.nextCertificateEntry(&malformed, &pos, malformed.len));
+}
+
 test "Tls13Handshake rejects malformed certificate chains when verification is skipped" {
     const malformed = [_]u8{
         @intFromEnum(HandshakeType.certificate), 0, 0, 9,
         0,                                       0, 0, 5,
         0,                                       0, 1, 0xaa,
+        0,
+    };
+    var handshake = Tls13Handshake.initClient(.{}, &.{});
+    handshake.provideData(&malformed);
+    try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificate());
+}
+
+test "Tls13Handshake rejects empty leaf certificate when verification is skipped" {
+    const malformed = [_]u8{
+        @intFromEnum(HandshakeType.certificate), 0, 0, 9,
+        0,                                       0, 0, 5,
+        0,                                       0, 0, 0,
         0,
     };
     var handshake = Tls13Handshake.initClient(.{}, &.{});
