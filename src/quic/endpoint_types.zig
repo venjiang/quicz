@@ -505,6 +505,8 @@ pub const EndpointDueWorkCryptoBackendDatagramDrainResult = struct {
     /// Backend drive and bounded output drain result when the due step did not
     /// already emit a datagram.
     backend: ?EndpointCryptoBackendDriveDatagramDrainResult = null,
+    /// Next endpoint-visible deadline after due work, backend progress, and drain.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from feeding one socket datagram through installed-key receive paths.

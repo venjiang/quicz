@@ -78,6 +78,8 @@ server endpoint 的非 route-facing due-deadline drain 也会给内部或非 soc
 共享 lifecycle 的 bounded due-deadline drain result 现在也携带相同的
 post-drain next-deadline 信号，覆盖单连接、跨连接 caller-owned map，以及显式
 installed-key output options。
+单连接 due-deadline-to-backend bounded-drain result 也会在普通 output 和显式
+output variants 中暴露 drain 后下一 deadline。
 
 Client endpoint 的错误路径不会再把无关待发送应用包误当作 close-on-error 输出：
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入

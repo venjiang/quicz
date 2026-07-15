@@ -33003,6 +33003,7 @@ test "EndpointConnectionLifecycle single due-deadline backend drain keeps separa
     try std.testing.expectEqual(@as(?Error, null), driven.drain.first_error);
     defer std.testing.allocator.free(out[0].datagram);
     try std.testing.expectEqual(@as(u64, 210), out[0].connection_id);
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), due.next_deadline);
     try std.testing.expect(try protectedZeroRttContainsControlFrame(
         out[0].datagram,
         secrets.client,
@@ -34944,6 +34945,9 @@ test "EndpointConnectionLifecycle single due-deadline backend drain continues af
     try std.testing.expectEqual(@as(usize, 1), driven.drain.datagrams_written);
     try std.testing.expectEqual(@as(?Error, null), driven.drain.first_error);
     try std.testing.expectEqual(@as(u64, 190), first_out[0].connection_id);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 190), next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
 
     const poll_views = [_]EndpointConnectionPollView{.{
         .connection_id = 190,

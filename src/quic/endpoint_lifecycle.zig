@@ -14516,7 +14516,10 @@ pub const EndpointConnectionLifecycle = struct {
             due_work.pending_work.idle_retired != null or
             due_work.pending_work.close_retired != null)
         {
-            return .{ .due_work = due_work };
+            return .{
+                .due_work = due_work,
+                .next_deadline = self.nextDeadline(connection_id, connection),
+            };
         }
 
         const drive_views = [_]EndpointCryptoBackendDriveView{.{
@@ -14541,6 +14544,7 @@ pub const EndpointConnectionLifecycle = struct {
                 poll_options.space,
                 out,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -14617,7 +14621,10 @@ pub const EndpointConnectionLifecycle = struct {
             due_work.pending_work.idle_retired != null or
             due_work.pending_work.close_retired != null)
         {
-            return .{ .due_work = due_work };
+            return .{
+                .due_work = due_work,
+                .next_deadline = self.nextDeadline(connection_id, connection),
+            };
         }
 
         const drive_views = [_]EndpointCryptoBackendDriveView{.{
@@ -14635,6 +14642,7 @@ pub const EndpointConnectionLifecycle = struct {
                 now_millis,
                 out,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 

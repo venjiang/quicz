@@ -87,6 +87,8 @@ post-drain next deadline for internal or non-socket callers.
 The shared lifecycle bounded due-deadline drain result now carries the same
 post-drain next-deadline signal for single-connection and cross-connection
 caller-owned maps, including explicit installed-key output options.
+The single-connection due-deadline-to-backend bounded-drain result also exposes
+the post-drain next deadline for ordinary and explicit-output variants.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
