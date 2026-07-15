@@ -56,6 +56,11 @@ version-information 原语）：
 | qlog、PMTU discovery、GSO/GRO、高级 congestion selection | transport loop 可用后的运维/性能扩展。 | Deferred 或未实现。 |
 | 外部互通 | 声称第一轮可用 transport 里程碑前必须具备。 | 部分完成：客户端专用二进制已与两个来自不同实现家族的本机独立服务端完成证书校验的 QUIC/TLS 握手，并通过强制 Retry 的 `quic-go` v0.59.0 server、以及另一次由 peer 丢弃一个 post-handshake 1-RTT 包以触发 PTO recovery 的运行完成证书校验的双向 STREAM FIN echo；仅支持 v1 的 `quic-go` server 会对 Zig v2 Initial 返回 Version Negotiation，Zig 校验后创建全新的 v1 连接并完成证书校验 stream echo。Go 与 Rust 客户端已和本地 Zig server 完成证书校验的双向 STREAM FIN echo，包含有界 Retry 路径。`quic-go` client 还证明 Zig server 在 stream 0 到 4 到 8 到 12 的连续 stream-count 额度释放、接收 RESET_STREAM(41)、server 的 STOP_SENDING(42) 后收到对端 RESET_STREAM(42)、单向 stream 2 到 3 的 FIN 交换，以及丢弃 4 个 post-stream Zig datagram 或握手完成前 4 个 server-flight datagram 后的服务端 PTO recovery。更广泛的服务端和应用层场景尚未验证。 |
 
+纯 Zig TLS resumption 路径现在会把 NewSessionTicket 的 `ticket_age_add`
+保存到下一次 ClientHello 的 `obfuscated_ticket_age`，服务端会发出
+CSPRNG-backed ticket age add，并记录 peer 提供的 obfuscated ticket age。
+完整 0-RTT replay 与 ticket-age policy 仍待实现。
+
 并发纯 Zig server 现经由其拥有的 `EndpointConnectionRegistry` 分发已路由的
 1-RTT short packet，涵盖 lifecycle route lookup、installed-key 接收和
 stateless-reset 处理。`Tls13ServerEndpoint` 会在同一 record 边界完成所有安装

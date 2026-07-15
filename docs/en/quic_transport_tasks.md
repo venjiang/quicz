@@ -62,6 +62,12 @@ packet/key/token and RFC 9368 version-information primitives:
 | qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
 | External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes certificate-verified QUIC/TLS handshakes with two independently implemented local servers, plus certificate-verified bidirectional STREAM FIN echoes through a `quic-go` v0.59.0 server that forces Retry and a separate run whose peer drops one post-handshake 1-RTT packet for PTO recovery; a v1-only `quic-go` server returns Version Negotiation to a Zig v2 Initial, after which Zig validates it and completes a fresh v1 certificate-verified stream echo. Go and Rust clients complete certificate-verified bidirectional STREAM FIN echoes against the local Zig server, including its bounded Retry path. A `quic-go` client also proves sequential stream-count credit release across streams 0-to-4-to-8-to-12, RESET_STREAM(41), server STOP_SENDING(42) followed by peer RESET_STREAM(42), uni stream 2-to-3 FIN exchange, and server PTO recovery after it drops four post-stream Zig datagrams or four server-flight datagrams before handshake completion. Broader server and application-protocol scenarios remain unproven. |
 
+The pure-Zig TLS resumption path now preserves `ticket_age_add` from
+NewSessionTicket into the next ClientHello `obfuscated_ticket_age`, emits a
+CSPRNG-backed server ticket age add, and records the peer's offered obfuscated
+ticket age on the server side. Full 0-RTT replay and ticket-age policy remains
+pending.
+
 The concurrent pure-Zig server now dispatches routed 1-RTT short packets through
 its owned `EndpointConnectionRegistry`, including lifecycle route lookup,
 installed-key receive, and stateless-reset handling. `Tls13ServerEndpoint`

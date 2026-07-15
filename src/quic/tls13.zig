@@ -1000,6 +1000,7 @@ test "Tls13Handshake server parses client pre_shared_key and early_data extensio
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
     @memcpy(client.session_ticket[0..ticket.len], &ticket);
     client.session_ticket_len = ticket.len;
+    client.session_ticket_age_add = 0x01020304;
     client.session_ticket_allows_early_data = true;
 
     // Build the ClientHello (with pre_shared_key + early_data).
@@ -1019,6 +1020,7 @@ test "Tls13Handshake server parses client pre_shared_key and early_data extensio
     try std.testing.expect(server.peer_offered_early_data);
     try std.testing.expectEqual(@as(usize, ticket.len), server.peer_psk_identity_len);
     try std.testing.expectEqualSlices(u8, &ticket, server.peer_psk_identity[0..server.peer_psk_identity_len]);
+    try std.testing.expectEqual(@as(u32, 0x01020304), server.peer_psk_obfuscated_ticket_age);
     // The binder is 32 bytes computed by the client over the truncated
     // ClientHello transcript; it must be non-zero (not the placeholder).
     var binder_is_zero = true;
@@ -1357,6 +1359,7 @@ pub const Tls13Handshake = struct {
     // present; `peer_offered_early_data` tracks the early_data extension.
     peer_psk_identity: [4096]u8 = undefined,
     peer_psk_identity_len: usize = 0,
+    peer_psk_obfuscated_ticket_age: u32 = 0,
     peer_psk_binder: [32]u8 = undefined,
     peer_offered_psk: bool = false,
     peer_offered_early_data: bool = false,
@@ -1397,6 +1400,7 @@ pub const Tls13Handshake = struct {
         self.session_ticket_allows_early_data = false;
         self.server_psk = null;
         self.peer_psk_identity_len = 0;
+        self.peer_psk_obfuscated_ticket_age = 0;
         self.peer_offered_psk = false;
         self.peer_offered_early_data = false;
         self.server_early_traffic_secret_derived = false;
@@ -1459,6 +1463,7 @@ pub const Tls13Handshake = struct {
         self.session_ticket_allows_early_data = false;
         self.server_psk = null;
         self.peer_psk_identity_len = 0;
+        self.peer_psk_obfuscated_ticket_age = 0;
         self.peer_offered_psk = false;
         self.peer_offered_early_data = false;
         self.server_early_traffic_secret_derived = false;
@@ -2496,6 +2501,7 @@ pub const Tls13Handshake = struct {
                             if (identity_len > self.peer_psk_identity.len) return error.DecodeError;
                             @memcpy(self.peer_psk_identity[0..identity_len], ext[pp..][0..identity_len]);
                             self.peer_psk_identity_len = identity_len;
+                            self.peer_psk_obfuscated_ticket_age = readU32(ext[pp + identity_len ..]);
                         }
                         pp += identity_len;
                         pp += 4; // obfuscated_ticket_age
