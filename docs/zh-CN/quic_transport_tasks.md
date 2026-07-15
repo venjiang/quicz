@@ -68,6 +68,10 @@ Client endpoint 的错误路径不会再把无关待发送应用包误当作 clo
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入
 `closing` 时才取 route-bound application datagram。route mismatch 和其他未进入 closing
 的无效输入会保留已排队 application output，等待正常 poll。
+Server endpoint 的 installed-key feed 也遵循同一规则：
+`Tls13ServerEndpoint.feedInstalledKeyDatagramWithRoutePath()` 只有在选中 record 的连接进入
+`closing` 后才为 `InvalidPacket` poll route-bound 1-RTT datagram，避免解密/认证失败消耗
+无关已排队输出。
 
 ### Packet number 重排证据
 

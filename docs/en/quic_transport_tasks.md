@@ -76,6 +76,11 @@ errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
 route-bound application datagram after `InvalidPacket` if the connection has
 entered `closing`. Route mismatches and other non-closing invalid inputs keep
 already queued application output pending for normal polling.
+Server endpoint installed-key feed follows the same rule:
+`Tls13ServerEndpoint.feedInstalledKeyDatagramWithRoutePath()` only polls a
+route-bound 1-RTT datagram after `InvalidPacket` when the selected record's
+connection has entered `closing`, so decrypt/authentication failures do not
+consume unrelated queued output.
 
 ### Packet-number reordering evidence
 

@@ -457,7 +457,10 @@ pub fn Tls13ServerEndpoint(
                 options,
             ) catch |err| {
                 if (err != error.InvalidPacket) return err;
-                const close_datagram = try self.pollOneRttDatagramWithRoutePath(route.connection_id, now_millis);
+                const close_datagram = if (connection.connectionState() == .closing)
+                    try self.pollOneRttDatagramWithRoutePath(route.connection_id, now_millis)
+                else
+                    null;
                 return .{
                     .feed_error = err,
                     .datagram = if (close_datagram) |value| .{
@@ -2606,6 +2609,24 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     try std.testing.expectEqual(record.handle, routed_ack.connection_id);
     try std.testing.expect(routed_ack.path.eql(new_path));
 
+    try record.connection.sendPing();
+    const malformed_on_route = [_]u8{ 0x40, 'l', 'o', 'c', 'a', 'l', 0x00 };
+    const malformed_result = try endpoint_owner.feedInstalledKeyDatagramWithRoutePath(
+        new_path,
+        9,
+        &malformed_on_route,
+        options,
+    );
+    try std.testing.expectEqual(@as(?root.EndpointProtectedDatagramError, error.InvalidPacket), malformed_result.feed_error);
+    try std.testing.expect(malformed_result.feed == null);
+    try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
+    try std.testing.expect(malformed_result.datagram == null);
+
+    const queued_server_ping = (try endpoint_owner.pollOneRttDatagramWithRoutePath(record.handle, 10)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(queued_server_ping.datagram);
+    try std.testing.expect(queued_server_ping.path.eql(new_path));
+    try std.testing.expect(queued_server_ping.datagram.len != 0);
+
     const invalid_packet_number = record.connection.nextPeerPacketNumber(.application);
     const illegal_plaintext = [_]u8{@intFromEnum(frame.FrameType.handshake_done)} ++ ([_]u8{0} ** 31);
     const illegal_handshake_done = try protection.protectShortPacketAes128(std.testing.allocator, .{
@@ -2618,7 +2639,7 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
 
     const error_result = try endpoint_owner.feedInstalledKeyDatagramWithRoutePath(
         new_path,
-        9,
+        11,
         illegal_handshake_done,
         options,
     );
@@ -2630,6 +2651,6 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     defer std.testing.allocator.free(close_output.datagram);
     try std.testing.expectEqual(record.handle, close_output.connection_id);
     try std.testing.expect(close_output.path.eql(new_path));
-    try client.processProtectedShortDatagramWithInstalledKeys(10, client_dcid.len, close_output.datagram);
+    try client.processProtectedShortDatagramWithInstalledKeys(12, client_dcid.len, close_output.datagram);
     try std.testing.expectEqual(connection_module.ConnectionState.draining, client.connectionState());
 }
