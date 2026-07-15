@@ -1901,10 +1901,11 @@ pub const Tls13Handshake = struct {
         if (readU16(body[pos..]) != legacy_version_tls_1_2) return error.UnsupportedVersion;
         pos += 2; // legacy_version
         pos += 32; // random
-        // legacy_session_id (QUIC uses empty, but skip whatever is sent)
+        // legacy_session_id (QUIC does not use TLS compatibility mode)
         if (pos >= body.len) return error.DecodeError;
         const sid_len = body[pos];
         pos += 1;
+        if (sid_len != 0) return error.DecodeError;
         if (pos + sid_len > body.len) return error.DecodeError;
         pos += sid_len;
         // cipher_suites — require TLS_AES_128_GCM_SHA256
@@ -3665,6 +3666,26 @@ test "Tls13Handshake server rejects invalid ClientHello legacy_version" {
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.UnsupportedVersion, server.step());
+}
+
+test "Tls13Handshake server rejects non-empty ClientHello legacy_session_id" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const session_id_len_offset = 4 + 2 + 32;
+    const insert_offset = session_id_len_offset + 1;
+    std.mem.copyBackwards(
+        u8,
+        hello_buf[insert_offset + 1 .. base_hello.len + 1],
+        hello_buf[insert_offset..base_hello.len],
+    );
+    hello_buf[session_id_len_offset] = 1;
+    hello_buf[insert_offset] = 0xaa;
+    try setClientHelloBodyLen(&hello_buf, base_hello.len + 1 - 4);
+    const hello = hello_buf[0 .. base_hello.len + 1];
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
 }
 
 test "Tls13Handshake server rejects malformed ClientHello cipher_suites length" {
