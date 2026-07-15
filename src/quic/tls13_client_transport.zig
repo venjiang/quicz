@@ -62,6 +62,11 @@ pub const Tls13ClientTransport = struct {
         return self.connection.openStream();
     }
 
+    /// Open a locally initiated unidirectional application stream.
+    pub fn openUniStream(self: *Tls13ClientTransport) ClientTransportError!u64 {
+        return self.connection.openUniStream();
+    }
+
     /// Queue stream bytes for protected 1-RTT transmission.
     ///
     /// Call `pollApplicationDatagram()` until it returns null, then send and
@@ -73,6 +78,24 @@ pub const Tls13ClientTransport = struct {
         fin: bool,
     ) ClientTransportError!void {
         try self.connection.sendOnStream(stream_id, data, fin);
+    }
+
+    /// Abort a locally writable stream and queue a RESET_STREAM frame.
+    pub fn resetStream(
+        self: *Tls13ClientTransport,
+        stream_id: u64,
+        application_error_code: u64,
+    ) ClientTransportError!void {
+        try self.connection.resetStream(stream_id, application_error_code);
+    }
+
+    /// Ask the peer to stop sending on a receive-capable stream.
+    pub fn stopSending(
+        self: *Tls13ClientTransport,
+        stream_id: u64,
+        application_error_code: u64,
+    ) ClientTransportError!void {
+        try self.connection.stopSending(stream_id, application_error_code);
     }
 
     /// Return one protected 1-RTT application datagram queued by this transport.
@@ -245,4 +268,25 @@ test "Tls13ClientTransport recognizes Retry and zero-only padding boundaries" {
     try std.testing.expect(isZeroOnlyPadding(&[_]u8{ 0, 0, 0 }));
     try std.testing.expect(!isZeroOnlyPadding(&[_]u8{}));
     try std.testing.expect(!isZeroOnlyPadding(&[_]u8{ 0x40, 0 }));
+}
+
+test "Tls13ClientTransport exposes unidirectional and stream cancellation controls" {
+    const alpn = [_][]const u8{"hq-interop"};
+    var transport = try Tls13ClientTransport.init(
+        std.testing.allocator,
+        .{},
+        .{ .alpn = &alpn },
+        .{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        .{ 8, 7, 6, 5, 4, 3, 2, 1 },
+    );
+    defer transport.deinit();
+
+    const unidirectional_stream = try transport.openUniStream();
+    try std.testing.expectEqual(@as(u64, 2), unidirectional_stream);
+    try transport.resetStream(unidirectional_stream, 41);
+    try std.testing.expectEqual(@as(usize, 1), transport.connection.pending_reset_streams.items.len);
+
+    const bidirectional_stream = try transport.openStream();
+    try transport.stopSending(bidirectional_stream, 42);
+    try std.testing.expectEqual(@as(usize, 1), transport.connection.pending_stop_sending.items.len);
 }

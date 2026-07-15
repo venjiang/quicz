@@ -62,6 +62,16 @@ pub const Tls13ServerTransport = struct {
         return self.connection.recvStreamFinished(stream_id);
     }
 
+    /// Open a locally initiated bidirectional application stream.
+    pub fn openStream(self: *Tls13ServerTransport) Error!u64 {
+        return self.connection.openStream();
+    }
+
+    /// Open a locally initiated unidirectional application stream.
+    pub fn openUniStream(self: *Tls13ServerTransport) Error!u64 {
+        return self.connection.openUniStream();
+    }
+
     /// Queue stream bytes for protected 1-RTT transmission.
     pub fn sendStream(
         self: *Tls13ServerTransport,
@@ -70,6 +80,24 @@ pub const Tls13ServerTransport = struct {
         fin: bool,
     ) Error!void {
         try self.connection.sendOnStream(stream_id, data, fin);
+    }
+
+    /// Abort a locally writable stream and queue a RESET_STREAM frame.
+    pub fn resetStream(
+        self: *Tls13ServerTransport,
+        stream_id: u64,
+        application_error_code: u64,
+    ) Error!void {
+        try self.connection.resetStream(stream_id, application_error_code);
+    }
+
+    /// Ask the peer to stop sending on a receive-capable stream.
+    pub fn stopSending(
+        self: *Tls13ServerTransport,
+        stream_id: u64,
+        application_error_code: u64,
+    ) Error!void {
+        try self.connection.stopSending(stream_id, application_error_code);
     }
 
     /// Return one protected 1-RTT datagram queued by this transport.
@@ -94,6 +122,20 @@ test "Tls13ServerTransport owns server connection and TLS backend" {
     var transport = try Tls13ServerTransport.init(std.testing.allocator, .{}, .{});
     defer transport.deinit();
     try std.testing.expectEqual(transport_types.ConnectionSide.server, transport.connection.side);
-    const stream_id = try transport.connection.openStream();
+    const stream_id = try transport.openStream();
     try transport.sendStream(stream_id, "server stream", true);
+}
+
+test "Tls13ServerTransport exposes unidirectional and stream cancellation controls" {
+    var transport = try Tls13ServerTransport.init(std.testing.allocator, .{}, .{});
+    defer transport.deinit();
+
+    const unidirectional_stream = try transport.openUniStream();
+    try std.testing.expectEqual(@as(u64, 3), unidirectional_stream);
+    try transport.resetStream(unidirectional_stream, 41);
+    try std.testing.expectEqual(@as(usize, 1), transport.connection.pending_reset_streams.items.len);
+
+    const bidirectional_stream = try transport.openStream();
+    try transport.stopSending(bidirectional_stream, 42);
+    try std.testing.expectEqual(@as(usize, 1), transport.connection.pending_stop_sending.items.len);
 }
