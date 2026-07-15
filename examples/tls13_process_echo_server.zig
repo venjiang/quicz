@@ -11,6 +11,7 @@ const quicz = @import("quicz");
 const Connection = quicz.Connection;
 const EndpointConnectionLifecycle = quicz.EndpointConnectionLifecycle;
 const Tls13Backend = quicz.tls13_backend.Tls13Backend;
+const Tls13ServerTransport = quicz.Tls13ServerTransport;
 const endpoint = quicz.endpoint;
 const quic_packet = quicz.packet;
 const protection = quicz.protection;
@@ -96,8 +97,7 @@ fn require(condition: bool) !void {
 
 const ManagedProcessConnection = struct {
     handle: u64,
-    connection: Connection,
-    backend: Tls13Backend,
+    transport: Tls13ServerTransport,
     peer_address: std.Io.net.IpAddress,
     server_scid: [4]u8,
     client_scid: [20]u8 = undefined,
@@ -120,11 +120,11 @@ const ManagedProcessConnection = struct {
     }
 
     fn deinit(self: *ManagedProcessConnection) void {
-        self.connection.deinit();
+        self.transport.deinit();
     }
 
     fn connectionRef(self: *ManagedProcessConnection) *Connection {
-        return &self.connection;
+        return self.transport.connectionRef();
     }
 
     fn destinationConnectionId(self: *const ManagedProcessConnection) []const u8 {
@@ -281,7 +281,7 @@ fn serveConcurrent(
                         allocator.destroy(managed);
                     }
                 }
-                const connection = try Connection.init(allocator, .server, .{
+                const transport = try Tls13ServerTransport.init(allocator, .{
                     .initial_max_data = 8192,
                     .initial_max_stream_data = 2048,
                     .initial_max_streams_bidi = 8,
@@ -290,22 +290,21 @@ fn serveConcurrent(
                     // the short test-only idle timeout in concurrent mode.
                     .initial_rtt_ms = 100,
                     .max_idle_timeout_ms = process_idle_timeout_millis,
+                }, .{
+                    .alpn = &alpn,
+                    .cert_chain_der = &.{&certificate_der},
+                    .private_key_bytes = &server_private_key,
+                    .private_key_algorithm = .ecdsa_p256_sha256,
                 });
                 managed.* = .{
                     .handle = handle,
-                    .connection = connection,
-                    .backend = Tls13Backend.initServer(.{
-                        .alpn = &alpn,
-                        .cert_chain_der = &.{&certificate_der},
-                        .private_key_bytes = &server_private_key,
-                        .private_key_algorithm = .ecdsa_p256_sha256,
-                    }),
+                    .transport = transport,
                     .peer_address = received.from,
                     .server_scid = processServerScid(handle),
                 };
                 managed_initialized = true;
-                try managed.connection.validatePeerAddress();
-                try managed.connection.setLocalInitialSourceConnectionId(&managed.server_scid);
+                try managed.transport.connection.validatePeerAddress();
+                try managed.transport.connection.setLocalInitialSourceConnectionId(&managed.server_scid);
                 if (initial_info.dcid.len > managed.original_dcid.len) return error.InvalidConnectionIdLength;
                 @memcpy(managed.original_dcid[0..initial_info.dcid.len], initial_info.dcid);
                 managed.original_dcid_len = initial_info.dcid.len;
@@ -324,7 +323,7 @@ fn serveConcurrent(
                         retryTokenNonce(handle),
                     );
                     defer allocator.free(token);
-                    const retry_datagram = try managed.connection.issueRetryDatagram(
+                    const retry_datagram = try managed.transport.connection.issueRetryDatagram(
                         now_millis,
                         initial_info.dcid,
                         initial_accept.source_connection_id,
@@ -348,17 +347,17 @@ fn serveConcurrent(
                 var initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                 const accepted = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams(
                     handle,
-                    &managed.connection,
+                    &managed.transport.connection,
                     now_millis,
                     initial_accept,
                     &managed.server_scid,
                     received.data,
                     .{ .active_migration_disabled = true },
-                    managed.backend.cryptoBackend(),
+                    managed.transport.cryptoBackend(),
                     &scratch,
                     &initial_outputs,
                 );
-                const peer_scid = managed.connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
+                const peer_scid = managed.transport.connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
                 if (peer_scid.len > managed.client_scid.len) return error.InvalidConnectionIdLength;
                 @memcpy(managed.client_scid[0..peer_scid.len], peer_scid);
                 managed.client_scid_len = peer_scid.len;
@@ -374,9 +373,9 @@ fn serveConcurrent(
                     var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                     const handshake = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
                         handle,
-                        &managed.connection,
+                        &managed.transport.connection,
                         .handshake,
-                        managed.backend.cryptoBackend(),
+                        managed.transport.cryptoBackend(),
                         &scratch,
                         now_millis,
                         .{
@@ -395,13 +394,13 @@ fn serveConcurrent(
             },
             .routed => |route| {
                 const managed = connections.get(route.connection_id) orelse return error.UnknownConnectionId;
-                if (retry_enabled and managed.connection.pendingRetryTokenCount() != 0) {
+                if (retry_enabled and managed.transport.connection.pendingRetryTokenCount() != 0) {
                     const retry_info = try protection.peekProtectedLongPacketInfo(received.data);
                     if (retry_info.packet_type != .initial) return error.InvalidPacket;
                     const retry_initial = try lifecycle.processRetryValidatedProtectedInitialDatagram(
                         &address_validation,
                         managed.handle,
-                        &managed.connection,
+                        &managed.transport.connection,
                         now_millis,
                         path,
                         received.data,
@@ -416,9 +415,9 @@ fn serveConcurrent(
                     var retry_initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                     const retry_initial_progress = try lifecycle.driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams(
                         managed.handle,
-                        &managed.connection,
+                        &managed.transport.connection,
                         .initial,
-                        managed.backend.cryptoBackend(),
+                        managed.transport.cryptoBackend(),
                         &retry_scratch,
                         .initial,
                         now_millis,
@@ -438,9 +437,9 @@ fn serveConcurrent(
                     var retry_handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                     const retry_handshake_progress = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
                         managed.handle,
-                        &managed.connection,
+                        &managed.transport.connection,
                         .handshake,
-                        managed.backend.cryptoBackend(),
+                        managed.transport.cryptoBackend(),
                         &retry_scratch,
                         now_millis,
                         .{
@@ -461,7 +460,7 @@ fn serveConcurrent(
                     continue;
                 }
                 if ((received.data[0] & 0x80) != 0) {
-                    if (managed.connection.handshakeConfirmed()) {
+                    if (managed.transport.connection.handshakeConfirmed()) {
                         // Independent clients can retransmit Initial or
                         // Handshake packets after their keys are discarded.
                         // Keep lifecycle route ownership, but never decrypt a
@@ -473,7 +472,7 @@ fn serveConcurrent(
                     const first_long_info = try protection.peekProtectedLongPacketInfo(received.data);
                     if (first_long_info.packet_type == .initial and
                         first_long_info.len < received.data.len and
-                        managed.connection.hasHandshakeProtectionKeys())
+                        managed.transport.connection.hasHandshakeProtectionKeys())
                     {
                         const initial_destination_connection_id = if (managed.retry_validated)
                             managed.server_scid[0..]
@@ -481,7 +480,7 @@ fn serveConcurrent(
                             managed.original_dcid[0..managed.original_dcid_len];
                         _ = try lifecycle.processRoutedProtectedLongDatagramWithInstalledHandshakeKeys(
                             managed.handle,
-                            &managed.connection,
+                            &managed.transport.connection,
                             path,
                             now_millis,
                             initial_destination_connection_id,
@@ -491,9 +490,9 @@ fn serveConcurrent(
                         var coalesced_handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                         const coalesced_handshake = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
                             managed.handle,
-                            &managed.connection,
+                            &managed.transport.connection,
                             .handshake,
-                            managed.backend.cryptoBackend(),
+                            managed.transport.cryptoBackend(),
                             &coalesced_scratch,
                             now_millis,
                             .{
@@ -529,13 +528,13 @@ fn serveConcurrent(
                                 var initial_scratch: [8192]u8 = undefined;
                                 const initial = try lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
                                     managed.handle,
-                                    &managed.connection,
+                                    &managed.transport.connection,
                                     .initial,
                                     path,
                                     now_millis,
                                     initial_secrets.client,
                                     long_packet,
-                                    managed.backend.cryptoBackend(),
+                                    managed.transport.cryptoBackend(),
                                     &initial_scratch,
                                     managed.clientScid(),
                                     &managed.server_scid,
@@ -553,9 +552,9 @@ fn serveConcurrent(
                                     var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                                     const handshake = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
                                         managed.handle,
-                                        &managed.connection,
+                                        &managed.transport.connection,
                                         .handshake,
-                                        managed.backend.cryptoBackend(),
+                                        managed.transport.cryptoBackend(),
                                         &initial_scratch,
                                         now_millis,
                                         .{
@@ -582,11 +581,11 @@ fn serveConcurrent(
                                 var handshake_scratch: [8192]u8 = undefined;
                                 const handshake = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams(
                                     managed.handle,
-                                    &managed.connection,
+                                    &managed.transport.connection,
                                     path,
                                     now_millis,
                                     long_packet,
-                                    managed.backend.cryptoBackend(),
+                                    managed.transport.cryptoBackend(),
                                     &handshake_scratch,
                                     managed.clientScid(),
                                     &managed.server_scid,
@@ -629,14 +628,14 @@ fn serveConcurrent(
                 inline for (echo_stream_ids, echo_payloads, 0..) |stream_id, payload, index| {
                     if (!managed.request_received[index]) {
                         var stream_buffer: [128]u8 = undefined;
-                        if (try managed.connection.recvOnStream(stream_id, &stream_buffer)) |echo_len| {
+                        if (try managed.transport.recvStream(stream_id, &stream_buffer)) |echo_len| {
                             try require(std.mem.eql(u8, stream_buffer[0..echo_len], payload));
-                            try require(try managed.connection.recvStreamFinished(stream_id));
+                            try require(try managed.transport.streamFinished(stream_id));
                             managed.request_received[index] = true;
                         }
                     }
                     if (managed.request_received[index] and !managed.echoed[index]) {
-                        try managed.connection.sendOnStream(stream_id, payload, true);
+                        try managed.transport.sendStream(stream_id, payload, true);
                         managed.echoed[index] = true;
                         queued_echo = true;
                     }
@@ -646,7 +645,7 @@ fn serveConcurrent(
                     while (sent_packets < max_initial_datagrams) : (sent_packets += 1) {
                         const echo_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
                             managed.handle,
-                            &managed.connection,
+                            &managed.transport.connection,
                             now_millis + @as(i64, @intCast(sent_packets)),
                             managed.clientScid(),
                         )) orelse break;
@@ -655,11 +654,11 @@ fn serveConcurrent(
                     }
                     try require(sent_packets > 0);
                 }
-                if (managed.connection.connectionState() == .draining) {
-                    const deadline = managed.connection.closeDeadlineMillis() orelse return error.UnexpectedState;
+                if (managed.transport.connection.connectionState() == .draining) {
+                    const deadline = managed.transport.connection.closeDeadlineMillis() orelse return error.UnexpectedState;
                     const retired = (try lifecycle.checkCloseTimeoutsAndRetireConnection(
                         managed.handle,
-                        &managed.connection,
+                        &managed.transport.connection,
                         deadline,
                     )) orelse return error.UnexpectedState;
                     try require(retired.routes_retired > 0);
