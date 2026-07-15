@@ -24,7 +24,11 @@ func main() {
 	caPath := flag.String("ca", "", "PEM trust anchor for the Zig echo server (required)")
 	serverName := flag.String("server-name", "localhost", "TLS server name")
 	expectStreamLimit := flag.Bool("expect-stream-limit", false, "require stream IDs 0 then 4 after a one-stream peer limit")
+	expectReset := flag.Bool("expect-reset", false, "cancel stream 0 with RESET_STREAM error 41, then echo stream 4")
 	flag.Parse()
+	if *expectStreamLimit && *expectReset {
+		log.Fatal("-expect-stream-limit and -expect-reset are mutually exclusive")
+	}
 
 	if *caPath == "" {
 		log.Fatal("-ca is required")
@@ -52,16 +56,31 @@ func main() {
 	}
 	defer connection.CloseWithError(0, "example complete")
 
+	messages := []string{"hello", "world"}
+	expectedFirstStreamID := uint64(0)
+	if *expectReset {
+		resetStream, err := connection.OpenStreamSync(ctx)
+		if err != nil {
+			log.Fatalf("open reset stream: %v", err)
+		}
+		if uint64(resetStream.StreamID()) != 0 {
+			log.Fatalf("reset stream: got stream %d, want 0", resetStream.StreamID())
+		}
+		resetStream.CancelWrite(41)
+		messages = messages[1:]
+		expectedFirstStreamID = 4
+	}
+
 	echoBytes := 0
-	for streamIndex, message := range []string{"hello", "world"} {
+	for streamIndex, message := range messages {
 		stream, err := connection.OpenStreamSync(ctx)
 		if err != nil {
 			log.Fatalf("open stream: %v", err)
 		}
-		if *expectStreamLimit {
-			expectedID := uint64(streamIndex * 4)
+		if *expectStreamLimit || *expectReset {
+			expectedID := expectedFirstStreamID + uint64(streamIndex*4)
 			if uint64(stream.StreamID()) != expectedID {
-				log.Fatalf("stream-limit release: got stream %d, want %d", stream.StreamID(), expectedID)
+				log.Fatalf("unexpected stream: got %d, want %d", stream.StreamID(), expectedID)
 			}
 		}
 		if _, err := stream.Write([]byte(message)); err != nil {
@@ -87,6 +106,10 @@ func main() {
 
 	if *expectStreamLimit {
 		fmt.Printf("go_quic_stream_limit_client: handshake_done=true initial_limit=1 released_stream=4 echo_bytes=%d\n", echoBytes)
+		return
+	}
+	if *expectReset {
+		fmt.Printf("go_quic_reset_client: handshake_done=true reset_error=41 echo_stream=4 echo_bytes=%d\n", echoBytes)
 		return
 	}
 	fmt.Printf("go_quic_echo_client: handshake_done=true echo_streams=2 echo_bytes=%d\n", echoBytes)
