@@ -58,6 +58,23 @@ pub fn Tls13ServerEndpoint(
             path: endpoint.Udp4Tuple,
         };
 
+        /// Endpoint response datagram paired with the UDP tuple it answers.
+        pub const DatagramResponsePathResult = struct {
+            /// Response datagram written into caller-provided scratch storage.
+            datagram: []const u8,
+            /// UDP tuple that produced the response.
+            path: endpoint.Udp4Tuple,
+        };
+
+        /// Route classification with response datagrams paired to their path.
+        pub const DatagramActionPathResult = union(enum) {
+            routed: endpoint.RouteResult,
+            accept_initial: endpoint.InitialAcceptResult,
+            version_negotiation: DatagramResponsePathResult,
+            stateless_reset: DatagramResponsePathResult,
+            dropped,
+        };
+
         /// Installed-key receive result with any immediate output route.
         pub const InstalledKeyDatagramRoutePollResult = struct {
             /// Receive, path validation, and route-update result when feed succeeded.
@@ -202,6 +219,37 @@ pub fn Tls13ServerEndpoint(
                 unpredictable_prefix,
                 supported_versions,
             );
+        }
+
+        /// Classify one UDP datagram and pair endpoint-generated responses
+        /// with the UDP tuple that must receive them.
+        pub fn feedDatagramWithResponsePath(
+            self: *const Self,
+            out: []u8,
+            path: endpoint.Udp4Tuple,
+            datagram: []const u8,
+            unpredictable_prefix: []const u8,
+            supported_versions: []const quic_packet.Version,
+        ) endpoint.RouteError!DatagramActionPathResult {
+            return switch (try self.feedDatagram(
+                out,
+                path,
+                datagram,
+                unpredictable_prefix,
+                supported_versions,
+            )) {
+                .routed => |route| .{ .routed = route },
+                .accept_initial => |initial| .{ .accept_initial = initial },
+                .version_negotiation => |response| .{ .version_negotiation = .{
+                    .datagram = response,
+                    .path = path,
+                } },
+                .stateless_reset => |reset| .{ .stateless_reset = .{
+                    .datagram = reset,
+                    .path = path,
+                } },
+                .dropped => .dropped,
+            };
         }
 
         /// Resolve one routed datagram without decrypting it.
@@ -1543,6 +1591,130 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectEqual(std.math.maxInt(usize), dynamic_endpoint.records.max_records);
     try std.testing.expectEqual(@as(usize, 0), dynamic_endpoint.lifecycle.routeCount());
     try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), try dynamic_endpoint.nextDeadline(std.testing.allocator));
+}
+
+test "Tls13ServerEndpoint pairs stateless endpoint responses with receive path" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "initial";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = TestEndpoint.init(std.testing.allocator);
+    defer endpoint_owner.deinit();
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5443),
+    };
+
+    const unsupported_initial = [_]u8{
+        0xc0,
+        0xfa,
+        0xce,
+        0xb0,
+        0x0c,
+        0x02,
+        0xaa,
+        0xbb,
+        0x03,
+        0x11,
+        0x22,
+        0x33,
+        0x00,
+    };
+    var response_out: [128]u8 = undefined;
+    const version_response = try endpoint_owner.feedDatagramWithResponsePath(
+        &response_out,
+        path,
+        &unsupported_initial,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+    );
+    switch (version_response) {
+        .version_negotiation => |response| {
+            try std.testing.expect(response.path.eql(path));
+            var parsed = try quic_packet.parseVersionNegotiationPacket(response.datagram, std.testing.allocator);
+            defer quic_packet.deinitVersionNegotiationPacket(&parsed, std.testing.allocator);
+            try std.testing.expectEqualSlices(u8, &[_]u8{ 0x11, 0x22, 0x33 }, parsed.dcid);
+            try std.testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0xbb }, parsed.scid);
+            try std.testing.expectEqualSlices(quic_packet.Version, &[_]quic_packet.Version{.v1}, parsed.versions);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const retired_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const reset_token = [_]u8{0x9a} ** quic_packet.stateless_reset_token_len;
+    try endpoint_owner.lifecycle.registerConnectionId(77, &retired_cid, path, .{
+        .stateless_reset_token = reset_token,
+    });
+    try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(&retired_cid, path));
+    const reset_prefix = [_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01, 0x02 };
+    const retired_datagram = [_]u8{
+        0x40, 0x31, 0x32, 0x33, 0x34, 0x01, 0x02, 0x03,
+        0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+        0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13,
+        0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+    };
+    const reset_response = try endpoint_owner.feedDatagramWithResponsePath(
+        &response_out,
+        path,
+        &retired_datagram,
+        &reset_prefix,
+        &[_]quic_packet.Version{.v1},
+    );
+    switch (reset_response) {
+        .stateless_reset => |response| {
+            try std.testing.expect(response.path.eql(path));
+            try std.testing.expectEqual(reset_prefix.len + quic_packet.stateless_reset_token_len, response.datagram.len);
+            try std.testing.expect(quic_packet.matchesStatelessReset(response.datagram, reset_token));
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "Tls13ServerEndpoint validates Retry Initial and returns route-bound TLS output" {
