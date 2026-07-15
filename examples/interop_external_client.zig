@@ -177,21 +177,27 @@ pub fn main(init: std.process.Init) !void {
     var got_echo_fin: [echo_payloads.len]bool = .{ false, false };
     var pto_recovered = false;
     while (received_application_datagrams < 16 and recovery_timer_services < 4) {
-        const next_recovery_deadline = if (transport.lossDetectionTimerDeadlineMillis()) |deadline|
-            deadline.deadline_millis
+        const next_deadline = if (transport.nextDeadline()) |deadline|
+            deadline.deadlineMillis()
         else
             null;
-        const received = socket.receiveTimeout(io, &receive_buffer, recvTimeoutForDeadline(io, next_recovery_deadline)) catch |err| switch (err) {
+        const received = socket.receiveTimeout(io, &receive_buffer, recvTimeoutForDeadline(io, next_deadline)) catch |err| switch (err) {
             error.Timeout => {
-                const serviced = (try transport.serviceLossDetectionTimer(nowMillis(io))) orelse continue;
-                recovery_timer_services += 1;
-                if (serviced.kind == .pto) pto_recovered = true;
+                const serviced = (try transport.serviceDueDeadline(nowMillis(io))) orelse continue;
+                switch (serviced) {
+                    .recovery => |recovery| {
+                        recovery_timer_services += 1;
+                        if (recovery.kind == .pto) pto_recovered = true;
 
-                var retransmission_count: usize = 0;
-                while (retransmission_count < 4) : (retransmission_count += 1) {
-                    const retransmission = (try transport.pollApplicationDatagram(nowMillis(io))) orelse break;
-                    defer allocator.free(retransmission);
-                    try socket.send(io, &server_address, retransmission);
+                        var retransmission_count: usize = 0;
+                        while (retransmission_count < 4) : (retransmission_count += 1) {
+                            const retransmission = (try transport.pollApplicationDatagram(nowMillis(io))) orelse break;
+                            defer allocator.free(retransmission);
+                            try socket.send(io, &server_address, retransmission);
+                        }
+                    },
+                    .idle_timeout, .close_timeout => return error.ConnectionClosed,
+                    .key_discard => continue,
                 }
                 continue;
             },

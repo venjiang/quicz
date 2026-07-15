@@ -17,6 +17,26 @@ const Error = transport_types.Error;
 const LossDetectionTimerDeadline = transport_types.LossDetectionTimerDeadline;
 const ClientTransportError = Error || protection.ProtectionError || packet.PacketError || error{EndOfStream};
 
+/// One deadline that a TLS-owned client socket loop must observe.
+pub const ClientTransportDeadline = union(enum) {
+    /// Packet/time-threshold loss or PTO recovery deadline.
+    recovery: LossDetectionTimerDeadline,
+    /// Active-connection idle timeout deadline.
+    idle_timeout: i64,
+    /// Closing or draining deadline.
+    close_timeout: i64,
+    /// Retained previous 1-RTT key generation discard deadline.
+    key_discard: i64,
+
+    /// Return the monotonic deadline value for socket wait selection.
+    pub fn deadlineMillis(self: ClientTransportDeadline) i64 {
+        return switch (self) {
+            .recovery => |deadline| deadline.deadline_millis,
+            .idle_timeout, .close_timeout, .key_discard => |deadline| deadline,
+        };
+    }
+};
+
 pub const Tls13ClientTransport = struct {
     allocator: std.mem.Allocator,
     connection: Connection,
@@ -138,6 +158,70 @@ pub const Tls13ClientTransport = struct {
         now_millis: i64,
     ) ClientTransportError!?LossDetectionTimerDeadline {
         return self.connection.serviceLossDetectionTimer(now_millis);
+    }
+
+    /// Select the earliest active lifecycle deadline for this transport.
+    ///
+    /// Socket loops should wait until this deadline, receive one datagram, or
+    /// call `serviceDueDeadline()` when the wait expires. This covers
+    /// connection idle/close state and retained 1-RTT key discard in addition
+    /// to RFC 9002 loss/PTO recovery.
+    pub fn nextDeadline(self: *const Tls13ClientTransport) ?ClientTransportDeadline {
+        const state = self.connection.connectionState();
+        var next: ?ClientTransportDeadline = null;
+
+        if (state == .active) {
+            if (self.connection.idleTimeoutDeadlineMillis()) |deadline| {
+                next = .{ .idle_timeout = deadline };
+            }
+            if (self.connection.lossDetectionTimerDeadlineMillis()) |deadline| {
+                next = selectEarlierDeadline(next, .{ .recovery = deadline });
+            }
+            if (self.connection.oneRttKeyDiscardDeadlineMillis()) |deadline| {
+                next = selectEarlierDeadline(next, .{ .key_discard = deadline });
+            }
+        }
+        if (state == .closing or state == .draining) {
+            if (self.connection.closeDeadlineMillis()) |deadline| {
+                next = selectEarlierDeadline(next, .{ .close_timeout = deadline });
+            }
+        }
+        return next;
+    }
+
+    /// Service the earliest lifecycle deadline when it is due.
+    ///
+    /// A returned deadline records which state transition or recovery action
+    /// was applied. Calls before the selected deadline leave transport state
+    /// unchanged and return null.
+    pub fn serviceDueDeadline(
+        self: *Tls13ClientTransport,
+        now_millis: i64,
+    ) ClientTransportError!?ClientTransportDeadline {
+        const deadline = self.nextDeadline() orelse return null;
+        if (deadline.deadlineMillis() > now_millis) return null;
+
+        switch (deadline) {
+            .recovery => {
+                _ = try self.connection.serviceLossDetectionTimer(now_millis);
+            },
+            .idle_timeout => {
+                self.connection.checkIdleTimeouts(now_millis) catch |err| switch (err) {
+                    error.ConnectionClosed => {},
+                    else => return err,
+                };
+            },
+            .close_timeout => {
+                self.connection.checkCloseTimeouts(now_millis) catch |err| switch (err) {
+                    error.ConnectionClosed => {},
+                    else => return err,
+                };
+            },
+            .key_discard => {
+                _ = self.connection.discardExpiredOneRttKeys(now_millis);
+            },
+        }
+        return deadline;
     }
 
     /// Return the selected configuration for a fresh client attempt after a
@@ -269,6 +353,16 @@ fn isZeroOnlyPadding(datagram: []const u8) bool {
     return datagram.len > 0 and std.mem.allEqual(u8, datagram, 0);
 }
 
+fn selectEarlierDeadline(
+    current: ?ClientTransportDeadline,
+    candidate: ClientTransportDeadline,
+) ClientTransportDeadline {
+    if (current) |deadline| {
+        if (deadline.deadlineMillis() <= candidate.deadlineMillis()) return deadline;
+    }
+    return candidate;
+}
+
 test "Tls13ClientTransport emits a protected ClientHello" {
     const alpn = [_][]const u8{"hq-interop"};
     var transport = try Tls13ClientTransport.init(
@@ -294,6 +388,27 @@ test "Tls13ClientTransport recognizes Retry and zero-only padding boundaries" {
     try std.testing.expect(isZeroOnlyPadding(&[_]u8{ 0, 0, 0 }));
     try std.testing.expect(!isZeroOnlyPadding(&[_]u8{}));
     try std.testing.expect(!isZeroOnlyPadding(&[_]u8{ 0x40, 0 }));
+}
+
+test "Tls13ClientTransport services idle lifecycle deadline" {
+    const alpn = [_][]const u8{"hq-interop"};
+    var transport = try Tls13ClientTransport.init(
+        std.testing.allocator,
+        .{ .max_idle_timeout_ms = 10 },
+        .{ .alpn = &alpn },
+        .{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        .{ 8, 7, 6, 5, 4, 3, 2, 1 },
+    );
+    defer transport.deinit();
+    transport.connection.last_packet_activity_millis = 10;
+
+    const deadline = transport.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i64, 20), deadline.deadlineMillis());
+    try std.testing.expect(deadline == .idle_timeout);
+    try std.testing.expect((try transport.serviceDueDeadline(19)) == null);
+    const serviced = try transport.serviceDueDeadline(20) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(serviced == .idle_timeout);
+    try std.testing.expectEqual(transport_types.ConnectionState.closed, transport.connection.connectionState());
 }
 
 test "Tls13ClientTransport selects a fresh v1 attempt after Version Negotiation" {
