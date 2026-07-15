@@ -219,7 +219,7 @@ fn serveConcurrent(
 
     const runs_continuously = completion_target == 0;
     receive_loop: while (runs_continuously or completed < completion_target) {
-        const next_deadline = try connections.nextDeadline(lifecycle, allocator);
+        const next_deadline = try server_endpoint.nextDeadline(allocator);
         const received = socket.receiveTimeout(
             io,
             &receive_buffer,
@@ -227,8 +227,7 @@ fn serveConcurrent(
         ) catch |err| switch (err) {
             error.Timeout => {
                 var due_datagrams: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
-                const due = (try connections.processDueDeadlineAndDrainDatagrams(
-                    lifecycle,
+                const due = (try server_endpoint.processDueDeadlineAndDrainDatagrams(
                     allocator,
                     nowMillis(io),
                     &due_datagrams,
@@ -627,8 +626,7 @@ fn serveConcurrent(
                     continue;
                 }
 
-                const application_feed = try connections.feedDatagramWithInstalledKeys(
-                    lifecycle,
+                const application_feed = try server_endpoint.feedDatagramWithInstalledKeys(
                     allocator,
                     path,
                     now_millis,

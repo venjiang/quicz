@@ -5,6 +5,7 @@
 //! caller.
 
 const std = @import("std");
+const root = @import("../lib.zig");
 const connection_module = @import("connection.zig");
 const endpoint = @import("endpoint.zig");
 const endpoint_connection_registry = @import("endpoint_connection_registry.zig");
@@ -53,6 +54,52 @@ pub fn Tls13ServerEndpoint(
             self.records.deinit();
             self.lifecycle.deinit();
         }
+
+        /// Select the earliest deadline across all endpoint-owned records.
+        pub fn nextDeadline(
+            self: *Self,
+            allocator: std.mem.Allocator,
+        ) !?root.EndpointConnectionDeadline {
+            return self.records.nextDeadline(&self.lifecycle, allocator);
+        }
+
+        /// Service the earliest due deadline and drain bounded protected output.
+        pub fn processDueDeadlineAndDrainDatagrams(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            now_millis: i64,
+            out: []root.EndpointPolledDatagramResult,
+            comptime destination_connection_id: *const fn (*const Record) []const u8,
+            comptime source_connection_id: *const fn (*const Record) []const u8,
+        ) root.Error!?root.EndpointDueWorkDatagramDrainResult {
+            return self.records.processDueDeadlineAndDrainDatagrams(
+                &self.lifecycle,
+                allocator,
+                now_millis,
+                out,
+                destination_connection_id,
+                source_connection_id,
+            );
+        }
+
+        /// Route and process one protected installed-key datagram.
+        pub fn feedDatagramWithInstalledKeys(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!root.EndpointFeedInstalledKeyDatagramResult {
+            return self.records.feedDatagramWithInstalledKeys(
+                &self.lifecycle,
+                allocator,
+                path,
+                now_millis,
+                datagram,
+                options,
+            );
+        }
     };
 }
 
@@ -93,4 +140,8 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expect(!endpoint_owner.records.hasCapacity());
     try endpoint_owner.records.remove(record.handle);
     try std.testing.expect(endpoint_owner.records.hasCapacity());
+
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    try std.testing.expect((try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) == null);
 }
