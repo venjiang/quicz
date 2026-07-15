@@ -429,7 +429,6 @@ fn serveConcurrent(
                     const retry_initial = try server_endpoint.validateRetryInitial(
                         &address_validation,
                         managed.handle,
-                        &managed.transport.connection,
                         now_millis,
                         path,
                         received.data,
@@ -444,7 +443,6 @@ fn serveConcurrent(
                     var retry_initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                     const retry_initial_progress = try server_endpoint.driveInitialBackend(
                         managed.handle,
-                        &managed.transport.connection,
                         managed.transport.cryptoBackend(),
                         &retry_scratch,
                         now_millis,

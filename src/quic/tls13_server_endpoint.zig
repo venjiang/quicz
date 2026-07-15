@@ -5,6 +5,7 @@
 //! caller.
 
 const std = @import("std");
+const address_validation_token = @import("address_validation_token.zig");
 const root = @import("../lib.zig");
 const connection_module = @import("connection.zig");
 const endpoint = @import("endpoint.zig");
@@ -256,7 +257,6 @@ pub fn Tls13ServerEndpoint(
         pub fn driveInitialBackend(
             self: *Self,
             connection_id: u64,
-            connection: *Connection,
             backend: root.CryptoBackend,
             scratch: []u8,
             now_millis: i64,
@@ -265,10 +265,11 @@ pub fn Tls13ServerEndpoint(
             initial_token: []const u8,
             keys: protection.Aes128PacketProtectionKeys,
             out: []root.EndpointPolledDatagramResult,
-        ) root.Error!root.EndpointCryptoBackendDriveProtectedLongDatagramDrainResult {
+        ) (root.Error || error{UnknownConnectionId})!root.EndpointCryptoBackendDriveProtectedLongDatagramDrainResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             return self.lifecycle.driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams(
                 connection_id,
-                connection,
+                connection_of(record),
                 .initial,
                 backend,
                 scratch,
@@ -287,16 +288,16 @@ pub fn Tls13ServerEndpoint(
             self: *Self,
             policy: *endpoint.AddressValidationPolicy,
             connection_id: u64,
-            connection: *Connection,
             now_millis: i64,
             path: endpoint.Udp4Tuple,
             datagram: []const u8,
             supported_versions: []const quic_packet.Version,
-        ) root.EndpointRetryProtectedInitialError!root.EndpointRetryProtectedInitialResult {
+        ) (root.EndpointRetryProtectedInitialError || error{UnknownConnectionId})!root.EndpointRetryProtectedInitialResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             return self.lifecycle.processRetryValidatedProtectedInitialDatagram(
                 policy,
                 connection_id,
-                connection,
+                connection_of(record),
                 now_millis,
                 path,
                 datagram,
@@ -544,6 +545,47 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
                 .source_connection_id = "local",
             },
             &backend_output,
+        ),
+    );
+    const retry_initial_secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const initial_backend_progress = try endpoint_owner.driveInitialBackend(
+        retry_record.handle,
+        empty_backend.backend(),
+        &backend_scratch,
+        1,
+        "peer",
+        "local",
+        &[_]u8{},
+        retry_initial_secrets.server,
+        &backend_output,
+    );
+    try std.testing.expectEqual(@as(usize, 0), initial_backend_progress.backend.outbound_chunks);
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        endpoint_owner.driveInitialBackend(
+            99,
+            empty_backend.backend(),
+            &backend_scratch,
+            1,
+            "peer",
+            "local",
+            &[_]u8{},
+            retry_initial_secrets.server,
+            &backend_output,
+        ),
+    );
+    const validation_secret: address_validation_token.Secret = [_]u8{0x55} ** address_validation_token.secret_len;
+    var validation_policy = endpoint.AddressValidationPolicy.init(std.testing.allocator, validation_secret, .{});
+    defer validation_policy.deinit();
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        endpoint_owner.validateRetryInitial(
+            &validation_policy,
+            99,
+            1,
+            retry_path,
+            &[_]u8{},
+            &[_]quic_packet.Version{.v1},
         ),
     );
 
