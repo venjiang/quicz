@@ -149,6 +149,12 @@ const ProcessConnectionRegistry = quicz.EndpointConnectionRegistry(
     ManagedProcessConnection.deinit,
 );
 
+const ProcessServerEndpoint = quicz.Tls13ServerEndpoint(
+    ManagedProcessConnection,
+    ManagedProcessConnection.connectionRef,
+    ManagedProcessConnection.deinit,
+);
+
 fn processServerScid(handle: u64) [4]u8 {
     return .{ 0x31, 0x32, @truncate(handle >> 8), @truncate(handle) };
 }
@@ -194,15 +200,15 @@ fn serveConcurrent(
 ) !void {
     const alpn = [_][]const u8{"hq-interop"};
     const max_routes = std.math.mul(usize, max_active_connections, 2) catch return error.InvalidConnectionCount;
-    var lifecycle = EndpointConnectionLifecycle.initWithRouterOptions(allocator, .{
+    var server_endpoint = try ProcessServerEndpoint.initWithCapacity(allocator, max_active_connections, .{
         .max_routes = max_routes,
         .max_stateless_reset_tokens = max_routes,
     });
-    defer lifecycle.deinit();
+    defer server_endpoint.deinit();
+    const lifecycle = &server_endpoint.lifecycle;
     var address_validation = endpoint.AddressValidationPolicy.init(allocator, retry_token_secret, .{});
     defer address_validation.deinit();
-    var connections = try ProcessConnectionRegistry.initWithCapacity(allocator, max_active_connections);
-    defer connections.deinit();
+    const connections = &server_endpoint.records;
 
     var receive_buffer: [2048]u8 = undefined;
     var endpoint_output: [128]u8 = undefined;
@@ -213,7 +219,7 @@ fn serveConcurrent(
 
     const runs_continuously = completion_target == 0;
     receive_loop: while (runs_continuously or completed < completion_target) {
-        const next_deadline = try connections.nextDeadline(&lifecycle, allocator);
+        const next_deadline = try connections.nextDeadline(lifecycle, allocator);
         const received = socket.receiveTimeout(
             io,
             &receive_buffer,
@@ -222,7 +228,7 @@ fn serveConcurrent(
             error.Timeout => {
                 var due_datagrams: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                 const due = (try connections.processDueDeadlineAndDrainDatagrams(
-                    &lifecycle,
+                    lifecycle,
                     allocator,
                     nowMillis(io),
                     &due_datagrams,
@@ -242,7 +248,7 @@ fn serveConcurrent(
                     const managed = connections.get(due.deadline.connection_id) orelse return error.UnknownConnectionId;
                     const completed_connection = !retry_enabled or managed.retry_accepted;
                     const retired_after_close_timeout = due.pending_work.close_retired != null;
-                    try destroyManagedConnection(&connections, due.deadline.connection_id);
+                    try destroyManagedConnection(connections, due.deadline.connection_id);
                     if (completed_connection) {
                         completed += 1;
                         if (retired_after_close_timeout) {
@@ -622,7 +628,7 @@ fn serveConcurrent(
                 }
 
                 const application_feed = try connections.feedDatagramWithInstalledKeys(
-                    &lifecycle,
+                    lifecycle,
                     allocator,
                     path,
                     now_millis,

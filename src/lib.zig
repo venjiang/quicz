@@ -286,6 +286,12 @@ test {
     _ = tls13_server_transport_module;
 }
 
+const tls13_server_endpoint_module = @import("quic/tls13_server_endpoint.zig");
+pub const Tls13ServerEndpoint = tls13_server_endpoint_module.Tls13ServerEndpoint;
+test {
+    _ = tls13_server_endpoint_module;
+}
+
 const connection_module = @import("quic/connection.zig");
 pub const Connection = connection_module.Connection;
 pub const QuicConnection = connection_module.Connection;
