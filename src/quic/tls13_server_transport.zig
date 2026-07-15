@@ -1,9 +1,12 @@
 //! Pure-Zig TLS 1.3 QUIC server connection state without socket ownership.
 
 const std = @import("std");
+const buffer = @import("buffer.zig");
 const connection_module = @import("connection.zig");
 const connection_config = @import("connection_config.zig");
 const crypto_types = @import("crypto_types.zig");
+const frame = @import("frame.zig");
+const protection = @import("protection.zig");
 const tls13 = @import("tls13.zig");
 const tls13_backend = @import("tls13_backend.zig");
 const transport_types = @import("transport_types.zig");
@@ -326,4 +329,41 @@ test "Tls13ServerTransport services idle lifecycle deadline" {
     const serviced = try transport.serviceDueDeadline(20) orelse return error.TestUnexpectedResult;
     try std.testing.expect(serviced == .idle_timeout);
     try std.testing.expectEqual(transport_types.ConnectionState.closed, transport.connection.connectionState());
+}
+
+test "Tls13ServerTransport sends to the newest peer connection ID" {
+    var transport = try Tls13ServerTransport.init(std.testing.allocator, .{}, .{});
+    defer transport.deinit();
+
+    const traffic_secret = [_]u8{0x44} ** 32;
+    try transport.connection.validatePeerAddress();
+    try transport.connection.confirmHandshake();
+    try transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const reset_token = [_]u8{0x55} ** 16;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try transport.connection.processDatagram(0, writer.getWritten());
+    try transport.connection.sendPing();
+
+    const datagram = (try transport.pollApplicationDatagram(1)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        protection.deriveAes128PacketProtectionKeys(traffic_secret),
+        datagram,
+        peer_connection_id.len,
+        0,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &peer_connection_id, opened.packet.header.dcid);
 }
