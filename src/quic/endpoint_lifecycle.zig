@@ -122,6 +122,7 @@ pub const EndpointDueWorkCryptoBackendNextDeadlineResult = endpoint_types.Endpoi
 pub const EndpointDueWorkCryptoBackendDatagramResult = endpoint_types.EndpointDueWorkCryptoBackendDatagramResult;
 pub const EndpointDueWorkCryptoBackendDatagramDrainResult = endpoint_types.EndpointDueWorkCryptoBackendDatagramDrainResult;
 pub const EndpointFeedInstalledKeyDatagramResult = endpoint_types.EndpointFeedInstalledKeyDatagramResult;
+pub const EndpointFeedInstalledKeyPathUpdateResult = endpoint_types.EndpointFeedInstalledKeyPathUpdateResult;
 pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = endpoint_types.EndpointFeedInstalledKeyDatagramNextDeadlineResult;
 pub const EndpointFeedPendingWorkNextDeadlineResult = endpoint_types.EndpointFeedPendingWorkNextDeadlineResult;
 pub const EndpointFeedPendingWorkDatagramPollResult = endpoint_types.EndpointFeedPendingWorkDatagramPollResult;
@@ -1437,6 +1438,81 @@ pub const EndpointConnectionLifecycle = struct {
             .version_negotiation => |response| .{ .version_negotiation = response },
             .stateless_reset => |reset| .{ .stateless_reset = reset },
             .dropped => .dropped,
+        };
+    }
+
+    /// Socket-facing installed-key receive with validated migration commit.
+    ///
+    /// This matches `feedDatagramWithInstalledKeys()` for Version Negotiation,
+    /// stateless reset, new Initial, Handshake, 0-RTT, and drop actions. For
+    /// routed 1-RTT application packets, it additionally commits the endpoint
+    /// route only when authenticated processing consumes an outstanding
+    /// PATH_CHALLENGE response from the changed UDP tuple.
+    pub fn feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyPathUpdateResult {
+        const action = try self.feedDatagram(
+            options.out,
+            path,
+            datagram,
+            options.unpredictable_prefix,
+            options.supported_versions,
+        );
+        return switch (action) {
+            .routed => |route| routed: {
+                if (route.connection_id != connection_id) return error.InvalidPacket;
+                if (try self.processRoutedStatelessResetDatagram(connection_id, connection, now_millis, datagram)) {
+                    break :routed .{ .feed = .dropped };
+                }
+                switch (options.space) {
+                    .handshake => try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+                        connection_id,
+                        connection,
+                        now_millis,
+                        datagram,
+                    ),
+                    .zero_rtt => try self.processProtectedZeroRttDatagramWithInstalledKeysOrClose(
+                        connection_id,
+                        connection,
+                        now_millis,
+                        datagram,
+                    ),
+                    .application => {
+                        const outstanding_before = connection.outstandingPathChallengeCount();
+                        try self.processProtectedShortDatagramWithInstalledKeysOrClose(
+                            connection_id,
+                            connection,
+                            now_millis,
+                            route.destination_connection_id.asSlice().len,
+                            datagram,
+                        );
+                        const outstanding_after = connection.outstandingPathChallengeCount();
+                        const updated_route: ?endpoint.RouteResult = if (route.path_changed and outstanding_after < outstanding_before)
+                            try self.updateRoutePathFromValidatedDatagramAndResetSpinBit(
+                                route.destination_connection_id.asSlice(),
+                                path,
+                                connection,
+                            )
+                        else
+                            null;
+                        break :routed .{
+                            .feed = .{ .routed = route },
+                            .updated_route = updated_route,
+                        };
+                    },
+                }
+                break :routed .{ .feed = .{ .routed = route } };
+            },
+            .accept_initial => |initial| .{ .feed = .{ .accept_initial = initial } },
+            .version_negotiation => |response| .{ .feed = .{ .version_negotiation = response } },
+            .stateless_reset => |reset| .{ .feed = .{ .stateless_reset = reset } },
+            .dropped => .{ .feed = .dropped },
         };
     }
 

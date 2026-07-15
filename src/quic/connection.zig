@@ -42215,6 +42215,94 @@ test "EndpointConnectionLifecycle installed-key path update commits after PATH_R
     try std.testing.expect(!confirmed_route.path_changed);
 }
 
+test "EndpointConnectionLifecycle feed installed-key path update commits after PATH_RESPONSE validation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const options = EndpointFeedInstalledKeyDatagramOptions{
+        .space = .application,
+        .out = &[_]u8{},
+        .unpredictable_prefix = &[_]u8{},
+        .supported_versions = &[_]packet.Version{.v1},
+    };
+
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    };
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    try lifecycle.registerConnectionId(188, &server_dcid, old_path, .{});
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try client.sendPing();
+    const migrated_ping = (try client.pollProtectedShortDatagramWithInstalledKeys(1, &server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(migrated_ping);
+    const ping_result = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+        188,
+        &server,
+        new_path,
+        2,
+        migrated_ping,
+        options,
+    );
+    const ping_route = switch (ping_result.feed) {
+        .routed => |route| route,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(ping_route.path_changed);
+    try std.testing.expect(ping_result.updated_route == null);
+    try std.testing.expect((try lifecycle.routeDatagram(new_path, migrated_ping)).path_changed);
+
+    const challenge_data = [_]u8{ 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb };
+    try server.sendPathChallenge(challenge_data);
+    const challenge = (try server.pollProtectedShortDatagramWithInstalledKeys(3, &client_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(challenge);
+    try client.processProtectedShortDatagramWithInstalledKeys(4, client_dcid.len, challenge);
+
+    const response = (try client.pollProtectedShortDatagramWithInstalledKeys(5, &server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response);
+    const validation_result = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+        188,
+        &server,
+        new_path,
+        6,
+        response,
+        options,
+    );
+    const response_route = switch (validation_result.feed) {
+        .routed => |route| route,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(response_route.path_changed);
+    const updated_route = validation_result.updated_route orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 188), updated_route.connection_id);
+    try std.testing.expect(!updated_route.path_changed);
+    try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+    try std.testing.expect(!(try lifecycle.routeDatagram(new_path, response)).path_changed);
+}
+
 test "EndpointConnectionLifecycle installed-key path update OrClose queues close without route update" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };

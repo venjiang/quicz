@@ -517,6 +517,14 @@ pub const EndpointFeedInstalledKeyDatagramResult = union(enum) {
     dropped,
 };
 
+/// Result from feeding one socket datagram and optionally committing path migration.
+pub const EndpointFeedInstalledKeyPathUpdateResult = struct {
+    /// Receive classification and processing result.
+    feed: EndpointFeedInstalledKeyDatagramResult,
+    /// Route after endpoint path update, present only when validation completed.
+    updated_route: ?endpoint.RouteResult = null,
+};
+
 /// Result from feeding one installed-key datagram, then selecting a wakeup.
 pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = struct {
     /// Receive classification and processing result.
