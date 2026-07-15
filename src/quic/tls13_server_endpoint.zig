@@ -66,6 +66,45 @@ pub fn Tls13ServerEndpoint(
             drain: root.EndpointDatagramDrainResult,
         };
 
+        /// Accepted Initial output paired with the committed UDP route.
+        pub const AcceptedInitialDatagramDrainPathResult = struct {
+            accepted: root.EndpointAcceptedInitialCryptoBackendDatagramDrainResult,
+            path: endpoint.Udp4Tuple,
+        };
+
+        /// Backend-driven installed-key output paired with the committed route.
+        pub const CryptoBackendDatagramDrainPathResult = struct {
+            backend: root.EndpointCryptoBackendDriveDatagramDrainResult,
+            path: endpoint.Udp4Tuple,
+        };
+
+        /// Backend-driven long-header output paired with the committed route.
+        pub const ProtectedLongBackendDatagramDrainPathResult = struct {
+            backend: root.EndpointCryptoBackendDriveProtectedLongDatagramDrainResult,
+            path: endpoint.Udp4Tuple,
+        };
+
+        /// Accepted Initial record admission with route-bound output drains.
+        pub const InitialRecordAdmissionPathResult = struct {
+            initial: AcceptedInitialDatagramDrainPathResult,
+            handshake: ?CryptoBackendDatagramDrainPathResult = null,
+        };
+
+        /// Routed Initial processing with route-bound output drains.
+        pub const InitialProcessPathResult = struct {
+            initial: struct {
+                route: endpoint.RouteResult,
+                backend: ProtectedLongBackendDatagramDrainPathResult,
+            },
+            handshake: ?CryptoBackendDatagramDrainPathResult = null,
+        };
+
+        /// Routed installed-key backend processing with route-bound output.
+        pub const RoutedBackendDatagramDrainPathResult = struct {
+            route: endpoint.RouteResult,
+            backend: CryptoBackendDatagramDrainPathResult,
+        };
+
         lifecycle: EndpointConnectionLifecycle,
         records: Registry,
 
@@ -74,6 +113,10 @@ pub fn Tls13ServerEndpoint(
                 .handshake => .handshake,
                 .zero_rtt, .application => .application,
             };
+        }
+
+        fn currentRecordRoutePath(self: *const Self, record: *const Record) endpoint.RouteError!endpoint.Udp4Tuple {
+            return self.lifecycle.currentRoutePath(source_connection_id_of(record));
         }
 
         /// Create an endpoint with dynamically allocated record and route storage.
@@ -508,6 +551,45 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Accept an Initial and return each output drain with its UDP route.
+        pub fn acceptInitialRecordWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            record: *Record,
+            now_millis: i64,
+            initial_accept: endpoint.InitialAcceptResult,
+            server_source_connection_id: []const u8,
+            datagram: []const u8,
+            options: endpoint.AcceptedInitialRouteOptions,
+            scratch: []u8,
+            initial_out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedInitialError || root.Error || error{ConnectionLimitReached})!InitialRecordAdmissionPathResult {
+            const admitted = try self.acceptInitialRecord(
+                connection_id,
+                record,
+                now_millis,
+                initial_accept,
+                server_source_connection_id,
+                datagram,
+                options,
+                scratch,
+                initial_out,
+                handshake_out,
+            );
+            const path = admitted.initial.accepted_initial.initial_accept.path;
+            return .{
+                .initial = .{
+                    .accepted = admitted.initial,
+                    .path = path,
+                },
+                .handshake = if (admitted.handshake) |handshake| .{
+                    .backend = handshake,
+                    .path = path,
+                } else null,
+            };
+        }
+
         /// Drive one TLS packet-number space and drain its bounded output.
         pub fn driveBackend(
             self: *Self,
@@ -532,6 +614,22 @@ pub fn Tls13ServerEndpoint(
                 },
                 out,
             );
+        }
+
+        /// Drive one TLS space and return the output drain with its UDP route.
+        pub fn driveBackendWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+            scratch: []u8,
+            now_millis: i64,
+            out: []root.EndpointPolledDatagramResult,
+        ) (root.Error || endpoint.RouteError)!CryptoBackendDatagramDrainPathResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            return .{
+                .backend = try self.driveBackend(connection_id, space, scratch, now_millis, out),
+                .path = try self.currentRecordRoutePath(record),
+            };
         }
 
         /// Drive the TLS Initial space and drain bounded protected Initial output.
@@ -567,6 +665,30 @@ pub fn Tls13ServerEndpoint(
                 keys,
                 out,
             );
+        }
+
+        /// Drive Initial TLS output and return the drain with its UDP route.
+        pub fn driveInitialBackendWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            scratch: []u8,
+            now_millis: i64,
+            initial_token: []const u8,
+            version: quic_packet.Version,
+            out: []root.EndpointPolledDatagramResult,
+        ) (root.Error || endpoint.RouteError)!ProtectedLongBackendDatagramDrainPathResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            return .{
+                .backend = try self.driveInitialBackend(
+                    connection_id,
+                    scratch,
+                    now_millis,
+                    initial_token,
+                    version,
+                    out,
+                ),
+                .path = try self.currentRecordRoutePath(record),
+            };
         }
 
         /// Authenticate and accept the Retry follow-up Initial for one route.
@@ -620,6 +742,34 @@ pub fn Tls13ServerEndpoint(
             return .{
                 .route = route,
                 .backend = try self.driveBackend(connection_id, .handshake, scratch, now_millis, out),
+            };
+        }
+
+        /// Process a routed Initial and return Handshake output with its route.
+        pub fn processInitialWithHandshakeKeysWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            scratch: []u8,
+            out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedInitialError || root.Error || endpoint.RouteError)!RoutedBackendDatagramDrainPathResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const processed = try self.processInitialWithHandshakeKeys(
+                connection_id,
+                path,
+                now_millis,
+                datagram,
+                scratch,
+                out,
+            );
+            return .{
+                .route = processed.route,
+                .backend = .{
+                    .backend = processed.backend,
+                    .path = try self.currentRecordRoutePath(record),
+                },
             };
         }
 
@@ -688,6 +838,45 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Process a routed Initial and return all output drains with routes.
+        pub fn processInitialWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            scratch: []u8,
+            initial_token: []const u8,
+            initial_out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!InitialProcessPathResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const processed = try self.processInitial(
+                connection_id,
+                path,
+                now_millis,
+                datagram,
+                scratch,
+                initial_token,
+                initial_out,
+                handshake_out,
+            );
+            const output_path = try self.currentRecordRoutePath(record);
+            return .{
+                .initial = .{
+                    .route = processed.initial.route,
+                    .backend = .{
+                        .backend = processed.initial.backend,
+                        .path = output_path,
+                    },
+                },
+                .handshake = if (processed.handshake) |handshake| .{
+                    .backend = handshake,
+                    .path = output_path,
+                } else null,
+            };
+        }
+
         /// Authenticate a routed Handshake packet, drive TLS, and drain output.
         pub fn processHandshake(
             self: *Self,
@@ -711,6 +900,34 @@ pub fn Tls13ServerEndpoint(
                 source_connection_id_of(record),
                 out,
             );
+        }
+
+        /// Process a routed Handshake packet and return output with its route.
+        pub fn processHandshakeWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            scratch: []u8,
+            out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedDatagramError || endpoint.RouteError)!RoutedBackendDatagramDrainPathResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const processed = try self.processHandshake(
+                connection_id,
+                path,
+                now_millis,
+                datagram,
+                scratch,
+                out,
+            );
+            return .{
+                .route = processed.route,
+                .backend = .{
+                    .backend = processed.backend,
+                    .path = try self.currentRecordRoutePath(record),
+                },
+            };
         }
     };
 }
@@ -1268,6 +1485,163 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
             },
         ),
     );
+}
+
+test "Tls13ServerEndpoint pairs accepted Initial output with committed route path" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: root.CryptoBackend,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "initial";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const InitialOutputBackend = struct {
+        pulled: bool = false,
+        received_initial: bool = false,
+
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: root.PacketNumberSpace, _: []const u8) root.Error!void {
+            if (space != .initial) return error.InvalidPacket;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.received_initial = true;
+        }
+
+        fn pull(context: *anyopaque, space: root.PacketNumberSpace, out: []u8) root.Error!?[]const u8 {
+            if (space != .initial) return null;
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.pulled) return null;
+            const response = "server initial response";
+            if (out.len < response.len) return error.BufferTooSmall;
+            @memcpy(out[0..response.len], response);
+            self.pulled = true;
+            return out[0..response.len];
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer endpoint_owner.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+    };
+    const original_dcid = [_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
+    const client_scid = [_]u8{ 0x51, 0x52, 0x53, 0x54 };
+    const server_scid = "local";
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.sendCryptoInSpace(.initial, "client initial");
+    const initial_datagram = (try client.pollInitialProtectedDatagram(
+        1,
+        &original_dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(initial_datagram);
+
+    var classification_out: [256]u8 = undefined;
+    const action = try endpoint_owner.feedDatagram(
+        &classification_out,
+        path,
+        initial_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+    );
+    const accepted_initial = switch (action) {
+        .accept_initial => |initial| initial,
+        else => return error.TestUnexpectedResult,
+    };
+
+    var backend = InitialOutputBackend{};
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned_by_test = true;
+    errdefer {
+        if (record_owned_by_test) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = 83,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = backend.backend(),
+    };
+    record_initialized = true;
+
+    var scratch: [256]u8 = undefined;
+    var initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    const admitted = try endpoint_owner.acceptInitialRecordWithRoutePath(
+        record.handle,
+        record,
+        2,
+        accepted_initial,
+        server_scid,
+        initial_datagram,
+        .{ .active_migration_disabled = true },
+        &scratch,
+        &initial_out,
+        &handshake_out,
+    );
+    record_owned_by_test = false;
+
+    try std.testing.expect(backend.received_initial);
+    try std.testing.expect(admitted.initial.path.eql(path));
+    try std.testing.expectEqual(@as(usize, 1), admitted.initial.accepted.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), admitted.initial.accepted.drain.first_error);
+    defer std.testing.allocator.free(initial_out[0].datagram);
+    try std.testing.expectEqual(record.handle, initial_out[0].connection_id);
+    try std.testing.expect(initial_out[0].datagram.len != 0);
+    try std.testing.expectEqual(@as(?TestEndpoint.CryptoBackendDatagramDrainPathResult, null), admitted.handshake);
+    try std.testing.expect((try endpoint_owner.lifecycle.currentRoutePath(server_scid)).eql(path));
 }
 
 test "Tls13ServerEndpoint pairs due recovery output with committed route path" {

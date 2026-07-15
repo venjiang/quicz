@@ -39,7 +39,7 @@ version-information 原语）：
 
 | 功能 | 实用目标 | quicz 状态 |
 | --- | --- | --- |
-| UDP client/server endpoint | 第一轮可用里程碑必须具备。由同一个 endpoint owner 驱动 accept/connect、packet receive/send、timer、route cleanup 和 close。 | 部分完成：`Tls13ServerEndpoint` 持有动态分配或有界的 TLS server record、ingress 分类、lifecycle routing/timer、accepted-Initial 到 Handshake 的 TLS backend output、原子 record 退役、route-owned installed-key short-packet receive、route-bound due recovery output、process server 基于已提交 route tuple 的 datagram send selection，以及 process server 验证后 route migration；`Tls13ClientEndpoint` 持有一个 client transport、CID route、调用方选择的 route migration、route-bound Initial begin output、route-bound receive-generated Initial/Handshake output、route-bound application output、route-bound due recovery output、recovery-timer mirror、route-bound protected close 发送，以及 due idle/close 的 route 与 timer 退役。process client/server 的 UDP receive capacity 已各自与配置的 local datagram limit 对齐。调用方仍持有 UDP I/O 与接纳策略；仍缺少生产级多连接 event-loop policy。 |
+| UDP client/server endpoint | 第一轮可用里程碑必须具备。由同一个 endpoint owner 驱动 accept/connect、packet receive/send、timer、route cleanup 和 close。 | 部分完成：`Tls13ServerEndpoint` 持有动态分配或有界的 TLS server record、ingress 分类、lifecycle routing/timer、route-bound accepted/routed Initial 和 Handshake TLS backend output drain、原子 record 退役、route-owned installed-key short-packet receive、route-bound due recovery output、process server 基于已提交 route tuple 的 datagram send selection，以及 process server 验证后 route migration；`Tls13ClientEndpoint` 持有一个 client transport、CID route、调用方选择的 route migration、route-bound Initial begin output、route-bound receive-generated Initial/Handshake output、route-bound application output、route-bound due recovery output、recovery-timer mirror、route-bound protected close 发送，以及 due idle/close 的 route 与 timer 退役。process client/server 的 UDP receive capacity 已各自与配置的 local datagram limit 对齐。调用方仍持有 UDP I/O 与接纳策略；仍缺少生产级多连接 event-loop policy。 |
 | TLS 1.3 集成 | 必须具备。纯 Zig TLS 1.3（`src/quic/tls13.zig` + `src/quic/tls13_backend.zig`）通过 `CryptoBackend` 接口接入；OpenSSL C adapter 为废弃路径。 | 部分完成：client 与 server TLS transport 持有 protected I/O，并统一选择和处理 recovery、idle、close 与 key-discard deadline；每个并发 server record 持有 `Tls13ServerTransport`（Connection、TLS backend，以及本端/对端/Original DCID 的固定副本）。服务端 Certificate 消息保留配置的 leaf-first DER certificate chain；配置 bundle 的 client 会在信任锚前逐跳校验收到的 leaf-to-issuer chain。下方 `quic-go` 证据完成真实 TLS-owned handshake 与两条带 FIN 的 1-RTT STREAM echo，不使用 mock key 或 OpenSSL；仍缺少生产级 endpoint-owned event loop。 |
 | QUIC v1 packet protection | 必须具备。Initial、Handshake、启用时的 0-RTT 和 1-RTT packet 必须由 TLS-owned 路径生成和消费。 | 部分完成：已有 v1/v2 Initial、Retry integrity、protected long/short helper、受保护 packet 解密和状态更新前的接收侧 UDP datagram 大小拒绝，以及 mock installed-key 路径。 |
 | Stream | 必须具备。Bidirectional/unidirectional stream 的 open、read、write、FIN、reset、STOP_SENDING 和 stream limit 必须能跑在 protected UDP 上。 | 部分完成：TLS-owned client/server transport 已暴露 bidirectional 和 unidirectional 的 open/write/read/FIN，以及 RESET_STREAM 和 STOP_SENDING。TLS-backed endpoint UDP loopback 已验证 RESET_STREAM 与 FIN 驱动的 MAX_STREAMS_BIDI 额度释放；独立 `quic-go` client 已验证 stream 0 到 4 到 8 到 12 的连续 stream-count 额度释放、RESET_STREAM(41)、STOP_SENDING(42) 后对端回送 RESET_STREAM(42)，以及 client 单向 stream 2 / server 单向 stream 3 的 FIN 交换。更广泛的 stream-limit 互通仍不完整。 |
@@ -60,8 +60,8 @@ version-information 原语）：
 1-RTT short packet，涵盖 lifecycle route lookup、installed-key 接收和
 stateless-reset 处理。`Tls13ServerEndpoint` 会在同一 record 边界完成所有安装
 Handshake key 的已路由 Initial（包括保留的 coalesced Initial/Handshake）及其
-Handshake backend output 和有界 drain；Retry follow-up 与已路由 Handshake input
-也使用同一 record boundary。这只是
+Handshake backend output 和有界 route-bound drain；Retry follow-up 与已路由
+Handshake input 也使用同一 record boundary。这只是
 endpoint ownership 的增量证据，并非完整生产级 event loop。
 
 ### Packet number 重排证据
