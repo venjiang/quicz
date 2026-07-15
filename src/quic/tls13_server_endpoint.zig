@@ -169,6 +169,49 @@ pub fn Tls13ServerEndpoint(
             );
         }
 
+        /// Route one installed-key datagram, apply validated path-update
+        /// handling on the selected record, and poll one 1-RTT output datagram.
+        ///
+        /// This keeps the record lookup, path-validation output tuple, and
+        /// protected output packet together at the endpoint-owner layer. The
+        /// caller still owns UDP I/O and supplies the route-classification
+        /// scratch buffer and endpoint entropy through `options`.
+        pub fn feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
+            self: *Self,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!root.EndpointFeedPathUpdateDatagramPollResult {
+            const action = try self.lifecycle.feedDatagram(
+                options.out,
+                path,
+                datagram,
+                options.unpredictable_prefix,
+                options.supported_versions,
+            );
+            const route = switch (action) {
+                .routed => |value| value,
+                .accept_initial => |initial| return .{ .feed = .{ .feed = .{ .accept_initial = initial } } },
+                .version_negotiation => |response| return .{ .feed = .{ .feed = .{ .version_negotiation = response } } },
+                .stateless_reset => |reset| return .{ .feed = .{ .feed = .{ .stateless_reset = reset } } },
+                .dropped => return .{ .feed = .{ .feed = .dropped } },
+            };
+            const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
+            return self.lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
+                route.connection_id,
+                connection_of(record),
+                path,
+                now_millis,
+                datagram,
+                options,
+                .{
+                    .space = .application,
+                    .destination_connection_id = destination_connection_id_of(record),
+                },
+            );
+        }
+
         /// Poll one installed-key 1-RTT datagram from an endpoint-owned record.
         ///
         /// The caller supplies only the selected handle and peer destination CID;
@@ -931,4 +974,157 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectEqual(std.math.maxInt(usize), dynamic_endpoint.records.max_records);
     try std.testing.expectEqual(@as(usize, 0), dynamic_endpoint.lifecycle.routeCount());
     try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), try dynamic_endpoint.nextDeadline(std.testing.allocator));
+}
+
+test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: root.CryptoBackend,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "initial";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 1,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer endpoint_owner.deinit();
+
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_001),
+    };
+    const server_dcid = "local";
+    const client_dcid = "peer";
+    const secrets = try protection.deriveInitialSecrets(.v1, "endpoint");
+    var empty_backend = EmptyBackend{};
+
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer {
+        if (record_owned) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = 88,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    record_initialized = true;
+    try record.connection.validatePeerAddress();
+    try record.connection.confirmHandshake();
+    try record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, old_path, .{});
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(record.handle);
+    try endpoint_owner.records.adopt(record.handle, record);
+    record_owned = false;
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    const challenge_data = [_]u8{ 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb };
+    const options = root.EndpointFeedInstalledKeyDatagramOptions{
+        .space = .application,
+        .out = &[_]u8{},
+        .unpredictable_prefix = &[_]u8{},
+        .supported_versions = &[_]quic_packet.Version{.v1},
+        .path_challenge_data = challenge_data,
+    };
+
+    try client.sendPing();
+    const migrated_ping = (try client.pollProtectedShortDatagramWithInstalledKeys(1, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(migrated_ping);
+    const ping_result = try endpoint_owner.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
+        new_path,
+        2,
+        migrated_ping,
+        options,
+    );
+    try std.testing.expect(ping_result.feed.path_challenge_queued);
+    try std.testing.expect((ping_result.output_path orelse return error.TestUnexpectedResult).eql(new_path));
+    const challenge_packet = ping_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(challenge_packet.datagram);
+    try std.testing.expectEqual(record.handle, challenge_packet.connection_id);
+
+    try client.processProtectedShortDatagramWithInstalledKeys(3, client_dcid.len, challenge_packet.datagram);
+    const response = (try client.pollProtectedShortDatagramWithInstalledKeys(4, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response);
+    const validation_result = try endpoint_owner.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
+        new_path,
+        5,
+        response,
+        options,
+    );
+    const updated_route = validation_result.feed.updated_route orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, updated_route.connection_id);
+    try std.testing.expect((validation_result.output_path orelse return error.TestUnexpectedResult).eql(new_path));
+    const ack_packet = validation_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack_packet.datagram);
+    try std.testing.expectEqual(record.handle, ack_packet.connection_id);
+    try std.testing.expect(!(try endpoint_owner.routeDatagram(new_path, response)).path_changed);
 }
