@@ -15,7 +15,7 @@
 | `run-interop-external-client -- <ip> <port> <ca> [name] [version-negotiation]` | `interop_external_client.zig` | 连接独立 IPv4 QUIC server，校验 stream 0、4 的 FIN `hello`/`world` echo；可选模式验证 v2 到 v1 Version Negotiation 后新建连接。 |
 | `run-interop-client -- <host> <port> [testcase]` | `interop_client.zig` | QUIC-Interop-Runner 风格 client 与本地回退探针。 |
 | `run-interop-event-loopback -- [handshake|transfer|loss|congestion|persistent|key-update|path|stream-control|stream-limit]` | `interop_event_loopback.zig` | TLS-owned UDP 事件循环，含 stream control 与额度释放。 |
-| Go client | `interop/go_echo_client/main.go` | quic-go FIN echo client；`-expect-stream-limit`、`-expect-reset`、`-expect-stop-sending`、`-expect-uni` 分别配合对应并发模式验证额度、RESET_STREAM、STOP_SENDING 与单向 stream。 |
+| Go client | `interop/go_echo_client/main.go` | quic-go FIN echo client；`-expect-stream-limit`、`-expect-reset`、`-expect-stop-sending`、`-expect-uni`、`-expect-server-pto` 分别配合对应并发模式验证额度、RESET_STREAM、STOP_SENDING、单向 stream 与有界 server-PTO recovery。 |
 | Go server | `interop/go_echo_client/echo_server/main.go` | 一次性 quic-go peer，生成本地 CA PEM、回显两条 FIN stream，并可通过 `-v1-only` 验证 Version Negotiation。 |
 | Rust client | `interop/rust_echo_client/src/main.rs` | quinn/rustls client 向 Zig server 发送 stream 0、4 的 FIN 数据。 |
 

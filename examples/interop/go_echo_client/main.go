@@ -13,11 +13,39 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
+	"sync/atomic"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
 )
+
+// dropInboundPacketBurstConn discards a bounded burst of post-handshake UDP
+// datagrams before exposing subsequent datagrams to quic-go. It is used only
+// by the PTO probe to force the server's recovery deadline to expire.
+type dropInboundPacketBurstConn struct {
+	net.PacketConn
+	droppingEnabled atomic.Bool
+	droppedCount    atomic.Uint32
+	dropLimit       uint32
+}
+
+func (connection *dropInboundPacketBurstConn) ReadFrom(packet []byte) (int, net.Addr, error) {
+	for {
+		n, address, err := connection.PacketConn.ReadFrom(packet)
+		if err != nil {
+			return n, address, err
+		}
+		if connection.droppingEnabled.Load() {
+			droppedCount := connection.droppedCount.Load()
+			if droppedCount < connection.dropLimit && connection.droppedCount.CompareAndSwap(droppedCount, droppedCount+1) {
+				continue
+			}
+		}
+		return n, address, nil
+	}
+}
 
 func main() {
 	address := flag.String("addr", "127.0.0.1:4443", "Zig QUIC server address")
@@ -28,15 +56,16 @@ func main() {
 	expectReset := flag.Bool("expect-reset", false, "cancel stream 0 with RESET_STREAM error 41, then echo stream 4")
 	expectStopSending := flag.Bool("expect-stop-sending", false, "require remote STOP_SENDING error 42 on stream 0, then echo stream 4")
 	expectUni := flag.Bool("expect-uni", false, "send client unidirectional stream 2 and require server unidirectional stream 3")
+	expectServerPTO := flag.Bool("expect-server-pto", false, "drop four post-stream Zig datagrams and require a PTO-recovered echo")
 	flag.Parse()
 	selectedProbeCount := 0
-	for _, enabled := range []bool{*expectStreamLimit, *expectReset, *expectStopSending, *expectUni} {
+	for _, enabled := range []bool{*expectStreamLimit, *expectReset, *expectStopSending, *expectUni, *expectServerPTO} {
 		if enabled {
 			selectedProbeCount++
 		}
 	}
 	if selectedProbeCount > 1 {
-		log.Fatal("stream-limit, reset, stop-sending, and uni probes are mutually exclusive")
+		log.Fatal("stream-limit, reset, stop-sending, uni, and server-PTO probes are mutually exclusive")
 	}
 
 	if *caPath == "" {
@@ -54,12 +83,32 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	connection, err := quic.DialAddr(ctx, *address, &tls.Config{
+	tlsConfig := &tls.Config{
 		RootCAs:    rootCAs,
 		ServerName: *serverName,
 		NextProtos: []string{*alpn},
 		MinVersion: tls.VersionTLS13,
-	}, &quic.Config{})
+	}
+	var connection *quic.Conn
+	var dropConnection *dropInboundPacketBurstConn
+	if *expectServerPTO {
+		udpConnection, err := net.ListenUDP("udp", nil)
+		if err != nil {
+			log.Fatalf("listen UDP for PTO probe: %v", err)
+		}
+		defer udpConnection.Close()
+		dropConnection = &dropInboundPacketBurstConn{
+			PacketConn: udpConnection,
+			dropLimit:  4,
+		}
+		peerAddress, err := net.ResolveUDPAddr("udp", *address)
+		if err != nil {
+			log.Fatalf("resolve %s: %v", *address, err)
+		}
+		connection, err = quic.Dial(ctx, dropConnection, peerAddress, tlsConfig, &quic.Config{})
+	} else {
+		connection, err = quic.DialAddr(ctx, *address, tlsConfig, &quic.Config{})
+	}
 	if err != nil {
 		log.Fatalf("dial %s: %v", *address, err)
 	}
@@ -158,6 +207,9 @@ func main() {
 		if err := stream.Close(); err != nil {
 			log.Fatalf("finish stream: %v", err)
 		}
+		if streamIndex == 0 && dropConnection != nil {
+			dropConnection.droppingEnabled.Store(true)
+		}
 
 		echoed := make([]byte, len(message))
 		if _, err := io.ReadFull(stream, echoed); err != nil {
@@ -183,6 +235,13 @@ func main() {
 	}
 	if *expectStopSending {
 		fmt.Printf("go_quic_stop_sending_client: handshake_done=true stop_error=42 reset_error=42 echo_stream=4 echo_bytes=%d\n", echoBytes)
+		return
+	}
+	if *expectServerPTO {
+		if dropConnection.droppedCount.Load() < dropConnection.dropLimit {
+			log.Fatal("PTO probe did not drop the expected post-handshake Zig datagrams")
+		}
+		fmt.Printf("go_quic_server_pto_client: handshake_done=true dropped_datagrams=%d echo_streams=2 echo_bytes=%d\n", dropConnection.dropLimit, echoBytes)
 		return
 	}
 	fmt.Printf("go_quic_echo_client: handshake_done=true echo_streams=2 echo_bytes=%d\n", echoBytes)

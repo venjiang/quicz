@@ -16,7 +16,7 @@ by `build.zig`; `zig build --help` is the authoritative generated index.
 | `run-interop-external-client -- <ip> <port> <ca> [name] [version-negotiation]` | `interop_external_client.zig` | Certificate-verified IPv4 peer probe with FIN `hello`/`world` echoes; optional mode proves v2-to-v1 Version Negotiation with a fresh connection. |
 | `run-interop-client -- <host> <port> [testcase]` | `interop_client.zig` | QUIC-Interop-Runner-style client and local fallback probe. |
 | `run-interop-event-loopback -- [handshake|transfer|loss|congestion|persistent|key-update|path|stream-control|stream-limit]` | `interop_event_loopback.zig` | TLS-owned UDP event-loop scenarios, including stream control and credit release. |
-| Go client | `interop/go_echo_client/main.go` | quic-go FIN echo client; `-expect-stream-limit`, `-expect-reset`, `-expect-stop-sending`, and `-expect-uni` validate matching concurrent server modes. |
+| Go client | `interop/go_echo_client/main.go` | quic-go FIN echo client; `-expect-stream-limit`, `-expect-reset`, `-expect-stop-sending`, `-expect-uni`, and `-expect-server-pto` validate matching concurrent server modes, including a bounded server-PTO recovery run. |
 | Go server | `interop/go_echo_client/echo_server/main.go` | One-connection quic-go peer that generates a local CA PEM, echoes two FIN streams, and can run `-v1-only` for Version Negotiation. |
 | Rust client | `interop/rust_echo_client/src/main.rs` | quinn/rustls client sending FIN streams 0 and 4 to the Zig server. |
 
