@@ -182,10 +182,10 @@ fn serverPath(bind_address: std.Io.net.IpAddress, peer_address: std.Io.net.IpAdd
 }
 
 fn destroyManagedConnection(
-    connections: *ProcessConnectionRegistry,
+    server_endpoint: *ProcessServerEndpoint,
     handle: u64,
 ) !void {
-    try connections.remove(handle);
+    _ = try server_endpoint.retireRecord(handle);
 }
 
 fn serveConcurrent(
@@ -251,7 +251,7 @@ fn serveConcurrent(
                     const managed = connections.get(due.deadline.connection_id) orelse return error.UnknownConnectionId;
                     const completed_connection = !retry_enabled or managed.retry_accepted;
                     const retired_after_close_timeout = due.pending_work.close_retired != null;
-                    try destroyManagedConnection(connections, due.deadline.connection_id);
+                    try destroyManagedConnection(&server_endpoint, due.deadline.connection_id);
                     if (completed_connection) {
                         completed += 1;
                         if (retired_after_close_timeout) {
@@ -307,8 +307,7 @@ fn serveConcurrent(
                 var managed_adopted = false;
                 errdefer {
                     if (managed_adopted) {
-                        _ = lifecycle.retireConnection(handle);
-                        connections.remove(handle) catch {};
+                        if (server_endpoint.retireRecord(handle)) |_| {} else |_| {}
                     } else {
                         if (managed_initialized) managed.deinit();
                         allocator.destroy(managed);

@@ -58,6 +58,20 @@ pub fn Tls13ServerEndpoint(
             self.lifecycle.deinit();
         }
 
+        /// Retire one endpoint-owned record together with all lifecycle state.
+        ///
+        /// The route/timer retirement is idempotent because deadline processing
+        /// can have already retired them before the caller destroys the record.
+        pub fn retireRecord(
+            self: *Self,
+            connection_id: u64,
+        ) error{UnknownConnectionId}!root.EndpointConnectionRetireResult {
+            if (self.records.get(connection_id) == null) return error.UnknownConnectionId;
+            const retired = self.lifecycle.retireConnection(connection_id);
+            self.records.remove(connection_id) catch unreachable;
+            return retired;
+        }
+
         /// Select the earliest deadline across all endpoint-owned records.
         pub fn nextDeadline(
             self: *Self,
@@ -496,6 +510,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         .connection = try Connection.init(std.testing.allocator, .server, .{}),
     };
     retry_record_initialized = true;
+    const retry_record_handle = retry_record.handle;
     const retry_path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5443),
@@ -756,6 +771,12 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     rejecting_record_owned = false;
     rejecting_record.deinit();
     std.testing.allocator.destroy(rejecting_record);
+
+    const retired_record = try endpoint_owner.retireRecord(retry_record_handle);
+    try std.testing.expectEqual(@as(usize, 1), retired_record.routes_retired);
+    try std.testing.expect(endpoint_owner.records.get(retry_record_handle) == null);
+    try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.retireRecord(retry_record_handle));
 
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
