@@ -253,9 +253,17 @@ pub fn Tls13ServerEndpoint(
 
         /// Accept an Initial and transfer its record into endpoint ownership.
         ///
-        /// Route installation, TLS driving, bounded Initial output, and record
-        /// admission succeed together. The caller retains `record` on failure;
-        /// any route or timer installed before that failure is retired.
+        /// Route installation, Initial-space TLS driving, bounded Initial
+        /// output, record admission, and the first Handshake-space TLS drive
+        /// succeed together. The caller retains `record` on failure; any route
+        /// or timer installed before that failure is retired.
+        pub const InitialRecordAdmissionResult = struct {
+            /// Initial-space processing and bounded output drain.
+            initial: root.EndpointAcceptedInitialCryptoBackendDatagramDrainResult,
+            /// Handshake-space output after Initial processing installed keys.
+            handshake: ?root.EndpointCryptoBackendDriveDatagramDrainResult = null,
+        };
+
         pub fn acceptInitialRecord(
             self: *Self,
             connection_id: u64,
@@ -266,8 +274,9 @@ pub fn Tls13ServerEndpoint(
             datagram: []const u8,
             options: endpoint.AcceptedInitialRouteOptions,
             scratch: []u8,
-            out: []root.EndpointPolledDatagramResult,
-        ) (root.EndpointProtectedInitialError || error{ConnectionLimitReached})!root.EndpointAcceptedInitialCryptoBackendDatagramDrainResult {
+            initial_out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedInitialError || root.Error || error{ConnectionLimitReached})!InitialRecordAdmissionResult {
             if (self.records.get(connection_id) != null) return error.DuplicateConnectionId;
             if (!self.records.hasCapacity()) return error.ConnectionLimitReached;
 
@@ -281,7 +290,7 @@ pub fn Tls13ServerEndpoint(
                 options,
                 crypto_backend_of(record),
                 scratch,
-                out,
+                initial_out,
             ) catch |err| {
                 _ = self.lifecycle.retireConnection(connection_id);
                 return err;
@@ -289,7 +298,20 @@ pub fn Tls13ServerEndpoint(
             errdefer _ = self.lifecycle.retireConnection(connection_id);
 
             try self.records.adopt(connection_id, record);
-            return accepted;
+            errdefer self.records.remove(connection_id) catch unreachable;
+            if (accepted.drain.first_error != null or !accepted.backend.handshake_keys_installed) {
+                return .{ .initial = accepted };
+            }
+            return .{
+                .initial = accepted,
+                .handshake = try self.driveBackend(
+                    connection_id,
+                    .handshake,
+                    scratch,
+                    now_millis,
+                    handshake_out,
+                ),
+            };
         }
 
         /// Drive one TLS packet-number space and drain its bounded output.
@@ -882,6 +904,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             initial_datagram,
             .{ .active_migration_disabled = true },
             &rejecting_scratch,
+            &rejecting_output,
             &rejecting_output,
         ),
     );

@@ -124,7 +124,8 @@ const ManagedProcessConnection = struct {
     echoed: [interop_echo_stream_ids.len]bool = .{ false, false, false, false },
 
     fn clientScid(self: *const ManagedProcessConnection) []const u8 {
-        return self.transport.peerInitialSourceConnectionId();
+        return self.transport.connection.peerInitialSourceConnectionId() orelse
+            self.transport.peerInitialSourceConnectionId();
     }
 
     fn retryDatagram(self: *const ManagedProcessConnection) []const u8 {
@@ -390,6 +391,7 @@ fn serveConcurrent(
 
                 var scratch: [8192]u8 = undefined;
                 var initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
+                var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                 const accepted = try server_endpoint.acceptInitialRecord(
                     handle,
                     managed,
@@ -400,25 +402,16 @@ fn serveConcurrent(
                     .{ .active_migration_disabled = true },
                     &scratch,
                     &initial_outputs,
+                    &handshake_outputs,
                 );
-                const peer_scid = managed.transport.connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
-                try managed.transport.setPeerInitialSourceConnectionId(peer_scid);
                 managed_adopted = true;
                 accepted_count += 1;
-                for (initial_outputs[0..accepted.drain.datagrams_written]) |output| {
+                for (initial_outputs[0..accepted.initial.drain.datagrams_written]) |output| {
                     defer allocator.free(output.datagram);
                     try socket.send(io, &managed.peer_address, output.datagram);
                 }
-                if (accepted.drain.first_error) |drain_error| return drain_error;
-                if (accepted.backend.handshake_keys_installed) {
-                    var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
-                    const handshake = try server_endpoint.driveBackend(
-                        handle,
-                        .handshake,
-                        &scratch,
-                        now_millis,
-                        &handshake_outputs,
-                    );
+                if (accepted.initial.drain.first_error) |drain_error| return drain_error;
+                if (accepted.handshake) |handshake| {
                     for (handshake_outputs[0..handshake.drain.datagrams_written]) |output| {
                         defer allocator.free(output.datagram);
                         try socket.send(io, &managed.peer_address, output.datagram);
