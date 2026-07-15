@@ -214,6 +214,7 @@ fn serveConcurrent(
     var next_handle: u64 = 1;
     var accepted_count: usize = 0;
     var completed: usize = 0;
+    var capacity_dropped_initials: usize = 0;
 
     const runs_continuously = completion_target == 0;
     receive_loop: while (runs_continuously or completed < completion_target) {
@@ -286,11 +287,11 @@ fn serveConcurrent(
                             std.debug.print("zig_process_server: connection={d} concurrent=true retry_reissued=true\n", .{managed.*.handle});
                             continue :receive_loop;
                         }
-                        std.debug.print("zig_process_server: concurrent=true initial_dropped_capacity=true\n", .{});
+                        capacity_dropped_initials +|= 1;
                         continue;
                     }
                 } else if (!connections.hasCapacity()) {
-                    std.debug.print("zig_process_server: concurrent=true initial_dropped_capacity=true\n", .{});
+                    capacity_dropped_initials +|= 1;
                     continue;
                 }
 
@@ -741,7 +742,7 @@ fn serveConcurrent(
         }
     }
     try require(runs_continuously or accepted_count == completion_target);
-    std.debug.print("zig_process_server: accepted_connections={d} max_active_connections={d} concurrent=true complete=true\n", .{ accepted_count, max_active_connections });
+    std.debug.print("zig_process_server: accepted_connections={d} max_active_connections={d} capacity_dropped_initials={d} concurrent=true complete=true\n", .{ accepted_count, max_active_connections, capacity_dropped_initials });
 }
 
 pub fn main(init: std.process.Init) !void {

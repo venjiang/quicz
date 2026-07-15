@@ -156,7 +156,8 @@ positive active-connection capacity. Retired close/idle records still release
 their slots before a later Initial can be accepted. While full, it reissues a
 matching Retry when available and otherwise drops a new Initial instead of
 terminating the endpoint; a live one-slot run observed those drops, retired a
-quiet Go client, and then completed a second certificate-verified Go echo.
+quiet Go client, then completed a second certificate-verified Go echo and
+reported `capacity_dropped_initials=4` only in its final summary.
 `QUICZ_PROCESS_INTEROP_CONNECTIONS=3 QUICZ_PROCESS_INTEROP_MAX_ACTIVE_CONNECTIONS=1 QUICZ_PROCESS_INTEROP_MODE=rolling zig build run-tls13-process-interop`
 runs three independent TLS-owned echoes one after another through the
 concurrent lifecycle path. It proves that protected-close retirement releases

@@ -128,7 +128,7 @@ close deadline 到期才退役该 handle 的 route（`close_cleanup=true`）。e
 服务到被中断，且必须显式给出正数活跃连接上限。close/idle record 退役后仍会先释放槽位，
 随后才能接收新的 Initial。容量已满时会重发匹配的 Retry；其余新的 Initial 会被丢弃而不会
 终止 endpoint。真实单槽位运行已观察到这些丢弃，静默 Go client 退役后第二个经证书校验的
-Go echo 成功完成。
+Go echo 成功完成，并且只在最终汇总中报告 `capacity_dropped_initials=4`。
 `QUICZ_PROCESS_INTEROP_CONNECTIONS=3 QUICZ_PROCESS_INTEROP_MAX_ACTIVE_CONNECTIONS=1 QUICZ_PROCESS_INTEROP_MODE=rolling zig build run-tls13-process-interop`
 会经同一个 concurrent lifecycle 路径依次运行三次 TLS-owned echo。它证明 protected close
 退役后会释放唯一的 route/map 槽位，下一条 Initial 才可被接收。这是可复用的有界容量证据，
