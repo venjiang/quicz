@@ -124,7 +124,7 @@ const ManagedProcessConnection = struct {
     echoed: [interop_echo_stream_ids.len]bool = .{ false, false, false, false },
 
     fn clientScid(self: *const ManagedProcessConnection) []const u8 {
-        return self.transport.connection.peerInitialSourceConnectionId() orelse
+        return self.transport.connection.peerDestinationConnectionId() orelse
             self.transport.peerInitialSourceConnectionId();
     }
 

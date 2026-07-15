@@ -1768,6 +1768,24 @@ pub const Connection = struct {
         return self.peer_initial_source_connection_id;
     }
 
+    /// Return the peer Connection ID selected for subsequent outgoing packets.
+    ///
+    /// Once the peer advertises active NEW_CONNECTION_ID values, prefer the
+    /// highest non-retired sequence number. Until then, use the authenticated
+    /// Initial Source Connection ID captured from the peer's first Initial.
+    pub fn peerDestinationConnectionId(self: *const Connection) ?[]const u8 {
+        var selected: ?[]const u8 = null;
+        var selected_sequence: ?u64 = null;
+        for (self.active_connection_ids.items) |active_id| {
+            if (active_id.retired) continue;
+            if (selected_sequence == null or active_id.sequence_number > selected_sequence.?) {
+                selected = active_id.connection_id;
+                selected_sequence = active_id.sequence_number;
+            }
+        }
+        return selected orelse self.peer_initial_source_connection_id;
+    }
+
     /// Return the Original Destination Connection ID remembered for transport parameters.
     ///
     /// Client connections record the DCID used by their first sent Initial and
@@ -69687,6 +69705,7 @@ test "Tls13Backend + Connection: NEW_CONNECTION_ID over 1-RTT on TLS-owned path"
     try client.processProtectedShortDatagramWithInstalledKeys(9, client_scid.len, cid_dgram);
     // After processing, the client knows the server's new CID.
     try std.testing.expect(server.pendingNewConnectionIdCount() == 0);
+    try std.testing.expectEqualSlices(u8, &new_cid, client.peerDestinationConnectionId().?);
 }
 
 test "Tls13Backend + Connection: protected close on TLS-owned path" {

@@ -179,7 +179,7 @@ pub const Tls13ServerTransport = struct {
         self: *Tls13ServerTransport,
         now_millis: i64,
     ) Error!?[]u8 {
-        const peer_connection_id = self.connection.peerInitialSourceConnectionId() orelse return error.InvalidPacket;
+        const peer_connection_id = self.connection.peerDestinationConnectionId() orelse return error.InvalidPacket;
         return self.connection.pollProtectedShortDatagramWithInstalledKeys(
             now_millis,
             peer_connection_id,
