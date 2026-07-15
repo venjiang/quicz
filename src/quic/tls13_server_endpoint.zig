@@ -11,6 +11,7 @@ const connection_module = @import("connection.zig");
 const endpoint = @import("endpoint.zig");
 const endpoint_connection_registry = @import("endpoint_connection_registry.zig");
 const endpoint_lifecycle = @import("endpoint_lifecycle.zig");
+const frame = @import("frame.zig");
 const quic_packet = @import("packet.zig");
 const protection = @import("protection.zig");
 
@@ -2248,4 +2249,31 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     defer std.testing.allocator.free(committed_output.datagram);
     try std.testing.expect(committed_output.path.eql(new_path));
     try std.testing.expect(committed_output.datagram.len != 0);
+
+    const invalid_packet_number = record.connection.nextPeerPacketNumber(.application);
+    const illegal_plaintext = [_]u8{@intFromEnum(frame.FrameType.handshake_done)} ++ ([_]u8{0} ** 31);
+    const illegal_handshake_done = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = invalid_packet_number,
+    }, try quic_packet.encodePacketNumberForHeader(invalid_packet_number, null), secrets.client, &illegal_plaintext);
+    defer std.testing.allocator.free(illegal_handshake_done);
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        endpoint_owner.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
+            new_path,
+            8,
+            illegal_handshake_done,
+            options,
+        ),
+    );
+    try std.testing.expectEqual(connection_module.ConnectionState.closing, record.connection.connectionState());
+
+    const close_output = (try endpoint_owner.pollOneRttDatagramWithRoutePath(record.handle, 9)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_output.datagram);
+    try std.testing.expect(close_output.path.eql(new_path));
+    try client.processProtectedShortDatagramWithInstalledKeys(10, client_dcid.len, close_output.datagram);
+    try std.testing.expectEqual(connection_module.ConnectionState.draining, client.connectionState());
 }

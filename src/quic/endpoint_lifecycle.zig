@@ -1582,10 +1582,14 @@ pub const EndpointConnectionLifecycle = struct {
             }
         else
             null;
+        const output_path = if (polled_result != null)
+            feed.selected_output_path orelse try self.currentRoutePath(poll_options.destination_connection_id)
+        else
+            null;
         return .{
             .feed = feed,
             .datagram = polled_result,
-            .output_path = if (polled_result != null) feed.selected_output_path else null,
+            .output_path = output_path,
         };
     }
 

@@ -537,7 +537,10 @@ pub const EndpointFeedPathUpdateDatagramPollResult = struct {
     feed: EndpointFeedInstalledKeyPathUpdateResult,
     /// Protected datagram emitted after receive processing, if any.
     datagram: ?EndpointPolledDatagramResult = null,
-    /// UDP tuple selected for `datagram` when path-validation output is emitted.
+    /// UDP tuple selected for `datagram`.
+    ///
+    /// Path-validation probes use the candidate tuple; other output uses the
+    /// current committed route.
     output_path: ?endpoint.Udp4Tuple = null,
 };
 
