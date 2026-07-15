@@ -10,6 +10,8 @@ const connection_module = @import("connection.zig");
 const endpoint = @import("endpoint.zig");
 const endpoint_connection_registry = @import("endpoint_connection_registry.zig");
 const endpoint_lifecycle = @import("endpoint_lifecycle.zig");
+const quic_packet = @import("packet.zig");
+const protection = @import("protection.zig");
 
 const Connection = connection_module.Connection;
 const EndpointConnectionLifecycle = endpoint_lifecycle.EndpointConnectionLifecycle;
@@ -150,6 +152,111 @@ pub fn Tls13ServerEndpoint(
                 scratch,
                 now_millis,
                 poll_options,
+                out,
+            );
+        }
+
+        /// Authenticate and accept the Retry follow-up Initial for one route.
+        pub fn validateRetryInitial(
+            self: *Self,
+            policy: *endpoint.AddressValidationPolicy,
+            connection_id: u64,
+            connection: *Connection,
+            now_millis: i64,
+            path: endpoint.Udp4Tuple,
+            datagram: []const u8,
+            supported_versions: []const quic_packet.Version,
+        ) root.EndpointRetryProtectedInitialError!root.EndpointRetryProtectedInitialResult {
+            return self.lifecycle.processRetryValidatedProtectedInitialDatagram(
+                policy,
+                connection_id,
+                connection,
+                now_millis,
+                path,
+                datagram,
+                supported_versions,
+            );
+        }
+
+        /// Authenticate a routed Initial after Handshake keys are available.
+        pub fn processInitialWithHandshakeKeys(
+            self: *Self,
+            connection_id: u64,
+            connection: *Connection,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            original_destination_connection_id: []const u8,
+            datagram: []const u8,
+        ) root.EndpointProtectedInitialError!endpoint.RouteResult {
+            return self.lifecycle.processRoutedProtectedLongDatagramWithInstalledHandshakeKeys(
+                connection_id,
+                connection,
+                path,
+                now_millis,
+                original_destination_connection_id,
+                datagram,
+            );
+        }
+
+        /// Authenticate a routed Initial, drive TLS, and drain bounded output.
+        pub fn processInitial(
+            self: *Self,
+            connection_id: u64,
+            connection: *Connection,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            receive_keys: protection.Aes128PacketProtectionKeys,
+            datagram: []const u8,
+            backend: root.CryptoBackend,
+            scratch: []u8,
+            destination_connection_id: []const u8,
+            source_connection_id: []const u8,
+            initial_token: []const u8,
+            send_keys: protection.Aes128PacketProtectionKeys,
+            out: []root.EndpointPolledDatagramResult,
+        ) root.EndpointProtectedDatagramError!root.EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult {
+            return self.lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
+                connection_id,
+                connection,
+                .initial,
+                path,
+                now_millis,
+                receive_keys,
+                datagram,
+                backend,
+                scratch,
+                destination_connection_id,
+                source_connection_id,
+                initial_token,
+                send_keys,
+                out,
+            );
+        }
+
+        /// Authenticate a routed Handshake packet, drive TLS, and drain output.
+        pub fn processHandshake(
+            self: *Self,
+            connection_id: u64,
+            connection: *Connection,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            backend: root.CryptoBackend,
+            scratch: []u8,
+            destination_connection_id: []const u8,
+            source_connection_id: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+        ) root.EndpointProtectedDatagramError!root.EndpointRoutedCryptoBackendDriveDatagramDrainResult {
+            return self.lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams(
+                connection_id,
+                connection,
+                path,
+                now_millis,
+                datagram,
+                backend,
+                scratch,
+                destination_connection_id,
+                source_connection_id,
                 out,
             );
         }

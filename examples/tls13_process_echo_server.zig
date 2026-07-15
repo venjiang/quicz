@@ -418,7 +418,7 @@ fn serveConcurrent(
                 if (retry_enabled and managed.transport.connection.pendingRetryTokenCount() != 0) {
                     const retry_info = try protection.peekProtectedLongPacketInfo(received.data);
                     if (retry_info.packet_type != .initial) return error.InvalidPacket;
-                    const retry_initial = try lifecycle.processRetryValidatedProtectedInitialDatagram(
+                    const retry_initial = try server_endpoint.validateRetryInitial(
                         &address_validation,
                         managed.handle,
                         &managed.transport.connection,
@@ -499,7 +499,7 @@ fn serveConcurrent(
                             managed.transport.localInitialSourceConnectionId()
                         else
                             managed.transport.originalDestinationConnectionId();
-                        _ = try lifecycle.processRoutedProtectedLongDatagramWithInstalledHandshakeKeys(
+                        _ = try server_endpoint.processInitialWithHandshakeKeys(
                             managed.handle,
                             &managed.transport.connection,
                             path,
@@ -547,10 +547,9 @@ fn serveConcurrent(
                                 );
                                 var initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                                 var initial_scratch: [8192]u8 = undefined;
-                                const initial = try lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams(
+                                const initial = try server_endpoint.processInitial(
                                     managed.handle,
                                     &managed.transport.connection,
-                                    .initial,
                                     path,
                                     now_millis,
                                     initial_secrets.client,
@@ -600,7 +599,7 @@ fn serveConcurrent(
                             .handshake => {
                                 var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
                                 var handshake_scratch: [8192]u8 = undefined;
-                                const handshake = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams(
+                                const handshake = try server_endpoint.processHandshake(
                                     managed.handle,
                                     &managed.transport.connection,
                                     path,
