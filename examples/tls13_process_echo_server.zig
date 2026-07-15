@@ -368,7 +368,7 @@ fn serveConcurrent(
 
                 var scratch: [8192]u8 = undefined;
                 var initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
-                const accepted = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams(
+                const accepted = try server_endpoint.acceptInitial(
                     handle,
                     &managed.transport.connection,
                     now_millis,
@@ -392,7 +392,7 @@ fn serveConcurrent(
                 if (accepted.drain.first_error) |drain_error| return drain_error;
                 if (accepted.backend.handshake_keys_installed) {
                     var handshake_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
-                    const handshake = try lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
+                    const handshake = try server_endpoint.driveBackend(
                         handle,
                         &managed.transport.connection,
                         .handshake,

@@ -100,6 +100,59 @@ pub fn Tls13ServerEndpoint(
                 options,
             );
         }
+
+        /// Register an accepted Initial, drive its TLS backend, and drain its
+        /// bounded Initial-space response datagrams.
+        pub fn acceptInitial(
+            self: *Self,
+            connection_id: u64,
+            connection: *Connection,
+            now_millis: i64,
+            initial_accept: endpoint.InitialAcceptResult,
+            server_source_connection_id: []const u8,
+            datagram: []const u8,
+            options: endpoint.AcceptedInitialRouteOptions,
+            backend: root.CryptoBackend,
+            scratch: []u8,
+            out: []root.EndpointPolledDatagramResult,
+        ) root.EndpointProtectedInitialError!root.EndpointAcceptedInitialCryptoBackendDatagramDrainResult {
+            return self.lifecycle.processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams(
+                connection_id,
+                connection,
+                now_millis,
+                initial_accept,
+                server_source_connection_id,
+                datagram,
+                options,
+                backend,
+                scratch,
+                out,
+            );
+        }
+
+        /// Drive one TLS packet-number space and drain its bounded output.
+        pub fn driveBackend(
+            self: *Self,
+            connection_id: u64,
+            connection: *Connection,
+            space: root.PacketNumberSpace,
+            backend: root.CryptoBackend,
+            scratch: []u8,
+            now_millis: i64,
+            poll_options: root.EndpointPollInstalledKeyDatagramOptions,
+            out: []root.EndpointPolledDatagramResult,
+        ) root.Error!root.EndpointCryptoBackendDriveDatagramDrainResult {
+            return self.lifecycle.driveCryptoBackendInSpaceAndDrainDatagrams(
+                connection_id,
+                connection,
+                space,
+                backend,
+                scratch,
+                now_millis,
+                poll_options,
+                out,
+            );
+        }
     };
 }
 
