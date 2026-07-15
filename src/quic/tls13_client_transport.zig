@@ -4,6 +4,7 @@ const std = @import("std");
 const buffer = @import("buffer.zig");
 const connection_module = @import("connection.zig");
 const connection_config = @import("connection_config.zig");
+const frame = @import("frame.zig");
 const packet = @import("packet.zig");
 const protection = @import("protection.zig");
 const tls13 = @import("tls13.zig");
@@ -468,4 +469,47 @@ test "Tls13ClientTransport exposes unidirectional and stream cancellation contro
     const bidirectional_stream = try transport.openStream();
     try transport.stopSending(bidirectional_stream, 42);
     try std.testing.expectEqual(@as(usize, 1), transport.connection.pending_stop_sending.items.len);
+}
+
+test "Tls13ClientTransport sends to the newest peer connection ID" {
+    const alpn = [_][]const u8{"hq-interop"};
+    var transport = try Tls13ClientTransport.init(
+        std.testing.allocator,
+        .{},
+        .{ .alpn = &alpn },
+        .{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        .{ 8, 7, 6, 5, 4, 3, 2, 1 },
+    );
+    defer transport.deinit();
+
+    const traffic_secret = [_]u8{0x44} ** 32;
+    try transport.connection.confirmHandshake();
+    try transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const reset_token = [_]u8{0x55} ** 16;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try transport.connection.processDatagram(0, writer.getWritten());
+    try transport.connection.sendPing();
+
+    const datagram = (try transport.pollApplicationDatagram(1)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        protection.deriveAes128PacketProtectionKeys(traffic_secret),
+        datagram,
+        peer_connection_id.len,
+        0,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &peer_connection_id, opened.packet.header.dcid);
 }
