@@ -407,7 +407,7 @@ fn serveConcurrent(
                         initial_info.dcid,
                         managed.transport.localInitialSourceConnectionId(),
                         path,
-                        .{ .active_migration_disabled = true },
+                        .{ .active_migration_disabled = false },
                     );
                     managed_adopted = true;
                     try sendToCurrentRoute(io, socket, &server_endpoint, managed, retry_datagram);
@@ -425,7 +425,7 @@ fn serveConcurrent(
                     initial_accept,
                     managed.transport.localInitialSourceConnectionId(),
                     received.data,
-                    .{ .active_migration_disabled = true },
+                    .{ .active_migration_disabled = false },
                     &scratch,
                     &initial_outputs,
                     &handshake_outputs,
@@ -587,8 +587,11 @@ fn serveConcurrent(
                     continue;
                 }
 
-                const application_feed = try server_endpoint.feedDatagramWithInstalledKeys(
-                    allocator,
+                var path_challenge_data: [8]u8 = undefined;
+                try io.randomSecure(&path_challenge_data);
+                const application_result = try server_endpoint.lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+                    managed.handle,
+                    managed.connectionRef(),
                     path,
                     now_millis,
                     received.data,
@@ -597,14 +600,35 @@ fn serveConcurrent(
                         .out = &endpoint_output,
                         .unpredictable_prefix = &[_]u8{},
                         .supported_versions = &[_]quic_packet.Version{.v1},
+                        .path_challenge_data = path_challenge_data,
                     },
                 );
-                const application_route = switch (application_feed) {
+                const application_route = switch (application_result.feed) {
                     .routed => |application_route| application_route,
                     .dropped => continue,
                     else => return error.InvalidPacket,
                 };
                 try require(application_route.connection_id == managed.handle);
+                if (application_result.path_challenge_queued) {
+                    std.debug.print("zig_process_server: connection={d} concurrent=true path_challenge_queued=true\n", .{managed.handle});
+                }
+                if (application_result.updated_route != null) {
+                    std.debug.print("zig_process_server: connection={d} concurrent=true route_updated=true\n", .{managed.handle});
+                }
+                if (application_result.selected_output_path) |output_path| {
+                    const path_output = (server_endpoint.pollOneRttDatagram(
+                        managed.handle,
+                        now_millis,
+                    ) catch |err| switch (err) {
+                        error.ConnectionClosed => null,
+                        else => return err,
+                    }) orelse null;
+                    if (path_output) |output_datagram| {
+                        defer allocator.free(output_datagram);
+                        const peer_address = peerAddressForPath(output_path);
+                        try socket.send(io, &peer_address, output_datagram);
+                    }
+                }
                 if (expect_client_reset and !managed.client_reset_received) {
                     if (try managed.transport.connection.streamState(echo_stream_ids[0])) |stream_state| {
                         if (stream_state.receive == .reset_received and stream_state.receive_reset_error_code == 41) {

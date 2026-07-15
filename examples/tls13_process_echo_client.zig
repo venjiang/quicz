@@ -1,6 +1,6 @@
 //! Pure-Zig TLS 1.3 QUIC client for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-client <server_host> <server_port> [connection_tag] [close|idle|loss] [none|retry]
+//! Usage: quicz-tls13-process-echo-client <server_host> <server_port> [connection_tag] [close|idle|loss|migrate] [none|retry]
 
 const std = @import("std");
 const quicz = @import("quicz");
@@ -55,7 +55,8 @@ pub fn main(init: std.process.Init) !void {
     const completion_mode = args.next() orelse "close";
     const leave_idle = std.mem.eql(u8, completion_mode, "idle");
     const drop_initial_responses = std.mem.eql(u8, completion_mode, "loss");
-    if (!leave_idle and !drop_initial_responses and !std.mem.eql(u8, completion_mode, "close")) return error.InvalidCompletionMode;
+    const migrate_after_handshake = std.mem.eql(u8, completion_mode, "migrate");
+    if (!leave_idle and !drop_initial_responses and !migrate_after_handshake and !std.mem.eql(u8, completion_mode, "close")) return error.InvalidCompletionMode;
     const retry_mode = args.next() orelse "none";
     const expect_retry = std.mem.eql(u8, retry_mode, "retry");
     if (!expect_retry and !std.mem.eql(u8, retry_mode, "none")) return error.InvalidRetryMode;
@@ -68,13 +69,16 @@ pub fn main(init: std.process.Init) !void {
     var local_address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
     var socket = try local_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
     defer socket.close(io);
+    var migrated_local_address = std.Io.net.IpAddress{ .ip4 = .loopback(0) };
+    var migrated_socket = try migrated_local_address.bind(io, .{ .mode = .dgram, .protocol = .udp });
+    defer migrated_socket.close(io);
     const client_path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(local_address.ip4.bytes, local_address.ip4.port),
         .remote = endpoint.Udp4Address.init(server_address.ip4.bytes, server_address.ip4.port),
     };
     const client_handle: u64 = 1;
     const alpn = [_][]const u8{"hq-interop"};
-    var client_endpoint = try quicz.Tls13ClientEndpoint.init(allocator, client_handle, client_path, .{ .active_migration_disabled = true }, .{
+    var client_endpoint = try quicz.Tls13ClientEndpoint.init(allocator, client_handle, client_path, .{ .active_migration_disabled = !migrate_after_handshake }, .{
         .initial_max_data = 8192,
         .initial_max_stream_data = 2048,
         .initial_max_streams_bidi = 8,
@@ -119,6 +123,17 @@ pub fn main(init: std.process.Init) !void {
     try require(sent_finished);
     try require(client_endpoint.handshakeConfirmed());
 
+    var active_socket = &socket;
+    if (migrate_after_handshake) {
+        const migrated_client_path = endpoint.Udp4Tuple{
+            .local = endpoint.Udp4Address.init(migrated_socket.address.ip4.bytes, migrated_socket.address.ip4.port),
+            .remote = endpoint.Udp4Address.init(server_address.ip4.bytes, server_address.ip4.port),
+        };
+        const migrated_route = try client_endpoint.updatePath(migrated_client_path);
+        try require(!migrated_route.path_changed);
+        active_socket = &migrated_socket;
+    }
+
     var stream_ids: [echo_payloads.len]u64 = undefined;
     for (echo_payloads, 0..) |payload, index| {
         stream_ids[index] = try client_endpoint.openStream();
@@ -128,7 +143,7 @@ pub fn main(init: std.process.Init) !void {
     while (sent_application_packets < 4) : (sent_application_packets += 1) {
         const stream_packet = (try client_endpoint.pollApplicationDatagram(nowMillis(io))) orelse break;
         defer allocator.free(stream_packet);
-        try socket.send(io, &server_address, stream_packet);
+        try active_socket.send(io, &server_address, stream_packet);
     }
     try require(sent_application_packets > 0);
 
@@ -143,7 +158,7 @@ pub fn main(init: std.process.Init) !void {
             deadline.deadlineMillis()
         else
             null;
-        const received = socket.receiveTimeout(io, &receive_buffer, recvTimeoutForDeadline(io, next_deadline)) catch |err| switch (err) {
+        const received = active_socket.receiveTimeout(io, &receive_buffer, recvTimeoutForDeadline(io, next_deadline)) catch |err| switch (err) {
             error.Timeout => {
                 const serviced = (try client_endpoint.serviceDueDeadline(nowMillis(io))) orelse continue;
                 switch (serviced) {
@@ -153,7 +168,7 @@ pub fn main(init: std.process.Init) !void {
                         while (retransmission_count < 4) : (retransmission_count += 1) {
                             const retransmission = (try client_endpoint.pollApplicationDatagram(nowMillis(io))) orelse break;
                             defer allocator.free(retransmission);
-                            try socket.send(io, &server_address, retransmission);
+                            try active_socket.send(io, &server_address, retransmission);
                         }
                     },
                     .idle_timeout, .close_timeout => return error.ConnectionClosed,
@@ -172,7 +187,13 @@ pub fn main(init: std.process.Init) !void {
         const progress = received_result.transport;
         if (progress.outbound_handshake) |client_finished| {
             defer allocator.free(client_finished);
-            try socket.send(io, &server_address, client_finished);
+            try active_socket.send(io, &server_address, client_finished);
+        }
+        var response_packets: usize = 0;
+        while (response_packets < 2) : (response_packets += 1) {
+            const response = (try client_endpoint.pollApplicationDatagram(nowMillis(io))) orelse break;
+            defer allocator.free(response);
+            try active_socket.send(io, &server_address, response);
         }
         if (!progress.application_processed) continue;
         received_packets += 1;
@@ -198,7 +219,7 @@ pub fn main(init: std.process.Init) !void {
 
     const close_packet = (try client_endpoint.close(0, 0, "process echo complete", nowMillis(io))) orelse return error.UnexpectedState;
     defer allocator.free(close_packet);
-    try socket.send(io, &server_address, close_packet);
+    try active_socket.send(io, &server_address, close_packet);
     const client_close_deadline = client_endpoint.closeDeadlineMillis() orelse return error.UnexpectedState;
     const client_retired = (try client_endpoint.retireAtCloseDeadline(client_close_deadline)) orelse return error.UnexpectedState;
     try require(client_retired.routes_retired > 0);
@@ -211,6 +232,10 @@ pub fn main(init: std.process.Init) !void {
         } else {
             std.debug.print("zig_process_client: tag={d} handshake_done=true echo_streams=2 echo_bytes={d} pto_recovered=true close_cleanup=true\n", .{ connection_tag, echo_total_bytes });
         }
+    } else if (migrate_after_handshake and expect_retry) {
+        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_streams=2 echo_bytes={d} migrated=true retry_validated=true close_cleanup=true\n", .{ connection_tag, echo_total_bytes });
+    } else if (migrate_after_handshake) {
+        std.debug.print("zig_process_client: tag={d} handshake_done=true echo_streams=2 echo_bytes={d} migrated=true close_cleanup=true\n", .{ connection_tag, echo_total_bytes });
     } else if (expect_retry) {
         std.debug.print("zig_process_client: tag={d} handshake_done=true echo_streams=2 echo_bytes={d} retry_validated=true close_cleanup=true\n", .{ connection_tag, echo_total_bytes });
     } else {

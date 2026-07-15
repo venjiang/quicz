@@ -85,6 +85,19 @@ pub const Tls13ClientEndpoint = struct {
         return .{ .route = route, .transport = progress };
     }
 
+    /// Move the client's registered UDP route after caller-selected migration.
+    pub fn updatePath(self: *Tls13ClientEndpoint, new_path: endpoint.Udp4Tuple) endpoint.RouteError!endpoint.RouteResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const updated = try self.lifecycle.updateRoutePathAndResetSpinBit(
+            local_source_connection_id,
+            self.path,
+            new_path,
+            &self.transport.connection,
+        );
+        self.path = new_path;
+        return updated;
+    }
+
     /// Poll one protected application datagram and refresh recovery scheduling.
     pub fn pollApplicationDatagram(self: *Tls13ClientEndpoint, now_millis: i64) !?[]u8 {
         const datagram = try self.transport.pollApplicationDatagram(now_millis);
@@ -183,7 +196,7 @@ test "Tls13ClientEndpoint registers its client route before begin" {
         std.testing.allocator,
         7,
         path,
-        .{ .active_migration_disabled = true },
+        .{ .active_migration_disabled = false },
         .{},
         .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
         original_dcid,
@@ -196,4 +209,13 @@ test "Tls13ClientEndpoint registers its client route before begin" {
     const initial = try client.begin(1, &scratch);
     defer std.testing.allocator.free(initial);
     try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
+
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = path.remote,
+    };
+    const updated = try client.updatePath(new_path);
+    try std.testing.expect(!updated.path_changed);
+    try std.testing.expect(client.path.eql(new_path));
+    try std.testing.expect((try client.lifecycle.currentRoutePath(&client_scid)).eql(new_path));
 }
