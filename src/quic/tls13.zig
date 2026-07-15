@@ -2319,6 +2319,7 @@ pub const Tls13Handshake = struct {
 
         if (!have_version) return error.UnsupportedVersion;
         if (!have_key_share) return error.NoKeyShare;
+        if (!have_supported_groups) return error.MissingExtension;
         if (have_supported_groups and !client_supports_x25519) return error.NoKeyShare;
         if (self.config.cert_chain_der.len > 0 and !have_signature_algorithms) return error.MissingExtension;
         if (have_signature_algorithms and !client_supports_server_sig) return error.UnsupportedSignatureAlgorithm;
@@ -4191,6 +4192,17 @@ test "Tls13Handshake server rejects ClientHello supported_groups without X25519"
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.NoKeyShare, server.step());
+}
+
+test "Tls13Handshake server rejects missing ClientHello supported_groups" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const groups = try clientHelloExtension(hello, @intFromEnum(ExtType.supported_groups));
+    writeU16(hello[groups.header_offset..][0..2], 0xaaaa);
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.MissingExtension, server.step());
 }
 
 test "Tls13Handshake server rejects missing signature_algorithms when sending a certificate" {
