@@ -266,6 +266,35 @@ pub const Tls13ClientEndpoint = struct {
         return self.transport.versionNegotiationFollowupConfig();
     }
 
+    /// Process Version Negotiation and install the follow-up Initial route.
+    ///
+    /// A valid Version Negotiation packet supersedes this client attempt. The
+    /// owned lifecycle retires the old route and recovery timer, then registers
+    /// the caller-provided follow-up Initial Source CID for the next attempt.
+    /// The current transport remains the validated old attempt; callers create
+    /// the follow-up transport from `version_negotiation.followup_config`.
+    pub fn processVersionNegotiationFollowupRoute(
+        self: *Tls13ClientEndpoint,
+        now_millis: i64,
+        datagram: []const u8,
+        followup_connection_id: u64,
+        followup_local_initial_source_connection_id: []const u8,
+        route_options: endpoint.ClientInitialRouteOptions,
+    ) !?endpoint_lifecycle.EndpointVersionNegotiationFollowupResult {
+        return self.lifecycle.processVersionNegotiationFollowupDatagram(
+            self.connection_id,
+            followup_connection_id,
+            &self.transport.connection,
+            now_millis,
+            &self.transport.original_destination_connection_id,
+            &self.transport.local_source_connection_id,
+            followup_local_initial_source_connection_id,
+            self.path,
+            datagram,
+            route_options,
+        );
+    }
+
     /// Open a locally initiated bidirectional stream.
     pub fn openStream(self: *Tls13ClientEndpoint) !u64 {
         return self.transport.openStream();
@@ -657,6 +686,62 @@ test "Tls13ClientEndpoint receive returns Retry output with committed route path
     defer std.testing.allocator.free(outbound_initial.datagram);
     try std.testing.expect(outbound_initial.path.eql(new_path));
     try std.testing.expect(outbound_initial.datagram.len >= 1200);
+}
+
+test "Tls13ClientEndpoint installs Version Negotiation follow-up route" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 0x7e, 0x7f, 0x80 };
+    const followup_scid = [_]u8{ 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const available_versions = [_]packet.Version{ .v2, .v1 };
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        17,
+        path,
+        .{ .active_migration_disabled = false },
+        .{ .chosen_version = .v2, .available_versions = &available_versions },
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    var scratch: [8192]u8 = undefined;
+    const initial = try client.begin(1, &scratch);
+    defer std.testing.allocator.free(initial);
+    try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
+
+    const server_versions = [_]packet.Version{.v1};
+    var vn_buf: [64]u8 = undefined;
+    var vn_writer = buffer.fixedWriter(&vn_buf);
+    try packet.encodeVersionNegotiationPacket(vn_writer.writer(), .{
+        .dcid = &client_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+    const followup = (try client.processVersionNegotiationFollowupRoute(
+        2,
+        vn_writer.getWritten(),
+        18,
+        &followup_scid,
+        .{ .active_migration_disabled = false },
+    )) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(packet.Version.v1, followup.version_negotiation.selected_version);
+    try std.testing.expectEqual(packet.Version.v1, followup.version_negotiation.followup_config.chosen_version);
+    try std.testing.expectEqual(@as(?packet.Version, .v1), followup.version_negotiation.followup_config.version_negotiation_selected_version);
+    try std.testing.expectEqual(@as(usize, 1), followup.version_negotiation.retired.routes_retired);
+    try std.testing.expect(followup.version_negotiation.retired.recovery_timer_disarmed);
+    try std.testing.expectEqual(@as(u64, 18), followup.followup_route.connection_id);
+    try std.testing.expectEqualSlices(u8, &followup_scid, followup.followup_route.destination_connection_id.asSlice());
+    try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
+    try std.testing.expectError(error.UnknownConnectionId, client.lifecycle.currentRoutePath(&client_scid));
+    try std.testing.expect((try client.lifecycle.currentRoutePath(&followup_scid)).eql(path));
+    try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) == null);
 }
 
 test "Tls13ClientEndpoint receive enters draining on active stateless reset" {
