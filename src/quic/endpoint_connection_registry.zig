@@ -95,6 +95,17 @@ pub fn EndpointConnectionRegistry(
             return self.count() < self.max_records;
         }
 
+        /// Write active endpoint connection handles into caller-owned storage.
+        pub fn fillConnectionIds(self: *Self, out: []u64) root.Error![]u64 {
+            if (out.len < self.count()) return error.BufferTooSmall;
+            var iterator = self.records.keyIterator();
+            var index: usize = 0;
+            while (iterator.next()) |connection_id| : (index += 1) {
+                out[index] = connection_id.*;
+            }
+            return out[0..index];
+        }
+
         /// Find one active record by its endpoint connection handle.
         pub fn get(self: *const Self, connection_id: u64) ?*Record {
             return self.records.get(connection_id);
@@ -369,6 +380,8 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
     defer registry.deinit();
     try std.testing.expectEqual(@as(usize, 1), registry.capacityLimit());
     try std.testing.expect(registry.records.capacity() >= 1);
+    var empty_ids: [1]u64 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), (try registry.fillConnectionIds(&empty_ids)).len);
     var connection = try root.Connection.init(std.testing.allocator, .client, .{});
     var connection_owned = true;
     errdefer if (connection_owned) connection.deinit();
@@ -393,6 +406,12 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
     try std.testing.expectEqual(@as(usize, 1), registry.count());
     try std.testing.expectEqual(@as(usize, 1), registry.capacityLimit());
     try std.testing.expect(!registry.hasCapacity());
+    var ids: [1]u64 = undefined;
+    const active_ids = try registry.fillConnectionIds(&ids);
+    try std.testing.expectEqual(@as(usize, 1), active_ids.len);
+    try std.testing.expectEqual(@as(u64, 7), active_ids[0]);
+    var no_ids: [0]u64 = .{};
+    try std.testing.expectError(error.BufferTooSmall, registry.fillConnectionIds(&no_ids));
     try std.testing.expectEqual(@as(usize, 1), views.len);
     try std.testing.expectEqual(@as(u64, 7), views[0].connection_id);
     try std.testing.expect(views[0].connection == &record.connection);
