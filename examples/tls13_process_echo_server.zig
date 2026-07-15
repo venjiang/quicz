@@ -178,10 +178,6 @@ const ProcessServerEndpoint = quicz.Tls13ServerEndpoint(
     ManagedProcessConnection.deinit,
 );
 
-fn processServerScid(handle: u64) [4]u8 {
-    return .{ 0x31, 0x32, @truncate(handle >> 8), @truncate(handle) };
-}
-
 fn randomRetryTokenNonce(io: std.Io) !address_validation_token.Nonce {
     var nonce: address_validation_token.Nonce = undefined;
     try io.randomSecure(&nonce);
@@ -315,7 +311,8 @@ fn serveConcurrent(
 
                 const handle = next_handle;
                 next_handle += 1;
-                const connection_scid = processServerScid(handle);
+                var connection_scid: [8]u8 = undefined;
+                try io.randomSecure(&connection_scid);
                 const managed = try allocator.create(ManagedProcessConnection);
                 var managed_initialized = false;
                 var managed_adopted = false;
