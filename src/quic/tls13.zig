@@ -1891,6 +1891,10 @@ pub const Tls13Handshake = struct {
                 @intFromEnum(ExtType.supported_versions) => {
                     // ClientHello: 1-byte list length + 2-byte versions.
                     if (el < 3) return error.DecodeError;
+                    const versions_len = ext[0];
+                    if (versions_len == 0 or 1 + versions_len != el or versions_len % 2 != 0) {
+                        return error.DecodeError;
+                    }
                     var vp: usize = 1;
                     while (vp + 2 <= el) : (vp += 2) {
                         if (readU16(ext[vp..]) == version_tls_1_3) {
@@ -1902,27 +1906,32 @@ pub const Tls13Handshake = struct {
                 @intFromEnum(ExtType.key_share) => {
                     // client_shares_len(2) + [group(2) + key_len(2) + key]
                     if (el < 2) return error.DecodeError;
+                    const shares_len = readU16(ext[0..2]);
+                    if (shares_len == 0 or 2 + shares_len != el) return error.DecodeError;
                     var sp: usize = 2; // skip client_shares_len
                     while (sp + 4 <= el) {
                         const group = readU16(ext[sp..]);
                         const klen = readU16(ext[sp + 2 ..]);
                         sp += 4;
+                        if (sp + klen > el) return error.DecodeError;
                         if (group == group_x25519 and klen == 32 and sp + 32 <= el) {
                             @memcpy(&self.peer_x25519_public, ext[sp..][0..32]);
                             have_key_share = true;
-                            break;
                         }
                         sp += klen;
                     }
+                    if (sp != el) return error.DecodeError;
                 },
                 @intFromEnum(ExtType.alpn) => {
-                    if (el < 2) continue; // empty ALPN list — skip
+                    if (el < 2) return error.DecodeError;
                     const list_len = readU16(ext[0..2]);
+                    if (list_len == 0 or 2 + list_len != el) return error.DecodeError;
                     var ap: usize = 2;
-                    while (ap < 2 + list_len and ap + 1 <= el) {
+                    while (ap < el) {
+                        if (ap + 1 > el) return error.DecodeError;
                         const plen = ext[ap];
                         ap += 1;
-                        if (ap + plen > el) break;
+                        if (plen == 0 or ap + plen > el) return error.DecodeError;
                         const proto = ext[ap .. ap + plen];
                         for (self.config.alpn) |our| {
                             if (std.mem.eql(u8, proto, our)) {
@@ -1934,7 +1943,6 @@ pub const Tls13Handshake = struct {
                                 break;
                             }
                         }
-                        if (self.negotiated_alpn_len > 0) break;
                         ap += plen;
                     }
                 },
@@ -3023,6 +3031,93 @@ test "verifyCertificateVerifySignature rejects an unsupported scheme" {
 }
 
 // ─── Tests for server-side handshake + loopback ──────────────────────
+
+const ClientHelloExtension = struct {
+    body_offset: usize,
+    body_len: usize,
+};
+
+fn clientHelloExtension(msg: []const u8, ext_type: u16) !ClientHelloExtension {
+    if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.client_hello)) return error.TestUnexpectedResult;
+    const body = msg[4..];
+    var pos: usize = 0;
+    if (body.len < 2 + 32 + 1) return error.TestUnexpectedResult;
+    pos += 2 + 32;
+    const sid_len = body[pos];
+    pos += 1;
+    if (pos + sid_len > body.len) return error.TestUnexpectedResult;
+    pos += sid_len;
+    if (pos + 2 > body.len) return error.TestUnexpectedResult;
+    const cipher_suites_len = readU16(body[pos..]);
+    pos += 2;
+    if (pos + cipher_suites_len > body.len) return error.TestUnexpectedResult;
+    pos += cipher_suites_len;
+    if (pos >= body.len) return error.TestUnexpectedResult;
+    const compression_methods_len = body[pos];
+    pos += 1;
+    if (pos + compression_methods_len > body.len) return error.TestUnexpectedResult;
+    pos += compression_methods_len;
+    if (pos + 2 > body.len) return error.TestUnexpectedResult;
+    const extensions_len = readU16(body[pos..]);
+    pos += 2;
+    if (pos + extensions_len > body.len) return error.TestUnexpectedResult;
+    const ext_end = pos + extensions_len;
+    while (pos < ext_end) {
+        if (pos + 4 > ext_end) return error.TestUnexpectedResult;
+        const current_type = readU16(body[pos..]);
+        const current_len = readU16(body[pos + 2 ..]);
+        pos += 4;
+        if (pos + current_len > ext_end) return error.TestUnexpectedResult;
+        if (current_type == ext_type) {
+            return .{ .body_offset = 4 + pos, .body_len = current_len };
+        }
+        pos += current_len;
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn clientHelloBytes(config: TlsConfig, out: []u8) ![]u8 {
+    var client = Tls13Handshake.initClient(config, &[_]u8{});
+    const action = try client.step();
+    if (std.meta.activeTag(action) != .send_data) return error.TestUnexpectedResult;
+    if (action.send_data.data.len > out.len) return error.TestUnexpectedResult;
+    @memcpy(out[0..action.send_data.data.len], action.send_data.data);
+    return out[0..action.send_data.data.len];
+}
+
+test "Tls13Handshake server rejects malformed ClientHello supported_versions length" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const versions = try clientHelloExtension(hello, @intFromEnum(ExtType.supported_versions));
+    hello[versions.body_offset] = 3;
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects malformed ClientHello key_share length" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const key_share = try clientHelloExtension(hello, @intFromEnum(ExtType.key_share));
+    writeU16(hello[key_share.body_offset..][0..2], @as(u16, @intCast(key_share.body_len - 3)));
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects malformed ClientHello ALPN length" {
+    const alpn = [_][]const u8{"hq-interop"};
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{ .alpn = &alpn }, &hello_buf);
+    const alpn_ext = try clientHelloExtension(hello, @intFromEnum(ExtType.alpn));
+    writeU16(hello[alpn_ext.body_offset..][0..2], @as(u16, @intCast(alpn_ext.body_len - 1)));
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
 
 test "Tls13Handshake server accepts matching ClientHello SNI" {
     var client = Tls13Handshake.initClient(.{
