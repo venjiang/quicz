@@ -83,6 +83,12 @@ closing 的输入仍抛错，并保留已排队输出给正常 poll。
 有界 drain 版本 `processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams()` 也遵循同一
 规则：认证后的 frame 错误会 drain close output；畸形且未进入 closing 的输入不会 drain
 无关已排队输出。
+调用方持 key 的 long-header backend helper
+`driveCryptoBackendInSpaceOrCloseAndPollProtectedLongCryptoDatagram()`、
+`driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams()` 及其
+process/routed wrapper 也使用同一 close 边界：peer transport-parameter 错误或认证后的
+receive frame 错误会直接从触发连接返回 protected close datagram，不再要求调用方另行
+poll output。
 
 ### Packet number 重排证据
 

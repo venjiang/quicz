@@ -43494,6 +43494,88 @@ test "EndpointConnectionLifecycle long OrClose poll returns close output after f
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
 }
 
+test "EndpointConnectionLifecycle long backend OrClose poll returns close output after frame error" {
+    const UnusedBackend = struct {
+        called: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.called = true;
+            return error.InvalidPacket;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.called = true;
+            return null;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x18, 0x28, 0x38, 0x48 };
+    const server_scid = [_]u8{ 0xb1, 0xc1, 0xd1, 0xe1 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var plaintext: [1200]u8 = undefined;
+    @memset(&plaintext, 0);
+    plaintext[0] = @intFromEnum(frame.FrameType.handshake_done);
+
+    const invalid_initial = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &original_dcid,
+        .scid = &client_scid,
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(invalid_initial);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    var backend = UnusedBackend{};
+    var scratch: [1]u8 = undefined;
+    const result = try lifecycle.processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram(
+        98,
+        &server,
+        .initial,
+        10,
+        secrets.client,
+        invalid_initial,
+        backend.backend(),
+        &scratch,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    );
+
+    try std.testing.expect(!backend.called);
+    try std.testing.expectEqual(@as(usize, 0), result.backend.inbound_chunks);
+    const close_result = result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_result.datagram);
+    try std.testing.expectEqual(@as(u64, 98), close_result.connection_id);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(12, .{ .initial = secrets.server }, close_result.datagram));
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+}
+
 test "EndpointConnectionLifecycle long OrClose poll preserves queued output on malformed input" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x14, 0x24, 0x34, 0x44 };
@@ -43775,7 +43857,7 @@ test "EndpointConnectionLifecycle routes long datagram then drives backend and d
     try std.testing.expectEqualStrings("routed backend response", response_crypto[0..response_len]);
 }
 
-test "EndpointConnectionLifecycle routed long backend OrClose stops before drain" {
+test "EndpointConnectionLifecycle routed long backend OrClose drains close output" {
     const BadBackend = struct {
         peer_sent: bool = false,
         output_pulled: bool = false,
@@ -43865,44 +43947,37 @@ test "EndpointConnectionLifecycle routed long backend OrClose stops before drain
     var backend = BadBackend{};
     var scratch: [96]u8 = undefined;
     var drained: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams(
-            server_connection_id,
-            &server,
-            .handshake,
-            server_receive_path,
-            11,
-            secrets.client,
-            client_datagram,
-            backend.backend(),
-            &scratch,
-            &client_dcid,
-            &server_dcid,
-            &[_]u8{},
-            secrets.server,
-            &drained,
-        ),
+    const result = try lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams(
+        server_connection_id,
+        &server,
+        .handshake,
+        server_receive_path,
+        11,
+        secrets.client,
+        client_datagram,
+        backend.backend(),
+        &scratch,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        secrets.server,
+        &drained,
     );
+    defer for (drained[0..result.backend.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
     try std.testing.expectEqualStrings("routed bad backend input", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), result.backend.backend.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.backend.drain.first_error);
 
-    const close_packet = (try lifecycle.pollProtectedLongDatagram(
-        server_connection_id,
-        &server,
-        12,
-        &client_dcid,
-        &server_dcid,
-        &[_]u8{},
-        .{ .handshake = secrets.server },
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(close_packet);
-
-    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(13, .{ .handshake = secrets.server }, close_packet));
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(13, .{ .handshake = secrets.server }, drained[0].datagram));
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
@@ -53280,7 +53355,7 @@ test "EndpointConnectionLifecycle OrClose backend drain returns empty after conf
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 }
 
-test "EndpointConnectionLifecycle caller-keyed long backend OrClose stops before output drain" {
+test "EndpointConnectionLifecycle caller-keyed long backend OrClose drains close output" {
     const BadBackend = struct {
         peer_sent: bool = false,
         output_pulled: bool = false,
@@ -53368,42 +53443,34 @@ test "EndpointConnectionLifecycle caller-keyed long backend OrClose stops before
     var backend = BadBackend{};
     var scratch: [128]u8 = undefined;
     var drained: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams(
-            64,
-            &server,
-            .handshake,
-            backend.backend(),
-            &scratch,
-            .handshake,
-            12,
-            &client_dcid,
-            &server_dcid,
-            &[_]u8{},
-            secrets.server,
-            &drained,
-        ),
+    const result = try lifecycle.driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams(
+        64,
+        &server,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .handshake,
+        12,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        secrets.server,
+        &drained,
     );
+    defer for (drained[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
     try std.testing.expectEqualStrings("caller-keyed bad backend input", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), result.backend.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
 
-    const close_packet = (try lifecycle.pollProtectedLongDatagram(
-        64,
-        &server,
-        13,
-        &client_dcid,
-        &server_dcid,
-        &[_]u8{},
-        .{ .handshake = secrets.server },
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(close_packet);
-
-    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(14, .{ .handshake = secrets.server }, close_packet));
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(14, .{ .handshake = secrets.server }, drained[0].datagram));
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
@@ -53648,7 +53715,7 @@ test "EndpointConnectionLifecycle routes long datagram then drives backend and p
     try std.testing.expectEqualStrings("routed long poll response", response_crypto[0..response_len]);
 }
 
-test "EndpointConnectionLifecycle routed caller-keyed long backend OrClose stops before poll" {
+test "EndpointConnectionLifecycle routed caller-keyed long backend OrClose polls close output" {
     const BadBackend = struct {
         peer_sent: bool = false,
         output_pulled: bool = false,
@@ -53737,43 +53804,35 @@ test "EndpointConnectionLifecycle routed caller-keyed long backend OrClose stops
 
     var backend = BadBackend{};
     var scratch: [128]u8 = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram(
-            server_connection_id,
-            &server,
-            .handshake,
-            server_receive_path,
-            11,
-            secrets.client,
-            client_datagram,
-            backend.backend(),
-            &scratch,
-            &client_dcid,
-            &server_dcid,
-            &[_]u8{},
-            secrets.server,
-        ),
+    const result = try lifecycle.processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram(
+        server_connection_id,
+        &server,
+        .handshake,
+        server_receive_path,
+        11,
+        secrets.client,
+        client_datagram,
+        backend.backend(),
+        &scratch,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        secrets.server,
     );
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
     try std.testing.expectEqualStrings("routed caller-keyed bad input", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), result.backend.backend.inbound_chunks);
 
-    const close_packet = (try lifecycle.pollProtectedLongDatagram(
-        server_connection_id,
-        &server,
-        12,
-        &client_dcid,
-        &server_dcid,
-        &[_]u8{},
-        .{ .handshake = secrets.server },
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(close_packet);
+    const close_packet = result.backend.datagram orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, close_packet.connection_id);
+    defer std.testing.allocator.free(close_packet.datagram);
 
-    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(13, .{ .handshake = secrets.server }, close_packet));
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(13, .{ .handshake = secrets.server }, close_packet.datagram));
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
@@ -53916,7 +53975,7 @@ test "EndpointConnectionLifecycle processes long datagram then drives backend an
     );
 }
 
-test "EndpointConnectionLifecycle processes long datagram through backend OrClose before drain" {
+test "EndpointConnectionLifecycle processes long datagram through backend OrClose and drains close output" {
     const BadBackend = struct {
         peer_sent: bool = false,
         output_pulled: bool = false,
@@ -53994,43 +54053,35 @@ test "EndpointConnectionLifecycle processes long datagram through backend OrClos
     var backend = BadBackend{};
     var scratch: [128]u8 = undefined;
     var drained: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams(
-            73,
-            &server,
-            .handshake,
-            11,
-            secrets.client,
-            client_datagram,
-            backend.backend(),
-            &scratch,
-            &client_dcid,
-            &server_dcid,
-            &[_]u8{},
-            secrets.server,
-            &drained,
-        ),
+    const result = try lifecycle.processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams(
+        73,
+        &server,
+        .handshake,
+        11,
+        secrets.client,
+        client_datagram,
+        backend.backend(),
+        &scratch,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        secrets.server,
+        &drained,
     );
+    defer for (drained[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
     try std.testing.expectEqualStrings("combined bad backend input", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), result.backend.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
 
-    const close_packet = (try lifecycle.pollProtectedLongDatagram(
-        73,
-        &server,
-        12,
-        &client_dcid,
-        &server_dcid,
-        &[_]u8{},
-        .{ .handshake = secrets.server },
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(close_packet);
-
-    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(13, .{ .handshake = secrets.server }, close_packet));
+    try std.testing.expectEqual(@as(usize, 1), try client.processProtectedLongDatagram(13, .{ .handshake = secrets.server }, drained[0].datagram));
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {

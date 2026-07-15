@@ -7434,9 +7434,8 @@ pub const EndpointConnectionLifecycle = struct {
     ///
     /// This is the close-propagating variant of
     /// `driveCryptoBackendInSpaceAndPollProtectedLongCryptoDatagram()`.
-    /// Backend peer transport-parameter errors queue a protected
-    /// `CONNECTION_CLOSE`, refresh endpoint recovery state, and return before
-    /// any caller-keyed CRYPTO output is polled.
+    /// Backend peer transport-parameter errors queue and poll protected close
+    /// output instead of polling ordinary caller-keyed CRYPTO output.
     pub fn driveCryptoBackendInSpaceOrCloseAndPollProtectedLongCryptoDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -7451,13 +7450,31 @@ pub const EndpointConnectionLifecycle = struct {
         initial_token: []const u8,
         keys: protection.Aes128PacketProtectionKeys,
     ) Error!EndpointCryptoBackendDriveProtectedLongDatagramResult {
-        var backend_progress = try self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+        var backend_progress = self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
             connection_id,
             connection,
             backend_space,
             backend,
             scratch,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            const datagram = try self.pollProtectedLongDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                dcid,
+                scid,
+                initial_token,
+                try protectedLongDatagramKeysForSpace(poll_space, keys),
+            );
+            return .{
+                .backend = .{},
+                .datagram = if (datagram) |bytes| .{
+                    .connection_id = connection_id,
+                    .datagram = bytes,
+                } else null,
+            };
+        };
         const handshake_discarded_before_poll = connection.packetNumberSpaceDiscarded(.handshake);
         if (connection.packetNumberSpaceDiscarded(poll_space)) {
             return .{
@@ -7548,9 +7565,8 @@ pub const EndpointConnectionLifecycle = struct {
     ///
     /// This is the close-propagating variant of
     /// `driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams()`.
-    /// Backend peer transport-parameter errors queue a protected
-    /// `CONNECTION_CLOSE`, refresh endpoint recovery state, and return before
-    /// any caller-keyed CRYPTO output is drained.
+    /// Backend peer transport-parameter errors queue and drain protected close
+    /// output instead of draining ordinary caller-keyed CRYPTO output.
     pub fn driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -7566,13 +7582,28 @@ pub const EndpointConnectionLifecycle = struct {
         keys: protection.Aes128PacketProtectionKeys,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointCryptoBackendDriveProtectedLongDatagramDrainResult {
-        var backend_progress = try self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+        var backend_progress = self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
             connection_id,
             connection,
             backend_space,
             backend,
             scratch,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            return .{
+                .backend = .{},
+                .drain = self.drainProtectedLongDatagrams(
+                    connection_id,
+                    connection,
+                    now_millis,
+                    dcid,
+                    scid,
+                    initial_token,
+                    try protectedLongDatagramKeysForSpace(drain_space, keys),
+                    out,
+                ),
+            };
+        };
         const handshake_discarded_before_drain = connection.packetNumberSpaceDiscarded(.handshake);
         if (connection.packetNumberSpaceDiscarded(drain_space)) {
             return .{
@@ -17146,6 +17177,40 @@ pub const EndpointConnectionLifecycle = struct {
         return result;
     }
 
+    fn drainProtectedLongDatagrams(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+        initial_token: []const u8,
+        keys: ProtectedLongDatagramKeys,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointDatagramDrainResult {
+        var result = EndpointDatagramDrainResult{};
+        while (result.datagrams_written < out.len) {
+            const datagram = self.pollProtectedLongDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                dcid,
+                scid,
+                initial_token,
+                keys,
+            ) catch |err| {
+                result.first_error = err;
+                return result;
+            };
+            out[result.datagrams_written] = .{
+                .connection_id = connection_id,
+                .datagram = datagram orelse return result,
+            };
+            result.datagrams_written += 1;
+        }
+        return result;
+    }
+
     /// Process one caller-keyed Initial/Handshake datagram and refresh timers.
     ///
     /// Packet-number-space selection, packet authentication, ACK generation,
@@ -17642,8 +17707,7 @@ pub const EndpointConnectionLifecycle = struct {
     /// `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndDrainDatagrams()`,
     /// while using the close-propagating receive and backend-drive paths.
     /// Authenticated frame errors or backend peer transport-parameter errors
-    /// return before caller-keyed output draining, leaving the protected close
-    /// to the existing long-header output path.
+    /// queue and drain protected close output in the same step.
     pub fn processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -17660,14 +17724,29 @@ pub const EndpointConnectionLifecycle = struct {
         send_keys: protection.Aes128PacketProtectionKeys,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointCryptoBackendDriveProtectedLongDatagramDrainResult {
-        try self.processProtectedLongDatagramInSpaceOrClose(
+        self.processProtectedLongDatagramInSpaceOrClose(
             connection_id,
             connection,
             space,
             now_millis,
             receive_keys,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            return .{
+                .backend = .{},
+                .drain = self.drainProtectedLongDatagrams(
+                    connection_id,
+                    connection,
+                    now_millis,
+                    dcid,
+                    scid,
+                    initial_token,
+                    try protectedLongDatagramKeysForSpace(space, send_keys),
+                    out,
+                ),
+            };
+        };
         return try self.driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams(
             connection_id,
             connection,
@@ -17690,8 +17769,7 @@ pub const EndpointConnectionLifecycle = struct {
     /// `processProtectedLongDatagramInSpaceAndDriveCryptoBackendAndPollDatagram()`,
     /// while using the close-propagating receive and backend-drive paths.
     /// Authenticated frame errors or backend peer transport-parameter errors
-    /// return before caller-keyed output polling, leaving the protected close
-    /// to the existing long-header output path.
+    /// queue and poll protected close output in the same step.
     pub fn processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -17707,14 +17785,32 @@ pub const EndpointConnectionLifecycle = struct {
         initial_token: []const u8,
         send_keys: protection.Aes128PacketProtectionKeys,
     ) Error!EndpointCryptoBackendDriveProtectedLongDatagramResult {
-        try self.processProtectedLongDatagramInSpaceOrClose(
+        self.processProtectedLongDatagramInSpaceOrClose(
             connection_id,
             connection,
             space,
             now_millis,
             receive_keys,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            const output = try self.pollProtectedLongDatagram(
+                connection_id,
+                connection,
+                now_millis,
+                dcid,
+                scid,
+                initial_token,
+                try protectedLongDatagramKeysForSpace(space, send_keys),
+            );
+            return .{
+                .backend = .{},
+                .datagram = if (output) |bytes| .{
+                    .connection_id = connection_id,
+                    .datagram = bytes,
+                } else null,
+            };
+        };
         return try self.driveCryptoBackendInSpaceOrCloseAndPollProtectedLongCryptoDatagram(
             connection_id,
             connection,
@@ -17988,8 +18084,7 @@ pub const EndpointConnectionLifecycle = struct {
     /// `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams()`.
     /// Route errors or connection-id mismatches fail before packet processing.
     /// Authenticated frame errors or backend peer transport-parameter errors
-    /// return before output draining and leave the protected close to the
-    /// existing caller-keyed long-header output path.
+    /// queue and drain protected close output in the same step.
     pub fn processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -18007,25 +18102,19 @@ pub const EndpointConnectionLifecycle = struct {
         send_keys: protection.Aes128PacketProtectionKeys,
         out: []EndpointPolledDatagramResult,
     ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveProtectedLongDatagramDrainResult {
-        const route = try self.processRoutedProtectedLongDatagramInSpaceOrClose(
-            connection_id,
-            connection,
-            space,
-            path,
-            now_millis,
-            receive_keys,
-            datagram,
-        );
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
         return .{
             .route = route,
-            .backend = try self.driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams(
+            .backend = try self.processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndDrainDatagrams(
                 connection_id,
                 connection,
                 space,
+                now_millis,
+                receive_keys,
+                datagram,
                 backend,
                 scratch,
-                space,
-                now_millis,
                 dcid,
                 scid,
                 initial_token,
@@ -18041,8 +18130,7 @@ pub const EndpointConnectionLifecycle = struct {
     /// `processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram()`.
     /// Route errors or connection-id mismatches fail before packet processing.
     /// Authenticated frame errors or backend peer transport-parameter errors
-    /// return before output polling and leave the protected close to the
-    /// existing caller-keyed long-header output path.
+    /// queue and poll protected close output in the same step.
     pub fn processRoutedProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -18059,25 +18147,19 @@ pub const EndpointConnectionLifecycle = struct {
         initial_token: []const u8,
         send_keys: protection.Aes128PacketProtectionKeys,
     ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveProtectedLongDatagramResult {
-        const route = try self.processRoutedProtectedLongDatagramInSpaceOrClose(
-            connection_id,
-            connection,
-            space,
-            path,
-            now_millis,
-            receive_keys,
-            datagram,
-        );
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
         return .{
             .route = route,
-            .backend = try self.driveCryptoBackendInSpaceOrCloseAndPollProtectedLongCryptoDatagram(
+            .backend = try self.processProtectedLongDatagramInSpaceAndDriveCryptoBackendOrCloseAndPollDatagram(
                 connection_id,
                 connection,
                 space,
+                now_millis,
+                receive_keys,
+                datagram,
                 backend,
                 scratch,
-                space,
-                now_millis,
                 dcid,
                 scid,
                 initial_token,

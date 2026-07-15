@@ -95,6 +95,13 @@ The bounded-drain variant
 `processProtectedLongDatagramInSpaceOrCloseAndDrainDatagrams()` follows the
 same rule and drains close output after authenticated frame errors without
 draining unrelated queued output on malformed non-closing inputs.
+Caller-keyed long-header backend helpers
+`driveCryptoBackendInSpaceOrCloseAndPollProtectedLongCryptoDatagram()`,
+`driveCryptoBackendInSpaceOrCloseAndDrainProtectedLongCryptoDatagrams()`, and
+their process/routed wrappers now use the same close boundary: peer
+transport-parameter errors or authenticated receive frame errors return the
+protected close datagram from the triggering connection instead of requiring a
+separate output poll.
 
 ### Packet-number reordering evidence
 
