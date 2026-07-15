@@ -40623,6 +40623,63 @@ test "EndpointConnectionLifecycle hands off Version Negotiation follow-up connec
     try std.testing.expectEqual(@as(u64, 108), route.connection_id);
 }
 
+test "EndpointConnectionLifecycle cleans follow-up route when Version Negotiation handoff init fails" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_000),
+    };
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const old_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const followup_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const client_versions = [_]packet.Version{ .v2, .v1 };
+    const server_versions = [_]packet.Version{.v2};
+    const old_short = [_]u8{ 0x40, 0x11, 0x22, 0x33, 0x44 };
+    const followup_short = [_]u8{ 0x40, 0x55, 0x66, 0x77, 0x88 };
+
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try packet.encodeVersionNegotiationPacket(out.writer(), .{
+        .dcid = &old_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+    });
+    defer client.deinit();
+    client.config.active_connection_id_limit = 1;
+
+    _ = try lifecycle.registerClientInitialSourceConnectionId(109, &old_scid, path, .{});
+    _ = try client.recordPacketSentInSpace(.initial, 0, 1200);
+    try lifecycle.armRecoveryTimerFromConnection(109, &client);
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    try std.testing.expectError(error.InvalidPacket, lifecycle.processVersionNegotiationHandoffDatagram(
+        109,
+        110,
+        &client,
+        10,
+        &original_dcid,
+        &old_scid,
+        &followup_scid,
+        path,
+        out.getWritten(),
+        .{},
+    ));
+
+    try std.testing.expectEqual(packet.Version.v2, client.versionNegotiationSelectedVersion().?);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectError(error.UnknownConnectionId, lifecycle.routeDatagram(path, &old_short));
+    try std.testing.expectError(error.UnknownConnectionId, lifecycle.routeDatagram(path, &followup_short));
+}
+
 test "EndpointConnectionLifecycle emits protected Version Negotiation follow-up Initial" {
     var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer lifecycle.deinit();
