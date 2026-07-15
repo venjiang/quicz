@@ -22,6 +22,7 @@ const original_dcid_base = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08
 const client_scid_base = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
 const echo_payloads = [_][]const u8{ "hello", "world" };
 const echo_total_bytes: usize = 10;
+const client_max_datagram_size: usize = 8192;
 
 fn recvTimeout() std.Io.Timeout {
     return .{ .duration = .{
@@ -75,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
         .initial_max_data = 8192,
         .initial_max_stream_data = 2048,
         .initial_max_streams_bidi = 8,
-        .max_datagram_size = 8192,
+        .max_datagram_size = client_max_datagram_size,
     });
     defer connection.deinit();
     try connection.setLocalInitialSourceConnectionId(&client_scid);
@@ -87,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
         .skip_cert_verify = true,
     });
     var scratch: [8192]u8 = undefined;
-    var receive_buffer: [2048]u8 = undefined;
+    var receive_buffer: [client_max_datagram_size]u8 = undefined;
 
     _ = try connection.driveCryptoBackendInSpace(.initial, backend.cryptoBackend(), &scratch);
     const client_initial = (try connection.pollProtectedLongCryptoDatagramInSpace(
