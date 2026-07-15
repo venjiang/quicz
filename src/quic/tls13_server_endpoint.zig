@@ -186,6 +186,48 @@ pub fn Tls13ServerEndpoint(
             );
         }
 
+        /// Accept an Initial and transfer its record into endpoint ownership.
+        ///
+        /// Route installation, TLS driving, bounded Initial output, and record
+        /// admission succeed together. The caller retains `record` on failure;
+        /// any route or timer installed before that failure is retired.
+        pub fn acceptInitialRecord(
+            self: *Self,
+            connection_id: u64,
+            record: *Record,
+            now_millis: i64,
+            initial_accept: endpoint.InitialAcceptResult,
+            server_source_connection_id: []const u8,
+            datagram: []const u8,
+            options: endpoint.AcceptedInitialRouteOptions,
+            backend: root.CryptoBackend,
+            scratch: []u8,
+            out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedInitialError || error{ConnectionLimitReached})!root.EndpointAcceptedInitialCryptoBackendDatagramDrainResult {
+            if (self.records.get(connection_id) != null) return error.DuplicateConnectionId;
+            if (!self.records.hasCapacity()) return error.ConnectionLimitReached;
+
+            const accepted = self.acceptInitial(
+                connection_id,
+                connection_of(record),
+                now_millis,
+                initial_accept,
+                server_source_connection_id,
+                datagram,
+                options,
+                backend,
+                scratch,
+                out,
+            ) catch |err| {
+                _ = self.lifecycle.retireConnection(connection_id);
+                return err;
+            };
+            errdefer _ = self.lifecycle.retireConnection(connection_id);
+
+            try self.records.adopt(connection_id, record);
+            return accepted;
+        }
+
         /// Drive one TLS packet-number space and drain its bounded output.
         pub fn driveBackend(
             self: *Self,
@@ -360,6 +402,23 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             self.connection.deinit();
         }
     };
+    const RejectingInitialBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {
+            return error.InvalidPacket;
+        }
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
     const TestEndpoint = Tls13ServerEndpoint(
         TestRecord,
         TestRecord.connectionRef,
@@ -500,6 +559,72 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     rollback_record_owned = false;
     rollback_record.deinit();
     std.testing.allocator.destroy(rollback_record);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    const accepted_original_dcid = [_]u8{ 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7 };
+    const accepted_client_scid = [_]u8{ 0xc0, 0xc1, 0xc2, 0xc3 };
+    const accepted_server_scid = [_]u8{ 0xd0, 0xd1, 0xd2, 0xd3 };
+    const accepted_secrets = try protection.deriveInitialSecrets(.v1, &accepted_original_dcid);
+    try client.sendCryptoInSpace(.initial, "endpoint record admission");
+    const initial_datagram = (try client.pollInitialProtectedDatagram(
+        1,
+        &accepted_original_dcid,
+        &accepted_client_scid,
+        &[_]u8{},
+        accepted_secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(initial_datagram);
+    var action_buffer: [256]u8 = undefined;
+    const accepted_action = try endpoint_owner.lifecycle.handleDatagramWithVersionNegotiation(
+        &action_buffer,
+        retry_path,
+        initial_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+    );
+    const accepted_initial = switch (accepted_action) {
+        .accept_initial => |initial_accept| initial_accept,
+        else => return error.TestUnexpectedResult,
+    };
+
+    const rejecting_record = try std.testing.allocator.create(TestRecord);
+    var rejecting_record_initialized = false;
+    var rejecting_record_owned = true;
+    errdefer {
+        if (rejecting_record_owned) {
+            if (rejecting_record_initialized) rejecting_record.deinit();
+            std.testing.allocator.destroy(rejecting_record);
+        }
+    }
+    rejecting_record.* = .{
+        .handle = 10,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+    };
+    rejecting_record_initialized = true;
+    var rejecting_backend = RejectingInitialBackend{};
+    var rejecting_scratch: [256]u8 = undefined;
+    var rejecting_output: [1]root.EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        endpoint_owner.acceptInitialRecord(
+            rejecting_record.handle,
+            rejecting_record,
+            2,
+            accepted_initial,
+            &accepted_server_scid,
+            initial_datagram,
+            .{ .active_migration_disabled = true },
+            rejecting_backend.backend(),
+            &rejecting_scratch,
+            &rejecting_output,
+        ),
+    );
+    try std.testing.expect(endpoint_owner.records.get(rejecting_record.handle) == null);
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
+    rejecting_record_owned = false;
+    rejecting_record.deinit();
+    std.testing.allocator.destroy(rejecting_record);
 
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);

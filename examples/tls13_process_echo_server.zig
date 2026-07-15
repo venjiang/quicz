@@ -378,9 +378,9 @@ fn serveConcurrent(
 
                 var scratch: [8192]u8 = undefined;
                 var initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
-                const accepted = try server_endpoint.acceptInitial(
+                const accepted = try server_endpoint.acceptInitialRecord(
                     handle,
-                    &managed.transport.connection,
+                    managed,
                     now_millis,
                     initial_accept,
                     managed.transport.localInitialSourceConnectionId(),
@@ -392,7 +392,6 @@ fn serveConcurrent(
                 );
                 const peer_scid = managed.transport.connection.peerInitialSourceConnectionId() orelse return error.MissingPeerConnectionId;
                 try managed.transport.setPeerInitialSourceConnectionId(peer_scid);
-                try connections.adopt(handle, managed);
                 managed_adopted = true;
                 accepted_count += 1;
                 for (initial_outputs[0..accepted.drain.datagrams_written]) |output| {
