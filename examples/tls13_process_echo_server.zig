@@ -23,6 +23,7 @@ const address_validation_token = quicz.address_validation_token;
 const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
 const max_initial_datagrams: usize = 4;
 const max_application_datagrams: usize = 16;
+const server_max_datagram_size: usize = 8192;
 const process_idle_timeout_millis: u64 = 1000;
 const retry_token_lifetime_millis: u64 = 10_000;
 const retry_token_secret = [_]u8{0x73} ** address_validation_token.secret_len;
@@ -233,7 +234,7 @@ fn serveConcurrent(
     defer address_validation.deinit();
     const connections = &server_endpoint.records;
 
-    var receive_buffer: [2048]u8 = undefined;
+    var receive_buffer: [server_max_datagram_size]u8 = undefined;
     var endpoint_output: [128]u8 = undefined;
     var next_handle: u64 = 1;
     var accepted_count: usize = 0;
@@ -334,7 +335,7 @@ fn serveConcurrent(
                     .initial_max_data = 8192,
                     .initial_max_stream_data = 2048,
                     .initial_max_streams_bidi = initial_max_streams_bidi,
-                    .max_datagram_size = 8192,
+                    .max_datagram_size = server_max_datagram_size,
                     // Keep the local loss-recovery probe comfortably ahead of
                     // the short test-only idle timeout in concurrent mode.
                     .initial_rtt_ms = 100,
@@ -764,7 +765,7 @@ pub fn main(init: std.process.Init) !void {
             .initial_max_data = 8192,
             .initial_max_stream_data = 2048,
             .initial_max_streams_bidi = 8,
-            .max_datagram_size = 8192,
+            .max_datagram_size = server_max_datagram_size,
         });
         defer connection.deinit();
         try connection.validatePeerAddress();
@@ -777,7 +778,7 @@ pub fn main(init: std.process.Init) !void {
             .private_key_algorithm = .ecdsa_p256_sha256,
         });
         var scratch: [8192]u8 = undefined;
-        var receive_buffer: [2048]u8 = undefined;
+        var receive_buffer: [server_max_datagram_size]u8 = undefined;
 
         // The endpoint owns acceptance and route registration. Connection and TLS
         // storage are freshly allocated for each accepted connection.
