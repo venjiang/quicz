@@ -73,6 +73,8 @@ endpoint ownership 的增量证据，并非完整生产级 event loop。
 server route-facing due-deadline drain 现在会在 recovery output 或 terminal close
 cleanup 后返回下一 endpoint-visible deadline，socket loop 可在一次 due timer
 处理中完成 route-bound bounded output 和下一次 wakeup 调度。
+server endpoint 的非 route-facing due-deadline drain 也会给内部或非 socket 调用方返回
+相同的 drain 后下一 deadline。
 共享 lifecycle 的 bounded due-deadline drain result 现在也携带相同的
 post-drain next-deadline 信号，覆盖单连接、跨连接 caller-owned map，以及显式
 installed-key output options。

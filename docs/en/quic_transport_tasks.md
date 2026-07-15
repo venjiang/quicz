@@ -82,6 +82,8 @@ Route-facing server due-deadline drains now return the next endpoint-visible
 deadline after recovery output or terminal close cleanup, so socket loops can
 service a due timer, send bounded route-bound output, and schedule the next
 wakeup without a separate query.
+The server endpoint's route-less due-deadline drain now exposes the same
+post-drain next deadline for internal or non-socket callers.
 The shared lifecycle bounded due-deadline drain result now carries the same
 post-drain next-deadline signal for single-connection and cross-connection
 caller-owned maps, including explicit installed-key output options.

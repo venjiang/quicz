@@ -441,6 +441,7 @@ pub fn Tls13ServerEndpoint(
                 .deadline = deadline,
                 .pending_work = pending_drain.pending_work,
                 .drain = pending_drain.drain,
+                .next_deadline = try self.nextDeadline(allocator),
             };
         }
 
@@ -3643,6 +3644,9 @@ test "Tls13ServerEndpoint drains Initial due recovery output without route metad
     try std.testing.expectEqual(record.handle, due_out[0].connection_id);
     const info = try protection.peekProtectedLongPacketInfo(due_out[0].datagram);
     try std.testing.expectEqual(quic_packet.PacketType.initial, info.packet_type);
+    const next_deadline = due.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, next_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
 }
 
 test "Tls13ServerEndpoint retires record when idle deadline closes server" {
@@ -3775,6 +3779,7 @@ test "Tls13ServerEndpoint retires record when idle deadline closes server" {
     try std.testing.expect(due.pending_work.idle_retired != null);
     try std.testing.expectEqual(@as(?root.EndpointConnectionRetireResult, null), due.pending_work.close_retired);
     try std.testing.expectEqual(@as(usize, 0), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), due.next_deadline);
     try std.testing.expect(endpoint_owner.records.get(record_handle) == null);
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.recoveryTimerCount());
