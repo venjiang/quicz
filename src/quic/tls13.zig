@@ -902,6 +902,14 @@ fn serverHelloKnownExtensionBit(ext_type: u16) ?u4 {
     };
 }
 
+fn encryptedExtensionsKnownExtensionBit(ext_type: u16) ?u4 {
+    return switch (ext_type) {
+        @intFromEnum(ExtType.alpn) => 0,
+        @intFromEnum(ExtType.quic_transport_parameters) => 1,
+        else => null,
+    };
+}
+
 // ─── Write helpers ───────────────────────────────────────────────────
 
 fn writeU16(buf: []u8, val: u16) void {
@@ -1577,6 +1585,7 @@ pub const Tls13Handshake = struct {
         const ext_end = pos + ext_total;
 
         var have_alpn = false;
+        var seen_known_extensions: u16 = 0;
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
             const et = readU16(msg[pos..]);
@@ -1585,6 +1594,11 @@ pub const Tls13Handshake = struct {
             if (pos + el > ext_end) return error.DecodeError;
             const ext = msg[pos .. pos + el];
             pos += el;
+            if (encryptedExtensionsKnownExtensionBit(et)) |bit| {
+                const mask = @as(u16, 1) << bit;
+                if (seen_known_extensions & mask != 0) return error.DecodeError;
+                seen_known_extensions |= mask;
+            }
             switch (et) {
                 @intFromEnum(ExtType.alpn) => {
                     // ALPN: 2-byte list length + (1-byte proto length + proto)
@@ -2795,6 +2809,43 @@ pub fn buildEncryptedExtensions(buf: []u8, alpn: []const u8, peer_tp: []const u8
     return p;
 }
 
+fn appendDuplicateEncryptedExtensionsExtension(buf: []u8, msg_len: usize, ext_type: u16) ![]u8 {
+    if (msg_len < 6 or buf[0] != @intFromEnum(HandshakeType.encrypted_extensions)) {
+        return error.TestUnexpectedResult;
+    }
+    var pos: usize = 4;
+    const extensions_len_offset = pos;
+    const extensions_len = readU16(buf[pos..]);
+    pos += 2;
+    if (pos + extensions_len > msg_len) return error.TestUnexpectedResult;
+    const ext_end = pos + extensions_len;
+
+    while (pos < ext_end) {
+        if (pos + 4 > ext_end) return error.TestUnexpectedResult;
+        const header_offset = pos;
+        const current_type = readU16(buf[pos..]);
+        const current_len = readU16(buf[pos + 2 ..]);
+        pos += 4;
+        if (pos + current_len > ext_end) return error.TestUnexpectedResult;
+        if (current_type == ext_type) {
+            const duplicate_len = 4 + current_len;
+            if (msg_len + duplicate_len > buf.len) return error.TestUnexpectedResult;
+            std.mem.copyForwards(u8, buf[msg_len..][0..duplicate_len], buf[header_offset..][0..duplicate_len]);
+            const new_body_len = msg_len - 4 + duplicate_len;
+            buf[1] = @as(u8, @intCast(new_body_len >> 16));
+            buf[2] = @as(u8, @intCast((new_body_len >> 8) & 0xFF));
+            buf[3] = @as(u8, @intCast(new_body_len & 0xFF));
+            writeU16(
+                buf[extensions_len_offset..][0..2],
+                @as(u16, @intCast(extensions_len + duplicate_len)),
+            );
+            return buf[0 .. msg_len + duplicate_len];
+        }
+        pos += current_len;
+    }
+    return error.TestUnexpectedResult;
+}
+
 /// Build a Certificate message carrying a leaf-first DER certificate chain.
 ///
 /// Every entry is emitted with empty per-certificate extensions. `null` means
@@ -3123,6 +3174,29 @@ test "Tls13Handshake client rejects missing ALPN selection when offered" {
     var ee_buf: [256]u8 = undefined;
     hs.provideData(ee_buf[0..buildEncryptedExtensions(&ee_buf, "", &[_]u8{})]);
     try std.testing.expectError(error.NoApplicationProtocol, hs.step());
+}
+
+test "Tls13Handshake client rejects duplicate known EncryptedExtensions extensions" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var sh_buf: [128]u8 = undefined;
+    hs.provideData(sh_buf[0..buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true)]);
+    _ = try hs.step();
+    _ = try hs.step();
+
+    var ee_buf: [256]u8 = undefined;
+    const base_len = buildEncryptedExtensions(&ee_buf, "", &[_]u8{ 0x01, 0x02, 0x03 });
+    const encrypted_extensions = try appendDuplicateEncryptedExtensionsExtension(
+        &ee_buf,
+        base_len,
+        @intFromEnum(ExtType.quic_transport_parameters),
+    );
+    hs.provideData(encrypted_extensions);
+    try std.testing.expectError(error.DecodeError, hs.step());
 }
 
 test "Tls13Handshake client rejects server Finished with wrong verify_data" {
