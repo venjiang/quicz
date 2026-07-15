@@ -42220,11 +42220,13 @@ test "EndpointConnectionLifecycle feed installed-key path update commits after P
     const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const challenge_data = [_]u8{ 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb };
     const options = EndpointFeedInstalledKeyDatagramOptions{
         .space = .application,
         .out = &[_]u8{},
         .unpredictable_prefix = &[_]u8{},
         .supported_versions = &[_]packet.Version{.v1},
+        .path_challenge_data = challenge_data,
     };
 
     const old_path = endpoint.Udp4Tuple{
@@ -42273,21 +42275,37 @@ test "EndpointConnectionLifecycle feed installed-key path update commits after P
     };
     try std.testing.expect(ping_route.path_changed);
     try std.testing.expect(ping_result.updated_route == null);
+    try std.testing.expect(ping_result.path_challenge_queued);
+    try std.testing.expectEqual(@as(usize, 1), server.pendingPathChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
     try std.testing.expect((try lifecycle.routeDatagram(new_path, migrated_ping)).path_changed);
 
-    const challenge_data = [_]u8{ 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb };
-    try server.sendPathChallenge(challenge_data);
+    try client.sendPing();
+    const duplicate_migrated_ping = (try client.pollProtectedShortDatagramWithInstalledKeys(3, &server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(duplicate_migrated_ping);
+    const duplicate_ping_result = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+        188,
+        &server,
+        new_path,
+        4,
+        duplicate_migrated_ping,
+        options,
+    );
+    try std.testing.expect(!duplicate_ping_result.path_challenge_queued);
+    try std.testing.expectEqual(@as(usize, 1), server.pendingPathChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+
     const challenge = (try server.pollProtectedShortDatagramWithInstalledKeys(3, &client_dcid)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(challenge);
-    try client.processProtectedShortDatagramWithInstalledKeys(4, client_dcid.len, challenge);
+    try client.processProtectedShortDatagramWithInstalledKeys(5, client_dcid.len, challenge);
 
-    const response = (try client.pollProtectedShortDatagramWithInstalledKeys(5, &server_dcid)) orelse return error.TestUnexpectedResult;
+    const response = (try client.pollProtectedShortDatagramWithInstalledKeys(6, &server_dcid)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(response);
     const validation_result = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
         188,
         &server,
         new_path,
-        6,
+        7,
         response,
         options,
     );
@@ -42297,6 +42315,7 @@ test "EndpointConnectionLifecycle feed installed-key path update commits after P
     };
     try std.testing.expect(response_route.path_changed);
     const updated_route = validation_result.updated_route orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!validation_result.path_challenge_queued);
     try std.testing.expectEqual(@as(u64, 188), updated_route.connection_id);
     try std.testing.expect(!updated_route.path_changed);
     try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());

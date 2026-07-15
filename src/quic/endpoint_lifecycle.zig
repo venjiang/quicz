@@ -1447,7 +1447,10 @@ pub const EndpointConnectionLifecycle = struct {
     /// stateless reset, new Initial, Handshake, 0-RTT, and drop actions. For
     /// routed 1-RTT application packets, it additionally commits the endpoint
     /// route only when authenticated processing consumes an outstanding
-    /// PATH_CHALLENGE response from the changed UDP tuple.
+    /// PATH_CHALLENGE response from the changed UDP tuple. When the caller
+    /// supplies `path_challenge_data`, a successfully processed application
+    /// packet from a changed path queues one PATH_CHALLENGE unless validation
+    /// is already pending or has just completed.
     pub fn feedDatagramWithInstalledKeysAndUpdatePathOrClose(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -1501,9 +1504,20 @@ pub const EndpointConnectionLifecycle = struct {
                             )
                         else
                             null;
+                        var path_challenge_queued = false;
+                        if (updated_route == null and route.path_changed and
+                            connection.pendingPathChallengeCount() == 0 and
+                            connection.outstandingPathChallengeCount() == 0)
+                        {
+                            if (options.path_challenge_data) |challenge_data| {
+                                try connection.sendPathChallenge(challenge_data);
+                                path_challenge_queued = true;
+                            }
+                        }
                         break :routed .{
                             .feed = .{ .routed = route },
                             .updated_route = updated_route,
+                            .path_challenge_queued = path_challenge_queued,
                         };
                     },
                 }

@@ -293,6 +293,8 @@ pub const EndpointFeedInstalledKeyDatagramOptions = struct {
     unpredictable_prefix: []const u8,
     /// Versions supported by this endpoint for Initial accept/VN classification.
     supported_versions: []const packet.Version,
+    /// Optional PATH_CHALLENGE payload to queue after receiving from a changed path.
+    path_challenge_data: ?[8]u8 = null,
 };
 
 /// Result from one socket-loop pending-work pass for a connection handle.
@@ -523,6 +525,8 @@ pub const EndpointFeedInstalledKeyPathUpdateResult = struct {
     feed: EndpointFeedInstalledKeyDatagramResult,
     /// Route after endpoint path update, present only when validation completed.
     updated_route: ?endpoint.RouteResult = null,
+    /// Whether a PATH_CHALLENGE was queued for a changed path.
+    path_challenge_queued: bool = false,
 };
 
 /// Result from feeding one installed-key datagram, then selecting a wakeup.
