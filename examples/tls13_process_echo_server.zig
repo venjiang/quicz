@@ -1,6 +1,6 @@
 //! Pure-Zig TLS 1.3 QUIC echo server for local process interoperability.
 //!
-//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [completion_target] [sequential|concurrent|concurrent-retry|concurrent-limit|concurrent-reset|rolling] [max_active_connections]
+//! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [completion_target] [sequential|concurrent|concurrent-retry|concurrent-limit|concurrent-reset|concurrent-stop|rolling] [max_active_connections]
 //! Concurrent mode accepts and routes the requested number of loopback
 //! connections through one UDP socket and one endpoint lifecycle owner. It
 //! waits on the lifecycle's earliest deadline and retires idle connections.
@@ -109,6 +109,8 @@ const ManagedProcessConnection = struct {
     retry_validated: bool = false,
     retry_accepted: bool = false,
     client_reset_received: bool = false,
+    client_stop_sending_sent: bool = false,
+    client_stop_reset_received: bool = false,
     request_received: [echo_stream_ids.len]bool = .{ false, false },
     echoed: [echo_stream_ids.len]bool = .{ false, false },
 
@@ -183,6 +185,7 @@ fn serveConcurrent(
     retry_enabled: bool,
     initial_max_streams_bidi: u64,
     expect_client_reset: bool,
+    expect_client_stop_sending: bool,
 ) !void {
     const alpn = [_][]const u8{"hq-interop"};
     const max_routes = std.math.mul(usize, max_active_connections, 2) catch return error.InvalidConnectionCount;
@@ -635,9 +638,29 @@ fn serveConcurrent(
                         }
                     }
                 }
+                if (expect_client_stop_sending) {
+                    if (!managed.client_stop_sending_sent) {
+                        if (try managed.transport.connection.streamState(echo_stream_ids[0])) |stream_state| {
+                            if (stream_state.receive == .receiving and stream_state.receive_buffered.? != 0) {
+                                try managed.transport.stopSending(echo_stream_ids[0], 42);
+                                managed.client_stop_sending_sent = true;
+                                std.debug.print("zig_process_server: connection={d} concurrent=true stop_sending_sent=true stop_error=42\n", .{managed.handle});
+                            }
+                        }
+                    }
+                    if (managed.client_stop_sending_sent and !managed.client_stop_reset_received) {
+                        if (try managed.transport.connection.streamState(echo_stream_ids[0])) |stream_state| {
+                            if (stream_state.receive == .reset_received and stream_state.receive_reset_error_code == 42) {
+                                managed.client_stop_reset_received = true;
+                                std.debug.print("zig_process_server: connection={d} concurrent=true client_stop_reset_received=true reset_error=42\n", .{managed.handle});
+                            }
+                        }
+                    }
+                }
                 var queued_echo = false;
                 inline for (echo_stream_ids, echo_payloads, 0..) |stream_id, payload, index| {
-                    if (!managed.request_received[index]) {
+                    const skip_echo = expect_client_stop_sending and index == 0;
+                    if (!skip_echo and !managed.request_received[index]) {
                         var stream_buffer: [128]u8 = undefined;
                         const echo_len = managed.transport.recvStream(stream_id, &stream_buffer) catch |err| switch (err) {
                             error.StreamClosed, error.ConnectionClosed => null,
@@ -649,28 +672,32 @@ fn serveConcurrent(
                             managed.request_received[index] = true;
                         }
                     }
-                    if (managed.request_received[index] and !managed.echoed[index]) {
+                    if (!skip_echo and managed.request_received[index] and !managed.echoed[index]) {
                         try managed.transport.sendStream(stream_id, payload, true);
                         managed.echoed[index] = true;
                         queued_echo = true;
                     }
                 }
+                var sent_packets: usize = 0;
+                while (sent_packets < max_initial_datagrams) : (sent_packets += 1) {
+                    const output_packet = (lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                        managed.handle,
+                        &managed.transport.connection,
+                        now_millis + @as(i64, @intCast(sent_packets)),
+                        managed.clientScid(),
+                    ) catch |err| switch (err) {
+                        error.ConnectionClosed => null,
+                        else => return err,
+                    }) orelse break;
+                    defer allocator.free(output_packet);
+                    try socket.send(io, &managed.peer_address, output_packet);
+                }
                 if (queued_echo) {
-                    var sent_packets: usize = 0;
-                    while (sent_packets < max_initial_datagrams) : (sent_packets += 1) {
-                        const echo_packet = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
-                            managed.handle,
-                            &managed.transport.connection,
-                            now_millis + @as(i64, @intCast(sent_packets)),
-                            managed.clientScid(),
-                        )) orelse break;
-                        defer allocator.free(echo_packet);
-                        try socket.send(io, &managed.peer_address, echo_packet);
-                    }
                     try require(sent_packets > 0);
                 }
                 if (managed.transport.connection.connectionState() == .draining) {
                     if (expect_client_reset and !managed.client_reset_received) return error.UnexpectedState;
+                    if (expect_client_stop_sending and !managed.client_stop_reset_received) return error.UnexpectedState;
                     const deadline = managed.transport.connection.closeDeadlineMillis() orelse return error.UnexpectedState;
                     const retired = (try lifecycle.checkCloseTimeoutsAndRetireConnection(
                         managed.handle,
@@ -724,16 +751,19 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("zig_process_server: listening={s}:{d} completion_target={d} max_active_connections={d} mode={s}\n", .{ bind_host, bind_port, completion_target, max_active_connections, mode });
 
     if (std.mem.eql(u8, mode, "concurrent") or std.mem.eql(u8, mode, "rolling")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false);
     }
     if (std.mem.eql(u8, mode, "concurrent-retry")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, true, 8, false);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, true, 8, false, false);
     }
     if (std.mem.eql(u8, mode, "concurrent-limit")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 1, false);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 1, false, false);
     }
     if (std.mem.eql(u8, mode, "concurrent-reset")) {
-        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, true);
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, true, false);
+    }
+    if (std.mem.eql(u8, mode, "concurrent-stop")) {
+        return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, true);
     }
     if (!std.mem.eql(u8, mode, "sequential")) return error.InvalidMode;
 

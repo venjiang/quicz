@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -25,9 +26,16 @@ func main() {
 	serverName := flag.String("server-name", "localhost", "TLS server name")
 	expectStreamLimit := flag.Bool("expect-stream-limit", false, "require stream IDs 0 then 4 after a one-stream peer limit")
 	expectReset := flag.Bool("expect-reset", false, "cancel stream 0 with RESET_STREAM error 41, then echo stream 4")
+	expectStopSending := flag.Bool("expect-stop-sending", false, "require remote STOP_SENDING error 42 on stream 0, then echo stream 4")
 	flag.Parse()
-	if *expectStreamLimit && *expectReset {
-		log.Fatal("-expect-stream-limit and -expect-reset are mutually exclusive")
+	selectedProbeCount := 0
+	for _, enabled := range []bool{*expectStreamLimit, *expectReset, *expectStopSending} {
+		if enabled {
+			selectedProbeCount++
+		}
+	}
+	if selectedProbeCount > 1 {
+		log.Fatal("stream-limit, reset, and stop-sending probes are mutually exclusive")
 	}
 
 	if *caPath == "" {
@@ -70,6 +78,35 @@ func main() {
 		messages = messages[1:]
 		expectedFirstStreamID = 4
 	}
+	if *expectStopSending {
+		stopStream, err := connection.OpenStreamSync(ctx)
+		if err != nil {
+			log.Fatalf("open stop-sending stream: %v", err)
+		}
+		if uint64(stopStream.StreamID()) != 0 {
+			log.Fatalf("stop-sending stream: got stream %d, want 0", stopStream.StreamID())
+		}
+		if _, err := stopStream.Write([]byte("stop")); err != nil {
+			log.Fatalf("write stop-sending stream: %v", err)
+		}
+		stopDeadline := time.Now().Add(2 * time.Second)
+		for {
+			_, err := stopStream.Write([]byte("x"))
+			if err != nil {
+				var streamErr *quic.StreamError
+				if !errors.As(err, &streamErr) || !streamErr.Remote || streamErr.ErrorCode != 42 {
+					log.Fatalf("stop-sending error: %v", err)
+				}
+				break
+			}
+			if time.Now().After(stopDeadline) {
+				log.Fatal("timed out waiting for STOP_SENDING")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		messages = messages[1:]
+		expectedFirstStreamID = 4
+	}
 
 	echoBytes := 0
 	for streamIndex, message := range messages {
@@ -77,7 +114,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("open stream: %v", err)
 		}
-		if *expectStreamLimit || *expectReset {
+		if *expectStreamLimit || *expectReset || *expectStopSending {
 			expectedID := expectedFirstStreamID + uint64(streamIndex*4)
 			if uint64(stream.StreamID()) != expectedID {
 				log.Fatalf("unexpected stream: got %d, want %d", stream.StreamID(), expectedID)
@@ -110,6 +147,10 @@ func main() {
 	}
 	if *expectReset {
 		fmt.Printf("go_quic_reset_client: handshake_done=true reset_error=41 echo_stream=4 echo_bytes=%d\n", echoBytes)
+		return
+	}
+	if *expectStopSending {
+		fmt.Printf("go_quic_stop_sending_client: handshake_done=true stop_error=42 reset_error=42 echo_stream=4 echo_bytes=%d\n", echoBytes)
 		return
 	}
 	fmt.Printf("go_quic_echo_client: handshake_done=true echo_streams=2 echo_bytes=%d\n", echoBytes)
