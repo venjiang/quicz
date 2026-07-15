@@ -58,7 +58,8 @@ current implementation shape.
   `Config.version_negotiation_selected_version`,
   validate the server's authenticated Version Information against it, and let
   `Tls13ClientEndpoint` replace the owned transport while emitting the first
-  route-bound follow-up Initial.
+  route-bound follow-up Initial. If follow-up connection creation or Initial
+  emission fails after route registration, the follow-up route is retired.
 - `Tls13ServerEndpoint` can validate a Retry follow-up Initial on its switched
   route, consume the one-time address-validation token only after packet
   authentication, then drive Initial and Handshake TLS output with committed

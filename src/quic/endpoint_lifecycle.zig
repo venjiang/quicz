@@ -7086,6 +7086,7 @@ pub const EndpointConnectionLifecycle = struct {
             datagram,
             options,
         )) orelse return null;
+        errdefer _ = self.retireConnection(followup_connection_id);
 
         return .{
             .followup = followup,

@@ -320,6 +320,7 @@ pub const Tls13ClientEndpoint = struct {
             &followup_local_initial_source_connection_id,
             route_options,
         )) orelse return null;
+        errdefer _ = self.lifecycle.retireConnection(followup_connection_id);
 
         var followup_transport = try Tls13ClientTransport.init(
             self.transport.allocator,
@@ -861,6 +862,64 @@ test "Tls13ClientEndpoint restarts transport after Version Negotiation" {
     try std.testing.expect((try client.lifecycle.currentRoutePath(&followup_scid)).eql(path));
     try std.testing.expect(client.lifecycle.nextDeadline(21, &client.transport.connection) == null);
     try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
+}
+
+test "Tls13ClientEndpoint clears Version Negotiation follow-up route when restart Initial fails" {
+    const original_dcid = [_]u8{ 0xa3, 0xa4, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0 };
+    const followup_scid = [_]u8{ 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const available_versions = [_]packet.Version{ .v2, .v1 };
+    const tls_config = tls13.TlsConfig{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true };
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        23,
+        path,
+        .{ .active_migration_disabled = false },
+        .{ .chosen_version = .v2, .available_versions = &available_versions },
+        tls_config,
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    var scratch: [8192]u8 = undefined;
+    const initial = try client.begin(1, &scratch);
+    defer std.testing.allocator.free(initial);
+
+    const server_versions = [_]packet.Version{.v1};
+    var vn_buf: [64]u8 = undefined;
+    var vn_writer = buffer.fixedWriter(&vn_buf);
+    try packet.encodeVersionNegotiationPacket(vn_writer.writer(), .{
+        .dcid = &client_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    client.transport.allocator = failing_allocator.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        client.processVersionNegotiationRestartWithRoutePath(
+            2,
+            &scratch,
+            vn_writer.getWritten(),
+            24,
+            followup_scid,
+            .{ .active_migration_disabled = false },
+            tls_config,
+        ),
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), client.lifecycle.routeCount());
+    try std.testing.expectError(error.UnknownConnectionId, client.lifecycle.currentRoutePath(&client_scid));
+    try std.testing.expectError(error.UnknownConnectionId, client.lifecycle.currentRoutePath(&followup_scid));
+    try std.testing.expectEqual(@as(u64, 23), client.connection_id);
+    try std.testing.expectEqual(packet.Version.v2, client.transport.version);
 }
 
 test "Tls13ClientEndpoint receive enters draining on active stateless reset" {

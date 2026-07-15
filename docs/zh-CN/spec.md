@@ -51,7 +51,8 @@
   中选择非 reserved 的 mutual version，通过
   `Config.version_negotiation_selected_version` 把该选择传入后续连接，并校验
   server authenticated Version Information；`Tls13ClientEndpoint` 也可以替换
-  自己持有的 transport，并发出 route-bound follow-up Initial。
+  自己持有的 transport，并发出 route-bound follow-up Initial；如果 follow-up
+  connection 创建或 Initial 发送在 route 注册后失败，follow-up route 会被退役。
 - `Tls13ServerEndpoint` 可以在已切换的 route 上验证 Retry follow-up Initial，
   只在 packet 认证后消费一次性地址验证 token，并把后续 Initial/Handshake
   TLS output 与已提交 UDP route 一起返回。
