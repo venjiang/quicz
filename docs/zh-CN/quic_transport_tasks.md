@@ -121,6 +121,8 @@ Client endpoint 的 due-recovery service 现在会按到期 packet number space 
 已服务的 RFC 9002 timer 发出 Initial、Handshake 或 Application protected output，
 `Tls13ClientEndpoint` 再把该输出绑定到已提交 route。测试覆盖 Initial 与 Handshake
 PTO route output，并保留已有 Application PTO route output 证据。
+route-bound client due-deadline poll result 现在也会针对 Initial、Handshake 与
+Application recovery timer 返回 service 后的下一 deadline。
 
 ### Packet number 重排证据
 

@@ -140,6 +140,9 @@ emits Initial, Handshake, or Application protected output according to the
 serviced RFC 9002 timer, and `Tls13ClientEndpoint` pairs that output with the
 committed route. Tests cover Initial and Handshake PTO route output plus the
 existing Application PTO route output.
+The route-bound client due-deadline poll result now also returns the
+post-service next deadline for Initial, Handshake, and Application recovery
+timers.
 
 ### Packet-number reordering evidence
 

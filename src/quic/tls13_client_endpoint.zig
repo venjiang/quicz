@@ -332,6 +332,7 @@ pub const Tls13ClientEndpoint = struct {
         return .{
             .deadline = serviced,
             .datagram = datagram,
+            .next_deadline = self.nextDeadline(),
         };
     }
 
@@ -608,6 +609,8 @@ pub const Tls13ClientEndpoint = struct {
         deadline: client_transport.ClientTransportDeadline,
         /// Protected datagram for the due recovery packet number space.
         datagram: ?ApplicationDatagramPathResult = null,
+        /// Next client-visible deadline after due work and optional output poll.
+        next_deadline: ?client_transport.ClientTransportDeadline = null,
     };
 
     /// Client due-deadline result with bounded route-bound recovery output.
@@ -1005,6 +1008,9 @@ test "Tls13ClientEndpoint services Initial recovery with committed route output"
     try std.testing.expect(output.path.eql(new_path));
     try std.testing.expect(output.datagram.len >= 1200);
     try std.testing.expectEqual(packet.HeaderForm.long, packet.parseHeaderForm(output.datagram[0]));
+    const next_deadline = serviced.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expect(next_deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.initial, next_deadline.recovery.space);
 }
 
 test "Tls13ClientEndpoint services Handshake recovery with committed route output" {
@@ -1089,6 +1095,9 @@ test "Tls13ClientEndpoint services Handshake recovery with committed route outpu
     try std.testing.expect(output.path.eql(new_path));
     const info = try protection.peekProtectedLongPacketInfo(output.datagram);
     try std.testing.expectEqual(packet.PacketType.handshake, info.packet_type);
+    const next_deadline = serviced.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expect(next_deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.handshake, next_deadline.recovery.space);
 }
 
 test "Tls13ClientEndpoint services due recovery with committed route output" {
@@ -1149,6 +1158,9 @@ test "Tls13ClientEndpoint services due recovery with committed route output" {
     defer std.testing.allocator.free(output.datagram);
     try std.testing.expect(output.path.eql(new_path));
     try std.testing.expect(output.datagram.len != 0);
+    const next_deadline = serviced.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expect(next_deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, next_deadline.recovery.space);
 }
 
 test "Tls13ClientEndpoint drains due recovery with committed route output" {
