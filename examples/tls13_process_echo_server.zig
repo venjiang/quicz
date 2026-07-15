@@ -434,13 +434,11 @@ fn serveConcurrent(
                         retry_initial.initial_accept.original_destination_connection_id,
                     );
                     var retry_initial_outputs: [max_initial_datagrams]quicz.EndpointPolledDatagramResult = undefined;
-                    const retry_initial_progress = try lifecycle.driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams(
+                    const retry_initial_progress = try server_endpoint.driveInitialBackend(
                         managed.handle,
                         &managed.transport.connection,
-                        .initial,
                         managed.transport.cryptoBackend(),
                         &retry_scratch,
-                        .initial,
                         now_millis,
                         managed.clientScid(),
                         managed.transport.localInitialSourceConnectionId(),

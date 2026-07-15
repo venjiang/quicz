@@ -156,6 +156,36 @@ pub fn Tls13ServerEndpoint(
             );
         }
 
+        /// Drive the TLS Initial space and drain bounded protected Initial output.
+        pub fn driveInitialBackend(
+            self: *Self,
+            connection_id: u64,
+            connection: *Connection,
+            backend: root.CryptoBackend,
+            scratch: []u8,
+            now_millis: i64,
+            destination_connection_id: []const u8,
+            source_connection_id: []const u8,
+            initial_token: []const u8,
+            keys: protection.Aes128PacketProtectionKeys,
+            out: []root.EndpointPolledDatagramResult,
+        ) root.Error!root.EndpointCryptoBackendDriveProtectedLongDatagramDrainResult {
+            return self.lifecycle.driveCryptoBackendInSpaceAndDrainProtectedLongCryptoDatagrams(
+                connection_id,
+                connection,
+                .initial,
+                backend,
+                scratch,
+                .initial,
+                now_millis,
+                destination_connection_id,
+                source_connection_id,
+                initial_token,
+                keys,
+                out,
+            );
+        }
+
         /// Authenticate and accept the Retry follow-up Initial for one route.
         pub fn validateRetryInitial(
             self: *Self,
