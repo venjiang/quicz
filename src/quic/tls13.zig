@@ -1526,6 +1526,7 @@ pub const Tls13Handshake = struct {
         if (pos + ext_total > msg.len) return error.DecodeError;
         const ext_end = pos + ext_total;
 
+        var have_alpn = false;
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
             const et = readU16(msg[pos..]);
@@ -1541,9 +1542,19 @@ pub const Tls13Handshake = struct {
                     const list_len = readU16(ext[0..2]);
                     if (list_len + 2 != el) return error.DecodeError;
                     const proto_len = ext[2];
-                    if (proto_len + 3 != el) return error.DecodeError;
+                    if (proto_len == 0 or proto_len + 3 != el) return error.DecodeError;
+                    const proto = ext[3 .. 3 + proto_len];
+                    var offered = self.config.alpn.len == 0;
+                    for (self.config.alpn) |candidate| {
+                        if (std.mem.eql(u8, proto, candidate)) {
+                            offered = true;
+                            break;
+                        }
+                    }
+                    if (!offered) return error.NoApplicationProtocol;
                     self.negotiated_alpn_len = @min(proto_len, self.negotiated_alpn.len);
-                    @memcpy(self.negotiated_alpn[0..self.negotiated_alpn_len], ext[3 .. 3 + self.negotiated_alpn_len]);
+                    @memcpy(self.negotiated_alpn[0..self.negotiated_alpn_len], proto[0..self.negotiated_alpn_len]);
+                    have_alpn = true;
                 },
                 @intFromEnum(ExtType.quic_transport_parameters) => {
                     self.peer_tp_len = @min(el, self.peer_tp.len);
@@ -1552,6 +1563,8 @@ pub const Tls13Handshake = struct {
                 else => {}, // ignore unrecognized extensions
             }
         }
+
+        if (self.config.alpn.len > 0 and !have_alpn) return error.NoApplicationProtocol;
 
         self.transcript.update(msg);
         self.state = .client_wait_certificate;
@@ -2794,6 +2807,50 @@ test "Tls13Handshake client completes full handshake and installs application ke
     // 9. Handshake complete.
     try std.testing.expect(std.meta.activeTag(try hs.step()) == .complete);
     try std.testing.expect(hs.isComplete());
+}
+
+test "Tls13Handshake client rejects unoffered server ALPN" {
+    const alpn = [_][]const u8{"hq-interop"};
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &[_]u8{});
+
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var sh_buf: [128]u8 = undefined;
+    hs.provideData(sh_buf[0..buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true)]);
+    _ = try hs.step();
+    _ = try hs.step();
+
+    var ee_buf: [256]u8 = undefined;
+    hs.provideData(ee_buf[0..buildEncryptedExtensions(&ee_buf, "other-proto", &[_]u8{})]);
+    try std.testing.expectError(error.NoApplicationProtocol, hs.step());
+}
+
+test "Tls13Handshake client rejects missing ALPN selection when offered" {
+    const alpn = [_][]const u8{"hq-interop"};
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &[_]u8{});
+
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var sh_buf: [128]u8 = undefined;
+    hs.provideData(sh_buf[0..buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true)]);
+    _ = try hs.step();
+    _ = try hs.step();
+
+    var ee_buf: [256]u8 = undefined;
+    hs.provideData(ee_buf[0..buildEncryptedExtensions(&ee_buf, "", &[_]u8{})]);
+    try std.testing.expectError(error.NoApplicationProtocol, hs.step());
 }
 
 test "Tls13Handshake client rejects server Finished with wrong verify_data" {
