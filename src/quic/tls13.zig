@@ -1741,7 +1741,7 @@ pub const Tls13Handshake = struct {
                     @memcpy(&self.peer_x25519_public, ext[4..36]);
                     have_key_share = true;
                 },
-                else => {}, // ignore unrecognized extensions
+                else => return error.DecodeError,
             }
         }
 
@@ -2887,6 +2887,38 @@ fn appendDuplicateServerHelloExtension(buf: []u8, msg_len: usize, ext_type: u16)
     return error.TestUnexpectedResult;
 }
 
+fn appendServerHelloRawExtension(buf: []u8, msg_len: usize, ext_type: u16, payload: []const u8) ![]u8 {
+    if (payload.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
+    const extension_len = 4 + payload.len;
+    if (msg_len < 4 + 2 + 32 + 1 + 2 + 1 + 2) return error.TestUnexpectedResult;
+    if (msg_len + extension_len > buf.len) return error.TestUnexpectedResult;
+    var pos: usize = 4 + 2 + 32;
+    const sid_len = buf[pos];
+    pos += 1;
+    if (pos + sid_len + 2 + 1 + 2 > msg_len) return error.TestUnexpectedResult;
+    pos += sid_len;
+    pos += 2; // cipher_suite
+    pos += 1; // legacy_compression_method
+    const extensions_len_offset = pos;
+    const extensions_len = readU16(buf[pos..]);
+    pos += 2;
+    if (pos + extensions_len != msg_len) return error.TestUnexpectedResult;
+
+    writeU16(buf[msg_len..][0..2], ext_type);
+    writeU16(buf[msg_len + 2 ..][0..2], @as(u16, @intCast(payload.len)));
+    @memcpy(buf[msg_len + 4 ..][0..payload.len], payload);
+
+    const new_body_len = msg_len - 4 + extension_len;
+    buf[1] = @as(u8, @intCast(new_body_len >> 16));
+    buf[2] = @as(u8, @intCast((new_body_len >> 8) & 0xFF));
+    buf[3] = @as(u8, @intCast(new_body_len & 0xFF));
+    writeU16(
+        buf[extensions_len_offset..][0..2],
+        @as(u16, @intCast(extensions_len + extension_len)),
+    );
+    return buf[0 .. msg_len + extension_len];
+}
+
 fn extendServerHelloExtensionBody(buf: []u8, msg_len: usize, ext_type: u16, extra: []const u8) ![]u8 {
     if (extra.len == 0 or extra.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
     if (msg_len < 4 + 2 + 32 + 1 + 2 + 1 + 2) return error.TestUnexpectedResult;
@@ -3017,6 +3049,22 @@ test "Tls13Handshake client rejects duplicate known ServerHello extensions" {
         base_len,
         @intFromEnum(ExtType.supported_versions),
     );
+    hs.provideData(server_hello);
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects unrequested ServerHello extension" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [160]u8 = undefined;
+    const base_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    const server_hello = try appendServerHelloRawExtension(&sh_buf, base_len, 0xaaaa, &[_]u8{});
     hs.provideData(server_hello);
 
     try std.testing.expectError(error.DecodeError, hs.step());
