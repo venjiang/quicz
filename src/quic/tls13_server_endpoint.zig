@@ -165,9 +165,25 @@ pub fn Tls13ServerEndpoint(
             datagram: []const u8,
             options: root.EndpointFeedInstalledKeyDatagramOptions,
         ) root.EndpointProtectedDatagramError!root.EndpointFeedInstalledKeyDatagramResult {
-            return self.records.feedDatagramWithInstalledKeys(
-                &self.lifecycle,
-                allocator,
+            _ = allocator;
+            const action = try self.lifecycle.feedDatagram(
+                options.out,
+                path,
+                datagram,
+                options.unpredictable_prefix,
+                options.supported_versions,
+            );
+            const route = switch (action) {
+                .routed => |value| value,
+                .accept_initial => |initial| return .{ .accept_initial = initial },
+                .version_negotiation => |response| return .{ .version_negotiation = response },
+                .stateless_reset => |reset| return .{ .stateless_reset = reset },
+                .dropped => return .dropped,
+            };
+            const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
+            return self.lifecycle.feedDatagramWithInstalledKeys(
+                route.connection_id,
+                connection_of(record),
                 path,
                 now_millis,
                 datagram,
@@ -1004,6 +1020,149 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectEqual(std.math.maxInt(usize), dynamic_endpoint.records.max_records);
     try std.testing.expectEqual(@as(usize, 0), dynamic_endpoint.lifecycle.routeCount());
     try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), try dynamic_endpoint.nextDeadline(std.testing.allocator));
+}
+
+test "Tls13ServerEndpoint feeds installed-key short datagram without receive-view allocation" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: root.CryptoBackend,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "initial";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = TestEndpoint.init(std.testing.allocator);
+    defer endpoint_owner.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+    };
+    const server_dcid = "local";
+    const secrets = try protection.deriveInitialSecrets(.v1, "endpoint-feed");
+    var empty_backend = EmptyBackend{};
+
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer {
+        if (record_owned) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = 81,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    record_initialized = true;
+    try record.connection.validatePeerAddress();
+    try record.connection.confirmHandshake();
+    try record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, path, .{});
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(record.handle);
+    try endpoint_owner.records.adopt(record.handle, record);
+    record_owned = false;
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try client.sendPing();
+    const datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(1, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    const feed_result = try endpoint_owner.feedDatagramWithInstalledKeys(
+        no_allocation_allocator.allocator(),
+        path,
+        2,
+        datagram,
+        .{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+    );
+    switch (feed_result) {
+        .routed => |route| try std.testing.expectEqual(record.handle, route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+
+    try endpoint_owner.records.remove(record.handle);
+    try std.testing.expectError(
+        error.InvalidPacket,
+        endpoint_owner.feedDatagramWithInstalledKeys(
+            no_allocation_allocator.allocator(),
+            path,
+            3,
+            datagram,
+            .{
+                .space = .application,
+                .out = &[_]u8{},
+                .unpredictable_prefix = &[_]u8{},
+                .supported_versions = &[_]quic_packet.Version{.v1},
+            },
+        ),
+    );
 }
 
 test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
