@@ -2032,11 +2032,11 @@ pub const Tls13Handshake = struct {
         } };
     }
 
-    /// Build the Certificate message from the configured leaf certificate
+    /// Build the Certificate message from the configured leaf-first chain
     /// (RFC 8446 §4.4.2).
     fn serverBuildCertificate(self: *Tls13Handshake) HandshakeError!Action {
         if (self.config.cert_chain_der.len == 0) return error.BadCertificate;
-        const len = buildCertificate(&self.out_buf, self.config.cert_chain_der[0]);
+        const len = buildCertificateChain(&self.out_buf, self.config.cert_chain_der) orelse return error.BadCertificate;
         self.transcript.update(self.out_buf[0..len]);
         self.state = .server_send_certificate_verify;
         return Action{ .send_data = .{
@@ -2463,36 +2463,94 @@ pub fn buildEncryptedExtensions(buf: []u8, alpn: []const u8, peer_tp: []const u8
     return p;
 }
 
-/// Build a Certificate message carrying a single DER certificate.
-pub fn buildCertificate(buf: []u8, cert_der: []const u8) usize {
+/// Build a Certificate message carrying a leaf-first DER certificate chain.
+///
+/// Every entry is emitted with empty per-certificate extensions. `null` means
+/// the chain is empty, an entry exceeds the TLS 24-bit vector limit, or the
+/// output buffer cannot hold the complete message.
+pub fn buildCertificateChain(buf: []u8, cert_chain_der: []const []const u8) ?usize {
+    if (cert_chain_der.len == 0 or buf.len < 8) return null;
+
     var p: usize = 0;
     buf[p] = @intFromEnum(HandshakeType.certificate);
     p += 1;
-    p += 3; // length placeholder
-    // certificate_request_context: empty
-    buf[p] = 0;
+    p += 3; // handshake message length placeholder
+    buf[p] = 0; // certificate_request_context: empty
     p += 1;
-    // certificate_list length (3 bytes): one entry = 3 + cert + 2 (extensions)
-    const entry_len: usize = 3 + cert_der.len + 2;
     const list_start = p;
-    p += 3;
-    // first entry: 3-byte cert length + cert + 2-byte extensions length (0)
-    buf[p] = @intCast((cert_der.len >> 16) & 0xFF);
-    buf[p + 1] = @intCast((cert_der.len >> 8) & 0xFF);
-    buf[p + 2] = @intCast(cert_der.len & 0xFF);
-    p += 3;
-    @memcpy(buf[p..][0..cert_der.len], cert_der);
-    p += cert_der.len;
-    writeU16(buf[p..], 0); // extensions
-    p += 2;
-    buf[list_start] = @intCast((entry_len >> 16) & 0xFF);
-    buf[list_start + 1] = @intCast((entry_len >> 8) & 0xFF);
-    buf[list_start + 2] = @intCast(entry_len & 0xFF);
-    const msg_len = p - 4;
-    buf[1] = @intCast((msg_len >> 16) & 0xFF);
-    buf[2] = @intCast((msg_len >> 8) & 0xFF);
-    buf[3] = @intCast(msg_len & 0xFF);
+    p += 3; // certificate_list length placeholder
+
+    for (cert_chain_der) |cert_der| {
+        if (cert_der.len > 0xFF_FF_FF) return null;
+        const entry_len = std.math.add(usize, cert_der.len, 5) catch return null;
+        const next = std.math.add(usize, p, entry_len) catch return null;
+        if (next > buf.len) return null;
+
+        buf[p] = @truncate(cert_der.len >> 16);
+        buf[p + 1] = @truncate(cert_der.len >> 8);
+        buf[p + 2] = @truncate(cert_der.len);
+        p += 3;
+        @memcpy(buf[p..][0..cert_der.len], cert_der);
+        p += cert_der.len;
+        writeU16(buf[p..], 0); // certificate-entry extensions
+        p += 2;
+    }
+
+    const list_len = p - (list_start + 3);
+    if (list_len > 0xFF_FF_FF) return null;
+    buf[list_start] = @truncate(list_len >> 16);
+    buf[list_start + 1] = @truncate(list_len >> 8);
+    buf[list_start + 2] = @truncate(list_len);
+
+    const message_len = p - 4;
+    if (message_len > 0xFF_FF_FF) return null;
+    buf[1] = @truncate(message_len >> 16);
+    buf[2] = @truncate(message_len >> 8);
+    buf[3] = @truncate(message_len);
     return p;
+}
+
+/// Build a Certificate message carrying a single DER certificate.
+pub fn buildCertificate(buf: []u8, cert_der: []const u8) usize {
+    return buildCertificateChain(buf, &.{cert_der}).?;
+}
+
+test "buildCertificateChain encodes every configured certificate" {
+    const leaf = [_]u8{ 0x01, 0x02 };
+    const issuer = [_]u8{ 0xa0, 0xb1, 0xc2 };
+    var buf: [64]u8 = undefined;
+    const len = buildCertificateChain(&buf, &.{ &leaf, &issuer }) orelse return error.TestUnexpectedResult;
+
+    const expected = [_]u8{
+        @intFromEnum(HandshakeType.certificate), 0, 0,    19,
+        0,                                       0, 0,    15,
+        0,                                       0, 2,    0x01,
+        0x02,                                    0, 0,    0,
+        0,                                       3, 0xa0, 0xb1,
+        0xc2,                                    0, 0,
+    };
+    try std.testing.expectEqual(expected.len, len);
+    try std.testing.expectEqualSlices(u8, &expected, buf[0..len]);
+}
+
+test "buildCertificateChain rejects empty and oversized output" {
+    var empty_buf: [8]u8 = undefined;
+    try std.testing.expect(buildCertificateChain(&empty_buf, &.{}) == null);
+
+    const leaf = [_]u8{0x01};
+    var too_small: [8]u8 = undefined;
+    try std.testing.expect(buildCertificateChain(&too_small, &.{&leaf}) == null);
+}
+
+test "buildCertificateChain writes multi-byte vector lengths" {
+    const leaf = [_]u8{0xaa} ** 300;
+    var buf: [400]u8 = undefined;
+    const len = buildCertificateChain(&buf, &.{&leaf}) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expectEqual(@as(usize, 313), len);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 53 }, buf[1..4]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 49 }, buf[5..8]);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 44 }, buf[8..11]);
 }
 
 /// Build a CertificateVerify message with a signature scheme and signature.
