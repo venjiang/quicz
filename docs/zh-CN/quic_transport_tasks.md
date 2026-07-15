@@ -97,7 +97,8 @@ output，再通过真实 UDP 驱动两次 TLS-owned 1-RTT key phase 轮转。首
 将 client 切换到单独绑定的新 UDP port，把受保护的 `PATH_CHALLENGE` 投递到新 tuple，
 再将匹配的 `PATH_RESPONSE` 经 server lifecycle 路由回来。server 在已认证 response
 消费 outstanding challenge 前保持旧 route，随后才提交新 tuple（`tls_path_validation=true`、
-`server_route_updated=true`）。
+`server_route_updated=true`）。同一 live socket 路径现在还会从已提交 route tuple
+发送后续普通 1-RTT PING 到迁移后的 client socket（`post_migration_output=true`）。
 聚焦 endpoint 测试也证明，validation 后可读取已提交的 router tuple，并且
 endpoint-owned TLS server 可把后续普通 1-RTT output 与该已提交 tuple 配对。
 

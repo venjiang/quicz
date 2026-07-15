@@ -114,7 +114,9 @@ delivers a protected `PATH_CHALLENGE` to that new tuple and routes the matching
 `PATH_RESPONSE` back through the server lifecycle. The server keeps its old
 route until authenticated response processing consumes the outstanding
 challenge, then commits the new tuple (`tls_path_validation=true` and
-`server_route_updated=true`).
+`server_route_updated=true`). The same live socket path now sends a later
+ordinary 1-RTT PING from the committed route tuple to the migrated client
+socket (`post_migration_output=true`).
 Focused endpoint tests also prove that the committed router tuple is readable
 after validation and that an endpoint-owned TLS server can pair subsequent
 ordinary 1-RTT output with that committed tuple.

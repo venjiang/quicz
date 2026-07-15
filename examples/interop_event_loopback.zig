@@ -867,7 +867,30 @@ pub fn main(init: std.process.Init) !void {
         try require(server.outstandingPathChallengeCount() == 0);
         try require(!(try server_lifecycle.routeDatagram(migrated_server_path, response_received.data)).path_changed);
 
-        std.debug.print("tls_path_validation=true old_client_port={} new_client_port={} server_route_updated=true\n", .{
+        const committed_server_path = try server_lifecycle.currentRoutePath(&server_scid);
+        try require(committed_server_path.eql(migrated_server_path));
+
+        try server.sendPing();
+        const post_migration_output = (try server_lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+            server_handle,
+            &server,
+            now + 2,
+            &client_scid,
+        )) orelse return error.UnexpectedState;
+        defer allocator.free(post_migration_output);
+        try server_socket.send(io, &migrated_client_socket.address, post_migration_output);
+
+        const post_migration_received = try migrated_client_socket.receiveTimeout(io, &recv_buf, shortTimeout());
+        const post_migration_client_result = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(
+            client_handle,
+            &client,
+            migrated_client_path,
+            now + 2,
+            post_migration_received.data,
+        );
+        try require(!post_migration_client_result.path_changed);
+
+        std.debug.print("tls_path_validation=true old_client_port={} new_client_port={} server_route_updated=true post_migration_output=true\n", .{
             client_socket.address.getPort(),
             migrated_client_socket.address.getPort(),
         });
