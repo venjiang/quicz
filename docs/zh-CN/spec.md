@@ -61,6 +61,8 @@
   EncryptedExtensions。
 - 纯 Zig TLS client 会拒绝未请求的 ServerHello extension，不再静默继续
   handshake transcript。
+- 纯 Zig TLS client 会拒绝未请求的 EncryptedExtensions extension，同时仍强制要求
+  QUIC transport parameters。
 - 纯 Zig TLS certificate 路径会拒绝空 CertificateEntry，测试构造器也不再生成空
   certificate entry。
 - `pollProtectedShortDatagram()` / `processProtectedShortDatagram()` 支持使用调用方提供的 key 收发 protected 1-RTT short PING/ACK/CRYPTO/HANDSHAKE_DONE/NEW_TOKEN/NEW_CONNECTION_ID/PATH_CHALLENGE/PATH_RESPONSE/RETIRE_CONNECTION_ID/MAX_*/BLOCKED/STREAM/RESET_STREAM/STOP_SENDING/CONNECTION_CLOSE datagram，并把 plaintext 按 Application-space 1-RTT frame 规则处理；真实 TLS secret production 和 socket-backed endpoint DCID lookup wiring 仍待实现。

@@ -1816,7 +1816,7 @@ pub const Tls13Handshake = struct {
                     @memcpy(self.peer_tp[0..self.peer_tp_len], ext);
                     have_quic_transport_parameters = true;
                 },
-                else => {}, // ignore unrecognized extensions
+                else => return error.DecodeError,
             }
         }
 
@@ -3280,6 +3280,28 @@ fn appendDuplicateEncryptedExtensionsExtension(buf: []u8, msg_len: usize, ext_ty
     return error.TestUnexpectedResult;
 }
 
+fn appendEncryptedExtensionsRawExtension(buf: []u8, msg_len: usize, ext_type: u16, payload: []const u8) ![]u8 {
+    if (payload.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
+    if (msg_len < 6 or buf[0] != @intFromEnum(HandshakeType.encrypted_extensions)) {
+        return error.TestUnexpectedResult;
+    }
+    const extension_len = 4 + payload.len;
+    if (msg_len + extension_len > buf.len) return error.TestUnexpectedResult;
+    const extensions_len = readU16(buf[4..]);
+    if (6 + extensions_len != msg_len) return error.TestUnexpectedResult;
+
+    writeU16(buf[msg_len..][0..2], ext_type);
+    writeU16(buf[msg_len + 2 ..][0..2], @as(u16, @intCast(payload.len)));
+    @memcpy(buf[msg_len + 4 ..][0..payload.len], payload);
+
+    const new_body_len = msg_len - 4 + extension_len;
+    buf[1] = @as(u8, @intCast(new_body_len >> 16));
+    buf[2] = @as(u8, @intCast((new_body_len >> 8) & 0xFF));
+    buf[3] = @as(u8, @intCast(new_body_len & 0xFF));
+    writeU16(buf[4..][0..2], @as(u16, @intCast(extensions_len + extension_len)));
+    return buf[0 .. msg_len + extension_len];
+}
+
 const EncryptedExtensionsExtension = struct {
     header_offset: usize,
     body_offset: usize,
@@ -3713,15 +3735,15 @@ test "Tls13Handshake client rejects missing ALPN selection when offered" {
 test "Tls13Handshake client rejects EncryptedExtensions without transport parameters" {
     var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
 
-    var ee_buf: [256]u8 = undefined;
-    const ee_len = buildEncryptedExtensions(&ee_buf, "", &[_]u8{});
-    const transport_parameters = try encryptedExtensionsExtension(
-        ee_buf[0..ee_len],
-        @intFromEnum(ExtType.quic_transport_parameters),
-    );
-    writeU16(ee_buf[transport_parameters.header_offset..][0..2], 0xaaaa);
-
-    hs.provideData(ee_buf[0..ee_len]);
+    const encrypted_extensions = [_]u8{
+        @intFromEnum(HandshakeType.encrypted_extensions),
+        0,
+        0,
+        2,
+        0,
+        0,
+    };
+    hs.provideData(&encrypted_extensions);
     try std.testing.expectError(error.MissingExtension, hs.clientProcessEncryptedExtensions());
 }
 
@@ -3744,6 +3766,25 @@ test "Tls13Handshake client rejects duplicate known EncryptedExtensions extensio
         base_len,
         @intFromEnum(ExtType.quic_transport_parameters),
     );
+    hs.provideData(encrypted_extensions);
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects unrequested EncryptedExtensions extension" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var sh_buf: [128]u8 = undefined;
+    hs.provideData(sh_buf[0..buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true)]);
+    _ = try hs.step();
+    _ = try hs.step();
+
+    var ee_buf: [256]u8 = undefined;
+    const base_len = buildEncryptedExtensions(&ee_buf, "", &[_]u8{});
+    const encrypted_extensions = try appendEncryptedExtensionsRawExtension(&ee_buf, base_len, 0xaaaa, &[_]u8{});
     hs.provideData(encrypted_extensions);
     try std.testing.expectError(error.DecodeError, hs.step());
 }
