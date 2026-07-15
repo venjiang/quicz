@@ -95,6 +95,8 @@ pub fn Tls13ServerEndpoint(
             pending_work: root.EndpointPendingWorkResult,
             /// Bounded output drain after a due recovery timer, if any.
             drain: root.EndpointDatagramDrainResult,
+            /// Next endpoint-visible deadline after due work and output drain.
+            next_deadline: ?root.EndpointConnectionDeadline = null,
         };
 
         /// Pending-work sweep result with every drained datagram paired to a route.
@@ -483,6 +485,7 @@ pub fn Tls13ServerEndpoint(
                         path,
                         out,
                     ),
+                    .next_deadline = try self.nextDeadline(allocator),
                 };
             } else if (deadline.kind == .recovery and deadline.recovery != null and deadline.recovery.?.space == .initial) pending: {
                 const pending = try self.lifecycle.processPendingWork(
@@ -504,6 +507,7 @@ pub fn Tls13ServerEndpoint(
                         path,
                         out,
                     ),
+                    .next_deadline = try self.nextDeadline(allocator),
                 };
             } else try self.lifecycle.processPendingWork(
                 deadline.connection_id,
@@ -516,6 +520,7 @@ pub fn Tls13ServerEndpoint(
                 .deadline = deadline,
                 .pending_work = pending_work,
                 .drain = .{},
+                .next_deadline = try self.nextDeadline(allocator),
             };
         }
 
@@ -3135,6 +3140,9 @@ test "Tls13ServerEndpoint pairs due recovery output with committed route path" {
     try std.testing.expectEqual(record.handle, due_out[0].connection_id);
     try std.testing.expect(due_out[0].path.eql(new_path));
     try std.testing.expect(due_out[0].datagram.len != 0);
+    const next_deadline = due.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, next_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
 }
 
 test "Tls13ServerEndpoint polls active record output with committed route path" {
@@ -3502,6 +3510,9 @@ test "Tls13ServerEndpoint pairs Initial due recovery output with committed route
     try std.testing.expect(due_out[0].path.eql(new_path));
     const info = try protection.peekProtectedLongPacketInfo(due_out[0].datagram);
     try std.testing.expectEqual(quic_packet.PacketType.initial, info.packet_type);
+    const next_deadline = due.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, next_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
 }
 
 test "Tls13ServerEndpoint drains Initial due recovery output without route metadata" {
@@ -4463,6 +4474,7 @@ test "Tls13ServerEndpoint feed reports active stateless reset and retires record
     )) orelse return error.TestUnexpectedResult;
     try std.testing.expect(due.pending_work.close_retired != null);
     try std.testing.expectEqual(@as(usize, 0), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), due.next_deadline);
     try std.testing.expect(endpoint_owner.records.get(record_handle) == null);
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
 }
