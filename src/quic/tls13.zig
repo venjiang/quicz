@@ -958,6 +958,12 @@ const cipher_aes_128_gcm_sha256: u16 = 0x1301;
 const group_x25519: u16 = 0x001D;
 const legacy_version_tls_1_2: u16 = 0x0303;
 const version_tls_1_3: u16 = 0x0304;
+const hello_retry_request_random = [_]u8{
+    0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11,
+    0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
+    0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e,
+    0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
+};
 
 const sig_ecdsa_secp256r1_sha256: u16 = 0x0403;
 const sig_ed25519: u16 = 0x0807;
@@ -1589,8 +1595,11 @@ pub const Tls13Handshake = struct {
         if (pos + 2 > msg.len) return error.DecodeError;
         if (readU16(msg[pos..]) != legacy_version_tls_1_2) return error.UnsupportedVersion;
         pos += 2;
-        // random (32 bytes; HelloRetryRequest sentinel is not handled yet)
+        // random (32 bytes). HelloRetryRequest reuses ServerHello with a
+        // fixed random sentinel; this minimal QUIC TLS path has no HRR state
+        // machine yet, so reject before transcript/key-schedule progress.
         if (pos + 32 > msg.len) return error.DecodeError;
+        if (std.mem.eql(u8, msg[pos..][0..32], &hello_retry_request_random)) return error.DecodeError;
         pos += 32;
         // legacy_session_id_echo
         if (pos + 1 > msg.len) return error.DecodeError;
@@ -2870,6 +2879,22 @@ test "Tls13Handshake client rejects malformed ServerHello supported_versions len
         &[_]u8{0x00},
     );
     hs.provideData(server_hello);
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects unsupported HelloRetryRequest sentinel" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    @memcpy(sh_buf[4 + 2 ..][0..32], &hello_retry_request_random);
+    hs.provideData(sh_buf[0..sh_len]);
 
     try std.testing.expectError(error.DecodeError, hs.step());
 }
