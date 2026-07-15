@@ -712,6 +712,15 @@ test "Tls13Handshake clientProcessNewSessionTicket rejects oversized session tic
     try std.testing.expectError(error.DecodeError, hs.clientProcessNewSessionTicket(&nst_msg));
 }
 
+test "Tls13Handshake serverBuildNewSessionTicket requires server connected state" {
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    try std.testing.expectError(error.UnexpectedMessage, server.serverBuildNewSessionTicket());
+
+    var client = Tls13Handshake.initClient(.{}, &[_]u8{});
+    client.state = .connected;
+    try std.testing.expectError(error.UnexpectedMessage, client.serverBuildNewSessionTicket());
+}
+
 test "PSK binder computes via computeFinishedVerifyData over binder key" {
     const psk = [_]u8{0xab} ** secret_len;
     const ks = KeySchedule.initWithPsk(psk);
@@ -2555,6 +2564,8 @@ pub const Tls13Handshake = struct {
     /// resumption_master_secret + ticket_nonce, so the server need not ship
     /// the secret in the clear.
     pub fn serverBuildNewSessionTicket(self: *Tls13Handshake) HandshakeError!Action {
+        if (!self.is_server) return error.UnexpectedMessage;
+        if (self.state != .connected) return error.UnexpectedMessage;
         const rms = self.key_schedule.deriveResumptionMasterSecret(self.transcript.current());
 
         // 16-byte ticket nonce; the PSK derived from it is available to the
