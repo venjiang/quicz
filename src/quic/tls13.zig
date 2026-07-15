@@ -819,6 +819,17 @@ test "Tls13Handshake ClientHello includes pre_shared_key when has_psk" {
     try std.testing.expect(found_early_data);
 }
 
+test "Tls13Handshake ClientHello omits early_data without session ticket" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hs = Tls13Handshake.initClientWithPsk(.{}, &[_]u8{}, psk);
+
+    const action = try hs.step();
+    const hello = action.send_data.data;
+
+    try std.testing.expectError(error.TestUnexpectedResult, clientHelloExtension(hello, @intFromEnum(ExtType.pre_shared_key)));
+    try std.testing.expectError(error.TestUnexpectedResult, clientHelloExtension(hello, @intFromEnum(ExtType.early_data)));
+}
+
 test "Tls13Handshake client rejects ClientHello PSK output overflow" {
     var long_name: [12250]u8 = undefined;
     @memset(&long_name, 'a');
@@ -1580,7 +1591,7 @@ pub const Tls13Handshake = struct {
 
         // early_data (RFC 8446 §4.2.10) -- empty extension signals 0-RTT
         // intent. Must precede pre_shared_key.
-        if (self.has_psk) {
+        if (self.has_psk and self.session_ticket_len > 0) {
             if (pos + 4 > buf.len) return error.DecodeError;
             pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.early_data), 0);
         }
