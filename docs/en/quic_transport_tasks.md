@@ -102,6 +102,10 @@ their process/routed wrappers now use the same close boundary: peer
 transport-parameter errors or authenticated receive frame errors return the
 protected close datagram from the triggering connection instead of requiring a
 separate output poll.
+Installed-key Handshake OrClose helpers now follow that same boundary:
+receive-side frame errors and backend peer-parameter errors return or drain the
+protected Handshake close datagram from the triggering connection, including
+routed backend drain/poll wrappers.
 
 ### Packet-number reordering evidence
 

@@ -51241,7 +51241,7 @@ test "EndpointConnectionLifecycle routes installed-key Handshake receive and dra
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
 }
 
-test "EndpointConnectionLifecycle installed-key Handshake OrClose stops before poll" {
+test "EndpointConnectionLifecycle installed-key Handshake OrClose polls close output" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x1a, 0x2a, 0x3a, 0x4a };
     const server_dcid = [_]u8{ 0xaa, 0xba, 0xca, 0xda };
@@ -51277,29 +51277,23 @@ test "EndpointConnectionLifecycle installed-key Handshake OrClose stops before p
     }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
     defer std.testing.allocator.free(invalid_handshake);
 
-    try std.testing.expectError(error.InvalidPacket, lifecycle.processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram(
+    const result = (try lifecycle.processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram(
         97,
         &server,
         11,
         invalid_handshake,
         &client_dcid,
         &server_dcid,
-    ));
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(result.datagram);
+
+    try std.testing.expectEqual(@as(u64, 97), result.connection_id);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.handshake));
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.handshake));
 
-    const close_packet = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
-        97,
-        &server,
-        12,
-        &client_dcid,
-        &server_dcid,
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(close_packet);
-
-    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, close_packet);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, result.datagram);
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
 }
 
@@ -51611,7 +51605,7 @@ test "EndpointConnectionLifecycle routes installed-key Handshake then drives bac
     try std.testing.expectEqualStrings("routed installed response", response_crypto[0..response_len]);
 }
 
-test "EndpointConnectionLifecycle routed installed-key Handshake backend OrClose stops before poll" {
+test "EndpointConnectionLifecycle routed installed-key Handshake backend OrClose polls close output" {
     const BadBackend = struct {
         peer_sent: bool = false,
         output_pulled: bool = false,
@@ -51697,40 +51691,34 @@ test "EndpointConnectionLifecycle routed installed-key Handshake backend OrClose
 
     var backend = BadBackend{};
     var scratch: [96]u8 = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram(
-            server_connection_id,
-            &server,
-            server_receive_path,
-            11,
-            client_datagram,
-            backend.backend(),
-            &scratch,
-            .{
-                .space = .handshake,
-                .destination_connection_id = &client_dcid,
-                .source_connection_id = &server_dcid,
-            },
-        ),
+    const result = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        client_datagram,
+        backend.backend(),
+        &scratch,
+        .{
+            .space = .handshake,
+            .destination_connection_id = &client_dcid,
+            .source_connection_id = &server_dcid,
+        },
     );
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
     try std.testing.expectEqualStrings("routed installed bad input", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), result.backend.backend.connections_driven);
 
-    const close_packet = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
-        server_connection_id,
-        &server,
-        12,
-        &client_dcid,
-        &server_dcid,
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(close_packet);
+    const close_packet = result.backend.datagram orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, close_packet.connection_id);
+    defer std.testing.allocator.free(close_packet.datagram);
 
-    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, close_packet);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, close_packet.datagram);
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
@@ -51742,7 +51730,7 @@ test "EndpointConnectionLifecycle routed installed-key Handshake backend OrClose
     }
 }
 
-test "EndpointConnectionLifecycle routed installed-key Handshake backend OrClose stops before drain" {
+test "EndpointConnectionLifecycle routed installed-key Handshake backend OrClose drains close output" {
     const BadBackend = struct {
         peer_sent: bool = false,
         output_pulled: bool = false,
@@ -51829,38 +51817,33 @@ test "EndpointConnectionLifecycle routed installed-key Handshake backend OrClose
     var backend = BadBackend{};
     var scratch: [96]u8 = undefined;
     var drained: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams(
-            server_connection_id,
-            &server,
-            server_receive_path,
-            11,
-            client_datagram,
-            backend.backend(),
-            &scratch,
-            &client_dcid,
-            &server_dcid,
-            &drained,
-        ),
+    const result = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        client_datagram,
+        backend.backend(),
+        &scratch,
+        &client_dcid,
+        &server_dcid,
+        &drained,
     );
+    defer for (drained[0..result.backend.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
     try std.testing.expectEqualStrings("routed installed bad input", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), result.backend.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), result.backend.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.backend.drain.first_error);
 
-    const close_packet = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
-        server_connection_id,
-        &server,
-        12,
-        &client_dcid,
-        &server_dcid,
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(close_packet);
-
-    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, close_packet);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, drained[0].datagram);
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {
@@ -54782,7 +54765,7 @@ test "EndpointConnectionLifecycle processes installed-key Handshake then drives 
     );
 }
 
-test "EndpointConnectionLifecycle installed-key Handshake backend OrClose stops before output drain" {
+test "EndpointConnectionLifecycle installed-key Handshake backend OrClose drains close output" {
     const BadBackend = struct {
         peer_sent: bool = false,
         output_pulled: bool = false,
@@ -54858,37 +54841,31 @@ test "EndpointConnectionLifecycle installed-key Handshake backend OrClose stops 
     var scratch: [128]u8 = undefined;
     var drained: [1]EndpointPolledDatagramResult = undefined;
 
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams(
-            92,
-            &server,
-            11,
-            client_datagram,
-            backend.backend(),
-            &scratch,
-            &client_dcid,
-            &server_dcid,
-            &drained,
-        ),
+    const result = try lifecycle.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams(
+        92,
+        &server,
+        11,
+        client_datagram,
+        backend.backend(),
+        &scratch,
+        &client_dcid,
+        &server_dcid,
+        &drained,
     );
+    defer for (drained[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
     try std.testing.expectEqualStrings("installed-key bad backend input", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
 
-    const close_packet = (try lifecycle.pollProtectedHandshakeDatagramWithInstalledKeys(
-        92,
-        &server,
-        12,
-        &client_dcid,
-        &server_dcid,
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(close_packet);
-
-    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, close_packet);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(13, drained[0].datagram);
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
     switch (client.peerClose() orelse return error.TestUnexpectedResult) {
         .connection => |close| {

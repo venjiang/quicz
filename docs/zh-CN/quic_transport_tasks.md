@@ -89,6 +89,9 @@ closing 的输入仍抛错，并保留已排队输出给正常 poll。
 process/routed wrapper 也使用同一 close 边界：peer transport-parameter 错误或认证后的
 receive frame 错误会直接从触发连接返回 protected close datagram，不再要求调用方另行
 poll output。
+installed-key Handshake OrClose helper 也采用同一边界：receive-side frame 错误和 backend
+peer-parameter 错误会直接返回或 drain 触发连接上的 protected Handshake close datagram，
+包括 routed backend drain/poll wrapper。
 
 ### Packet number 重排证据
 

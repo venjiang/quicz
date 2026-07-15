@@ -20449,8 +20449,7 @@ pub const EndpointConnectionLifecycle = struct {
     /// `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndDrainDatagrams()`,
     /// while using the close-propagating receive and backend-drive paths.
     /// Authenticated frame errors or backend peer transport-parameter errors
-    /// return before output draining, leaving the protected close to the
-    /// existing installed-key Handshake output path.
+    /// queue and drain protected close output in the same step.
     pub fn processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -20463,12 +20462,25 @@ pub const EndpointConnectionLifecycle = struct {
         scid: []const u8,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
-        try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+        self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
             connection_id,
             connection,
             now_millis,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            return .{
+                .backend = .{},
+                .drain = self.drainProtectedHandshakeDatagramsWithInstalledKeys(
+                    connection_id,
+                    connection,
+                    now_millis,
+                    dcid,
+                    scid,
+                    out,
+                ),
+            };
+        };
 
         const drive_views = [_]EndpointCryptoBackendDriveView{.{
             .connection_id = connection_id,
@@ -20482,14 +20494,27 @@ pub const EndpointConnectionLifecycle = struct {
             .destination_connection_id = dcid,
             .source_connection_id = scid,
         }};
-        return try self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
+        return self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
             .handshake,
             &drive_views,
             &poll_views,
             now_millis,
             .handshake,
             out,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            return .{
+                .backend = .{},
+                .drain = self.drainProtectedHandshakeDatagramsWithInstalledKeys(
+                    connection_id,
+                    connection,
+                    now_millis,
+                    dcid,
+                    scid,
+                    out,
+                ),
+            };
+        };
     }
 
     /// Process installed-key Handshake input through close-propagating backend, then poll output.
@@ -20498,8 +20523,7 @@ pub const EndpointConnectionLifecycle = struct {
     /// `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendAndPollDatagram()`,
     /// while using the close-propagating receive and backend-drive paths.
     /// Authenticated frame errors or backend peer transport-parameter errors
-    /// return before output polling, leaving protected close output to the
-    /// existing installed-key Handshake output path.
+    /// queue and poll protected close output in the same step.
     pub fn processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -20510,14 +20534,30 @@ pub const EndpointConnectionLifecycle = struct {
         scratch: []u8,
         poll_options: EndpointPollInstalledKeyDatagramOptions,
     ) Error!EndpointCryptoBackendDriveDatagramResult {
-        try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+        self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
             connection_id,
             connection,
             now_millis,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            const output = try self.pollProtectedHandshakeDatagramWithInstalledKeys(
+                connection_id,
+                connection,
+                now_millis,
+                poll_options.destination_connection_id,
+                poll_options.source_connection_id,
+            );
+            return .{
+                .backend = .{},
+                .datagram = if (output) |bytes| .{
+                    .connection_id = connection_id,
+                    .datagram = bytes,
+                } else null,
+            };
+        };
 
-        return try self.driveCryptoBackendInSpaceOrCloseAndPollDatagram(
+        return self.driveCryptoBackendInSpaceOrCloseAndPollDatagram(
             connection_id,
             connection,
             .handshake,
@@ -20525,7 +20565,23 @@ pub const EndpointConnectionLifecycle = struct {
             scratch,
             now_millis,
             poll_options,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            const output = try self.pollProtectedHandshakeDatagramWithInstalledKeys(
+                connection_id,
+                connection,
+                now_millis,
+                poll_options.destination_connection_id,
+                poll_options.source_connection_id,
+            );
+            return .{
+                .backend = .{},
+                .datagram = if (output) |bytes| .{
+                    .connection_id = connection_id,
+                    .datagram = bytes,
+                } else null,
+            };
+        };
     }
 
     /// Process one installed-key protected Handshake datagram with close propagation.
@@ -20631,8 +20687,8 @@ pub const EndpointConnectionLifecycle = struct {
 
     /// Process installed-key Handshake input with close propagation, then poll output.
     ///
-    /// Authenticated frame errors queue CONNECTION_CLOSE and return before
-    /// ordinary installed-key Handshake output polling.
+    /// Authenticated frame errors queue CONNECTION_CLOSE and poll protected
+    /// close output instead of ordinary installed-key Handshake output.
     pub fn processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -20642,12 +20698,14 @@ pub const EndpointConnectionLifecycle = struct {
         dcid: []const u8,
         scid: []const u8,
     ) Error!?EndpointPolledDatagramResult {
-        try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+        self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
             connection_id,
             connection,
             now_millis,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+        };
         const output = try self.pollProtectedHandshakeDatagramWithInstalledKeys(
             connection_id,
             connection,
@@ -20761,8 +20819,8 @@ pub const EndpointConnectionLifecycle = struct {
 
     /// Process installed-key Handshake input with close propagation, then drain output.
     ///
-    /// Authenticated frame errors queue CONNECTION_CLOSE and return before any
-    /// ordinary installed-key Handshake output is drained.
+    /// Authenticated frame errors queue CONNECTION_CLOSE and drain protected
+    /// close output instead of ordinary installed-key Handshake output.
     pub fn processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -20773,12 +20831,33 @@ pub const EndpointConnectionLifecycle = struct {
         scid: []const u8,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointDatagramDrainResult {
-        try self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
+        self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(
             connection_id,
             connection,
             now_millis,
             datagram,
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+        };
+        return self.drainProtectedHandshakeDatagramsWithInstalledKeys(
+            connection_id,
+            connection,
+            now_millis,
+            dcid,
+            scid,
+            out,
         );
+    }
+
+    fn drainProtectedHandshakeDatagramsWithInstalledKeys(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid: []const u8,
+        scid: []const u8,
+        out: []EndpointPolledDatagramResult,
+    ) EndpointDatagramDrainResult {
         var result = EndpointDatagramDrainResult{};
         while (result.datagrams_written < out.len) {
             const output = self.pollProtectedHandshakeDatagramWithInstalledKeys(
@@ -21086,8 +21165,7 @@ pub const EndpointConnectionLifecycle = struct {
     /// `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams()`.
     /// Route errors and connection-id mismatches fail before packet processing.
     /// Authenticated frame errors or backend peer transport-parameter errors
-    /// return before output draining and leave protected close output to the
-    /// existing installed-key Handshake poll/drain path.
+    /// queue and drain protected close output in the same step.
     pub fn processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -21101,33 +21179,19 @@ pub const EndpointConnectionLifecycle = struct {
         scid: []const u8,
         out: []EndpointPolledDatagramResult,
     ) EndpointProtectedDatagramError!EndpointRoutedCryptoBackendDriveDatagramDrainResult {
-        const route = try self.processRoutedProtectedHandshakeDatagramWithInstalledKeysOrClose(
-            connection_id,
-            connection,
-            path,
-            now_millis,
-            datagram,
-        );
-        const drive_views = [_]EndpointCryptoBackendDriveView{.{
-            .connection_id = connection_id,
-            .connection = connection,
-            .backend = backend,
-            .scratch = scratch,
-        }};
-        const poll_views = [_]EndpointConnectionPollView{.{
-            .connection_id = connection_id,
-            .connection = connection,
-            .destination_connection_id = dcid,
-            .source_connection_id = scid,
-        }};
+        const route = try self.routeDatagram(path, datagram);
+        if (route.connection_id != connection_id) return error.InvalidPacket;
         return .{
             .route = route,
-            .backend = try self.driveCryptoBackendsInSpaceOrCloseAndDrainDatagrams(
-                .handshake,
-                &drive_views,
-                &poll_views,
+            .backend = try self.processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndDrainDatagrams(
+                connection_id,
+                connection,
                 now_millis,
-                .handshake,
+                datagram,
+                backend,
+                scratch,
+                dcid,
+                scid,
                 out,
             ),
         };
@@ -21139,8 +21203,7 @@ pub const EndpointConnectionLifecycle = struct {
     /// `processProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram()`.
     /// Route errors and connection-id mismatches fail before packet processing.
     /// Authenticated frame errors or backend peer transport-parameter errors
-    /// return before output polling and leave protected close output to the
-    /// existing installed-key Handshake poll/drain path.
+    /// queue and poll protected close output in the same step.
     pub fn processRoutedProtectedHandshakeDatagramWithInstalledKeysAndDriveCryptoBackendOrCloseAndPollDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
