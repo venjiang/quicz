@@ -58,7 +58,7 @@ func main() {
 	expectStopSending := flag.Bool("expect-stop-sending", false, "require remote STOP_SENDING error 42 on stream 0, then echo stream 4")
 	expectUni := flag.Bool("expect-uni", false, "send client unidirectional stream 2 and require server unidirectional stream 3")
 	expectServerPTO := flag.Bool("expect-server-pto", false, "drop four post-stream Zig datagrams and require a PTO-recovered echo")
-	expectFlowControl := flag.Bool("expect-flow-control", false, "send 4 KiB through the server's 2 KiB stream window")
+	expectFlowControl := flag.Bool("expect-flow-control", false, "send 12 KiB through the server's 2 KiB stream and 8 KiB connection windows")
 	flag.Parse()
 	selectedProbeCount := 0
 	for _, enabled := range []bool{*expectStreamLimit, *expectReset, *expectStopSending, *expectUni, *expectServerPTO, *expectFlowControl} {
@@ -149,7 +149,7 @@ func main() {
 
 	messages := []string{"hello", "world"}
 	if *expectFlowControl {
-		messages = []string{strings.Repeat("f", 4096)}
+		messages = []string{strings.Repeat("f", 12_288)}
 	}
 	expectedFirstStreamID := uint64(0)
 	if *expectReset {
