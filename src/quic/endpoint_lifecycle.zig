@@ -13569,6 +13569,7 @@ pub const EndpointConnectionLifecycle = struct {
         const serviced = pending_work.recovery_serviced orelse return .{
             .pending_work = pending_work,
             .drain = .{},
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
         if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
 
@@ -13586,6 +13587,7 @@ pub const EndpointConnectionLifecycle = struct {
                 options.space,
                 out,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 

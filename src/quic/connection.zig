@@ -32103,6 +32103,10 @@ test "EndpointConnectionLifecycle processPendingWorkAndDrainDatagramsWithInstall
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), early.pending_work.recovery_serviced);
     try std.testing.expectEqual(@as(usize, 0), early.drain.datagrams_written);
     try std.testing.expectEqual(@as(?Error, null), early.drain.first_error);
+    const early_next = early.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, early_next.kind);
+    try std.testing.expectEqual(@as(u64, 65), early_next.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, early_next.recovery.?.space);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 
     var due_out: [1]EndpointPolledDatagramResult = undefined;
@@ -32123,6 +32127,10 @@ test "EndpointConnectionLifecycle processPendingWorkAndDrainDatagramsWithInstall
     try std.testing.expectEqual(@as(u64, 65), due_out[0].connection_id);
     try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    const due_next = due.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due_next.kind);
+    try std.testing.expectEqual(@as(u64, 65), due_next.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, due_next.recovery.?.space);
 
     var opened = try protection.unprotectShortPacketAes128(
         std.testing.allocator,

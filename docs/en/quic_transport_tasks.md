@@ -89,6 +89,10 @@ post-drain next-deadline signal for single-connection and cross-connection
 caller-owned maps, including explicit installed-key output options.
 The single-connection due-deadline-to-backend bounded-drain result also exposes
 the post-drain next deadline for ordinary and explicit-output variants.
+The single-connection pending-work bounded-drain result now also returns the
+post-drain next deadline, so a caller-owned socket loop can service pending
+recovery work, drain bounded installed-key output, and keep its wakeup target
+without a separate lifecycle query.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
@@ -1663,7 +1667,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   `processPendingWorkAndPollDatagram()`: before a loss/PTO timer is serviced it
   returns an empty drain result, and after a matching recovery wakeup it drains
   installed-key output into caller-owned result slots. Unit coverage proves the
-  before-deadline no-op and the due Application PTO 1-RTT PING probe path.
+  before-deadline no-op and the due Application PTO 1-RTT PING probe path. The
+  result now also exposes the next endpoint-visible deadline after no-op and
+  due-drain paths, matching the due-deadline bounded-drain helpers.
 - 2026-06-10: Added
   `EndpointConnectionDeadline.installedKeyPollOptions()` and
   `EndpointPollInstalledKeyDatagramOptions.fromRecoveryDeadline()` so socket
