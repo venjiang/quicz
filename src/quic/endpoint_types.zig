@@ -531,6 +531,16 @@ pub const EndpointFeedInstalledKeyPathUpdateResult = struct {
     selected_output_path: ?endpoint.Udp4Tuple = null,
 };
 
+/// Result from feeding with path update, then polling installed-key output.
+pub const EndpointFeedPathUpdateDatagramPollResult = struct {
+    /// Receive, path-validation, and route-update result.
+    feed: EndpointFeedInstalledKeyPathUpdateResult,
+    /// Protected datagram emitted after receive processing, if any.
+    datagram: ?EndpointPolledDatagramResult = null,
+    /// UDP tuple selected for `datagram` when path-validation output is emitted.
+    output_path: ?endpoint.Udp4Tuple = null,
+};
+
 /// Result from feeding one installed-key datagram, then selecting a wakeup.
 pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = struct {
     /// Receive classification and processing result.

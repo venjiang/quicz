@@ -42261,24 +42261,32 @@ test "EndpointConnectionLifecycle feed installed-key path update commits after P
     try client.sendPing();
     const migrated_ping = (try client.pollProtectedShortDatagramWithInstalledKeys(1, &server_dcid)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(migrated_ping);
-    const ping_result = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+    const ping_result = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
         188,
         &server,
         new_path,
         2,
         migrated_ping,
         options,
+        .{
+            .space = .application,
+            .destination_connection_id = &client_dcid,
+        },
     );
-    const ping_route = switch (ping_result.feed) {
+    const ping_route = switch (ping_result.feed.feed) {
         .routed => |route| route,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expect(ping_route.path_changed);
-    try std.testing.expect(ping_result.updated_route == null);
-    try std.testing.expect(ping_result.path_challenge_queued);
-    try std.testing.expect((ping_result.selected_output_path orelse return error.TestUnexpectedResult).eql(new_path));
-    try std.testing.expectEqual(@as(usize, 1), server.pendingPathChallengeCount());
-    try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+    try std.testing.expect(ping_result.feed.updated_route == null);
+    try std.testing.expect(ping_result.feed.path_challenge_queued);
+    try std.testing.expect((ping_result.feed.selected_output_path orelse return error.TestUnexpectedResult).eql(new_path));
+    try std.testing.expect((ping_result.output_path orelse return error.TestUnexpectedResult).eql(new_path));
+    const challenge_packet = ping_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(challenge_packet.datagram);
+    try std.testing.expectEqual(@as(u64, 188), challenge_packet.connection_id);
+    try std.testing.expectEqual(@as(usize, 0), server.pendingPathChallengeCount());
+    try std.testing.expectEqual(@as(usize, 1), server.outstandingPathChallengeCount());
     try std.testing.expect((try lifecycle.routeDatagram(new_path, migrated_ping)).path_changed);
 
     try client.sendPing();
@@ -42294,31 +42302,37 @@ test "EndpointConnectionLifecycle feed installed-key path update commits after P
     );
     try std.testing.expect(!duplicate_ping_result.path_challenge_queued);
     try std.testing.expect(duplicate_ping_result.selected_output_path == null);
-    try std.testing.expectEqual(@as(usize, 1), server.pendingPathChallengeCount());
-    try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());
+    try std.testing.expectEqual(@as(usize, 0), server.pendingPathChallengeCount());
+    try std.testing.expectEqual(@as(usize, 1), server.outstandingPathChallengeCount());
 
-    const challenge = (try server.pollProtectedShortDatagramWithInstalledKeys(3, &client_dcid)) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(challenge);
-    try client.processProtectedShortDatagramWithInstalledKeys(5, client_dcid.len, challenge);
+    try client.processProtectedShortDatagramWithInstalledKeys(5, client_dcid.len, challenge_packet.datagram);
 
     const response = (try client.pollProtectedShortDatagramWithInstalledKeys(6, &server_dcid)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(response);
-    const validation_result = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+    const validation_result = try lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
         188,
         &server,
         new_path,
         7,
         response,
         options,
+        .{
+            .space = .application,
+            .destination_connection_id = &client_dcid,
+        },
     );
-    const response_route = switch (validation_result.feed) {
+    const response_route = switch (validation_result.feed.feed) {
         .routed => |route| route,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expect(response_route.path_changed);
-    const updated_route = validation_result.updated_route orelse return error.TestUnexpectedResult;
-    try std.testing.expect(!validation_result.path_challenge_queued);
-    try std.testing.expect((validation_result.selected_output_path orelse return error.TestUnexpectedResult).eql(new_path));
+    const updated_route = validation_result.feed.updated_route orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!validation_result.feed.path_challenge_queued);
+    try std.testing.expect((validation_result.feed.selected_output_path orelse return error.TestUnexpectedResult).eql(new_path));
+    try std.testing.expect((validation_result.output_path orelse return error.TestUnexpectedResult).eql(new_path));
+    const ack_packet = validation_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack_packet.datagram);
+    try std.testing.expectEqual(@as(u64, 188), ack_packet.connection_id);
     try std.testing.expectEqual(@as(u64, 188), updated_route.connection_id);
     try std.testing.expect(!updated_route.path_changed);
     try std.testing.expectEqual(@as(usize, 0), server.outstandingPathChallengeCount());

@@ -123,6 +123,7 @@ pub const EndpointDueWorkCryptoBackendDatagramResult = endpoint_types.EndpointDu
 pub const EndpointDueWorkCryptoBackendDatagramDrainResult = endpoint_types.EndpointDueWorkCryptoBackendDatagramDrainResult;
 pub const EndpointFeedInstalledKeyDatagramResult = endpoint_types.EndpointFeedInstalledKeyDatagramResult;
 pub const EndpointFeedInstalledKeyPathUpdateResult = endpoint_types.EndpointFeedInstalledKeyPathUpdateResult;
+pub const EndpointFeedPathUpdateDatagramPollResult = endpoint_types.EndpointFeedPathUpdateDatagramPollResult;
 pub const EndpointFeedInstalledKeyDatagramNextDeadlineResult = endpoint_types.EndpointFeedInstalledKeyDatagramNextDeadlineResult;
 pub const EndpointFeedPendingWorkNextDeadlineResult = endpoint_types.EndpointFeedPendingWorkNextDeadlineResult;
 pub const EndpointFeedPendingWorkDatagramPollResult = endpoint_types.EndpointFeedPendingWorkDatagramPollResult;
@@ -1529,6 +1530,54 @@ pub const EndpointConnectionLifecycle = struct {
             .version_negotiation => |response| .{ .feed = .{ .version_negotiation = response } },
             .stateless_reset => |reset| .{ .feed = .{ .stateless_reset = reset } },
             .dropped => .{ .feed = .dropped },
+        };
+    }
+
+    /// Feed with validated path-update handling, then poll installed-key output.
+    ///
+    /// This single-connection socket-loop step pairs any immediate
+    /// path-validation-related output with the UDP tuple selected by the core
+    /// feed result. Ordinary receive processing, route commit, and polling
+    /// semantics are inherited from the underlying feed and poll helpers.
+    pub fn feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        feed_options: EndpointFeedInstalledKeyDatagramOptions,
+        poll_options: EndpointPollInstalledKeyDatagramOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedPathUpdateDatagramPollResult {
+        const feed = try self.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+            connection_id,
+            connection,
+            path,
+            now_millis,
+            datagram,
+            feed_options,
+        );
+        switch (feed.feed) {
+            .routed => {},
+            else => return .{ .feed = feed },
+        }
+        const polled = try self.pollDatagram(
+            connection_id,
+            connection,
+            now_millis,
+            poll_options,
+        );
+        const polled_result: ?EndpointPolledDatagramResult = if (polled) |protected_datagram|
+            .{
+                .connection_id = connection_id,
+                .datagram = protected_datagram,
+            }
+        else
+            null;
+        return .{
+            .feed = feed,
+            .datagram = polled_result,
+            .output_path = if (polled_result != null) feed.selected_output_path else null,
         };
     }
 
