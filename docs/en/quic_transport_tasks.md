@@ -114,8 +114,8 @@ Client endpoint due-recovery service now polls the due packet number space, not
 only the Application short-packet path. `Tls13ClientTransport.pollRecoveryDatagram()`
 emits Initial, Handshake, or Application protected output according to the
 serviced RFC 9002 timer, and `Tls13ClientEndpoint` pairs that output with the
-committed route. Tests cover Initial PTO route output and the existing
-Application PTO route output.
+committed route. Tests cover Initial and Handshake PTO route output plus the
+existing Application PTO route output.
 
 ### Packet-number reordering evidence
 

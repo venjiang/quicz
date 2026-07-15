@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const buffer = @import("buffer.zig");
+const connection_module = @import("connection.zig");
 const connection_config = @import("connection_config.zig");
 const endpoint = @import("endpoint.zig");
 const endpoint_lifecycle = @import("endpoint_lifecycle.zig");
@@ -16,6 +17,7 @@ const client_transport = @import("tls13_client_transport.zig");
 const transport_types = @import("transport_types.zig");
 
 const Config = connection_config.Config;
+const Connection = connection_module.Connection;
 const EndpointConnectionLifecycle = endpoint_lifecycle.EndpointConnectionLifecycle;
 const Tls13ClientTransport = client_transport.Tls13ClientTransport;
 
@@ -757,6 +759,90 @@ test "Tls13ClientEndpoint services Initial recovery with committed route output"
     try std.testing.expect(output.path.eql(new_path));
     try std.testing.expect(output.datagram.len >= 1200);
     try std.testing.expectEqual(packet.HeaderForm.long, packet.parseHeaderForm(output.datagram[0]));
+}
+
+test "Tls13ClientEndpoint services Handshake recovery with committed route output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59 };
+    const server_scid = [_]u8{ 0x62, 0x63, 0x64, 0x65 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = old_path.remote,
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        20,
+        old_path,
+        .{ .active_migration_disabled = false },
+        .{ .initial_rtt_ms = 100 },
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    var scratch: [8192]u8 = undefined;
+    const initial = try client.beginWithRoutePath(1, &scratch);
+    defer std.testing.allocator.free(initial.datagram);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.setLocalInitialSourceConnectionId(&server_scid);
+    try server.sendPingInSpace(.initial);
+    const initial_secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+    const server_initial = (try server.pollProtectedLongDatagram(
+        2,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        .{ .initial = initial_secrets.server },
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_initial);
+    try client.transport.connection.processProtectedLongDatagramInSpace(
+        .initial,
+        3,
+        client.transport.server_initial_keys,
+        server_initial,
+    );
+    try client.transport.connection.discardPacketNumberSpace(.initial);
+
+    const client_handshake_secret = [_]u8{0x21} ** protection.traffic_secret_len;
+    const server_handshake_secret = [_]u8{0x22} ** protection.traffic_secret_len;
+    try client.transport.connection.installHandshakeTrafficSecrets(.{
+        .local = client_handshake_secret,
+        .peer = server_handshake_secret,
+    });
+    try client.transport.connection.sendPingInSpace(.handshake);
+    const first = (try client.transport.connection.pollProtectedHandshakeDatagramWithInstalledKeys(
+        4,
+        &server_scid,
+        &client_scid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    try client.lifecycle.armRecoveryTimerFromConnection(client.connection_id, &client.transport.connection);
+
+    const deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.handshake, deadline.recovery.space);
+    _ = try client.updatePath(new_path);
+
+    const before_deadline = try client.serviceDueDeadlineAndPollDatagramWithRoutePath(deadline.deadlineMillis() - 1);
+    try std.testing.expect(before_deadline == null);
+
+    const serviced = (try client.serviceDueDeadlineAndPollDatagramWithRoutePath(deadline.deadlineMillis())) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(serviced.deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.handshake, serviced.deadline.recovery.space);
+    const output = serviced.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(output.datagram);
+    try std.testing.expect(output.path.eql(new_path));
+    const info = try protection.peekProtectedLongPacketInfo(output.datagram);
+    try std.testing.expectEqual(packet.PacketType.handshake, info.packet_type);
 }
 
 test "Tls13ClientEndpoint services due recovery with committed route output" {
