@@ -248,6 +248,7 @@ const BuiltProtectedLongPacket = struct {
     ack_eliciting: bool,
     close_packet: bool = false,
     sent_stream_frame: ?PendingStreamFrame = null,
+    queued_stream_remainder: ?PendingStreamFrame = null,
     sent_reset_stream_frame: ?frame.ResetStreamFrame = null,
     sent_stop_sending_frame: ?frame.StopSendingFrame = null,
     local_original_destination_connection_id: [max_connection_id_len]u8 = undefined,
@@ -279,6 +280,10 @@ const BuiltProtectedLongPacket = struct {
         if (self.sent_stream_frame) |pending| {
             allocator.free(pending.data);
             self.sent_stream_frame = null;
+        }
+        if (self.queued_stream_remainder) |pending| {
+            allocator.free(pending.data);
+            self.queued_stream_remainder = null;
         }
     }
 };
@@ -4811,21 +4816,7 @@ pub const Connection = struct {
             packet_space.largest_acknowledged.*,
         ) catch return error.Internal;
 
-        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
-        const plaintext_len = @max(encoded_frame_len, min_payload_len);
-        if (plaintext_len > self.maxTxDatagramSize()) return error.BufferTooSmall;
-
-        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
-        defer self.allocator.free(plaintext);
-        @memset(plaintext, 0);
-
-        var plaintext_out = buffer.fixedWriter(plaintext);
-        frame.encodeFrame(plaintext_out.writer(), frame_to_send) catch |err| switch (err) {
-            error.NoSpaceLeft => return error.BufferTooSmall,
-            else => return error.Internal,
-        };
-
-        const datagram = protection.protectLongPacketAes128(self.allocator, .{
+        const header = packet.LongHeader{
             .version = self.config.chosen_version,
             .dcid = dcid,
             .scid = scid,
@@ -4833,7 +4824,69 @@ pub const Connection = struct {
             .token = &[_]u8{},
             .packet_number = packet_number,
             .payload_length = 0,
-        }, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
+        };
+        const min_payload_len = if (packet_number_encoding.len >= 4) 0 else 4 - packet_number_encoding.len;
+        var protected_frame = frame_to_send;
+        var protected_frame_len = encoded_frame_len;
+        var queued_stream_remainder: ?PendingStreamFrame = null;
+        errdefer if (queued_stream_remainder) |remainder| self.allocator.free(remainder.data);
+        if (consume.stream) {
+            const stream = switch (frame_to_send) {
+                .stream => |value| value,
+                else => return error.Internal,
+            };
+            if (stream.data.len != 0) {
+                var low: usize = 1;
+                var high: usize = stream.data.len;
+                var stream_data_len: usize = 0;
+                while (low <= high) {
+                    const candidate = low + (high - low) / 2;
+                    const candidate_frame_len = try streamFrameWireLen(stream.stream_id, stream.offset, candidate);
+                    const candidate_plaintext_len = @max(candidate_frame_len, min_payload_len);
+                    if (try protectedLongDatagramWireLen(header, packet_number_encoding.len, candidate_plaintext_len) <= self.maxTxDatagramSize()) {
+                        stream_data_len = candidate;
+                        low = candidate + 1;
+                    } else {
+                        high = candidate - 1;
+                    }
+                }
+                if (stream_data_len == 0) return error.BufferTooSmall;
+                protected_frame = .{ .stream = .{
+                    .stream_id = stream.stream_id,
+                    .offset = stream.offset,
+                    .fin = stream.fin and stream_data_len == stream.data.len,
+                    .data = stream.data[0..stream_data_len],
+                } };
+                protected_frame_len = try streamFrameWireLen(stream.stream_id, stream.offset, stream_data_len);
+                if (stream_data_len < stream.data.len) {
+                    const remainder_offset = streamEndOffset(stream.offset, stream_data_len) orelse return error.Internal;
+                    const remainder_data = self.allocator.dupe(u8, stream.data[stream_data_len..]) catch return error.OutOfMemory;
+                    queued_stream_remainder = .{
+                        .stream_id = stream.stream_id,
+                        .offset = remainder_offset,
+                        .fin = stream.fin,
+                        .data = remainder_data,
+                    };
+                }
+            }
+        }
+
+        const plaintext_len = @max(protected_frame_len, min_payload_len);
+        if (try protectedLongDatagramWireLen(header, packet_number_encoding.len, plaintext_len) > self.maxTxDatagramSize()) {
+            return error.BufferTooSmall;
+        }
+
+        const plaintext = self.allocator.alloc(u8, plaintext_len) catch return error.OutOfMemory;
+        defer self.allocator.free(plaintext);
+        @memset(plaintext, 0);
+
+        var plaintext_out = buffer.fixedWriter(plaintext);
+        frame.encodeFrame(plaintext_out.writer(), protected_frame) catch |err| switch (err) {
+            error.NoSpaceLeft => return error.BufferTooSmall,
+            else => return error.Internal,
+        };
+
+        const datagram = protection.protectLongPacketAes128(self.allocator, header, packet_number_encoding, keys, plaintext) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NoSpaceLeft => return error.BufferTooSmall,
             else => return error.InvalidPacket,
@@ -4842,7 +4895,7 @@ pub const Connection = struct {
 
         var sent_stream_frame: ?PendingStreamFrame = null;
         if (consume.stream) {
-            const stream = switch (frame_to_send) {
+            const stream = switch (protected_frame) {
                 .stream => |stream| stream,
                 else => return error.Internal,
             };
@@ -4857,14 +4910,14 @@ pub const Connection = struct {
             self.allocator.free(pending.data);
         };
         const sent_reset_stream_frame: ?frame.ResetStreamFrame = if (consume.reset_stream)
-            switch (frame_to_send) {
+            switch (protected_frame) {
                 .reset_stream => |reset| reset,
                 else => return error.Internal,
             }
         else
             null;
         const sent_stop_sending_frame: ?frame.StopSendingFrame = if (consume.stop_sending)
-            switch (frame_to_send) {
+            switch (protected_frame) {
                 .stop_sending => |stop_sending| stop_sending,
                 else => return error.Internal,
             }
@@ -4876,8 +4929,9 @@ pub const Connection = struct {
             .space = .application,
             .packet_number = packet_number,
             .datagram = datagram,
-            .ack_eliciting = frameIsAckEliciting(frame_to_send),
+            .ack_eliciting = frameIsAckEliciting(protected_frame),
             .sent_stream_frame = sent_stream_frame,
+            .queued_stream_remainder = queued_stream_remainder,
             .sent_reset_stream_frame = sent_reset_stream_frame,
             .sent_stop_sending_frame = sent_stop_sending_frame,
             .consume_reset_stream = consume.reset_stream,
@@ -5155,7 +5209,12 @@ pub const Connection = struct {
         if (built.consume_reset_stream) _ = self.pending_reset_streams.orderedRemove(0);
         if (built.consume_stop_sending) _ = self.pending_stop_sending.orderedRemove(0);
         if (built.consume_stream) {
-            const removed = self.send_queue.orderedRemove(0);
+            const removed = self.send_queue.items[0];
+            if (built.queued_stream_remainder) |remainder| {
+                self.send_queue.items[0] = remainder;
+            } else {
+                _ = self.send_queue.orderedRemove(0);
+            }
             self.allocator.free(removed.data);
         }
         if (built.clear_ack) packet_space.pending_ack_largest.* = null;
@@ -69930,6 +69989,71 @@ test "protected short stream packets fragment queued writes against the exact pa
         defer std.testing.allocator.free(datagram);
         try std.testing.expect(datagram.len <= 1200);
         try server.processProtectedShortDatagramWithInstalledKeys(now_millis + 1, server_scid.len, datagram);
+        now_millis += 2;
+        packets_sent += 1;
+    }
+    try std.testing.expect(packets_sent > 1);
+
+    var received: [payload.len]u8 = undefined;
+    var received_len: usize = 0;
+    while (try server.recvOnStream(stream_id, received[received_len..])) |count| {
+        received_len += count;
+    }
+    try std.testing.expectEqual(payload.len, received_len);
+    try std.testing.expectEqualSlices(u8, &payload, &received);
+}
+
+test "protected zero-rtt stream packets fragment queued writes against the exact packet budget" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24 };
+    const server_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 8192,
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 8192,
+        .max_datagram_size = 8192,
+    });
+    defer server.deinit();
+    try client.confirmHandshake();
+    try client.installZeroRttTrafficSecrets(.{ .local = secrets.client.secret });
+    try server.installZeroRttTrafficSecrets(.{ .peer = secrets.client.secret });
+    try server.acceptZeroRtt();
+
+    const payload = [_]u8{'z'} ** 4096;
+    const stream_id = try client.openStream();
+    try client.sendOnStream(stream_id, &payload, true);
+    try std.testing.expectEqual(@as(usize, 1), client.send_queue.items.len);
+
+    // The remembered peer transport parameters may be narrower than the local
+    // write limit used when the application queued the early-data STREAM.
+    client.peer_max_udp_payload_size = 1200;
+
+    var now_millis: i64 = 1;
+    const first = (try client.pollProtectedZeroRttDatagramWithInstalledKeys(now_millis, &server_scid, &client_scid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first);
+    try std.testing.expect(first.len <= 1200);
+    try std.testing.expectEqual(@as(usize, 1), client.send_queue.items.len);
+    const first_sent = client.sent_packets.items[client.sent_packets.items.len - 1].stream_frame orelse return error.TestUnexpectedResult;
+    try std.testing.expect(first_sent.data.len < payload.len);
+    try std.testing.expect(!first_sent.fin);
+    try std.testing.expectEqual(first_sent.offset + first_sent.data.len, client.send_queue.items[0].offset);
+    try std.testing.expect(client.send_queue.items[0].fin);
+    try server.processProtectedZeroRttDatagramWithInstalledKeys(now_millis + 1, first);
+    now_millis += 2;
+
+    var packets_sent: usize = 1;
+    while (client.send_queue.items.len != 0) {
+        const datagram = (try client.pollProtectedZeroRttDatagramWithInstalledKeys(now_millis, &server_scid, &client_scid)) orelse return error.TestUnexpectedResult;
+        defer std.testing.allocator.free(datagram);
+        try std.testing.expect(datagram.len <= 1200);
+        try server.processProtectedZeroRttDatagramWithInstalledKeys(now_millis + 1, datagram);
         now_millis += 2;
         packets_sent += 1;
     }
