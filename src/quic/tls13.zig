@@ -1563,13 +1563,12 @@ pub const Tls13Handshake = struct {
             }
         }
 
-        // QUIC transport parameters
-        if (self.tp_encoded_len > 0) {
-            if (pos + 4 + self.tp_encoded_len > buf.len) return error.DecodeError;
-            pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.quic_transport_parameters), self.tp_encoded_len);
-            @memcpy(buf[pos..][0..self.tp_encoded_len], self.tp_encoded[0..self.tp_encoded_len]);
-            pos += self.tp_encoded_len;
-        }
+        // QUIC transport parameters are mandatory in QUIC TLS, even when the
+        // encoded parameter list is empty (RFC 9001 §8).
+        if (pos + 4 + self.tp_encoded_len > buf.len) return error.DecodeError;
+        pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.quic_transport_parameters), self.tp_encoded_len);
+        @memcpy(buf[pos..][0..self.tp_encoded_len], self.tp_encoded[0..self.tp_encoded_len]);
+        pos += self.tp_encoded_len;
 
         // psk_key_exchange_modes
         if (pos + 4 + 2 > buf.len) return error.DecodeError;
@@ -1775,6 +1774,7 @@ pub const Tls13Handshake = struct {
         const ext_end = pos + ext_total;
 
         var have_alpn = false;
+        var have_quic_transport_parameters = false;
         var seen_known_extensions: u16 = 0;
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
@@ -1814,11 +1814,13 @@ pub const Tls13Handshake = struct {
                     if (el > self.peer_tp.len) return error.DecodeError;
                     self.peer_tp_len = el;
                     @memcpy(self.peer_tp[0..self.peer_tp_len], ext);
+                    have_quic_transport_parameters = true;
                 },
                 else => {}, // ignore unrecognized extensions
             }
         }
 
+        if (!have_quic_transport_parameters) return error.MissingExtension;
         if (self.config.alpn.len > 0 and !have_alpn) return error.NoApplicationProtocol;
 
         self.transcript.update(msg);
@@ -2138,6 +2140,7 @@ pub const Tls13Handshake = struct {
         var have_supported_groups = false;
         var have_signature_algorithms = false;
         var have_psk_key_exchange_modes = false;
+        var have_quic_transport_parameters = false;
         var client_supports_x25519 = false;
         var client_supports_server_sig = false;
         var client_supports_psk_dhe_ke = false;
@@ -2281,6 +2284,7 @@ pub const Tls13Handshake = struct {
                     if (el > self.peer_tp.len) return error.DecodeError;
                     self.peer_tp_len = el;
                     @memcpy(self.peer_tp[0..self.peer_tp_len], ext);
+                    have_quic_transport_parameters = true;
                 },
                 @intFromEnum(ExtType.psk_key_exchange_modes) => {
                     if (el < 2) return error.DecodeError;
@@ -2365,6 +2369,7 @@ pub const Tls13Handshake = struct {
         if (!have_version) return error.UnsupportedVersion;
         if (!have_key_share) return error.NoKeyShare;
         if (!have_supported_groups) return error.MissingExtension;
+        if (!have_quic_transport_parameters) return error.MissingExtension;
         if (have_supported_groups and !client_supports_x25519) return error.NoKeyShare;
         if (self.config.cert_chain_der.len > 0 and !have_signature_algorithms) return error.MissingExtension;
         if (have_signature_algorithms and !client_supports_server_sig) return error.UnsupportedSignatureAlgorithm;
@@ -2473,7 +2478,7 @@ pub const Tls13Handshake = struct {
         const tp = self.tp_encoded[0..self.tp_encoded_len];
         if (alpn.len > std.math.maxInt(u8)) return error.DecodeError;
         const alpn_ext_len = if (alpn.len > 0) 4 + 2 + 1 + alpn.len else 0;
-        const tp_ext_len = if (tp.len > 0) 4 + tp.len else 0;
+        const tp_ext_len = 4 + tp.len;
         const ee_len = std.math.add(usize, 4 + 2, alpn_ext_len) catch return error.DecodeError;
         const total_len = std.math.add(usize, ee_len, tp_ext_len) catch return error.DecodeError;
         if (total_len > self.out_buf.len) return error.DecodeError;
@@ -2721,6 +2726,14 @@ test "Tls13Handshake client builds ClientHello with transport parameters" {
         }
     }
     try std.testing.expect(found_tp);
+}
+
+test "Tls13Handshake client builds ClientHello with empty transport parameters extension" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const transport_parameters = try clientHelloExtension(hello, @intFromEnum(ExtType.quic_transport_parameters));
+
+    try std.testing.expectEqual(@as(usize, 0), transport_parameters.body_len);
 }
 
 test "Tls13Handshake client rejects empty local SNI" {
@@ -3152,7 +3165,7 @@ test "Tls13Handshake client rejects ServerHello missing key_share" {
 // ─── Tests for client handshake completion ───────────────────────────
 
 /// Build a minimal EncryptedExtensions carrying an optional ALPN protocol
-/// and an optional opaque QUIC transport parameters blob.
+/// and a mandatory opaque QUIC transport parameters blob.
 pub fn buildEncryptedExtensions(buf: []u8, alpn: []const u8, peer_tp: []const u8) usize {
     var p: usize = 0;
     buf[p] = @intFromEnum(HandshakeType.encrypted_extensions);
@@ -3170,11 +3183,9 @@ pub fn buildEncryptedExtensions(buf: []u8, alpn: []const u8, peer_tp: []const u8
         @memcpy(buf[p..][0..alpn.len], alpn);
         p += alpn.len;
     }
-    if (peer_tp.len > 0) {
-        p = writeExtHeader(buf, p, @intFromEnum(ExtType.quic_transport_parameters), peer_tp.len);
-        @memcpy(buf[p..][0..peer_tp.len], peer_tp);
-        p += peer_tp.len;
-    }
+    p = writeExtHeader(buf, p, @intFromEnum(ExtType.quic_transport_parameters), peer_tp.len);
+    @memcpy(buf[p..][0..peer_tp.len], peer_tp);
+    p += peer_tp.len;
     const ext_len = p - ext_start - 2;
     writeU16(buf[ext_start..], @intCast(ext_len));
     const msg_len = p - 4;
@@ -3215,6 +3226,41 @@ fn appendDuplicateEncryptedExtensionsExtension(buf: []u8, msg_len: usize, ext_ty
                 @as(u16, @intCast(extensions_len + duplicate_len)),
             );
             return buf[0 .. msg_len + duplicate_len];
+        }
+        pos += current_len;
+    }
+    return error.TestUnexpectedResult;
+}
+
+const EncryptedExtensionsExtension = struct {
+    header_offset: usize,
+    body_offset: usize,
+    body_len: usize,
+};
+
+fn encryptedExtensionsExtension(msg: []const u8, ext_type: u16) !EncryptedExtensionsExtension {
+    if (msg.len < 6 or msg[0] != @intFromEnum(HandshakeType.encrypted_extensions)) {
+        return error.TestUnexpectedResult;
+    }
+    var pos: usize = 4;
+    const extensions_len = readU16(msg[pos..]);
+    pos += 2;
+    if (pos + extensions_len != msg.len) return error.TestUnexpectedResult;
+    const ext_end = pos + extensions_len;
+
+    while (pos < ext_end) {
+        if (pos + 4 > ext_end) return error.TestUnexpectedResult;
+        const header_offset = pos;
+        const current_type = readU16(msg[pos..]);
+        const current_len = readU16(msg[pos + 2 ..]);
+        pos += 4;
+        if (pos + current_len > ext_end) return error.TestUnexpectedResult;
+        if (current_type == ext_type) {
+            return .{
+                .header_offset = header_offset,
+                .body_offset = pos,
+                .body_len = current_len,
+            };
         }
         pos += current_len;
     }
@@ -3591,6 +3637,21 @@ test "Tls13Handshake client rejects missing ALPN selection when offered" {
     var ee_buf: [256]u8 = undefined;
     hs.provideData(ee_buf[0..buildEncryptedExtensions(&ee_buf, "", &[_]u8{})]);
     try std.testing.expectError(error.NoApplicationProtocol, hs.step());
+}
+
+test "Tls13Handshake client rejects EncryptedExtensions without transport parameters" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+
+    var ee_buf: [256]u8 = undefined;
+    const ee_len = buildEncryptedExtensions(&ee_buf, "", &[_]u8{});
+    const transport_parameters = try encryptedExtensionsExtension(
+        ee_buf[0..ee_len],
+        @intFromEnum(ExtType.quic_transport_parameters),
+    );
+    writeU16(ee_buf[transport_parameters.header_offset..][0..2], 0xaaaa);
+
+    hs.provideData(ee_buf[0..ee_len]);
+    try std.testing.expectError(error.MissingExtension, hs.clientProcessEncryptedExtensions());
 }
 
 test "Tls13Handshake client rejects duplicate known EncryptedExtensions extensions" {
@@ -4163,6 +4224,17 @@ test "Tls13Handshake server rejects ClientHello PSK binder with invalid length" 
     try std.testing.expectError(error.DecodeError, server.step());
 }
 
+test "Tls13Handshake server rejects ClientHello without transport parameters" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const transport_parameters = try clientHelloExtension(hello, @intFromEnum(ExtType.quic_transport_parameters));
+    writeU16(hello[transport_parameters.header_offset..][0..2], 0xaaaa);
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.MissingExtension, server.step());
+}
+
 test "Tls13Handshake server rejects trailing ClientHello PSK binder bytes" {
     const psk = [_]u8{0xab} ** secret_len;
     var hello_buf: [1024]u8 = undefined;
@@ -4188,7 +4260,7 @@ test "Tls13Handshake server rejects oversized ClientHello transport parameters" 
     const base_hello = try clientHelloBytes(.{}, &hello_buf);
     var peer_tp: [1025]u8 = undefined;
     @memset(&peer_tp, 0xaa);
-    const hello = try appendClientHelloRawExtension(
+    const hello = try extendClientHelloExtensionBody(
         &hello_buf,
         base_hello.len,
         @intFromEnum(ExtType.quic_transport_parameters),
