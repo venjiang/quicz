@@ -134,6 +134,44 @@ pub const Tls13ClientEndpoint = struct {
         };
     }
 
+    /// Route/process one peer datagram and surface close-on-frame-error output.
+    ///
+    /// This keeps the existing throwing receive path unchanged for callers that
+    /// only need success output, while giving socket loops one bounded step that
+    /// can send a protected CONNECTION_CLOSE after an authenticated 1-RTT frame
+    /// error.
+    pub fn receiveWithRoutePathOrClose(
+        self: *Tls13ClientEndpoint,
+        now_millis: i64,
+        scratch: []u8,
+        datagram: []const u8,
+    ) !ReceiveOrCloseDatagramPathResult {
+        const received = self.receive(now_millis, scratch, datagram) catch |err| {
+            if (err != error.InvalidPacket) return err;
+            return .{
+                .receive_error = error.InvalidPacket,
+                .outbound_application = try self.pollApplicationDatagramWithRoutePath(now_millis),
+            };
+        };
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        return .{
+            .receive = received,
+            .outbound_initial = if (received.transport.outbound_initial) |bytes| .{
+                .datagram = bytes,
+                .path = path,
+            } else null,
+            .outbound_handshake = if (received.transport.outbound_handshake) |bytes| .{
+                .datagram = bytes,
+                .path = path,
+            } else null,
+            .outbound_application = if (received.transport.application_processed)
+                try self.pollApplicationDatagramWithRoutePath(now_millis)
+            else
+                null,
+        };
+    }
+
     /// Move the client's registered UDP route after caller-selected migration.
     pub fn updatePath(self: *Tls13ClientEndpoint, new_path: endpoint.Udp4Tuple) endpoint.RouteError!endpoint.RouteResult {
         const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
@@ -300,6 +338,15 @@ pub const Tls13ClientEndpoint = struct {
         outbound_handshake: ?ApplicationDatagramPathResult = null,
     };
 
+    /// Client receive result that can carry close-on-frame-error output.
+    pub const ReceiveOrCloseDatagramPathResult = struct {
+        receive: ?ReceiveResult = null,
+        receive_error: ?transport_types.Error = null,
+        outbound_initial: ?ApplicationDatagramPathResult = null,
+        outbound_handshake: ?ApplicationDatagramPathResult = null,
+        outbound_application: ?ApplicationDatagramPathResult = null,
+    };
+
     /// Client endpoint application datagram paired with the committed route.
     pub const ApplicationDatagramPathResult = struct {
         datagram: []u8,
@@ -431,6 +478,71 @@ test "Tls13ClientEndpoint polls application output with committed route path" {
     try std.testing.expect(polled.path.eql(new_path));
     try std.testing.expect(polled.datagram.len != 0);
     try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
+}
+
+test "Tls13ClientEndpoint receive returns route-bound close on frame error" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = old_path.remote,
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        16,
+        old_path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const client_secret = [_]u8{0x31} ** protection.traffic_secret_len;
+    const server_secret = [_]u8{0x32} ** protection.traffic_secret_len;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = client_secret,
+        .peer = server_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xac, 0xad, 0xae, 0xaf };
+    const reset_token = [_]u8{0x75} ** 16;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+    _ = try client.updatePath(new_path);
+
+    const invalid_plaintext = [_]u8{0x1f} ++ ([_]u8{0} ** 31);
+    const invalid_packet_number = client.transport.connection.nextPeerPacketNumber(.application);
+    const invalid_datagram = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &client_scid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = invalid_packet_number,
+    }, try packet.encodePacketNumberForHeader(invalid_packet_number, null), protection.deriveAes128PacketProtectionKeys(server_secret), &invalid_plaintext);
+    defer std.testing.allocator.free(invalid_datagram);
+
+    var scratch: [128]u8 = undefined;
+    const received = try client.receiveWithRoutePathOrClose(10, &scratch, invalid_datagram);
+    try std.testing.expect(received.receive == null);
+    try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), received.receive_error);
+    try std.testing.expectEqual(transport_types.ConnectionState.closing, client.transport.connection.connectionState());
+    const close_datagram = received.outbound_application orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_datagram.datagram);
+    try std.testing.expect(close_datagram.path.eql(new_path));
+    try std.testing.expect(close_datagram.datagram.len != 0);
 }
 
 test "Tls13ClientEndpoint services due recovery with committed route output" {

@@ -308,7 +308,7 @@ pub const Tls13ClientTransport = struct {
         }
         var application_processed = false;
         if (offset < datagram.len and !isZeroOnlyPadding(datagram[offset..])) {
-            try self.connection.processProtectedShortDatagramWithInstalledKeys(
+            try self.connection.processProtectedShortDatagramWithInstalledKeysOrClose(
                 now_millis,
                 self.local_source_connection_id.len,
                 datagram[offset..],
