@@ -1,6 +1,9 @@
 //! Pure-Zig TLS 1.3 QUIC echo server for local process interoperability.
 //!
 //! Usage: quicz-tls13-process-echo-server <bind_host> <bind_port> [completion_target] [sequential|concurrent|concurrent-retry|concurrent-limit|concurrent-reset|concurrent-stop|concurrent-uni|rolling] [max_active_connections]
+//!
+//! A concurrent mode with completion_target=0 runs until interrupted and
+//! requires an explicit positive max_active_connections value.
 //! Concurrent mode accepts and routes the requested number of loopback
 //! connections through one UDP socket and one endpoint lifecycle owner. It
 //! waits on the lifecycle's earliest deadline and retires idle connections.
@@ -212,7 +215,8 @@ fn serveConcurrent(
     var accepted_count: usize = 0;
     var completed: usize = 0;
 
-    receive_loop: while (completed < completion_target) {
+    const runs_continuously = completion_target == 0;
+    receive_loop: while (runs_continuously or completed < completion_target) {
         const next_deadline = try connections.nextDeadline(&lifecycle, allocator);
         const received = socket.receiveTimeout(
             io,
@@ -743,7 +747,7 @@ fn serveConcurrent(
             .dropped => {},
         }
     }
-    try require(accepted_count == completion_target);
+    try require(runs_continuously or accepted_count == completion_target);
     std.debug.print("zig_process_server: accepted_connections={d} max_active_connections={d} concurrent=true complete=true\n", .{ accepted_count, max_active_connections });
 }
 
@@ -759,12 +763,13 @@ pub fn main(init: std.process.Init) !void {
         try std.fmt.parseInt(usize, raw_count, 10)
     else
         1;
-    if (completion_target == 0) return error.InvalidConnectionCount;
     const mode = args.next() orelse "sequential";
     const max_active_connections = if (args.next()) |raw_count|
         try std.fmt.parseInt(usize, raw_count, 10)
+    else if (completion_target != 0)
+        completion_target
     else
-        completion_target;
+        return error.MissingActiveConnectionCapacity;
     if (max_active_connections == 0) return error.InvalidConnectionCount;
     if (args.next() != null) return error.TooManyArgs;
     const bind_address = try std.Io.net.IpAddress.parseIp4(bind_host, bind_port);
@@ -791,6 +796,7 @@ pub fn main(init: std.process.Init) !void {
         return serveConcurrent(allocator, io, &socket, bind_address, completion_target, max_active_connections, false, 8, false, false, true);
     }
     if (!std.mem.eql(u8, mode, "sequential")) return error.InvalidMode;
+    if (completion_target == 0) return error.InvalidConnectionCount;
 
     const alpn = [_][]const u8{"hq-interop"};
     for (0..completion_target) |connection_index| {

@@ -150,6 +150,10 @@ retired.
 The server now separates its finite completion target from its active-connection
 capacity. The optional fifth server argument sets `max_active_connections`; the
 default keeps the old behavior by using the completion target for both values.
+Passing `completion_target=0` in a concurrent mode creates a bounded
+long-lived endpoint: it serves until interrupted and requires an explicit,
+positive active-connection capacity. Retired close/idle records still release
+their slots before a later Initial can be accepted.
 `QUICZ_PROCESS_INTEROP_CONNECTIONS=3 QUICZ_PROCESS_INTEROP_MAX_ACTIVE_CONNECTIONS=1 QUICZ_PROCESS_INTEROP_MODE=rolling zig build run-tls13-process-interop`
 runs three independent TLS-owned echoes one after another through the
 concurrent lifecycle path. It proves that protected-close retirement releases

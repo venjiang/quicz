@@ -124,6 +124,9 @@ due-recovery poll view 与 installed-key receive view，因此热路径收包和
 服务端现在把有限的 completion target 与同时活跃连接容量分开：可选的第五个 server
 参数 `max_active_connections` 指定活跃上限；省略时仍沿用旧行为，即 completion target
 同时也是容量上限。执行
+在 concurrent 模式传入 `completion_target=0` 会创建有界的长生命周期 endpoint：它一直
+服务到被中断，且必须显式给出正数活跃连接上限。close/idle record 退役后仍会先释放槽位，
+随后才能接收新的 Initial。
 `QUICZ_PROCESS_INTEROP_CONNECTIONS=3 QUICZ_PROCESS_INTEROP_MAX_ACTIVE_CONNECTIONS=1 QUICZ_PROCESS_INTEROP_MODE=rolling zig build run-tls13-process-interop`
 会经同一个 concurrent lifecycle 路径依次运行三次 TLS-owned echo。它证明 protected close
 退役后会释放唯一的 route/map 槽位，下一条 Initial 才可被接收。这是可复用的有界容量证据，
