@@ -2412,6 +2412,12 @@ pub const Tls13Handshake = struct {
         if (self.local_tp_too_large) return error.DecodeError;
         const alpn = self.negotiated_alpn[0..self.negotiated_alpn_len];
         const tp = self.tp_encoded[0..self.tp_encoded_len];
+        if (alpn.len > std.math.maxInt(u8)) return error.DecodeError;
+        const alpn_ext_len = if (alpn.len > 0) 4 + 2 + 1 + alpn.len else 0;
+        const tp_ext_len = if (tp.len > 0) 4 + tp.len else 0;
+        const ee_len = std.math.add(usize, 4 + 2, alpn_ext_len) catch return error.DecodeError;
+        const total_len = std.math.add(usize, ee_len, tp_ext_len) catch return error.DecodeError;
+        if (total_len > self.out_buf.len) return error.DecodeError;
         const len = buildEncryptedExtensions(&self.out_buf, alpn, tp);
         self.transcript.update(self.out_buf[0..len]);
         self.state = .server_send_certificate;
@@ -3549,6 +3555,14 @@ test "Tls13Handshake server rejects oversized local transport parameters" {
     var tp: [1025]u8 = undefined;
     @memset(&tp, 0xaa);
     var hs = Tls13Handshake.initServer(.{}, &tp);
+
+    try std.testing.expectError(error.DecodeError, hs.serverBuildEncryptedExtensions());
+}
+
+test "Tls13Handshake server rejects oversized EncryptedExtensions ALPN output" {
+    var hs = Tls13Handshake.initServer(.{}, &[_]u8{});
+    @memset(&hs.negotiated_alpn, 'a');
+    hs.negotiated_alpn_len = hs.negotiated_alpn.len;
 
     try std.testing.expectError(error.DecodeError, hs.serverBuildEncryptedExtensions());
 }
