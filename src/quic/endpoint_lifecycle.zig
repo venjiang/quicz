@@ -7305,6 +7305,20 @@ pub const EndpointConnectionLifecycle = struct {
         return next;
     }
 
+    fn nextDeadlineAcrossReceiveConnections(
+        self: *const EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionReceiveView,
+    ) ?EndpointConnectionDeadline {
+        var next: ?EndpointConnectionDeadline = null;
+        for (connections) |view| {
+            const candidate = self.nextDeadline(view.connection_id, view.connection) orelse continue;
+            if (next == null or candidate.deadline_millis < next.?.deadline_millis) {
+                next = candidate;
+            }
+        }
+        return next;
+    }
+
     /// Drive a connection TLS/crypto backend under endpoint lifecycle ownership.
     ///
     /// This wraps `Connection.driveCryptoBackendInSpace()` and then refreshes
@@ -10801,6 +10815,7 @@ pub const EndpointConnectionLifecycle = struct {
             return .{
                 .pending_work = pending_work,
                 .drain = .{},
+                .next_deadline = self.nextDeadlineAcrossReceiveConnections(pending_connections),
             };
         }
 
@@ -10812,6 +10827,7 @@ pub const EndpointConnectionLifecycle = struct {
                 poll_space,
                 out,
             ),
+            .next_deadline = self.nextDeadlineAcrossReceiveConnections(pending_connections),
         };
     }
 
@@ -10834,6 +10850,7 @@ pub const EndpointConnectionLifecycle = struct {
             return .{
                 .pending_work = pending_work,
                 .drain = .{},
+                .next_deadline = self.nextDeadlineAcrossReceiveConnections(pending_connections),
             };
         }
 
@@ -10844,6 +10861,7 @@ pub const EndpointConnectionLifecycle = struct {
                 now_millis,
                 out,
             ),
+            .next_deadline = self.nextDeadlineAcrossReceiveConnections(pending_connections),
         };
     }
 

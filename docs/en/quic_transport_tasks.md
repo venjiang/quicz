@@ -93,6 +93,8 @@ The single-connection pending-work bounded-drain result now also returns the
 post-drain next deadline, so a caller-owned socket loop can service pending
 recovery work, drain bounded installed-key output, and keep its wakeup target
 without a separate lifecycle query.
+The cross-connection pending-work bounded-drain result now does the same across
+caller-owned connection maps, including explicit installed-key output options.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
@@ -2531,7 +2533,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   proves ordinary queued output is not polled when no recovery timer is
   serviced, a serviced PTO wakeup can return one protected output datagram, and
   bounded draining can return PTO output from two caller-owned connections in
-  one loop step.
+  one loop step. The bounded-drain result now also carries the next
+  endpoint-visible deadline selected across the caller-owned map after ordinary
+  and explicit-output drains.
 - 2026-06-10: Added pending-work-to-backend-to-output and
   pending-work-to-backend-to-bounded-drain loop steps:
   `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram()`,

@@ -357,6 +357,8 @@ pub const EndpointPendingWorkSweepDatagramDrainResult = struct {
     pending_work: EndpointPendingWorkSweepResult,
     /// Bounded output drain result after pending recovery work.
     drain: EndpointDatagramDrainResult,
+    /// Next endpoint-visible deadline after pending work and output drain.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from pending-work sweep followed by backend drive and output polling.

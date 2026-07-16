@@ -17748,6 +17748,10 @@ test "EndpointConnectionLifecycle pending-work cross-connection drain returns bo
     try std.testing.expectEqual(@as(u8, 1), second.recovery_state.pto_count);
     try std.testing.expectEqual(@as(usize, 2), first.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 2), second.sentPacketCount(.application));
+    const next_deadline = drained.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 202), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, next_deadline.recovery.?.space);
 }
 
 test "EndpointConnectionLifecycle pending-work cross-connection poll keeps explicit zero RTT output" {
@@ -17926,6 +17930,10 @@ test "EndpointConnectionLifecycle pending-work cross-connection drain keeps expl
     try std.testing.expectEqual(@as(u64, 213), out[1].connection_id);
     try std.testing.expectEqual(@as(u8, 1), first.recovery_state.pto_count);
     try std.testing.expectEqual(@as(u8, 1), second.recovery_state.pto_count);
+    const next_deadline = drained.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 212), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, next_deadline.recovery.?.space);
     try std.testing.expect(try protectedZeroRttContainsControlFrame(
         out[0].datagram,
         secrets.client,
