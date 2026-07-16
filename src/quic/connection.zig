@@ -51353,6 +51353,73 @@ test "EndpointConnectionLifecycle refreshes recovery timer when installed-key Ha
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
 }
 
+test "EndpointConnectionLifecycle routes installed-key Handshake receive and polls deadline" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x1c, 0x2c, 0x3c, 0x4c };
+    const server_dcid = [_]u8{ 0xac, 0xbc, 0xcc, 0xdc };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.installHandshakeTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+
+    var server = try Connection.init(std.testing.allocator, .server, .{
+        .max_idle_timeout_ms = 30,
+    });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_096);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const server_connection_id: u64 = 97;
+    try lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    try client.sendCryptoInSpace(.handshake, "routed handshake poll");
+    const client_datagram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        10,
+        &server_dcid,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(client_datagram);
+
+    const result = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysAndPollDatagram(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        client_datagram,
+        &client_dcid,
+        &server_dcid,
+    );
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqualSlices(u8, &server_dcid, result.route.destination_connection_id.asSlice());
+    const response = result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(response.datagram);
+    try std.testing.expectEqual(server_connection_id, response.connection_id);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next_deadline.kind);
+
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(12, response.datagram);
+    try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
+}
+
 test "EndpointConnectionLifecycle routes installed-key Handshake receive and drains output" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x19, 0x29, 0x39, 0x49 };
@@ -51427,6 +51494,7 @@ test "EndpointConnectionLifecycle routes installed-key Handshake receive and dra
     try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
     try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
     try std.testing.expectEqual(server_connection_id, drained[0].connection_id);
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), result.next_deadline);
 
     try client.processProtectedHandshakeDatagramWithInstalledKeys(12, drained[0].datagram);
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.handshake));
@@ -51486,6 +51554,71 @@ test "EndpointConnectionLifecycle installed-key Handshake OrClose polls close ou
 
     try client.processProtectedHandshakeDatagramWithInstalledKeys(13, result.datagram);
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
+}
+
+test "EndpointConnectionLifecycle routes installed-key Handshake OrClose drains deadline" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x1d, 0x2d, 0x3d, 0x4d };
+    const server_dcid = [_]u8{ 0xad, 0xbd, 0xcd, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const client_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_097);
+    const server_addr = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433);
+    const server_receive_path = endpoint.Udp4Tuple{
+        .local = server_addr,
+        .remote = client_addr,
+    };
+    const server_connection_id: u64 = 98;
+    try lifecycle.registerConnectionId(server_connection_id, &server_dcid, server_receive_path, .{
+        .sequence_number = 0,
+    });
+
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_handshake = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &server_dcid,
+        .scid = &client_dcid,
+        .packet_type = .handshake,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
+    defer std.testing.allocator.free(invalid_handshake);
+
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    const result = try lifecycle.processRoutedProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams(
+        server_connection_id,
+        &server,
+        server_receive_path,
+        11,
+        invalid_handshake,
+        &client_dcid,
+        &server_dcid,
+        &out,
+    );
+    defer for (out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(server_connection_id, out[0].connection_id);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.close_timeout, next_deadline.kind);
 }
 
 test "EndpointConnectionLifecycle refreshes recovery timer when installed-key Handshake poll rejects closed connection" {

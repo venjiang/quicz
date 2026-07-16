@@ -129,6 +129,9 @@ emission, or preserved-output route mismatch with no newly armed timer.
 Routed installed-key short-packet receive poll and bounded-drain results now
 also expose the post-output next deadline after route-owned 1-RTT receive,
 including protected close output from OrClose drain paths.
+Routed installed-key Handshake receive poll and bounded-drain results expose the
+same post-output next-deadline signal for route-owned Handshake socket loops,
+including protected close output from OrClose drain paths.
 The bounded variant
 `Tls13ClientEndpoint.receiveWithRoutePathOrCloseAndDrainDatagrams()` follows
 the same close boundary, drains route-bound protected close output into
@@ -1052,6 +1055,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   process one protected short packet, poll or bounded-drain installed-key
   output, and keep the next endpoint deadline without a separate query. Tests
   cover ACK output poll, ACK output drain, and OrClose protected close drain.
+  The same result types now carry routed installed-key Handshake poll/drain
+  deadlines; tests cover Handshake output poll, no-deadline drain, and OrClose
+  protected close drain.
 
 - 2026-06-24: Caller-keyed long-header backend-drive poll/drain helpers now
   treat backend-confirmed Handshake-space discard as a no-output result when

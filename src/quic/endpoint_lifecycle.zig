@@ -21133,6 +21133,7 @@ pub const EndpointConnectionLifecycle = struct {
                 dcid,
                 scid,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -21162,6 +21163,7 @@ pub const EndpointConnectionLifecycle = struct {
                 dcid,
                 scid,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -21295,6 +21297,7 @@ pub const EndpointConnectionLifecycle = struct {
                 scid,
                 out,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -21326,6 +21329,7 @@ pub const EndpointConnectionLifecycle = struct {
                 scid,
                 out,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
