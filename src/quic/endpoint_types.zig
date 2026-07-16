@@ -508,6 +508,8 @@ pub const EndpointDueWorkCryptoBackendDatagramResult = struct {
     /// Backend drive and output polling result when the due step did not
     /// already emit a datagram.
     backend: ?EndpointCryptoBackendDriveDatagramResult = null,
+    /// Next endpoint-visible deadline after due work, backend progress, and output poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from due-deadline work followed by optional backend/output draining.

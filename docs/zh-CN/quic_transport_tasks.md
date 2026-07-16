@@ -95,6 +95,8 @@ installed-key output options 与终态 cleanup。
 receive-to-pending-work/backend 的 poll 和 bounded-drain result 也会在普通 in-space、
 有序 cross-space、显式 output 以及 compatible-version 成功路径后暴露步骤后的下一
 deadline。
+single-connection due-deadline/backend poll result 现在也会在普通、显式 output
+和有序 cross-space 成功路径后暴露步骤后的下一 deadline，与 bounded-drain 调度一致。
 
 Client endpoint 的错误路径不会再把无关待发送应用包误当作 close-on-error 输出：
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入
@@ -1639,7 +1641,8 @@ close 和 route cleanup 事件。
   pending work、不发 installed-key datagram，并可继续进入 backend drive；Handshake 和
   Application recovery 会先校验调用方传入的输出空间再 poll。单元测试证明 accepted 0-RTT PTO
   wakeup 在 poll 和 drain wrapper 中都会返回 protected 0-RTT `RESET_STREAM` recovery datagram，
-  并在 backend drive 前停止。
+  并在 backend drive 前停止。poll result 现在也会在 recovery datagram 或 backend output
+  后返回步骤后的下一 deadline，与 bounded-drain 形态一致。
 - 2026-06-11：新增
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()` 和
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions()`。
@@ -1696,6 +1699,7 @@ close 和 route cleanup 事件。
   backend/output helper，让没有 due datagram 的 live deadline 可以按有序 space drive backend，
   再 poll 或 drain 调用方选择的输出，而不引入另一套 backend 路径。单元测试证明 cross-space
   poll 和 bounded-drain 的显式 0-RTT output 选择，以及 deadline 前不会 drive backend。
+  cross-space poll result 现在也会在 backend output 后返回步骤后的下一 deadline。
 - 2026-06-18：把内部 connection bookkeeping 记录拆到
   `src/quic/connection_state.zig`，同时保持 `src/lib.zig` 作为稳定 public module root。
   新模块负责 pending STREAM/CRYPTO frame、sent-packet metadata、pending close/control

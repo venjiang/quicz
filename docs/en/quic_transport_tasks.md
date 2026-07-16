@@ -105,6 +105,9 @@ including explicit installed-key output options and terminal cleanup.
 The receive-to-pending-work/backend poll and bounded-drain results also expose
 the post-step deadline for ordinary in-space, ordered cross-space, explicit
 output, and compatible-version success paths.
+The single-connection due-deadline/backend poll result now exposes the same
+post-step deadline for ordinary, explicit-output, and ordered cross-space
+success paths, matching bounded-drain scheduling.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
@@ -1873,7 +1876,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   Application recovery now validate the caller-provided output space before
   polling. Unit coverage proves accepted 0-RTT PTO wakeups return protected
   0-RTT `RESET_STREAM` recovery datagrams and stop before backend drive in both
-  the poll and drain wrappers.
+  the poll and drain wrappers. The poll result now returns the post-step
+  deadline after recovery datagrams or backend output, matching the
+  bounded-drain form.
 - 2026-06-11: Added
   `EndpointConnectionLifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`
   and
@@ -1938,7 +1943,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   ordered backend spaces and then poll or drain caller-selected output without
   introducing another backend path. Unit coverage proves cross-space poll and
   bounded-drain explicit 0-RTT output selection plus no backend drive before
-  the due deadline.
+  the due deadline. The cross-space poll result now also returns the post-step
+  deadline after backend output.
 - 2026-06-18: Split internal connection bookkeeping records into
   `src/quic/connection_state.zig` while keeping `src/lib.zig` as the stable
   public module root. The new module owns pending STREAM/CRYPTO frames,

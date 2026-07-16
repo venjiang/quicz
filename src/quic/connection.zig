@@ -32751,6 +32751,10 @@ test "EndpointConnectionLifecycle due-deadline backend poll keeps explicit zero 
     try std.testing.expectEqual(@as(usize, 0), backend.pulls);
     try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    const next_deadline = due.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 72), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, next_deadline.recovery.?.space);
     try std.testing.expect(try protectedZeroRttContainsControlFrame(
         probe,
         secrets.client,
@@ -32968,6 +32972,7 @@ test "EndpointConnectionLifecycle single due-deadline backend poll keeps separat
     const polled = driven.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(polled.datagram);
     try std.testing.expectEqual(@as(u64, 208), polled.connection_id);
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), due.next_deadline);
     try std.testing.expect(try protectedZeroRttContainsControlFrame(
         polled.datagram,
         secrets.client,
@@ -33189,6 +33194,7 @@ test "EndpointConnectionLifecycle single due-deadline cross-space backend poll k
     const polled = driven.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(polled.datagram);
     try std.testing.expectEqual(@as(u64, 320), polled.connection_id);
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), due.next_deadline);
     try std.testing.expect(try protectedZeroRttContainsControlFrame(
         polled.datagram,
         secrets.client,
@@ -35169,6 +35175,10 @@ test "EndpointConnectionLifecycle single due-deadline backend poll continues aft
     const polled = driven.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(polled.datagram);
     try std.testing.expectEqual(@as(u64, 196), polled.connection_id);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 196), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.handshake, next_deadline.recovery.?.space);
 
     try server.processProtectedHandshakeDatagramWithInstalledKeys(
         recovery_timer.deadline_millis + 1,
