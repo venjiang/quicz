@@ -26711,6 +26711,7 @@ test "EndpointConnectionLifecycle feeds installed-key datagram then polls ACK ou
         .destination_connection_id = &server_dcid,
     })) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(first_ping);
+    try server.sendPing();
 
     const receive_connections = [_]EndpointConnectionReceiveView{
         .{ .connection_id = 183, .connection = &decoy },
@@ -26737,6 +26738,10 @@ test "EndpointConnectionLifecycle feeds installed-key datagram then polls ACK ou
     const first_ack = first.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(first_ack.datagram);
     try std.testing.expectEqual(@as(u64, 182), first_ack.connection_id);
+    const first_deadline = first.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 182), first_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, first_deadline.kind);
+    try std.testing.expectEqual(PacketNumberSpace.application, first_deadline.recovery.?.space);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(?u64, null), decoy.pendingAckLargest(.application));
 
@@ -26776,6 +26781,7 @@ test "EndpointConnectionLifecycle feeds installed-key datagram then polls ACK ou
     const second_ack = second.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(second_ack.datagram);
     try std.testing.expectEqual(@as(u64, 182), second_ack.connection_id);
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), second.next_deadline);
 
     try client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
         181,
@@ -26854,6 +26860,7 @@ test "EndpointConnectionLifecycle feeds installed-key datagram then drains ACK o
         .destination_connection_id = &server_dcid,
     })) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(first_ping);
+    try server.sendPing();
 
     const receive_connections = [_]EndpointConnectionReceiveView{
         .{ .connection_id = 173, .connection = &decoy },
@@ -26883,6 +26890,10 @@ test "EndpointConnectionLifecycle feeds installed-key datagram then drains ACK o
     try std.testing.expectEqual(@as(usize, 1), first_drain.datagrams_written);
     try std.testing.expectEqual(@as(?Error, null), first_drain.first_error);
     try std.testing.expectEqual(@as(u64, 172), first_out[0].connection_id);
+    const first_deadline = first.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 172), first_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, first_deadline.kind);
+    try std.testing.expectEqual(PacketNumberSpace.application, first_deadline.recovery.?.space);
     defer std.testing.allocator.free(first_out[0].datagram);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(?u64, null), decoy.pendingAckLargest(.application));
@@ -26926,6 +26937,7 @@ test "EndpointConnectionLifecycle feeds installed-key datagram then drains ACK o
     try std.testing.expectEqual(@as(usize, 1), second_drain.datagrams_written);
     try std.testing.expectEqual(@as(?Error, null), second_drain.first_error);
     try std.testing.expectEqual(@as(u64, 172), second_out[0].connection_id);
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), second.next_deadline);
     defer std.testing.allocator.free(second_out[0].datagram);
 
     try client_lifecycle.processProtectedShortDatagramWithInstalledKeys(

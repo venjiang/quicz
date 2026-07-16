@@ -5261,6 +5261,7 @@ pub const EndpointConnectionLifecycle = struct {
                 now_millis,
                 poll_space,
             ),
+            .next_deadline = self.nextDeadlineAcrossReceiveConnections(receive_connections),
         };
     }
 
@@ -5295,6 +5296,7 @@ pub const EndpointConnectionLifecycle = struct {
                 poll_views,
                 now_millis,
             ),
+            .next_deadline = self.nextDeadlineAcrossReceiveConnections(receive_connections),
         };
     }
 
@@ -5398,6 +5400,7 @@ pub const EndpointConnectionLifecycle = struct {
                 poll_space,
                 out,
             ),
+            .next_deadline = self.nextDeadlineAcrossReceiveConnections(receive_connections),
         };
     }
 
@@ -5433,6 +5436,7 @@ pub const EndpointConnectionLifecycle = struct {
                 now_millis,
                 out,
             ),
+            .next_deadline = self.nextDeadlineAcrossReceiveConnections(receive_connections),
         };
     }
 

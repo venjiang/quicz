@@ -139,6 +139,8 @@ inputs. Its result now exposes the selected connection's post-feed deadline
 state after path-validation output, route commit ACK output, non-closing invalid
 input, and protected close emission, including null when the selected connection
 has no next deadline.
+The base installed-key feed-to-output poll and bounded-drain lifecycle results
+now also expose the post-step deadline across caller-owned receive views.
 Caller-keyed long-header
 `processProtectedLongDatagramInSpaceOrCloseAndPollDatagram()` now follows the
 same output boundary: authenticated Initial/Handshake frame errors return the
@@ -1439,7 +1441,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   feed classification routes before packet processing, the selected
   caller-owned connection polls one 1-RTT ACK datagram, decoy connections are
   not touched, and the single-connection wrapper preserves ACK cleanup on the
-  peer.
+  peer. The result now also returns the post-poll deadline across the
+  caller-owned receive views, including recovery after queued 1-RTT output.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDrainDatagrams()`
   and the cross-connection
@@ -1448,7 +1451,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   proves feed classification routes before packet processing, the selected
   caller-owned connection drains a 1-RTT ACK into bounded output slots, decoy
   connections are not touched, and the single-connection wrapper preserves ACK
-  cleanup on the peer.
+  cleanup on the peer. The result now also returns the post-drain deadline
+  across the caller-owned receive views, including recovery after queued 1-RTT
+  output.
 - 2026-06-17: Added
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagrams()`
   and its `OrClose` variant as routed installed-key 1-RTT

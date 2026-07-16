@@ -650,6 +650,8 @@ pub const EndpointFeedInstalledKeyDatagramPollResult = struct {
     feed: EndpointFeedInstalledKeyDatagramResult,
     /// Protected datagram emitted after receive processing, if any.
     datagram: ?EndpointPolledDatagramResult = null,
+    /// Next endpoint-visible deadline after receive processing and output poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from feeding one installed-key datagram, then draining output.
@@ -658,6 +660,8 @@ pub const EndpointFeedInstalledKeyDatagramDrainResult = struct {
     feed: EndpointFeedInstalledKeyDatagramResult,
     /// Bounded output drain when `feed` routed to a connection.
     drain: ?EndpointDatagramDrainResult = null,
+    /// Next endpoint-visible deadline after receive processing and output drain.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from feeding one installed-key datagram, then driving backend and selecting a wakeup.

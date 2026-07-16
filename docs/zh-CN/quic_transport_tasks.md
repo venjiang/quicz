@@ -122,6 +122,8 @@ endpoint deadline。
 未进入 closing 的无效输入下已排队输出。其 result 现在会在 path-validation output、
 route commit ACK output、未进入 closing 的 invalid input 和 protected close emission 后，
 暴露所选连接的 feed 后 deadline 状态；所选连接没有下一 deadline 时返回 null。
+基础 installed-key feed-to-output poll 和 bounded-drain lifecycle result 现在也会在
+caller-owned receive views 上暴露步骤后的 deadline。
 调用方持 key 的 long-header
 `processProtectedLongDatagramInSpaceOrCloseAndPollDatagram()` 也采用同一边界：认证后的
 Initial/Handshake frame 错误会直接返回已排队 CONNECTION_CLOSE datagram；畸形且未进入
@@ -1279,7 +1281,8 @@ close 和 route cleanup 事件。
   socket-facing installed-key receive-to-output 核心 step。单元测试证明 feed
   classification 会先完成 route selection，选中的 caller-owned connection 会 poll 一个
   1-RTT ACK datagram，decoy connection 不被触碰，single-connection wrapper 也保持
-  peer ACK cleanup。
+  peer ACK cleanup。result 现在也会在 caller-owned receive views 上返回 poll 后
+  deadline，包括已排队 1-RTT output 后的 recovery deadline。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndDrainDatagrams()`
   和 cross-connection
@@ -1287,7 +1290,8 @@ close 和 route cleanup 事件。
   socket-facing installed-key receive-to-bounded-drain 核心 step。单元测试证明 feed
   classification 会先完成 route selection，选中的 caller-owned connection 会把 1-RTT
   ACK drain 到 bounded output slots，decoy connection 不被触碰，single-connection
-  wrapper 也保持 peer ACK cleanup。
+  wrapper 也保持 peer ACK cleanup。result 现在也会在 caller-owned receive views
+  上返回 drain 后 deadline，包括已排队 1-RTT output 后的 recovery deadline。
 - 2026-06-17：新增
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDrainDatagrams()`
   及其 `OrClose` 变体，作为 routed installed-key 1-RTT
