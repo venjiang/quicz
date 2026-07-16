@@ -61814,6 +61814,60 @@ test "EndpointConnectionLifecycle wakes to discard expired retained 1 RTT keys" 
     try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
 }
 
+test "EndpointConnectionLifecycle pending work counts retained one RTT key discard" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try client.initiateOneRttKeyUpdate();
+    try client.sendPing();
+    const update = (try client.pollProtectedShortDatagramWithInstalledKeys(100, &server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(update);
+    try server.processProtectedShortDatagramWithInstalledKeys(100, server_dcid.len, update);
+    const discard_deadline = server.oneRttKeyDiscardDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(0));
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    const before_deadline = try lifecycle.processPendingWork(
+        7,
+        &server,
+        discard_deadline - 1,
+    );
+    try std.testing.expect(before_deadline.idle_retired == null);
+    try std.testing.expect(before_deadline.close_retired == null);
+    try std.testing.expect(!before_deadline.key_discard_serviced);
+    try std.testing.expect(before_deadline.recovery_serviced == null);
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(0));
+
+    const connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 7,
+        .connection = &server,
+    }};
+    const sweep = try lifecycle.processPendingWorkAcrossConnections(&connections, discard_deadline);
+    try std.testing.expectEqual(@as(usize, 0), sweep.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), sweep.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), sweep.key_discard_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), sweep.recovery_serviced_count);
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
+}
+
 test "installed one RTT key update ACK confirmation rolls back with invalid payload" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
