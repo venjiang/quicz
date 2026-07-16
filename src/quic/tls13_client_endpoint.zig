@@ -248,16 +248,24 @@ pub const Tls13ClientEndpoint = struct {
         var due = try self.serviceDueDeadlineAndDrainDatagramsWithRoutePath(now_millis, due_out);
         if (due == null) {
             if (selected_deadline) |deadline| {
-                if (deadline.deadlineMillis() <= now_millis and self.transport.connection.connectionState() == .closed) {
+                if (deadline.deadlineMillis() <= now_millis) {
                     switch (deadline) {
                         .idle_timeout, .close_timeout => {
-                            _ = self.lifecycle.retireConnection(self.connection_id);
+                            if (self.transport.connection.connectionState() == .closed) {
+                                _ = self.lifecycle.retireConnection(self.connection_id);
+                                due = .{
+                                    .deadline = deadline,
+                                    .next_deadline = self.nextDeadline(),
+                                };
+                            }
+                        },
+                        .key_discard => {
                             due = .{
                                 .deadline = deadline,
                                 .next_deadline = self.nextDeadline(),
                             };
                         },
-                        .recovery, .key_discard => {},
+                        .recovery => {},
                     }
                 }
             }
@@ -1373,6 +1381,63 @@ test "Tls13ClientEndpoint receive step drains due recovery with committed route 
     const next_deadline = step.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expect(next_deadline == .recovery);
     try std.testing.expectEqual(transport_types.PacketNumberSpace.application, next_deadline.recovery.space);
+}
+
+test "Tls13ClientEndpoint receive step reports key discard while reporting input" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        32,
+        path,
+        .{ .active_migration_disabled = false },
+        .{ .initial_rtt_ms = 100 },
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+    const client_secret = [_]u8{0x5a} ** protection.traffic_secret_len;
+    const server_secret = [_]u8{0x5b} ** protection.traffic_secret_len;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = client_secret,
+        .peer = server_secret,
+    });
+    client.transport.connection.last_packet_activity_millis = 10;
+
+    try client.transport.connection.initiateOneRttKeyUpdate();
+    var scratch: [128]u8 = undefined;
+    try std.testing.expectEqual(@as(?u64, 1), client.transport.connection.localOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?bool, true), client.transport.connection.localOneRttRetainsKeyGeneration(0));
+
+    const deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(deadline == .key_discard);
+    var receive_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    var due_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const malformed_short = [_]u8{ 0x40, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53, 0x00 };
+    const step = try client.receiveDatagramStepWithRoutePath(
+        deadline.deadlineMillis(),
+        &scratch,
+        &malformed_short,
+        &receive_out,
+        &due_out,
+    );
+
+    try std.testing.expect(step.receive.receive == null);
+    try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), step.receive.receive_error);
+    try std.testing.expectEqual(@as(?bool, false), client.transport.connection.localOneRttRetainsKeyGeneration(0));
+    const due = step.due orelse return error.TestUnexpectedResult;
+    try std.testing.expect(due.deadline == .key_discard);
+    try std.testing.expectEqual(@as(usize, 0), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), due.drain.first_error);
+    try std.testing.expectEqual(@as(?client_transport.ClientTransportDeadline, null), step.next_deadline);
+    try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
 }
 
 test "Tls13ClientEndpoint receive returns Retry output with committed route path" {
