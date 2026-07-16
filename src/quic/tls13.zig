@@ -1131,7 +1131,7 @@ test "Tls13Handshake server rejects mismatched PSK binder" {
         .alpn = &alpn,
     }, &tp, server_psk);
     server.provideData(client_hello);
-    _ = try server.step();
+    try std.testing.expectError(error.BadFinished, server.step());
 
     // Binder verification fails and the early traffic secret is NOT derived.
     try std.testing.expect(!server.peer_psk_binder_valid);
@@ -2600,6 +2600,7 @@ pub const Tls13Handshake = struct {
                     expected,
                     self.peer_psk_binder,
                 );
+                if (!self.peer_psk_binder_valid) return error.BadFinished;
                 if (self.peer_psk_binder_valid and self.peer_offered_early_data) {
                     self.server_early_traffic_secret = self.key_schedule.deriveEarlyTrafficSecret(self.transcript.current());
                     self.server_early_traffic_secret_derived = true;
