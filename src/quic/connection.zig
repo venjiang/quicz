@@ -52777,6 +52777,72 @@ test "EndpointConnectionLifecycle refreshes recovery timer after compatible back
     try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), lifecycle.earliestRecoveryDeadline());
 }
 
+test "EndpointConnectionLifecycle backend poll returns caller-keyed long next deadline" {
+    const Backend = struct {
+        outbound: []const u8,
+        sent: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(context: *anyopaque, space: PacketNumberSpace, out_buf: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space != .handshake or self.sent) return null;
+            if (out_buf.len < self.outbound.len) return error.BufferTooSmall;
+            @memcpy(out_buf[0..self.outbound.len], self.outbound);
+            self.sent = true;
+            return out_buf[0..self.outbound.len];
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x10, 0x20, 0x30, 0x40 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var backend = Backend{ .outbound = "server keyed poll" };
+    var scratch: [64]u8 = undefined;
+    const result = try lifecycle.driveCryptoBackendInSpaceAndPollProtectedLongCryptoDatagram(
+        61,
+        &server,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        .handshake,
+        10,
+        &client_dcid,
+        &server_dcid,
+        &[_]u8{},
+        secrets.server,
+    );
+    defer if (result.datagram) |datagram| std.testing.allocator.free(datagram.datagram);
+
+    try std.testing.expectEqual(@as(usize, 1), result.backend.outbound_chunks);
+    try std.testing.expect(result.datagram != null);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 61), next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(PacketNumberSpace.handshake, next_deadline.recovery.?.space);
+}
+
 test "EndpointConnectionLifecycle drives backend and drains caller-keyed long crypto datagrams" {
     const Backend = struct {
         outbound: []const []const u8,
@@ -52889,6 +52955,10 @@ test "EndpointConnectionLifecycle drives backend and drains caller-keyed long cr
     try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
     try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
     try std.testing.expectEqual(@as(u64, 62), first_out[0].connection_id);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 62), next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(PacketNumberSpace.handshake, next_deadline.recovery.?.space);
 
     var rest_out: [4]EndpointPolledDatagramResult = undefined;
     const rest = lifecycle.drainProtectedLongCryptoDatagramsInSpace(

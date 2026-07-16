@@ -7505,6 +7505,7 @@ pub const EndpointConnectionLifecycle = struct {
             return .{
                 .backend = backend_progress,
                 .datagram = null,
+                .next_deadline = self.nextDeadline(connection_id, connection),
             };
         }
         const datagram = try self.pollProtectedLongCryptoDatagramInSpace(
@@ -7526,6 +7527,7 @@ pub const EndpointConnectionLifecycle = struct {
                 .connection_id = connection_id,
                 .datagram = bytes,
             } else null,
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -7572,6 +7574,7 @@ pub const EndpointConnectionLifecycle = struct {
                     .connection_id = connection_id,
                     .datagram = bytes,
                 } else null,
+                .next_deadline = self.nextDeadline(connection_id, connection),
             };
         };
         const handshake_discarded_before_poll = connection.packetNumberSpaceDiscarded(.handshake);
@@ -7579,6 +7582,7 @@ pub const EndpointConnectionLifecycle = struct {
             return .{
                 .backend = backend_progress,
                 .datagram = null,
+                .next_deadline = self.nextDeadline(connection_id, connection),
             };
         }
         const datagram = try self.pollProtectedLongCryptoDatagramInSpace(
@@ -7600,6 +7604,7 @@ pub const EndpointConnectionLifecycle = struct {
                 .connection_id = connection_id,
                 .datagram = bytes,
             } else null,
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -7638,6 +7643,7 @@ pub const EndpointConnectionLifecycle = struct {
             return .{
                 .backend = backend_progress,
                 .drain = .{},
+                .next_deadline = self.nextDeadline(connection_id, connection),
             };
         }
         const drain = self.drainProtectedLongCryptoDatagramsInSpace(
@@ -7657,6 +7663,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend_progress,
             .drain = drain,
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -7701,6 +7708,7 @@ pub const EndpointConnectionLifecycle = struct {
                     try protectedLongDatagramKeysForSpace(drain_space, keys),
                     out,
                 ),
+                .next_deadline = self.nextDeadline(connection_id, connection),
             };
         };
         const handshake_discarded_before_drain = connection.packetNumberSpaceDiscarded(.handshake);
@@ -7708,6 +7716,7 @@ pub const EndpointConnectionLifecycle = struct {
             return .{
                 .backend = backend_progress,
                 .drain = .{},
+                .next_deadline = self.nextDeadline(connection_id, connection),
             };
         }
         const drain = self.drainProtectedLongCryptoDatagramsInSpace(
@@ -7727,6 +7736,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend_progress,
             .drain = drain,
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 

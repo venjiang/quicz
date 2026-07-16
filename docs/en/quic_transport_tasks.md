@@ -111,6 +111,8 @@ ordinary, explicit-output, compatible-version, and OrClose success paths.
 The direct backend-drive poll and bounded-drain results now expose the same
 post-output deadline for ordinary, explicit-output, cross-space,
 compatible-version, and OrClose backend loops.
+Caller-keyed long-header backend poll and bounded-drain results now expose the
+post-output deadline for Initial/Handshake protected CRYPTO socket loops.
 The single-connection due-deadline/backend poll result now exposes the same
 post-step deadline for ordinary, explicit-output, and ordered cross-space
 success paths, matching bounded-drain scheduling.
@@ -163,6 +165,8 @@ their process/routed wrappers now use the same close boundary: peer
 transport-parameter errors or authenticated receive frame errors return the
 protected close datagram from the triggering connection instead of requiring a
 separate output poll.
+The same caller-keyed long-header backend poll/drain result types now expose
+the next deadline after Initial/Handshake protected CRYPTO output.
 Installed-key Handshake OrClose helpers now follow that same boundary:
 receive-side frame errors and backend peer-parameter errors return or drain the
 protected Handshake close datagram from the triggering connection, including
@@ -1044,6 +1048,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   the selected poll/drain space has already been discarded. This keeps socket
   loops from surfacing a spurious packet-processing error after TLS backend
   confirmation has legitimately cleared Handshake packet-number-space state.
+  The same result types now expose the post-output next deadline after
+  caller-keyed Initial/Handshake protected CRYPTO poll or bounded drain.
 
 - 2026-06-18: Added recovery and connection-level congestion-window
   send-budget queries. `recovery.Recovery.availableCongestionWindow()` reports

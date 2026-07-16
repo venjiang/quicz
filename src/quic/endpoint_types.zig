@@ -425,6 +425,8 @@ pub const EndpointCryptoBackendDriveProtectedLongDatagramResult = struct {
     backend: CryptoBackendProgress,
     /// Caller-keyed Initial/Handshake CRYPTO datagram emitted after backend progress, if any.
     datagram: ?EndpointPolledDatagramResult = null,
+    /// Next endpoint-visible deadline after backend progress and long-packet output poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from one TLS backend sweep followed by bounded output draining.
@@ -443,6 +445,8 @@ pub const EndpointCryptoBackendDriveProtectedLongDatagramDrainResult = struct {
     backend: CryptoBackendProgress,
     /// Bounded caller-keyed Initial/Handshake CRYPTO output drain result.
     drain: EndpointDatagramDrainResult,
+    /// Next endpoint-visible deadline after backend progress and long-packet output drain.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from polling installed-key output across caller-owned connections.

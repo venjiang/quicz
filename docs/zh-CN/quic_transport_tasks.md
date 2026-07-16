@@ -101,6 +101,8 @@ compatible-version 和 OrClose 成功路径。
 直接 backend-drive 的 poll 和 bounded-drain result 现在也会暴露同样的 output 后
 deadline，覆盖普通、显式 output、cross-space、compatible-version 和 OrClose backend
 loop。
+caller-keyed long-header backend poll 和 bounded-drain result 现在也会暴露
+Initial/Handshake protected CRYPTO socket loop 的 output 后 deadline。
 single-connection due-deadline/backend poll result 现在也会在普通、显式 output
 和有序 cross-space 成功路径后暴露步骤后的下一 deadline，与 bounded-drain 调度一致。
 
@@ -143,6 +145,8 @@ closing 的输入仍抛错，并保留已排队输出给正常 poll。
 process/routed wrapper 也使用同一 close 边界：peer transport-parameter 错误或认证后的
 receive frame 错误会直接从触发连接返回 protected close datagram，不再要求调用方另行
 poll output。
+同一 caller-keyed long-header backend poll/drain result type 现在也会在
+Initial/Handshake protected CRYPTO output 后暴露下一 deadline。
 installed-key Handshake OrClose helper 也采用同一边界：receive-side frame 错误和 backend
 peer-parameter 错误会直接返回或 drain 触发连接上的 protected Handshake close datagram，
 包括 routed backend drain/poll wrapper。
@@ -926,7 +930,9 @@ close 和 route cleanup 事件。
 - 2026-06-24：caller-keyed long-header backend-drive poll/drain helper 现在会
   在 backend 确认握手并已丢弃待 poll/drain 的 Handshake packet number space
   时返回 no-output 结果。这样 socket loop 不会把 TLS backend 合法确认并清理
-  Handshake 状态后的输出轮询误报为 packet-processing 错误。
+  Handshake 状态后的输出轮询误报为 packet-processing 错误。同一 result type
+  现在也会在 caller-keyed Initial/Handshake protected CRYPTO poll 或 bounded
+  drain 后暴露 output 后下一 deadline。
 
 - 2026-06-18：新增 recovery 和连接层 congestion-window 剩余发送预算查询。
   `recovery.Recovery.availableCongestionWindow()` 返回单个 recovery state 的
