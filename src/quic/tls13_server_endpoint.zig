@@ -4974,6 +4974,171 @@ test "Tls13ServerEndpoint closes with route output and retires record at close d
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.closeDeadlineMillis(record_handle));
 }
 
+test "Tls13ServerEndpoint receive step retires closing record while reporting input" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: root.CryptoBackend,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "initial";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 1,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer endpoint_owner.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+    };
+    const server_dcid = "local";
+    const secrets = try protection.deriveInitialSecrets(.v1, "endpoint-step-close");
+    var empty_backend = EmptyBackend{};
+
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer {
+        if (record_owned) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = 89,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    record_initialized = true;
+    try record.connection.validatePeerAddress();
+    try record.connection.confirmHandshake();
+    try record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, path, .{});
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(record.handle);
+    try endpoint_owner.records.adopt(record.handle, record);
+    record_owned = false;
+    const record_handle = record.handle;
+
+    const close_datagram = (try endpoint_owner.closeWithRoutePath(record_handle, 0, 0, "server done", 10)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_datagram.datagram);
+    try std.testing.expect(close_datagram.path.eql(path));
+    const close_deadline = (try endpoint_owner.nextDeadline(std.testing.allocator)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.close_timeout, close_deadline.kind);
+    try std.testing.expectEqual(record_handle, close_deadline.connection_id);
+
+    const unsupported_initial = [_]u8{
+        0xc0,
+        0xfa,
+        0xce,
+        0xb0,
+        0x0c,
+        0x02,
+        0xaa,
+        0xbb,
+        0x03,
+        0x11,
+        0x22,
+        0x33,
+        0x00,
+    };
+    var route_out: [128]u8 = undefined;
+    var scratch: [64]u8 = undefined;
+    var initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    var pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    const step = try endpoint_owner.receiveDatagramStepWithRoutePath(
+        no_allocation_allocator.allocator(),
+        path,
+        close_deadline.deadline_millis,
+        &unsupported_initial,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &route_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &scratch,
+        &[_]u8{},
+        &initial_out,
+        &handshake_out,
+        &installed_key_out,
+        .application,
+        &pending_out,
+    );
+    switch (step.process) {
+        .version_negotiation => |response| try std.testing.expect(response.path.eql(path)),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), step.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), step.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), step.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), step.pending_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), step.next_deadline);
+    try std.testing.expect(endpoint_owner.records.get(record_handle) == null);
+    try std.testing.expectEqual(@as(usize, 0), endpoint_owner.activeConnectionCount());
+    try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.closeDeadlineMillis(record_handle));
+}
+
 test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     const TestRecord = struct {
         handle: u64,
