@@ -1209,6 +1209,8 @@ test "Tls13Handshake server selects PSK only for matching ticket identity" {
     try std.testing.expect(!mismatched.peer_psk_binder_valid);
     try std.testing.expect(!mismatched.psk_selected);
     try std.testing.expect(!mismatched.server_early_traffic_secret_derived);
+    const no_psk_schedule = KeySchedule.init();
+    try std.testing.expectEqualSlices(u8, &no_psk_schedule.early_secret, &mismatched.key_schedule.early_secret);
 
     const server_hello_action = try mismatched.step();
     try std.testing.expectEqual(EncryptionLevel.initial, server_hello_action.send_data.level);
@@ -1216,6 +1218,28 @@ test "Tls13Handshake server selects PSK only for matching ticket identity" {
         error.TestUnexpectedResult,
         serverHelloExtension(server_hello_action.send_data.data, @intFromEnum(ExtType.pre_shared_key)),
     );
+}
+
+test "Tls13Handshake configured server PSK does not seed non PSK handshakes" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+
+    var client = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp);
+    const client_hello = (try client.step()).send_data.data;
+
+    var server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+    }, &tp, psk);
+    server.provideData(client_hello);
+    try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
+    try std.testing.expect(!server.peer_offered_psk);
+    try std.testing.expect(!server.psk_selected);
+    const no_psk_schedule = KeySchedule.init();
+    try std.testing.expectEqualSlices(u8, &no_psk_schedule.early_secret, &server.key_schedule.early_secret);
 }
 
 test "Tls13Handshake rejects invalid server PSK identity configuration" {
@@ -2734,6 +2758,9 @@ pub const Tls13Handshake = struct {
             }
         } else {
             self.transcript.update(msg);
+        }
+        if (!self.psk_selected and self.server_psk != null) {
+            self.key_schedule = KeySchedule.init();
         }
         self.state = .server_send_server_hello;
         return ._continue;

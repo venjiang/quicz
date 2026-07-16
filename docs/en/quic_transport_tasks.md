@@ -1053,6 +1053,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-16: Reset the pure-Zig TLS server key schedule back to the no-PSK
+  baseline when a configured PSK is not selected. A configured PSK no longer
+  contaminates normal certificate handshakes or ticket-identity-mismatch
+  fallback handshakes.
+
 - 2026-07-16: Bound server-side pure-Zig TLS PSK selection to an optional
   configured ticket identity. Matching identities still verify the binder,
   select PSK identity 0, and derive the 0-RTT receive secret when early_data was

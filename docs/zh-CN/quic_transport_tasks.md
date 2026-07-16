@@ -936,6 +936,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-16：配置了 PSK 的 pure-Zig TLS server 如果最终没有选择 PSK，
+  现在会把 key schedule 重置回 no-PSK 基线。普通证书握手和 ticket identity
+  mismatch fallback 不再被预置 PSK early secret 污染。
+
 - 2026-07-16：server-side 纯 Zig TLS PSK selection 现在可绑定到配置的
   ticket identity。identity 匹配时继续校验 binder、在 ServerHello 里选择
   PSK identity 0，并在 offer 了 early_data 时派生 0-RTT receive secret；
