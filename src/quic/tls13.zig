@@ -199,6 +199,52 @@ pub const InstallKeys = struct {
     seal: QuicKeys,
 };
 
+pub const psk_replay_fingerprint_len = Sha256.digest_length;
+
+/// Bounded server-side replay filter for TLS PSK ticket identities.
+///
+/// The filter stores SHA-256 fingerprints of accepted ticket identities. It is
+/// intentionally local and bounded; callers that need cross-worker replay
+/// rejection must persist or distribute equivalent state outside the handshake.
+pub const ServerPskReplayFilter = struct {
+    fingerprints: [64][psk_replay_fingerprint_len]u8 = undefined,
+    len: usize = 0,
+    max_entries: usize = 64,
+
+    pub fn init(max_entries: usize) ServerPskReplayFilter {
+        return .{ .max_entries = @min(max_entries, 64) };
+    }
+
+    pub fn entryCount(self: *const ServerPskReplayFilter) usize {
+        return self.len;
+    }
+
+    /// Record `identity` as consumed. Returns false when already consumed or
+    /// when the filter is configured with zero capacity.
+    pub fn consume(self: *ServerPskReplayFilter, identity: []const u8) bool {
+        if (self.max_entries == 0) return false;
+        var fingerprint: [psk_replay_fingerprint_len]u8 = undefined;
+        Sha256.hash(identity, &fingerprint, .{});
+        for (self.fingerprints[0..self.len]) |existing| {
+            if (std.crypto.timing_safe.eql([psk_replay_fingerprint_len]u8, existing, fingerprint)) {
+                return false;
+            }
+        }
+        if (self.len == self.max_entries) {
+            std.mem.copyForwards(
+                [psk_replay_fingerprint_len]u8,
+                self.fingerprints[0 .. self.max_entries - 1],
+                self.fingerprints[1..self.max_entries],
+            );
+            self.fingerprints[self.max_entries - 1] = fingerprint;
+        } else {
+            self.fingerprints[self.len] = fingerprint;
+            self.len += 1;
+        }
+        return true;
+    }
+};
+
 /// Signature algorithm used by the server's CertificateVerify (matches the
 /// private key in `TlsConfig.private_key_bytes`).
 pub const PrivateKeyAlgorithm = enum {
@@ -221,6 +267,8 @@ pub const TlsConfig = struct {
     /// Optional CA bundle for chain-to-trust-anchor verification. Requires
     /// `now_sec` to be set as well.
     ca_bundle: ?*const Certificate.Bundle = null,
+    /// Optional shared replay filter for accepting PSK identities only once.
+    server_psk_replay_filter: ?*ServerPskReplayFilter = null,
 };
 
 /// TLS handshake error set.
@@ -1130,6 +1178,55 @@ test "Tls13Handshake server applies PSK ticket age policy" {
     try std.testing.expect(!stale_server.psk_selected);
     try std.testing.expect(!stale_server.peer_psk_binder_valid);
     try std.testing.expect(!stale_server.server_early_traffic_secret_derived);
+}
+
+test "Tls13Handshake server consumes PSK identity through replay filter" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    var replay_filter = ServerPskReplayFilter.init(4);
+
+    var first_client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    @memcpy(first_client.session_ticket[0..ticket.len], &ticket);
+    first_client.session_ticket_len = ticket.len;
+    first_client.session_ticket_allows_early_data = true;
+    const first_hello = (try first_client.step()).send_data.data;
+
+    var first_server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+        .server_psk_replay_filter = &replay_filter,
+    }, &tp, psk);
+    first_server.provideData(first_hello);
+    _ = try first_server.step();
+    try std.testing.expect(first_server.psk_selected);
+    try std.testing.expect(first_server.peer_psk_binder_valid);
+    try std.testing.expect(first_server.server_early_traffic_secret_derived);
+    try std.testing.expectEqual(@as(usize, 1), replay_filter.entryCount());
+
+    var replay_client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    @memcpy(replay_client.session_ticket[0..ticket.len], &ticket);
+    replay_client.session_ticket_len = ticket.len;
+    replay_client.session_ticket_allows_early_data = true;
+    const replay_hello = (try replay_client.step()).send_data.data;
+
+    var replay_server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+        .server_psk_replay_filter = &replay_filter,
+    }, &tp, psk);
+    replay_server.provideData(replay_hello);
+    _ = try replay_server.step();
+    try std.testing.expect(replay_server.peer_offered_psk);
+    try std.testing.expect(replay_server.peer_psk_binder_valid);
+    try std.testing.expect(!replay_server.psk_selected);
+    try std.testing.expect(!replay_server.server_early_traffic_secret_derived);
+    try std.testing.expectEqual(@as(usize, 1), replay_filter.entryCount());
 }
 
 test "Tls13Handshake server verifies PSK binder without deriving early secret when early_data absent" {
@@ -2928,10 +3025,13 @@ pub const Tls13Handshake = struct {
             const ticket_age_allowed = self.serverPskTicketAgeAllowed();
             // If the server holds a PSK and the offered identity matches the
             // configured ticket identity and ticket-age policy, verify the
-            // binder. Derive the client early traffic secret only when the peer
-            // actually offered early_data; PSK-only resumption must not open a
-            // 0-RTT receive path. A non-matching or stale identity leaves PSK
-            // unselected so the handshake can continue on the certificate path.
+            // binder. A shared replay filter, when configured, consumes the
+            // identity only after the binder verifies so invalid binders cannot
+            // burn a ticket. Derive the client early traffic secret only when
+            // the peer actually offered early_data; PSK-only resumption must
+            // not open a 0-RTT receive path. A non-matching, stale, or replayed
+            // identity leaves PSK unselected so the handshake can continue on
+            // the certificate path.
             if (self.server_psk != null and identity_matches and ticket_age_allowed) {
                 const binder_key = self.key_schedule.deriveBinderKey();
                 const expected = KeySchedule.computeFinishedVerifyData(binder_key, truncated_hash);
@@ -2941,8 +3041,12 @@ pub const Tls13Handshake = struct {
                     self.peer_psk_binder,
                 );
                 if (!self.peer_psk_binder_valid) return error.BadFinished;
-                self.psk_selected = true;
-                if (self.peer_psk_binder_valid and self.peer_offered_early_data) {
+                const replay_allowed = if (self.config.server_psk_replay_filter) |filter|
+                    filter.consume(self.peer_psk_identity[0..self.peer_psk_identity_len])
+                else
+                    true;
+                self.psk_selected = replay_allowed;
+                if (replay_allowed and self.peer_offered_early_data) {
                     self.server_early_traffic_secret = self.key_schedule.deriveEarlyTrafficSecret(self.transcript.current());
                     self.server_early_traffic_secret_derived = true;
                 }

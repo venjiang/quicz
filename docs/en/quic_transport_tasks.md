@@ -55,7 +55,7 @@ packet/key/token and RFC 9368 version-information primitives:
 | Connection IDs and stateless reset | Required. Routing, CID issuance/retirement, reset-token handling, close cleanup, and inactive-CID reset emission must work in the endpoint lifecycle. | Partial: endpoint router, connection-level reset receive-to-draining state, endpoint installed-key feed active-route reset handling with recovery timer disarm, client endpoint active reset receive-to-draining handling, server endpoint route-bound active reset reporting with close-deadline record retirement, server endpoint inactive-reset response path pairing, lifecycle helpers, and socket-backed loopbacks exist. TLS client/server transports select the newest active peer `NEW_CONNECTION_ID` for outgoing packets, falling back to the authenticated Initial SCID; the concurrent TLS process server generates an independent 8-byte CSPRNG Initial SCID per accepted connection. Full TLS-owned lifecycle integration is still incomplete. |
 | Retry and address validation | Required for server-side robustness and interop. | Partial: concurrent Retry uses fresh per-process token-secret and per-issuance nonce entropy; token policy, Retry validation, address-validation loopbacks, and TLS extension byte checks exist; production storage/replay policy is missing. |
 | Path validation and migration | Required for single-path validation and route update; full multipath is out of scope. | Partial: PATH_CHALLENGE/PATH_RESPONSE and route-update loopbacks exist; endpoint-owned server output and the process server's datagram sends can now use the committed route tuple after validated migration. A separate-process Zig migration run completes STREAM echo after client port migration and prints `path_challenge_queued=true`, `route_updated=true`, and `migrated=true`. Production path policy and external migration evidence are incomplete. |
-| 0-RTT | Schedule after the first 1-RTT stream echo interop gate; not required for the current milestone. | Partial: explicit accept/reject, mock installed-key 0-RTT paths, NewSessionTicket RFC 9001 sentinel validation, ticket-gated ClientHello `early_data` emission, connection-policy-bound EncryptedExtensions acceptance, client rejection-driven key discard, and server-side ticket-age policy exist; full replay policy is still missing. |
+| 0-RTT | Schedule after the first 1-RTT stream echo interop gate; not required for the current milestone. | Partial: explicit accept/reject, mock installed-key 0-RTT paths, NewSessionTicket RFC 9001 sentinel validation, ticket-gated ClientHello `early_data` emission, connection-policy-bound EncryptedExtensions acceptance, client rejection-driven key discard, server-side ticket-age policy, and bounded local PSK identity replay filtering exist; production/distributed replay policy is still missing. |
 | RFC 9221 DATAGRAM | Optional extension, not part of the first transport milestone. | Deferred. |
 | HTTP/3 and QPACK | Application-layer work after the transport is interoperable. | Deferred. |
 | QUIC v2 and RFC 9368 compatible version negotiation | Optional extension unless a selected interop target requires it. | Partial primitives exist; full behavior is deferred. |
@@ -73,8 +73,10 @@ does not permit QUIC 0-RTT. Server-side PSK selection can now be bound to the
 configured ticket identity, leaving non-matching identities unselected instead
 of opening a 0-RTT receive path. Server-side PSK selection can also require a
 stored ticket-age policy and leave stale ticket ages unselected before binder
-verification or 0-RTT secret derivation. Full 0-RTT replay policy remains
-pending.
+verification or 0-RTT secret derivation. Configured servers can additionally
+share a bounded local PSK identity replay filter; a replayed ticket identity
+leaves PSK unselected and derives no 0-RTT secret. Production/distributed
+0-RTT replay policy remains pending.
 The TLS-owned 0-RTT acceptance signal is now bound to connection policy:
 servers emit EncryptedExtensions `early_data` only when the connection accepts
 installed peer 0-RTT keys, and clients discard local 0-RTT send keys as soon as
