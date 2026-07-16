@@ -108,6 +108,9 @@ output, and compatible-version success paths.
 The base installed-key feed/backend poll and bounded-drain results now expose
 the post-step deadline after backend-driven protected output, including
 ordinary, explicit-output, compatible-version, and OrClose success paths.
+The direct backend-drive poll and bounded-drain results now expose the same
+post-output deadline for ordinary, explicit-output, cross-space,
+compatible-version, and OrClose backend loops.
 The single-connection due-deadline/backend poll result now exposes the same
 post-step deadline for ordinary, explicit-output, and ordered cross-space
 success paths, matching bounded-drain scheduling.
@@ -2434,7 +2437,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   datagram, and consumed by the peer as CRYPTO bytes in the same loop-facing
   API step. The single-connection forms reuse the same sweep path with one
   connection/backend pair and prove one-datagram polling, close-before-poll
-  suppression, and compatible-version peer information handling.
+  suppression, and compatible-version peer information handling. The poll
+  result now also returns the post-output deadline after backend-driven
+  protected output, including cross-space, explicit-output, compatible-version,
+  and OrClose backend loops.
 - 2026-06-10: Added `EndpointCryptoBackendDriveDatagramDrainResult` and
   backend-drive-to-bounded-drain loop steps:
   `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndDrainDatagrams()`,
@@ -2453,7 +2459,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   and compatible-version variants apply or reject peer Version Information
   before draining. The single-connection forms reuse the same sweep path with
   one connection/backend pair and prove one-slot bounded drain, close-before
-  drain suppression, and compatible-version peer information handling.
+  drain suppression, and compatible-version peer information handling. The
+  bounded-drain result now also returns the post-drain deadline after
+  backend-driven protected output, including cross-space, explicit-output,
+  compatible-version, and OrClose backend loops.
 - 2026-06-10: Added `EndpointFeedCryptoBackendDriveDatagramResult` and
   receive-to-backend-to-output loop steps:
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram()`,

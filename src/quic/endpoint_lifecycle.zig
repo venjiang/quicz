@@ -7371,6 +7371,34 @@ pub const EndpointConnectionLifecycle = struct {
         return next;
     }
 
+    fn nextDeadlineAcrossPollConnections(
+        self: *const EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionPollView,
+    ) ?EndpointConnectionDeadline {
+        var next: ?EndpointConnectionDeadline = null;
+        for (connections) |view| {
+            const candidate = self.nextDeadline(view.connection_id, view.connection) orelse continue;
+            if (next == null or candidate.deadline_millis < next.?.deadline_millis) {
+                next = candidate;
+            }
+        }
+        return next;
+    }
+
+    fn nextDeadlineAcrossInstalledKeyPollConnections(
+        self: *const EndpointConnectionLifecycle,
+        connections: []const EndpointConnectionInstalledKeyPollView,
+    ) ?EndpointConnectionDeadline {
+        var next: ?EndpointConnectionDeadline = null;
+        for (connections) |view| {
+            const candidate = self.nextDeadline(view.connection_id, view.connection) orelse continue;
+            if (next == null or candidate.deadline_millis < next.?.deadline_millis) {
+                next = candidate;
+            }
+        }
+        return next;
+    }
+
     /// Drive a connection TLS/crypto backend under endpoint lifecycle ownership.
     ///
     /// This wraps `Connection.driveCryptoBackendInSpace()` and then refreshes
@@ -8227,6 +8255,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
 
@@ -8262,6 +8291,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
 
@@ -8299,6 +8329,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
 
@@ -8333,6 +8364,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
         };
     }
 
@@ -8368,6 +8400,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
         };
     }
 
@@ -8401,6 +8434,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
         };
     }
 
@@ -8435,6 +8469,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
 
@@ -8470,6 +8505,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
         };
     }
 
@@ -8507,6 +8543,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
 
@@ -8539,6 +8576,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
         };
     }
 
@@ -8641,6 +8679,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
 
@@ -8675,6 +8714,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
         };
     }
 
@@ -8851,6 +8891,7 @@ pub const EndpointConnectionLifecycle = struct {
                         now_millis,
                         poll_space,
                     ),
+                    .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
                 };
             };
             accumulateCryptoBackendProgress(&backend, progress);
@@ -8869,6 +8910,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
 
@@ -8901,6 +8943,7 @@ pub const EndpointConnectionLifecycle = struct {
                         poll_views,
                         now_millis,
                     ),
+                    .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
                 };
             };
             accumulateCryptoBackendProgress(&backend, progress);
@@ -8919,6 +8962,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
         };
     }
 
@@ -9018,6 +9062,7 @@ pub const EndpointConnectionLifecycle = struct {
                         poll_space,
                         out,
                     ),
+                    .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
                 };
             };
             accumulateCryptoBackendProgress(&backend, progress);
@@ -9037,6 +9082,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
 
@@ -9070,6 +9116,7 @@ pub const EndpointConnectionLifecycle = struct {
                         now_millis,
                         out,
                     ),
+                    .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
                 };
             };
             accumulateCryptoBackendProgress(&backend, progress);
@@ -9089,6 +9136,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
         };
     }
 
@@ -9370,7 +9418,11 @@ pub const EndpointConnectionLifecycle = struct {
             retained_handshake_spaces_before_poll,
             countRetainedHandshakeSpaces(poll_views),
         );
-        return .{ .backend = backend, .datagram = datagram };
+        return .{
+            .backend = backend,
+            .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
+        };
     }
 
     /// Drive compatible-version backends across ordered packet number spaces,
@@ -9399,7 +9451,11 @@ pub const EndpointConnectionLifecycle = struct {
             retained_handshake_spaces_before_poll,
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views),
         );
-        return .{ .backend = backend, .datagram = datagram };
+        return .{
+            .backend = backend,
+            .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
+        };
     }
 
     /// Drive one compatible-version backend across ordered packet number spaces,
@@ -9494,7 +9550,11 @@ pub const EndpointConnectionLifecycle = struct {
             retained_handshake_spaces_before_drain,
             countRetainedHandshakeSpaces(poll_views),
         );
-        return .{ .backend = backend, .drain = drain };
+        return .{
+            .backend = backend,
+            .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
+        };
     }
 
     /// Drive compatible-version backends across ordered packet number spaces,
@@ -9525,7 +9585,11 @@ pub const EndpointConnectionLifecycle = struct {
             retained_handshake_spaces_before_drain,
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views),
         );
-        return .{ .backend = backend, .drain = drain };
+        return .{
+            .backend = backend,
+            .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
+        };
     }
 
     /// Drive one compatible-version backend across ordered packet number spaces,
@@ -9679,6 +9743,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
 
@@ -9714,6 +9779,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
         };
     }
 
@@ -9815,6 +9881,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
 
@@ -9851,6 +9918,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
         };
     }
 
@@ -10110,7 +10178,11 @@ pub const EndpointConnectionLifecycle = struct {
             retained_handshake_spaces_before_poll,
             countRetainedHandshakeSpaces(poll_views),
         );
-        return .{ .backend = backend, .datagram = datagram };
+        return .{
+            .backend = backend,
+            .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
+        };
     }
 
     /// Drive compatible-version close-propagating backends across ordered
@@ -10139,7 +10211,11 @@ pub const EndpointConnectionLifecycle = struct {
             retained_handshake_spaces_before_poll,
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views),
         );
-        return .{ .backend = backend, .datagram = datagram };
+        return .{
+            .backend = backend,
+            .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
+        };
     }
 
     /// Drive one compatible-version close-propagating backend across ordered
@@ -10234,7 +10310,11 @@ pub const EndpointConnectionLifecycle = struct {
             retained_handshake_spaces_before_drain,
             countRetainedHandshakeSpaces(poll_views),
         );
-        return .{ .backend = backend, .drain = drain };
+        return .{
+            .backend = backend,
+            .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
+        };
     }
 
     /// Drive compatible-version close-propagating backends across ordered
@@ -10265,7 +10345,11 @@ pub const EndpointConnectionLifecycle = struct {
             retained_handshake_spaces_before_drain,
             countRetainedHandshakeSpacesWithInstalledKeyOptions(poll_views),
         );
-        return .{ .backend = backend, .drain = drain };
+        return .{
+            .backend = backend,
+            .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
+        };
     }
 
     /// Drive one compatible-version close-propagating backend across ordered
@@ -10417,6 +10501,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
 
@@ -10452,6 +10537,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .datagram = datagram,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
         };
     }
 
@@ -10556,6 +10642,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossPollConnections(poll_views),
         };
     }
 
@@ -10592,6 +10679,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .backend = backend,
             .drain = drain,
+            .next_deadline = self.nextDeadlineAcrossInstalledKeyPollConnections(poll_views),
         };
     }
 

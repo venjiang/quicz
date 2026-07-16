@@ -415,6 +415,8 @@ pub const EndpointCryptoBackendDriveDatagramResult = struct {
     backend: EndpointCryptoBackendDriveSweepResult,
     /// Protected datagram emitted after backend progress, if any.
     datagram: ?EndpointPolledDatagramResult = null,
+    /// Next endpoint-visible deadline after backend progress and output poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from one backend drive followed by caller-keyed long-packet polling.
@@ -431,6 +433,8 @@ pub const EndpointCryptoBackendDriveDatagramDrainResult = struct {
     backend: EndpointCryptoBackendDriveSweepResult,
     /// Bounded output drain result after backend progress.
     drain: EndpointDatagramDrainResult,
+    /// Next endpoint-visible deadline after backend progress and output drain.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from one backend drive followed by caller-keyed long-packet draining.

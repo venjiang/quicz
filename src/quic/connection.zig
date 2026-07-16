@@ -37107,6 +37107,10 @@ test "EndpointConnectionLifecycle backend drive drains caller-owned output slots
     defer std.testing.allocator.free(out[1].datagram);
     try std.testing.expectEqual(@as(u64, 106), out[0].connection_id);
     try std.testing.expectEqual(@as(u64, 107), out[1].connection_id);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 106), next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(PacketNumberSpace.application, next_deadline.recovery.?.space);
 }
 
 test "EndpointConnectionLifecycle backend drive polls explicit installed-key output" {
@@ -54803,6 +54807,10 @@ test "EndpointConnectionLifecycle drives crypto backend sweep and polls installe
     try std.testing.expectEqual(@as(usize, "backend handshake".len), result.backend.progress.outbound_bytes);
     try std.testing.expect(backend.sent);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 151), next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(PacketNumberSpace.handshake, next_deadline.recovery.?.space);
 
     const polled = result.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(polled.datagram);

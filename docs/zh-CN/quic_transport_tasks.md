@@ -98,6 +98,9 @@ deadline。
 基础 installed-key feed/backend 的 poll 和 bounded-drain result 现在也会在
 backend-driven protected output 后暴露步骤后的下一 deadline，覆盖普通、显式 output、
 compatible-version 和 OrClose 成功路径。
+直接 backend-drive 的 poll 和 bounded-drain result 现在也会暴露同样的 output 后
+deadline，覆盖普通、显式 output、cross-space、compatible-version 和 OrClose backend
+loop。
 single-connection due-deadline/backend poll result 现在也会在普通、显式 output
 和有序 cross-space 成功路径后暴露步骤后的下一 deadline，与 bounded-drain 调度一致。
 
@@ -2090,7 +2093,9 @@ close 和 route cleanup 事件。
   面向 loop 的 API step 中被驱动、组包为 protected installed-key Handshake datagram，
   并由对端作为 CRYPTO bytes 消费。单连接形态复用同一 sweep path，只接收一个
   connection/backend pair，并证明 one-datagram polling、close-before-poll
-  suppression 和 compatible-version peer information 处理。
+  suppression 和 compatible-version peer information 处理。poll result 现在也会在
+  backend-driven protected output 后返回 output 后 deadline，覆盖 cross-space、显式
+  output、compatible-version 和 OrClose backend loop。
 - 2026-06-10：新增 `EndpointCryptoBackendDriveDatagramDrainResult`，以及
   backend-drive-to-bounded-drain loop step：
   `EndpointConnectionLifecycle.driveCryptoBackendInSpaceAndDrainDatagrams()`、
@@ -2108,6 +2113,8 @@ close 和 route cleanup 事件。
   compatible-version 变体会在 drain 前应用或拒绝 peer Version Information。单连接形态复用
   同一 sweep path，只传入一个 connection/backend pair，并证明一格 bounded drain、
   close-before-drain suppression 和 compatible-version peer information 处理。
+  bounded-drain result 现在也会在 backend-driven protected output 后返回 drain 后
+  deadline，覆盖 cross-space、显式 output、compatible-version 和 OrClose backend loop。
 - 2026-06-10：新增 `EndpointFeedCryptoBackendDriveDatagramResult` 和
   receive-to-backend-to-output loop step：
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDriveCryptoBackendsInSpaceAndPollDatagram()`，
