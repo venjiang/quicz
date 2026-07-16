@@ -5037,7 +5037,7 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     try std.testing.expectEqual(connection_module.ConnectionState.draining, client.connectionState());
 }
 
-test "Tls13ServerEndpoint feed reports active stateless reset and retires record" {
+test "Tls13ServerEndpoint bounded receive reports active stateless reset and retires record" {
     const TestRecord = struct {
         handle: u64,
         connection: Connection,
@@ -5154,20 +5154,38 @@ test "Tls13ServerEndpoint feed reports active stateless reset and retires record
     try quic_packet.encodeStatelessReset(reset_writer.writer(), &reset_prefix, reset_token);
 
     var route_out: [64]u8 = undefined;
-    const reset = try endpoint_owner.feedInstalledKeyDatagramWithRoutePath(
+    var scratch: [64]u8 = undefined;
+    var initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const reset_process = try endpoint_owner.processDatagramAndDrainWithRoutePath(
         path,
         10,
         reset_writer.getWritten(),
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
         .{
             .space = .application,
             .out = &route_out,
             .unpredictable_prefix = &[_]u8{},
             .supported_versions = &[_]quic_packet.Version{.v1},
         },
+        &scratch,
+        &[_]u8{},
+        &initial_out,
+        &handshake_out,
+        &installed_key_out,
     );
+    const reset = switch (reset_process) {
+        .routed => |routed| switch (routed) {
+            .installed_key => |installed_key| installed_key,
+            .long => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    };
     const feed = reset.feed orelse return error.TestUnexpectedResult;
     try std.testing.expect(feed.feed == .dropped);
-    try std.testing.expect(reset.datagram == null);
+    try std.testing.expectEqual(@as(usize, 0), reset.drain.datagrams_written);
     try std.testing.expectEqual(@as(?u64, 0), reset.stateless_reset_sequence_number);
     const reset_next_deadline = reset.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(record_handle, reset_next_deadline.connection_id);
