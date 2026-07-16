@@ -1308,6 +1308,56 @@ test "Tls13Handshake server verifies PSK binder without deriving early secret wh
     try std.testing.expect(!server.server_early_traffic_secret_derived);
 }
 
+test "Tls13Handshake server replay filter does not block PSK without early data" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    var replay_filter = ServerPskReplayFilter.init(4);
+
+    var first_client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    @memcpy(first_client.session_ticket[0..ticket.len], &ticket);
+    first_client.session_ticket_len = ticket.len;
+    const first_hello = (try first_client.step()).send_data.data;
+
+    var first_server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+        .server_psk_replay_filter = &replay_filter,
+    }, &tp, psk);
+    first_server.provideData(first_hello);
+    _ = try first_server.step();
+    try std.testing.expect(first_server.peer_offered_psk);
+    try std.testing.expect(!first_server.peer_offered_early_data);
+    try std.testing.expect(first_server.psk_selected);
+    try std.testing.expect(first_server.peer_psk_binder_valid);
+    try std.testing.expect(!first_server.server_early_traffic_secret_derived);
+    try std.testing.expectEqual(@as(usize, 0), replay_filter.entryCount());
+
+    var second_client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    @memcpy(second_client.session_ticket[0..ticket.len], &ticket);
+    second_client.session_ticket_len = ticket.len;
+    const second_hello = (try second_client.step()).send_data.data;
+
+    var second_server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+        .server_psk_replay_filter = &replay_filter,
+    }, &tp, psk);
+    second_server.provideData(second_hello);
+    _ = try second_server.step();
+    try std.testing.expect(second_server.peer_offered_psk);
+    try std.testing.expect(!second_server.peer_offered_early_data);
+    try std.testing.expect(second_server.psk_selected);
+    try std.testing.expect(second_server.peer_psk_binder_valid);
+    try std.testing.expect(!second_server.server_early_traffic_secret_derived);
+    try std.testing.expectEqual(@as(usize, 0), replay_filter.entryCount());
+}
+
 test "Tls13Handshake server rejects mismatched PSK binder" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -3078,12 +3128,14 @@ pub const Tls13Handshake = struct {
             // If the server holds a PSK and the offered identity matches the
             // configured ticket identity and ticket-age policy, verify the
             // binder. A shared replay filter, when configured, consumes the
-            // identity only after the binder verifies so invalid binders cannot
-            // burn a ticket. Derive the client early traffic secret only when
-            // the peer actually offered early_data; PSK-only resumption must
-            // not open a 0-RTT receive path. A non-matching, stale, or replayed
-            // identity leaves PSK unselected so the handshake can continue on
-            // the certificate path.
+            // identity only after the binder verifies and only when the peer
+            // offered early_data, so invalid binders cannot burn a ticket and
+            // ordinary 1-RTT PSK resumption is not constrained by 0-RTT replay
+            // policy. Derive the client early traffic secret only when the
+            // peer actually offered early_data; PSK-only resumption must not
+            // open a 0-RTT receive path. A non-matching, stale, or replayed
+            // early-data identity leaves PSK unselected so the handshake can
+            // continue on the certificate path.
             if (self.server_psk != null and identity_matches and ticket_age_allowed) {
                 const binder_key = self.key_schedule.deriveBinderKey();
                 const expected = KeySchedule.computeFinishedVerifyData(binder_key, truncated_hash);
@@ -3093,10 +3145,10 @@ pub const Tls13Handshake = struct {
                     self.peer_psk_binder,
                 );
                 if (!self.peer_psk_binder_valid) return error.BadFinished;
-                const replay_allowed = if (self.config.server_psk_replay_filter) |filter|
-                    filter.consume(self.peer_psk_identity[0..self.peer_psk_identity_len])
-                else
-                    true;
+                const replay_allowed = if (self.peer_offered_early_data) replay: {
+                    const filter = self.config.server_psk_replay_filter orelse break :replay true;
+                    break :replay filter.consume(self.peer_psk_identity[0..self.peer_psk_identity_len]);
+                } else true;
                 self.psk_selected = replay_allowed;
                 if (replay_allowed and self.peer_offered_early_data) {
                     self.server_early_traffic_secret = self.key_schedule.deriveEarlyTrafficSecret(self.transcript.current());

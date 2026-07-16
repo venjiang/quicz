@@ -75,10 +75,11 @@ of opening a 0-RTT receive path. Server-side PSK selection can also require a
 stored ticket-age policy and leave stale ticket ages unselected before binder
 verification or 0-RTT secret derivation. Configured servers can additionally
 share a bounded local PSK identity replay filter; a replayed ticket identity
-leaves PSK unselected and derives no 0-RTT secret. The replay filter now exports
-and restores fixed snapshots so callers can persist or distribute retained
-identity fingerprints. Production/distributed 0-RTT replay policy remains
-pending.
+that offered early data leaves PSK unselected and derives no 0-RTT secret,
+while ordinary PSK resumption without early_data remains reusable. The replay
+filter now exports and restores fixed snapshots so callers can persist or
+distribute retained identity fingerprints. Production/distributed 0-RTT replay
+policy remains pending.
 The TLS-owned 0-RTT acceptance signal is now bound to connection policy:
 servers emit EncryptedExtensions `early_data` only when the connection accepts
 installed peer 0-RTT keys, and clients discard local 0-RTT send keys as soon as

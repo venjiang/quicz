@@ -67,7 +67,8 @@ ticket identity，identity 不匹配时不会选择 PSK，也不会打开 0-RTT 
 server-side PSK selection 也可要求已存 ticket-age policy；stale ticket age 会在
 binder verification 或 0-RTT secret derivation 前保持 PSK unselected。
 配置后的 server 还可共享有界本地 PSK identity replay filter；重复使用的 ticket
-identity 会保持 PSK unselected，且不会派生 0-RTT secret。replay filter 现在可
+identity 只有在 offer early_data 时才会保持 PSK unselected 且不派生 0-RTT
+secret；没有 early_data 的普通 PSK resumption 仍可重复使用。replay filter 现在可
 导出/恢复 fixed snapshot，调用方可持久化或分发已保留的 identity fingerprint。
 生产/分布式 0-RTT replay policy 仍待实现。
 TLS-owned 0-RTT acceptance signal 现在绑定到连接策略：server 只有在
