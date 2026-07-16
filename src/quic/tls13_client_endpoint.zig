@@ -1697,6 +1697,57 @@ test "Tls13ClientEndpoint retires its route when idle deadline closes the client
     try std.testing.expectEqual(@as(usize, 0), client.lifecycle.recoveryTimerCount());
 }
 
+test "Tls13ClientEndpoint receive step retires idle route while reporting input" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        14,
+        path,
+        .{ .active_migration_disabled = false },
+        .{ .max_idle_timeout_ms = 10 },
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+    client.transport.connection.last_packet_activity_millis = 10;
+
+    const deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(deadline == .idle_timeout);
+    try std.testing.expectEqual(@as(i64, 20), deadline.deadlineMillis());
+    try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
+
+    const malformed_short = [_]u8{ 0x40, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70, 0x00 };
+    var scratch: [128]u8 = undefined;
+    var receive_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    var due_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const step = try client.receiveDatagramStepWithRoutePath(
+        deadline.deadlineMillis(),
+        &scratch,
+        &malformed_short,
+        &receive_out,
+        &due_out,
+    );
+
+    try std.testing.expect(step.receive.receive == null);
+    try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), step.receive.receive_error);
+    try std.testing.expectEqual(@as(usize, 0), step.receive.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), step.receive.drain.first_error);
+    const due = step.due orelse return error.TestUnexpectedResult;
+    try std.testing.expect(due.deadline == .idle_timeout);
+    try std.testing.expectEqual(@as(usize, 0), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), due.drain.first_error);
+    try std.testing.expectEqual(@as(?client_transport.ClientTransportDeadline, null), step.next_deadline);
+    try std.testing.expectEqual(@as(usize, 0), client.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), client.lifecycle.recoveryTimerCount());
+}
+
 test "Tls13ClientEndpoint closes with committed route output" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58 };
