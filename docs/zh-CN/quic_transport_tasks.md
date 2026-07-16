@@ -62,8 +62,9 @@ CSPRNG-backed ticket age add，并记录 peer 提供的 obfuscated ticket age。
 NewSessionTicket 现在携带 QUIC 0-RTT `early_data` sentinel，server 只在
 ClientHello 实际 offer `early_data` 时才派生 peer 0-RTT receive secret。
 client-side 0-RTT secret poll 在已存 ticket 不允许 QUIC 0-RTT 时不会 build
-ClientHello，也不会修改 outbound CRYPTO。完整 0-RTT replay 与 ticket-age
-policy 仍待实现。
+ClientHello，也不会修改 outbound CRYPTO。server-side PSK selection 现在可绑定到配置的
+ticket identity，identity 不匹配时不会选择 PSK，也不会打开 0-RTT receive path。
+完整 0-RTT replay 与 ticket-age policy 仍待实现。
 
 并发纯 Zig server 现经由其拥有的 `EndpointConnectionRegistry` 分发已路由的
 1-RTT short packet，涵盖 lifecycle route lookup、installed-key 接收和
@@ -934,6 +935,12 @@ close 和 route cleanup 事件。
 以上仅是有界的 1-RTT short-packet 证据。Initial 和 Handshake 接收路径仍保持当前的有序规则，尚未记录外部 server 互通结果。
 
 ## 进展记录
+
+- 2026-07-16：server-side 纯 Zig TLS PSK selection 现在可绑定到配置的
+  ticket identity。identity 匹配时继续校验 binder、在 ServerHello 里选择
+  PSK identity 0，并在 offer 了 early_data 时派生 0-RTT receive secret；
+  identity 不匹配时保持 PSK unselected，且不会发送 `pre_shared_key`
+  ServerHello extension。
 
 - 2026-07-16：`CryptoBackend` client 0-RTT write-secret hook 现在受已存
   NewSessionTicket `early_data` 权限约束。只有 PSK 但没有 ticket，或 ticket 未携带

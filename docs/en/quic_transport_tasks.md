@@ -69,7 +69,9 @@ ticket age on the server side. NewSessionTicket now carries QUIC's 0-RTT
 `early_data` sentinel, and the server derives peer 0-RTT receive secrets only
 when the ClientHello actually offers `early_data`. Client-side 0-RTT secret
 polls now leave ClientHello and outbound CRYPTO untouched when the stored ticket
-does not permit QUIC 0-RTT. Full 0-RTT replay and ticket-age policy remains
+does not permit QUIC 0-RTT. Server-side PSK selection can now be bound to the
+configured ticket identity, leaving non-matching identities unselected instead
+of opening a 0-RTT receive path. Full 0-RTT replay and ticket-age policy remains
 pending.
 
 The concurrent pure-Zig server now dispatches routed 1-RTT short packets through
@@ -1050,6 +1052,12 @@ QUIC unless the gap is named and the verification evidence is added here.
 | Interop | Partial | A certificate-verified Zig client completes a FIN-terminated protected STREAM echo against a local independent `quic-go` v0.59.0 server; separate Go and Rust clients complete the inverse echo direction against the Zig server. | Record repeatable peer-version evidence and add Retry, loss/recovery, version-negotiation, broader server, and application-protocol scenarios. |
 
 ## Progress Notes
+
+- 2026-07-16: Bound server-side pure-Zig TLS PSK selection to an optional
+  configured ticket identity. Matching identities still verify the binder,
+  select PSK identity 0, and derive the 0-RTT receive secret when early_data was
+  offered; non-matching identities leave PSK unselected and emit no
+  `pre_shared_key` ServerHello extension.
 
 - 2026-07-16: Gated the pure-Zig `CryptoBackend` client 0-RTT write-secret
   hook on the stored NewSessionTicket `early_data` permission. A PSK without a

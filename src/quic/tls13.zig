@@ -1174,6 +1174,60 @@ test "Tls13Handshake server selects valid PSK in ServerHello" {
     try std.testing.expect(client.psk_selected);
 }
 
+test "Tls13Handshake server selects PSK only for matching ticket identity" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+
+    var client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+    client.session_ticket_allows_early_data = true;
+    const client_hello = (try client.step()).send_data.data;
+
+    var matching = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+    }, &tp, psk);
+    try matching.setServerPskIdentity(&ticket);
+    matching.provideData(client_hello);
+    try std.testing.expect(std.meta.activeTag(try matching.step()) == ._continue);
+    try std.testing.expect(matching.peer_psk_binder_valid);
+    try std.testing.expect(matching.psk_selected);
+    try std.testing.expect(matching.server_early_traffic_secret_derived);
+
+    var mismatched = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+    }, &tp, psk);
+    const other_ticket = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    try mismatched.setServerPskIdentity(&other_ticket);
+    mismatched.provideData(client_hello);
+    try std.testing.expect(std.meta.activeTag(try mismatched.step()) == ._continue);
+    try std.testing.expect(!mismatched.peer_psk_binder_valid);
+    try std.testing.expect(!mismatched.psk_selected);
+    try std.testing.expect(!mismatched.server_early_traffic_secret_derived);
+
+    const server_hello_action = try mismatched.step();
+    try std.testing.expectEqual(EncryptionLevel.initial, server_hello_action.send_data.level);
+    try std.testing.expectError(
+        error.TestUnexpectedResult,
+        serverHelloExtension(server_hello_action.send_data.data, @intFromEnum(ExtType.pre_shared_key)),
+    );
+}
+
+test "Tls13Handshake rejects invalid server PSK identity configuration" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
+    try std.testing.expectError(error.DecodeError, server.setServerPskIdentity(&[_]u8{}));
+
+    var oversized: [4097]u8 = undefined;
+    @memset(&oversized, 0xcc);
+    try std.testing.expectError(error.DecodeError, server.setServerPskIdentity(&oversized));
+}
+
 test "TranscriptHash is empty hash on init" {
     const th = TranscriptHash.init();
     const hash = th.current();
@@ -1412,6 +1466,8 @@ pub const Tls13Handshake = struct {
     // the server seeds `KeySchedule.initWithPsk` so it can derive the same
     // client early traffic secret the client used to protect early data.
     server_psk: ?[secret_len]u8 = null,
+    server_psk_identity: [4096]u8 = undefined,
+    server_psk_identity_len: usize = 0,
 
     // Server-side: the client early traffic secret derived over the
     // ClientHello transcript once a matching PSK is in place. This is the
@@ -1466,6 +1522,7 @@ pub const Tls13Handshake = struct {
         self.session_ticket_age_add = 0;
         self.session_ticket_allows_early_data = false;
         self.server_psk = null;
+        self.server_psk_identity_len = 0;
         self.peer_psk_identity_len = 0;
         self.peer_psk_obfuscated_ticket_age = 0;
         self.peer_offered_psk = false;
@@ -1530,6 +1587,7 @@ pub const Tls13Handshake = struct {
         self.session_ticket_age_add = 0;
         self.session_ticket_allows_early_data = false;
         self.server_psk = null;
+        self.server_psk_identity_len = 0;
         self.peer_psk_identity_len = 0;
         self.peer_psk_obfuscated_ticket_age = 0;
         self.peer_offered_psk = false;
@@ -1566,6 +1624,15 @@ pub const Tls13Handshake = struct {
         self.server_psk = psk;
         self.key_schedule = KeySchedule.initWithPsk(psk);
         return self;
+    }
+
+    /// Restrict server-side PSK selection to one ticket identity. Without this
+    /// optional binding, `initServerWithPsk` preserves the external-PSK
+    /// behavior and accepts any identity whose binder verifies against the PSK.
+    pub fn setServerPskIdentity(self: *Tls13Handshake, identity: []const u8) HandshakeError!void {
+        if (identity.len == 0 or identity.len > self.server_psk_identity.len) return error.DecodeError;
+        @memcpy(self.server_psk_identity[0..identity.len], identity);
+        self.server_psk_identity_len = identity.len;
     }
 
     pub fn provideData(self: *Tls13Handshake, data: []const u8) void {
@@ -2637,11 +2704,20 @@ pub const Tls13Handshake = struct {
             self.transcript.update(msg[0..binder_offset]);
             const truncated_hash = self.transcript.current();
             self.transcript.update(msg[binder_offset..]);
-            // If the server holds a PSK, verify the binder. Derive the client
+            const identity_matches = self.server_psk_identity_len == 0 or
+                (self.peer_psk_identity_len == self.server_psk_identity_len and
+                    std.mem.eql(
+                        u8,
+                        self.peer_psk_identity[0..self.peer_psk_identity_len],
+                        self.server_psk_identity[0..self.server_psk_identity_len],
+                    ));
+            // If the server holds a PSK and the offered identity matches the
+            // configured ticket identity, verify the binder. Derive the client
             // early traffic secret only when the peer actually offered
             // early_data; PSK-only resumption must not open a 0-RTT receive
-            // path.
-            if (self.server_psk != null) {
+            // path. A non-matching identity leaves PSK unselected so the
+            // handshake can continue on the certificate path.
+            if (self.server_psk != null and identity_matches) {
                 const binder_key = self.key_schedule.deriveBinderKey();
                 const expected = KeySchedule.computeFinishedVerifyData(binder_key, truncated_hash);
                 self.peer_psk_binder_valid = std.crypto.timing_safe.eql(
