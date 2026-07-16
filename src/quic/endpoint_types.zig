@@ -307,6 +307,8 @@ pub const EndpointPendingWorkResult = struct {
     idle_retired: ?EndpointConnectionRetireResult = null,
     /// Endpoint state retired because close/drain timeout closed the connection.
     close_retired: ?EndpointConnectionRetireResult = null,
+    /// Retained 1-RTT previous keys discarded for the connection.
+    key_discard_serviced: bool = false,
     /// Loss/PTO timer serviced for the connection, if due.
     recovery_serviced: ?EndpointLossDetectionTimerDeadline = null,
 };
@@ -337,6 +339,8 @@ pub const EndpointPendingWorkSweepResult = struct {
     idle_retired_count: usize = 0,
     /// Number of connection handles retired by close/drain timeout.
     close_retired_count: usize = 0,
+    /// Number of due retained 1-RTT previous-key discard timers serviced.
+    key_discard_serviced_count: usize = 0,
     /// Number of due loss/PTO timers serviced.
     recovery_serviced_count: usize = 0,
 };

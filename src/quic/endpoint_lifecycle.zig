@@ -10801,7 +10801,7 @@ pub const EndpointConnectionLifecycle = struct {
         );
         if (result.close_retired != null) return result;
 
-        _ = connection.discardExpiredOneRttKeys(now_millis);
+        result.key_discard_serviced = connection.discardExpiredOneRttKeys(now_millis);
 
         result.recovery_serviced = try self.serviceRecoveryTimer(
             connection_id,
@@ -10834,6 +10834,9 @@ pub const EndpointConnectionLifecycle = struct {
             }
             if (pending.close_retired != null) {
                 sweep.close_retired_count += 1;
+            }
+            if (pending.key_discard_serviced) {
+                sweep.key_discard_serviced_count += 1;
             }
             if (pending.recovery_serviced != null) {
                 sweep.recovery_serviced_count += 1;
@@ -12298,6 +12301,7 @@ pub const EndpointConnectionLifecycle = struct {
         return .{
             .idle_retired_count = if (pending_work.idle_retired != null) 1 else 0,
             .close_retired_count = if (pending_work.close_retired != null) 1 else 0,
+            .key_discard_serviced_count = if (pending_work.key_discard_serviced) 1 else 0,
             .recovery_serviced_count = if (pending_work.recovery_serviced != null) 1 else 0,
         };
     }
