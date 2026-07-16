@@ -673,6 +673,7 @@ pub const EndpointConnectionLifecycle = struct {
                 &[_]u8{},
                 initial_secrets.server,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -770,6 +771,7 @@ pub const EndpointConnectionLifecycle = struct {
                 initial_secrets.server,
                 out,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -827,6 +829,7 @@ pub const EndpointConnectionLifecycle = struct {
                 &[_]u8{},
                 initial_secrets.server,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -926,6 +929,7 @@ pub const EndpointConnectionLifecycle = struct {
                 initial_secrets.server,
                 out,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 

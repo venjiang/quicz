@@ -41221,6 +41221,10 @@ test "EndpointConnectionLifecycle accepts Initial and drives backend response" {
     try std.testing.expectEqual(@as(usize, "server hello from backend".len), result.backend.outbound_bytes);
     try std.testing.expectEqual(@as(usize, 2), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 205), next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(PacketNumberSpace.initial, next_deadline.recovery.?.space);
 
     const response_route = try client_lifecycle.processRoutedProtectedInitialDatagram(
         121,
@@ -41485,6 +41489,10 @@ test "EndpointConnectionLifecycle accepts Initial and drains backend response da
     try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
     try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
     try std.testing.expectEqual(@as(u64, 207), first_out[0].connection_id);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 207), next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(PacketNumberSpace.initial, next_deadline.recovery.?.space);
 
     var rest_out: [4]EndpointPolledDatagramResult = undefined;
     const rest = lifecycle.drainProtectedLongCryptoDatagramsInSpace(

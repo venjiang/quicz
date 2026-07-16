@@ -716,6 +716,8 @@ pub const EndpointAcceptedInitialCryptoBackendDatagramResult = struct {
     /// The caller owns these bytes and must free them with the same allocator
     /// used by `connection`.
     response_datagram: ?[]u8 = null,
+    /// Next endpoint-visible deadline after accepted Initial backend progress and output poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Endpoint result after accepting a protected Initial and draining TLS output.
@@ -726,6 +728,8 @@ pub const EndpointAcceptedInitialCryptoBackendDatagramDrainResult = struct {
     backend: CryptoBackendProgress,
     /// Bounded protected server Initial output drain result.
     drain: EndpointDatagramDrainResult,
+    /// Next endpoint-visible deadline after accepted Initial backend progress and output drain.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Endpoint result after accepting a Retry follow-up protected Initial.
