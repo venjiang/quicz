@@ -166,6 +166,12 @@ pub fn Tls13ServerEndpoint(
             coalesced_initial_handshake: RoutedBackendDatagramDrainPathResult,
         };
 
+        /// Routed datagram dispatch with route-bound output.
+        pub const RoutedDatagramProcessPathResult = union(enum) {
+            long: LongDatagramProcessPathResult,
+            installed_key: InstalledKeyDatagramRoutePollResult,
+        };
+
         /// Routed installed-key backend processing with route-bound output.
         pub const RoutedBackendDatagramDrainPathResult = struct {
             route: endpoint.RouteResult,
@@ -768,6 +774,25 @@ pub fn Tls13ServerEndpoint(
                 },
             };
             const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
+            return self.processRoutedInstalledKeyDatagramWithRoutePath(
+                route,
+                record,
+                path,
+                now_millis,
+                datagram,
+                options,
+            );
+        }
+
+        fn processRoutedInstalledKeyDatagramWithRoutePath(
+            self: *Self,
+            route: endpoint.RouteResult,
+            record: *Record,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!InstalledKeyDatagramRoutePollResult {
             const connection = connection_of(record);
             const destination_connection_id = destination_connection_id_of(record);
             if (datagram.len != 0 and quic_packet.parseHeaderForm(datagram[0]) == .short) {
@@ -1605,6 +1630,49 @@ pub fn Tls13ServerEndpoint(
                 handshake_out,
             ) };
         }
+
+        /// Dispatch one already-routed UDP datagram by packet header form.
+        ///
+        /// Socket loops can classify once with `feedDatagramWithResponsePath()`
+        /// or `routeDatagram()`, then keep long-header CRYPTO and installed-key
+        /// short-packet processing behind this endpoint owner.
+        pub fn processRoutedDatagramWithRoutePath(
+            self: *Self,
+            route: endpoint.RouteResult,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            installed_key_options: root.EndpointFeedInstalledKeyDatagramOptions,
+            scratch: []u8,
+            initial_token: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!RoutedDatagramProcessPathResult {
+            if (datagram.len == 0) return error.InvalidPacket;
+            return switch (quic_packet.parseHeaderForm(datagram[0])) {
+                .long => .{ .long = try self.processLongDatagramWithRoutePath(
+                    route.connection_id,
+                    path,
+                    now_millis,
+                    datagram,
+                    scratch,
+                    initial_token,
+                    out,
+                    handshake_out,
+                ) },
+                .short => short: {
+                    const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
+                    break :short .{ .installed_key = try self.processRoutedInstalledKeyDatagramWithRoutePath(
+                        route,
+                        record,
+                        path,
+                        now_millis,
+                        datagram,
+                        installed_key_options,
+                    ) };
+                },
+            };
+        }
     };
 }
 
@@ -2296,18 +2364,33 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
     defer std.testing.allocator.free(initial_datagram);
 
     var scratch: [256]u8 = undefined;
+    var route_out: [64]u8 = undefined;
     var initial_out: [1]root.EndpointPolledDatagramResult = undefined;
     var handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
-    const initial_result = try endpoint_owner.processLongPacketWithRoutePath(
-        record.handle,
+    const initial_route = try endpoint_owner.routeDatagram(path, initial_datagram);
+    const initial_dispatch = try endpoint_owner.processRoutedDatagramWithRoutePath(
+        initial_route,
         path,
         2,
         initial_datagram,
+        .{
+            .space = .application,
+            .out = &route_out,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
         &scratch,
         &[_]u8{},
         &initial_out,
         &handshake_out,
     );
+    const initial_result = switch (initial_dispatch) {
+        .long => |long| switch (long) {
+            .packet => |packet_result| packet_result,
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    };
     switch (initial_result) {
         .initial => |initial| {
             try std.testing.expectEqual(record.handle, initial.initial.route.connection_id);
@@ -2337,16 +2420,30 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(handshake_datagram);
 
-    const handshake_result = try endpoint_owner.processLongPacketWithRoutePath(
-        record.handle,
+    const handshake_route = try endpoint_owner.routeDatagram(path, handshake_datagram);
+    const handshake_dispatch = try endpoint_owner.processRoutedDatagramWithRoutePath(
+        handshake_route,
         path,
         4,
         handshake_datagram,
+        .{
+            .space = .application,
+            .out = &route_out,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
         &scratch,
         &[_]u8{},
         &initial_out,
         &handshake_out,
     );
+    const handshake_result = switch (handshake_dispatch) {
+        .long => |long| switch (long) {
+            .packet => |packet_result| packet_result,
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    };
     switch (handshake_result) {
         .handshake => |handshake| {
             try std.testing.expectEqual(record.handle, handshake.route.connection_id);
@@ -2356,6 +2453,47 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expect(record.backend.received_handshake);
+
+    const client_1rtt = [_]u8{0x51} ** protection.traffic_secret_len;
+    const server_1rtt = [_]u8{0x52} ** protection.traffic_secret_len;
+    try client.installOneRttTrafficSecrets(.{
+        .local = client_1rtt,
+        .peer = server_1rtt,
+    });
+    try record.connection.installOneRttTrafficSecrets(.{
+        .local = server_1rtt,
+        .peer = client_1rtt,
+    });
+    try client.confirmHandshake();
+    try record.connection.confirmHandshake();
+    try client.sendPing();
+    const short_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(5, &server_cid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(short_datagram);
+    const short_route = try endpoint_owner.routeDatagram(path, short_datagram);
+    const short_dispatch = try endpoint_owner.processRoutedDatagramWithRoutePath(
+        short_route,
+        path,
+        6,
+        short_datagram,
+        .{
+            .space = .application,
+            .out = &route_out,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &scratch,
+        &[_]u8{},
+        &initial_out,
+        &handshake_out,
+    );
+    switch (short_dispatch) {
+        .installed_key => |processed_short| {
+            try std.testing.expect((processed_short.feed orelse return error.TestUnexpectedResult).feed == .routed);
+            try std.testing.expectEqual(@as(?TestEndpoint.DatagramPathResult, null), processed_short.datagram);
+            try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), processed_short.next_deadline);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 
     const unsupported_coalesced = try std.testing.allocator.alloc(u8, handshake_datagram.len + initial_datagram.len);
     defer std.testing.allocator.free(unsupported_coalesced);
