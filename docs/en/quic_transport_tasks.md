@@ -102,6 +102,9 @@ post-poll next deadline for ordinary and explicit-output timer ticks.
 Receive-to-pending-work poll and bounded-drain results now expose the same
 post-step deadline for single-connection and caller-owned connection-map loops,
 including explicit installed-key output options and terminal cleanup.
+The receive-to-pending-work/backend poll and bounded-drain results also expose
+the post-step deadline for ordinary in-space, ordered cross-space, explicit
+output, and compatible-version success paths.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
@@ -2152,7 +2155,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   as receive-to-pending-work-to-backend-to-output socket-loop steps. Unit
   coverage proves routed Handshake input can drive a caller-owned backend and
   return the protected Handshake response datagram from the same lifecycle
-  call. The result contract lives in `src/quic/endpoint_types.zig` and is
+  call. Results now also expose the post-step Handshake recovery deadline after
+  backend output polling. The result contract lives in `src/quic/endpoint_types.zig` and is
   re-exported from `src/lib.zig`.
 - 2026-06-24: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndDrainDatagrams()`
@@ -2160,7 +2164,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   as bounded receive-to-pending-work-to-backend-to-output socket-loop steps.
   Unit coverage proves routed Handshake input can drive a caller-owned backend,
   drain one protected Handshake response into the caller-owned output slice,
-  and preserve the endpoint pending-work ordering in the same lifecycle call.
+  preserve the endpoint pending-work ordering, and return the post-step
+  Handshake recovery deadline in the same lifecycle call.
   The result contract lives in `src/quic/endpoint_types.zig` and is
   re-exported from `src/lib.zig`.
 - 2026-06-24: Added
@@ -2169,7 +2174,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   so caller-owned socket loops can preserve per-connection installed-key output
   choices after receive processing, pending work, and backend progress. Unit
   coverage proves explicit Handshake output options return and drain protected
-  backend responses from the same lifecycle call.
+  backend responses from the same lifecycle call, with the post-step recovery
+  deadline exposed to the caller.
 - 2026-06-24: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram()`,
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`,

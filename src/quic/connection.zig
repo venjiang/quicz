@@ -24760,6 +24760,10 @@ test "EndpointConnectionLifecycle feed pending-work cross-space backend poll ste
     const polled = backend_result.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(polled.datagram);
     try std.testing.expectEqual(@as(u64, 250), polled.connection_id);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 250), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.handshake, next_deadline.recovery.?.space);
     try client.processProtectedHandshakeDatagramWithInstalledKeys(12, polled.datagram);
     var response: [64]u8 = undefined;
     const response_len = (try client.recvCryptoInSpace(.handshake, &response)) orelse return error.TestUnexpectedResult;
@@ -24854,6 +24858,10 @@ test "EndpointConnectionLifecycle feed pending-work cross-space backend drain st
     try std.testing.expectEqual(@as(usize, 1), backend_result.backend.connections_driven);
     try std.testing.expectEqual(@as(usize, 1), backend_result.drain.datagrams_written);
     try std.testing.expectEqual(@as(usize, 260), drained[0].connection_id);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 260), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.handshake, next_deadline.recovery.?.space);
     defer std.testing.allocator.free(drained[0].datagram);
 
     try client.processProtectedHandshakeDatagramWithInstalledKeys(12, drained[0].datagram);
@@ -24948,6 +24956,10 @@ test "EndpointConnectionLifecycle feed pending-work cross-space backend drain st
 
     const backend_result = result.backend orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), backend_result.drain.datagrams_written);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 280), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.handshake, next_deadline.recovery.?.space);
     defer std.testing.allocator.free(drained[0].datagram);
     try client.processProtectedHandshakeDatagramWithInstalledKeys(12, drained[0].datagram);
     var response: [64]u8 = undefined;

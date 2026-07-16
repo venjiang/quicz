@@ -371,6 +371,8 @@ pub const EndpointPendingWorkCryptoBackendDatagramResult = struct {
     pending_work: EndpointPendingWorkSweepResult,
     /// Backend drive and output polling result.
     backend: EndpointCryptoBackendDriveDatagramResult,
+    /// Next endpoint-visible deadline after pending work, backend progress, and output poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from pending-work sweep followed by backend drive and output draining.
@@ -379,6 +381,8 @@ pub const EndpointPendingWorkCryptoBackendDatagramDrainResult = struct {
     pending_work: EndpointPendingWorkSweepResult,
     /// Backend drive and bounded output drain result.
     backend: EndpointCryptoBackendDriveDatagramDrainResult,
+    /// Next endpoint-visible deadline after pending work, backend progress, and output drain.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from pending-work sweep followed by backend drive and deadline selection.
@@ -622,6 +626,8 @@ pub const EndpointFeedPendingWorkCryptoBackendDatagramResult = struct {
     pending_work: EndpointPendingWorkSweepResult,
     /// Backend drive and output result when `feed` routed and pending work kept connections live.
     backend: ?EndpointCryptoBackendDriveDatagramResult = null,
+    /// Next endpoint-visible deadline after receive, pending work, backend progress, and output poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from feeding one installed-key datagram, processing pending work, driving backend, then draining output.
@@ -632,6 +638,8 @@ pub const EndpointFeedPendingWorkCryptoBackendDatagramDrainResult = struct {
     pending_work: EndpointPendingWorkSweepResult,
     /// Backend drive and bounded output drain when `feed` routed and pending work kept connections live.
     backend: ?EndpointCryptoBackendDriveDatagramDrainResult = null,
+    /// Next endpoint-visible deadline after receive, pending work, backend progress, and output drain.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from feeding one installed-key datagram, then polling output.

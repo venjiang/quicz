@@ -92,6 +92,9 @@ poll 后下一 deadline。
 receive-to-pending-work 的 poll 和 bounded-drain result 现在会在单连接与
 caller-owned connection map 两类 socket loop 中暴露同样的步骤后 deadline，覆盖显式
 installed-key output options 与终态 cleanup。
+receive-to-pending-work/backend 的 poll 和 bounded-drain result 也会在普通 in-space、
+有序 cross-space、显式 output 以及 compatible-version 成功路径后暴露步骤后的下一
+deadline。
 
 Client endpoint 的错误路径不会再把无关待发送应用包误当作 close-on-error 输出：
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入
@@ -1882,7 +1885,8 @@ close 和 route cleanup 事件。
   和 `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram()`，
   作为 receive-to-pending-work-to-backend-to-output socket-loop step。单元测试证明 routed
   Handshake input 可以驱动调用方持有的 backend，并在同一个 lifecycle call 中返回 protected
-  Handshake response datagram。结果契约放在 `src/quic/endpoint_types.zig`，并从
+  Handshake response datagram。result 现在还会在 backend output polling 后暴露步骤后的
+  Handshake recovery deadline。结果契约放在 `src/quic/endpoint_types.zig`，并从
   `src/lib.zig` re-export。
 - 2026-06-24：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndDrainDatagrams()`
@@ -1890,13 +1894,15 @@ close 和 route cleanup 事件。
   作为 bounded receive-to-pending-work-to-backend-to-output socket-loop step。单元测试证明
   routed Handshake input 可以驱动调用方持有的 backend，把一个 protected Handshake response
   drain 到调用方持有的 output slice，并在同一个 lifecycle call 中保持 endpoint pending-work
-  顺序。结果契约放在 `src/quic/endpoint_types.zig`，并从 `src/lib.zig` re-export。
+  顺序，同时返回步骤后的 Handshake recovery deadline。结果契约放在
+  `src/quic/endpoint_types.zig`，并从 `src/lib.zig` re-export。
 - 2026-06-24：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`
   和 `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions()`，
   让调用方持有 connection map 的 socket loop 可以在 receive processing、pending work 和
   backend progress 后继续保留每条连接自己的 installed-key output 选择。单元测试证明 explicit
-  Handshake output options 可以在同一个 lifecycle call 中返回和 drain protected backend response。
+  Handshake output options 可以在同一个 lifecycle call 中返回和 drain protected backend
+  response，并向调用方暴露步骤后的 recovery deadline。
 - 2026-06-24：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagram()`、
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndPollDatagramWithInstalledKeyOptions()`、
