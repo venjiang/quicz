@@ -252,10 +252,14 @@ pub const Tls13Backend = struct {
             return .{ .local = null, .peer = self.hs.server_early_traffic_secret };
         }
         // The connection pulls traffic secrets before pulling CRYPTO bytes,
-        // so for a PSK-resumed client the ClientHello may not be built yet.
-        // Pump once to emit it (arming client_hello_built) so the early
-        // traffic secret can be derived over the ClientHello transcript.
-        if (self.hs.has_psk and !self.client_hello_built) {
+        // so for a PSK-resumed client with a QUIC-0RTT-capable ticket the
+        // ClientHello may not be built yet. Pump only when 0-RTT is legal; a
+        // denied 0-RTT poll must not build ClientHello or mutate CRYPTO output.
+        if (self.hs.has_psk and
+            self.hs.session_ticket_len > 0 and
+            self.hs.session_ticket_allows_early_data and
+            !self.client_hello_built)
+        {
             self.pump() catch {
                 self.drive_errors += 1;
                 return error.CryptoError;
@@ -449,6 +453,58 @@ test "Tls13Backend pullEarlyTrafficSecret requires ticket early_data permission"
     var disallowed_out: [4096]u8 = undefined;
     _ = try disallowed_cb.pull(disallowed_cb.context, .initial, &disallowed_out);
     try std.testing.expect(disallowed.pullEarlyTrafficSecret() == null);
+}
+
+test "Tls13Backend zero rtt hook does not build ClientHello without early data ticket" {
+    var no_ticket = Tls13Backend.initClientWithPsk(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    }, [_]u8{0xab} ** tls13.secret_len);
+    var no_ticket_cb = no_ticket.cryptoBackend();
+    try std.testing.expect(try no_ticket_cb.pullZeroRttTrafficSecrets() == null);
+    try std.testing.expect(!no_ticket.client_hello_built);
+    try std.testing.expectEqual(@as(usize, 0), no_ticket.out_initial.len);
+
+    var no_ticket_out: [4096]u8 = undefined;
+    const no_ticket_initial = try no_ticket_cb.pull(no_ticket_cb.context, .initial, &no_ticket_out);
+    try std.testing.expect(no_ticket_initial != null);
+    try std.testing.expect(no_ticket.client_hello_built);
+
+    var disallowed = Tls13Backend.initClientWithPsk(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    }, [_]u8{0xab} ** tls13.secret_len);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(disallowed.hs.session_ticket[0..ticket.len], &ticket);
+    disallowed.hs.session_ticket_len = ticket.len;
+    var disallowed_cb = disallowed.cryptoBackend();
+    try std.testing.expect(try disallowed_cb.pullZeroRttTrafficSecrets() == null);
+    try std.testing.expect(!disallowed.client_hello_built);
+    try std.testing.expectEqual(@as(usize, 0), disallowed.out_initial.len);
+
+    var disallowed_out: [4096]u8 = undefined;
+    const disallowed_initial = try disallowed_cb.pull(disallowed_cb.context, .initial, &disallowed_out);
+    try std.testing.expect(disallowed_initial != null);
+    try std.testing.expect(disallowed.client_hello_built);
+}
+
+test "Tls13Backend zero rtt hook builds ClientHello only with early data ticket" {
+    var backend = Tls13Backend.initClientWithPsk(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    }, [_]u8{0xab} ** tls13.secret_len);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(backend.hs.session_ticket[0..ticket.len], &ticket);
+    backend.hs.session_ticket_len = ticket.len;
+    backend.hs.session_ticket_allows_early_data = true;
+
+    var cb = backend.cryptoBackend();
+    const secrets = try cb.pullZeroRttTrafficSecrets() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(secrets.local != null);
+    try std.testing.expect(secrets.peer == null);
+    try std.testing.expect(backend.client_hello_built);
+    try std.testing.expect(backend.out_initial.len > 0);
+    try std.testing.expect(try cb.pullZeroRttTrafficSecrets() == null);
 }
 
 test "Tls13Backend drives a full client handshake through CryptoBackend hooks" {
