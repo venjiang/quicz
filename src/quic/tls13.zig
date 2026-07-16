@@ -1263,6 +1263,7 @@ test "Tls13Handshake server EncryptedExtensions signals accepted early data" {
     server.provideData(client_hello);
     try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
     try std.testing.expect(server.server_early_traffic_secret_derived);
+    server.server_accepts_early_data = true;
     try std.testing.expectEqual(EncryptionLevel.initial, (try server.step()).send_data.level);
     try std.testing.expectEqual(EncryptionLevel.handshake, (try server.step()).install_keys.level);
 
@@ -1273,6 +1274,39 @@ test "Tls13Handshake server EncryptedExtensions signals accepted early data" {
         @intFromEnum(ExtType.early_data),
     );
     try std.testing.expectEqual(@as(usize, 0), early_ext.body_len);
+}
+
+test "Tls13Handshake server EncryptedExtensions omits rejected early data" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+
+    var client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+    client.session_ticket_allows_early_data = true;
+    const client_hello = (try client.step()).send_data.data;
+
+    var server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+    }, &tp, psk);
+    server.provideData(client_hello);
+    try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
+    try std.testing.expect(server.server_early_traffic_secret_derived);
+    try std.testing.expect(!server.server_accepts_early_data);
+    try std.testing.expectEqual(EncryptionLevel.initial, (try server.step()).send_data.level);
+    try std.testing.expectEqual(EncryptionLevel.handshake, (try server.step()).install_keys.level);
+
+    const ee_action = try server.step();
+    try std.testing.expectEqual(EncryptionLevel.handshake, ee_action.send_data.level);
+    try std.testing.expectError(
+        error.TestUnexpectedResult,
+        encryptedExtensionsExtension(ee_action.send_data.data, @intFromEnum(ExtType.early_data)),
+    );
 }
 
 test "Tls13Handshake client accepts EncryptedExtensions early data only when offered" {
@@ -1562,6 +1596,7 @@ pub const Tls13Handshake = struct {
     // peer (receive) 0-RTT secret for the server.
     server_early_traffic_secret: [secret_len]u8 = undefined,
     server_early_traffic_secret_derived: bool = false,
+    server_accepts_early_data: bool = false,
 
     // Server-side: the psk_identity offered by the client in its
     // pre_shared_key extension (parsed but not yet validated against a
@@ -1584,7 +1619,9 @@ pub const Tls13Handshake = struct {
     // for this connection (one-shot, so pump does not regenerate it).
     nst_sent: bool = false,
 
-    // Client-side: whether EncryptedExtensions accepted the offered 0-RTT.
+    // Client-side: whether EncryptedExtensions carried the server's 0-RTT
+    // acceptance decision and whether it accepted the offered 0-RTT.
+    server_encrypted_extensions_processed: bool = false,
     server_accepted_early_data: bool = false,
 
     /// Initialize as a TLS 1.3 client.
@@ -1619,8 +1656,10 @@ pub const Tls13Handshake = struct {
         self.peer_offered_psk = false;
         self.peer_offered_early_data = false;
         self.server_early_traffic_secret_derived = false;
+        self.server_accepts_early_data = false;
         self.peer_psk_binder_valid = false;
         self.nst_sent = false;
+        self.server_encrypted_extensions_processed = false;
         self.server_accepted_early_data = false;
 
         // Copy pre-encoded transport parameters. Oversized local bytes cannot
@@ -1685,8 +1724,10 @@ pub const Tls13Handshake = struct {
         self.peer_offered_psk = false;
         self.peer_offered_early_data = false;
         self.server_early_traffic_secret_derived = false;
+        self.server_accepts_early_data = false;
         self.peer_psk_binder_valid = false;
         self.nst_sent = false;
+        self.server_encrypted_extensions_processed = false;
         self.server_accepted_early_data = false;
 
         // Copy pre-encoded transport parameters (sent in EncryptedExtensions).
@@ -2242,6 +2283,7 @@ pub const Tls13Handshake = struct {
         if (!have_quic_transport_parameters) return error.MissingExtension;
         if (self.config.alpn.len > 0 and !have_alpn) return error.NoApplicationProtocol;
 
+        self.server_encrypted_extensions_processed = true;
         self.transcript.update(msg);
         self.state = if (self.psk_selected) .client_wait_finished else .client_wait_certificate;
         return ._continue;
@@ -2920,12 +2962,13 @@ pub const Tls13Handshake = struct {
         if (alpn.len > std.math.maxInt(u8)) return error.DecodeError;
         const alpn_ext_len = if (alpn.len > 0) 4 + 2 + 1 + alpn.len else 0;
         const tp_ext_len = 4 + tp.len;
-        const early_data_ext_len: usize = if (self.server_early_traffic_secret_derived) 4 else 0;
+        const accept_early_data = self.server_early_traffic_secret_derived and self.server_accepts_early_data;
+        const early_data_ext_len: usize = if (accept_early_data) 4 else 0;
         var total_len = std.math.add(usize, 4 + 2, alpn_ext_len) catch return error.DecodeError;
         total_len = std.math.add(usize, total_len, early_data_ext_len) catch return error.DecodeError;
         total_len = std.math.add(usize, total_len, tp_ext_len) catch return error.DecodeError;
         if (total_len > self.out_buf.len) return error.DecodeError;
-        const len = buildEncryptedExtensionsWithEarlyData(&self.out_buf, alpn, tp, self.server_early_traffic_secret_derived);
+        const len = buildEncryptedExtensionsWithEarlyData(&self.out_buf, alpn, tp, accept_early_data);
         self.transcript.update(self.out_buf[0..len]);
         self.state = if (self.psk_selected) .server_send_finished else .server_send_certificate;
         return Action{ .send_data = .{

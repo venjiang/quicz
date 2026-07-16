@@ -65,6 +65,10 @@ client-side 0-RTT secret poll 在已存 ticket 不允许 QUIC 0-RTT 时不会 bu
 ClientHello，也不会修改 outbound CRYPTO。server-side PSK selection 现在可绑定到配置的
 ticket identity，identity 不匹配时不会选择 PSK，也不会打开 0-RTT receive path。
 完整 0-RTT replay 与 ticket-age policy 仍待实现。
+TLS-owned 0-RTT acceptance signal 现在绑定到连接策略：server 只有在
+connection 接受已安装 peer 0-RTT key 时才发送 EncryptedExtensions
+`early_data`；client 一旦从 EncryptedExtensions 确认 server 拒绝 early data，
+会立即丢弃本地 0-RTT send key。
 
 并发纯 Zig server 现经由其拥有的 `EndpointConnectionRegistry` 分发已路由的
 1-RTT short packet，涵盖 lifecycle route lookup、installed-key 接收和

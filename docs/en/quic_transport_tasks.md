@@ -73,6 +73,10 @@ does not permit QUIC 0-RTT. Server-side PSK selection can now be bound to the
 configured ticket identity, leaving non-matching identities unselected instead
 of opening a 0-RTT receive path. Full 0-RTT replay and ticket-age policy remains
 pending.
+The TLS-owned 0-RTT acceptance signal is now bound to connection policy:
+servers emit EncryptedExtensions `early_data` only when the connection accepts
+installed peer 0-RTT keys, and clients discard local 0-RTT send keys as soon as
+EncryptedExtensions proves the server rejected early data.
 
 The concurrent pure-Zig server now dispatches routed 1-RTT short packets through
 its owned `EndpointConnectionRegistry`, including lifecycle route lookup,

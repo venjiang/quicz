@@ -7897,17 +7897,27 @@ pub const Connection = struct {
             try self.installZeroRttTrafficSecrets(secrets);
             // Server-side application policy (RFC 9001 §8): when configured to
             // accept 0-RTT, accept installed peer receive keys automatically so
-            // early data is delivered to streams. When disabled (the safe
-            // default), keys stay installed but not accepted, so
+            // early data is delivered to streams and TLS can signal acceptance
+            // in EncryptedExtensions. When disabled (the safe default), keys
+            // stay installed but not accepted, so
             // `processProtectedZeroRttDatagramWithInstalledKeys` rejects
-            // early-data packets. Clients only carry `local` 0-RTT secrets and
-            // are unaffected by this gate; application layers retain the manual
-            // `acceptZeroRtt()`/`rejectZeroRtt()` override for anti-replay
-            // checks.
-            if (secrets.peer != null and self.config.accept_zero_rtt) {
-                try self.acceptZeroRtt();
+            // early-data packets and TLS omits the EncryptedExtensions
+            // early_data acceptance signal. Clients only carry `local` 0-RTT
+            // secrets and are unaffected by this gate.
+            if (secrets.peer != null) {
+                const accept_early_data = self.config.accept_zero_rtt;
+                if (accept_early_data) try self.acceptZeroRtt();
+                _ = try backend.setEarlyDataAccepted(accept_early_data);
             }
             progress.zero_rtt_keys_installed = true;
+        }
+
+        if (backend.earlyDataAccepted()) |accepted| {
+            progress.zero_rtt_accepted = accepted;
+            if (!accepted and self.side == .client and self.local_zero_rtt_keys != null) {
+                self.local_zero_rtt_keys = null;
+                progress.zero_rtt_keys_discarded = true;
+            }
         }
 
         if (try backend.pullOneRttTrafficSecrets()) |secrets| {
@@ -72647,6 +72657,7 @@ test "Tls13Backend + Connection: accept_zero_rtt config auto-accepts early data"
     try server.processProtectedLongDatagramInSpace(.initial, 1, secrets.client, ch);
     _ = try server.driveCryptoBackendInSpace(.initial, server_backend.cryptoBackend(), &scratch);
     try std.testing.expect(server_backend.hs.peer_psk_binder_valid);
+    try std.testing.expect(server_backend.hs.server_accepts_early_data);
     try std.testing.expect(server.hasPeerZeroRttProtectionKey());
     try std.testing.expect(server.zeroRttAccepted());
 
@@ -72698,6 +72709,7 @@ test "Tls13Backend + Connection: accept_zero_rtt=false ignores early data" {
         .max_datagram_size = 8192,
     });
     defer server.deinit();
+    try server.validatePeerAddress();
     try client.setLocalInitialSourceConnectionId(&client_scid);
     try server.setLocalInitialSourceConnectionId(&server_scid);
 
@@ -72739,6 +72751,7 @@ test "Tls13Backend + Connection: accept_zero_rtt=false ignores early data" {
     try server.processProtectedLongDatagramInSpace(.initial, 1, secrets.client, ch);
     _ = try server.driveCryptoBackendInSpace(.initial, server_backend.cryptoBackend(), &scratch);
     try std.testing.expect(server_backend.hs.peer_psk_binder_valid);
+    try std.testing.expect(!server_backend.hs.server_accepts_early_data);
     try std.testing.expect(server.hasPeerZeroRttProtectionKey());
     try std.testing.expect(!server.zeroRttAccepted());
 
@@ -72764,13 +72777,31 @@ test "Tls13Backend + Connection: accept_zero_rtt=false ignores early data" {
     var recv_buf: [32]u8 = undefined;
     try std.testing.expect((try server.recvOnStream(stream_id, &recv_buf)) == null);
 
-    // Once 1-RTT keys are installed, the client discards its 0-RTT send keys
-    // (RFC 9001 §8: client stops sending 0-RTT once 1-RTT is available) and
-    // communication continues over 1-RTT.
-    try client.installOneRttTrafficSecrets(.{
-        .local = secrets.client.secret,
-        .peer = secrets.server.secret,
-    });
+    // The TLS server flight omits EncryptedExtensions early_data. Once the
+    // client processes that rejection, it discards its local 0-RTT send keys
+    // before 1-RTT secrets are installed.
+    const sh = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        4,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        secrets.server,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(sh);
+    _ = try server.driveCryptoBackendInSpace(.handshake, server_backend.cryptoBackend(), &scratch);
+    const shs = (try server.pollProtectedHandshakeDatagramWithInstalledKeys(
+        5,
+        &client_scid,
+        &server_scid,
+    )) orelse return error.UnexpectedState;
+    defer std.testing.allocator.free(shs);
+    try client.processProtectedLongDatagramInSpace(.initial, 6, secrets.server, sh);
+    _ = try client.driveCryptoBackendInSpace(.initial, client_backend.cryptoBackend(), &scratch);
+    try client.processProtectedHandshakeDatagramWithInstalledKeys(7, shs);
+    const rejection = try client.driveCryptoBackendInSpace(.handshake, client_backend.cryptoBackend(), &scratch);
+    try std.testing.expectEqual(false, rejection.zero_rtt_accepted.?);
+    try std.testing.expect(rejection.zero_rtt_keys_discarded);
     try std.testing.expect(!client.hasLocalZeroRttProtectionKey());
 }
 

@@ -58,6 +58,14 @@ pub const CryptoBackendProgress = struct {
     handshake_space_discarded: bool = false,
     /// Whether any 0-RTT traffic secret was installed during this drive step.
     zero_rtt_keys_installed: bool = false,
+    /// Whether installed 0-RTT packet-protection keys were discarded during this drive step.
+    zero_rtt_keys_discarded: bool = false,
+    /// TLS early-data acceptance observed during this drive step.
+    ///
+    /// `null` means TLS has not reported an acceptance decision. `true` means
+    /// the server accepted offered 0-RTT. `false` means it rejected offered
+    /// 0-RTT, so a client must stop sending early data.
+    zero_rtt_accepted: ?bool = null,
     /// Whether 1-RTT traffic secrets were installed during this drive step.
     one_rtt_keys_installed: bool = false,
     /// Number of inbound CRYPTO chunks delivered to the backend.
@@ -115,6 +123,12 @@ pub const CryptoBackend = struct {
     /// Return null until secrets are available. Clients usually return `local`
     /// and servers usually return `peer`.
     pull_zero_rtt_traffic_secrets: ?*const fn (context: *anyopaque) Error!?ZeroRttTrafficSecrets = null,
+    /// Optional server-side hook that tells TLS whether the connection policy
+    /// accepted offered early data before EncryptedExtensions is emitted.
+    set_early_data_accepted: ?*const fn (context: *anyopaque, accepted: bool) Error!void = null,
+    /// Optional client-side hook returning the server's EncryptedExtensions
+    /// early-data decision. Return null until the decision is known.
+    early_data_accepted: ?*const fn (context: *anyopaque) ?bool = null,
     /// Optional hook returning TLS-produced 1-RTT traffic secrets.
     ///
     /// Return null until secrets are available. The connection derives packet
@@ -156,6 +170,17 @@ pub const CryptoBackend = struct {
     pub fn pullZeroRttTrafficSecrets(self: CryptoBackend) Error!?ZeroRttTrafficSecrets {
         const pull_secrets = self.pull_zero_rtt_traffic_secrets orelse return null;
         return try pull_secrets(self.context);
+    }
+
+    pub fn setEarlyDataAccepted(self: CryptoBackend, accepted: bool) Error!bool {
+        const set_accepted = self.set_early_data_accepted orelse return false;
+        try set_accepted(self.context, accepted);
+        return true;
+    }
+
+    pub fn earlyDataAccepted(self: CryptoBackend) ?bool {
+        const accepted = self.early_data_accepted orelse return null;
+        return accepted(self.context);
     }
 
     pub fn pullOneRttTrafficSecrets(self: CryptoBackend) Error!?OneRttTrafficSecrets {

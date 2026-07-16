@@ -145,6 +145,8 @@ pub const Tls13Backend = struct {
             .pull_peer_transport_parameters = pullPeerTransportParameters,
             .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
             .pull_zero_rtt_traffic_secrets = pullZeroRttTrafficSecrets,
+            .set_early_data_accepted = setEarlyDataAccepted,
+            .early_data_accepted = earlyDataAccepted,
             .pull_1rtt_traffic_secrets = pullOneRttTrafficSecrets,
             .pull_negotiated_alpn = pullNegotiatedAlpn,
             .handshake_confirmed = handshakeConfirmed,
@@ -246,6 +248,25 @@ pub const Tls13Backend = struct {
     fn handshakeConfirmed(context: *anyopaque) bool {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
         return self.hs.isComplete();
+    }
+
+    fn setEarlyDataAccepted(context: *anyopaque, accepted: bool) Error!void {
+        const self: *Tls13Backend = @ptrCast(@alignCast(context));
+        if (!self.hs.is_server) return;
+        self.hs.server_accepts_early_data = accepted;
+    }
+
+    fn earlyDataAccepted(context: *anyopaque) ?bool {
+        const self: *Tls13Backend = @ptrCast(@alignCast(context));
+        if (self.hs.is_server) return null;
+        if (!self.hs.has_psk or
+            self.hs.session_ticket_len == 0 or
+            !self.hs.session_ticket_allows_early_data or
+            !self.hs.server_encrypted_extensions_processed)
+        {
+            return null;
+        }
+        return self.hs.server_accepted_early_data;
     }
 
     fn pullZeroRttTrafficSecrets(context: *anyopaque) Error!?ZeroRttTrafficSecrets {
