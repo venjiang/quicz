@@ -1138,6 +1138,42 @@ test "Tls13Handshake server rejects mismatched PSK binder" {
     try std.testing.expect(!server.server_early_traffic_secret_derived);
 }
 
+test "Tls13Handshake server selects valid PSK in ServerHello" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+
+    var client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+    const client_hello = (try client.step()).send_data.data;
+
+    var server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+    }, &tp, psk);
+    server.provideData(client_hello);
+    try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
+    try std.testing.expect(server.peer_psk_binder_valid);
+    try std.testing.expect(server.psk_selected);
+
+    const server_hello_action = try server.step();
+    try std.testing.expectEqual(EncryptionLevel.initial, server_hello_action.send_data.level);
+    const selected = try serverHelloExtension(
+        server_hello_action.send_data.data,
+        @intFromEnum(ExtType.pre_shared_key),
+    );
+    try std.testing.expectEqual(@as(usize, 2), selected.body_len);
+    try std.testing.expectEqual(@as(u16, 0), readU16(server_hello_action.send_data.data[selected.body_offset..]));
+
+    client.provideData(server_hello_action.send_data.data);
+    try std.testing.expect(std.meta.activeTag(try client.step()) == ._continue);
+    try std.testing.expect(client.psk_selected);
+}
+
 test "TranscriptHash is empty hash on init" {
     const th = TranscriptHash.init();
     const hash = th.current();
@@ -1249,6 +1285,7 @@ fn serverHelloKnownExtensionBit(ext_type: u16) ?u4 {
     return switch (ext_type) {
         @intFromEnum(ExtType.supported_versions) => 0,
         @intFromEnum(ExtType.key_share) => 1,
+        @intFromEnum(ExtType.pre_shared_key) => 2,
         else => null,
     };
 }
@@ -1361,6 +1398,7 @@ pub const Tls13Handshake = struct {
     // True when the client was initialized with a resumption PSK, enabling
     // pre_shared_key resumption in the ClientHello.
     has_psk: bool = false,
+    psk_selected: bool = false,
 
     // Session ticket from a post-handshake NewSessionTicket (client side).
     // Carried in the pre_shared_key extension of a resumed ClientHello.
@@ -1423,6 +1461,7 @@ pub const Tls13Handshake = struct {
         self.cert_verify_sig_len = 0;
         self.resumption_psk = null;
         self.has_psk = false;
+        self.psk_selected = false;
         self.session_ticket_len = 0;
         self.session_ticket_age_add = 0;
         self.session_ticket_allows_early_data = false;
@@ -1486,6 +1525,7 @@ pub const Tls13Handshake = struct {
         self.cert_verify_sig_len = 0;
         self.resumption_psk = null;
         self.has_psk = false;
+        self.psk_selected = false;
         self.session_ticket_len = 0;
         self.session_ticket_age_add = 0;
         self.session_ticket_allows_early_data = false;
@@ -1940,6 +1980,15 @@ pub const Tls13Handshake = struct {
                     @memcpy(&self.peer_x25519_public, ext[4..36]);
                     have_key_share = true;
                 },
+                @intFromEnum(ExtType.pre_shared_key) => {
+                    // ServerHello pre_shared_key selects one offered identity
+                    // by index. This implementation offers one identity only.
+                    if (pos != ext_end) return error.DecodeError;
+                    if (!self.has_psk or self.session_ticket_len == 0) return error.DecodeError;
+                    if (el != 2) return error.DecodeError;
+                    if (readU16(ext[0..2]) != 0) return error.DecodeError;
+                    self.psk_selected = true;
+                },
                 else => return error.DecodeError,
             }
         }
@@ -2023,7 +2072,7 @@ pub const Tls13Handshake = struct {
         if (self.config.alpn.len > 0 and !have_alpn) return error.NoApplicationProtocol;
 
         self.transcript.update(msg);
-        self.state = .client_wait_certificate;
+        self.state = if (self.psk_selected) .client_wait_finished else .client_wait_certificate;
         return ._continue;
     }
 
@@ -2601,6 +2650,7 @@ pub const Tls13Handshake = struct {
                     self.peer_psk_binder,
                 );
                 if (!self.peer_psk_binder_valid) return error.BadFinished;
+                self.psk_selected = true;
                 if (self.peer_psk_binder_valid and self.peer_offered_early_data) {
                     self.server_early_traffic_secret = self.key_schedule.deriveEarlyTrafficSecret(self.transcript.current());
                     self.server_early_traffic_secret_derived = true;
@@ -2651,6 +2701,11 @@ pub const Tls13Handshake = struct {
         pos += 2;
         @memcpy(buf[pos..][0..32], &self.x25519_public);
         pos += 32;
+        if (self.psk_selected) {
+            pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.pre_shared_key), 2);
+            writeU16(buf[pos..], 0);
+            pos += 2;
+        }
         const ext_len = pos - ext_start - 2;
         writeU16(buf[ext_start..], @intCast(ext_len));
         const msg_len = pos - 4;
@@ -2687,7 +2742,7 @@ pub const Tls13Handshake = struct {
         if (total_len > self.out_buf.len) return error.DecodeError;
         const len = buildEncryptedExtensions(&self.out_buf, alpn, tp);
         self.transcript.update(self.out_buf[0..len]);
-        self.state = .server_send_certificate;
+        self.state = if (self.psk_selected) .server_send_finished else .server_send_certificate;
         return Action{ .send_data = .{
             .level = .handshake,
             .data = self.out_buf[0..len],
@@ -3133,6 +3188,46 @@ fn appendServerHelloRawExtension(buf: []u8, msg_len: usize, ext_type: u16, paylo
         @as(u16, @intCast(extensions_len + extension_len)),
     );
     return buf[0 .. msg_len + extension_len];
+}
+
+const ServerHelloExtension = struct {
+    header_offset: usize,
+    body_offset: usize,
+    body_len: usize,
+};
+
+fn serverHelloExtension(msg: []const u8, ext_type: u16) !ServerHelloExtension {
+    if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.server_hello)) return error.TestUnexpectedResult;
+    var pos: usize = 4;
+    if (pos + 2 + 32 + 1 + 2 + 1 + 2 > msg.len) return error.TestUnexpectedResult;
+    pos += 2 + 32;
+    const sid_len = msg[pos];
+    pos += 1;
+    if (pos + sid_len + 2 + 1 + 2 > msg.len) return error.TestUnexpectedResult;
+    pos += sid_len;
+    pos += 2; // cipher_suite
+    pos += 1; // legacy_compression_method
+    const extensions_len = readU16(msg[pos..]);
+    pos += 2;
+    if (pos + extensions_len != msg.len) return error.TestUnexpectedResult;
+    const ext_end = pos + extensions_len;
+    while (pos < ext_end) {
+        if (pos + 4 > ext_end) return error.TestUnexpectedResult;
+        const header_offset = pos;
+        const current_type = readU16(msg[pos..]);
+        const current_len = readU16(msg[pos + 2 ..]);
+        pos += 4;
+        if (pos + current_len > ext_end) return error.TestUnexpectedResult;
+        if (current_type == ext_type) {
+            return .{
+                .header_offset = header_offset,
+                .body_offset = pos,
+                .body_len = current_len,
+            };
+        }
+        pos += current_len;
+    }
+    return error.TestUnexpectedResult;
 }
 
 fn extendServerHelloExtensionBody(buf: []u8, msg_len: usize, ext_type: u16, extra: []const u8) ![]u8 {
@@ -4996,6 +5091,106 @@ test "Tls13Handshake client↔server loopback completes with matching secrets" {
     try std.testing.expectEqualStrings("hq-interop", server.negotiated_alpn[0..server.negotiated_alpn_len]);
 
     // 7. Peer transport parameters crossed over.
+    try std.testing.expectEqualSlices(u8, &server_tp, client.peer_tp[0..client.peer_tp_len]);
+    try std.testing.expectEqualSlices(u8, &client_tp, server.peer_tp[0..server.peer_tp_len]);
+}
+
+test "Tls13Handshake PSK-selected loopback skips Certificate flight" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const client_tp = [_]u8{ 0x01, 0x02, 0x03 };
+    const server_tp = [_]u8{ 0xaa, 0xbb };
+    const psk = [_]u8{0x7a} ** secret_len;
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+
+    var client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &client_tp, psk);
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+    var server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+    }, &server_tp, psk);
+
+    const ch_action = try client.step();
+    try std.testing.expectEqual(EncryptionLevel.initial, ch_action.send_data.level);
+    server.provideData(ch_action.send_data.data);
+
+    var srv_initial: [512]u8 = undefined;
+    var srv_initial_len: usize = 0;
+    var srv_hs: [1024]u8 = undefined;
+    var srv_hs_len: usize = 0;
+    var srv_hs_keys = false;
+    var srv_app_keys = false;
+    while (true) {
+        const action = try server.step();
+        switch (action) {
+            .send_data => |send| {
+                if (send.level == .initial) {
+                    @memcpy(srv_initial[srv_initial_len..][0..send.data.len], send.data);
+                    srv_initial_len += send.data.len;
+                } else {
+                    @memcpy(srv_hs[srv_hs_len..][0..send.data.len], send.data);
+                    srv_hs_len += send.data.len;
+                }
+            },
+            .install_keys => |keys| {
+                if (keys.level == .handshake) srv_hs_keys = true;
+                if (keys.level == .application) srv_app_keys = true;
+            },
+            .wait_for_data, .complete => break,
+            ._continue => continue,
+        }
+    }
+    try std.testing.expect(server.psk_selected);
+    try std.testing.expect(srv_hs_keys);
+    try std.testing.expect(srv_app_keys);
+    _ = try serverHelloExtension(srv_initial[0..srv_initial_len], @intFromEnum(ExtType.pre_shared_key));
+    var srv_msg_pos: usize = 0;
+    while (srv_msg_pos < srv_hs_len) {
+        try std.testing.expect(srv_msg_pos + 4 <= srv_hs_len);
+        const msg_type = srv_hs[srv_msg_pos];
+        const msg_len = (@as(usize, srv_hs[srv_msg_pos + 1]) << 16) |
+            (@as(usize, srv_hs[srv_msg_pos + 2]) << 8) |
+            @as(usize, srv_hs[srv_msg_pos + 3]);
+        try std.testing.expect(srv_msg_pos + 4 + msg_len <= srv_hs_len);
+        try std.testing.expect(msg_type != @intFromEnum(HandshakeType.certificate));
+        try std.testing.expect(msg_type != @intFromEnum(HandshakeType.certificate_verify));
+        srv_msg_pos += 4 + msg_len;
+    }
+
+    client.provideData(srv_initial[0..srv_initial_len]);
+    client.provideData(srv_hs[0..srv_hs_len]);
+    var cli_fin: [256]u8 = undefined;
+    var cli_fin_len: usize = 0;
+    var cli_hs_keys = false;
+    var cli_app_keys = false;
+    while (true) {
+        const action = try client.step();
+        switch (action) {
+            .send_data => |send| {
+                @memcpy(cli_fin[cli_fin_len..][0..send.data.len], send.data);
+                cli_fin_len += send.data.len;
+            },
+            .install_keys => |keys| {
+                if (keys.level == .handshake) cli_hs_keys = true;
+                if (keys.level == .application) cli_app_keys = true;
+            },
+            .wait_for_data, .complete => break,
+            ._continue => continue,
+        }
+    }
+    try std.testing.expect(client.psk_selected);
+    try std.testing.expect(cli_hs_keys);
+    try std.testing.expect(cli_app_keys);
+    try std.testing.expectEqual(@as(usize, 36), cli_fin_len);
+
+    server.provideData(cli_fin[0..cli_fin_len]);
+    try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
+    try std.testing.expect(client.isComplete());
+    try std.testing.expect(server.isComplete());
+    try std.testing.expectEqualSlices(u8, &client.key_schedule.client_app_traffic_secret, &server.key_schedule.client_app_traffic_secret);
+    try std.testing.expectEqualSlices(u8, &client.key_schedule.server_app_traffic_secret, &server.key_schedule.server_app_traffic_secret);
     try std.testing.expectEqualSlices(u8, &server_tp, client.peer_tp[0..client.peer_tp_len]);
     try std.testing.expectEqualSlices(u8, &client_tp, server.peer_tp[0..server.peer_tp_len]);
 }
