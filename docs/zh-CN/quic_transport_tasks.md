@@ -95,6 +95,9 @@ installed-key output options 与终态 cleanup。
 receive-to-pending-work/backend 的 poll 和 bounded-drain result 也会在普通 in-space、
 有序 cross-space、显式 output 以及 compatible-version 成功路径后暴露步骤后的下一
 deadline。
+基础 installed-key feed/backend 的 poll 和 bounded-drain result 现在也会在
+backend-driven protected output 后暴露步骤后的下一 deadline，覆盖普通、显式 output、
+compatible-version 和 OrClose 成功路径。
 single-connection due-deadline/backend poll result 现在也会在普通、显式 output
 和有序 cross-space 成功路径后暴露步骤后的下一 deadline，与 bounded-drain 调度一致。
 
@@ -2127,7 +2130,8 @@ close 和 route cleanup 事件。
   output polling 前停止。单连接形态复用同一 lifecycle path，只接收一个
   connection/backend pair，并证明 routed receive-to-backend-to-poll response
   delivery、close-before-poll suppression、compatible peer Version Information
-  application，以及 compatible-version close-before-poll suppression。
+  application，以及 compatible-version close-before-poll suppression。poll result
+  现在也会在 backend-driven protected output 后返回 output 后 deadline。
 - 2026-06-18：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagramWithInstalledKeyOptions()` 和
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndDrainDatagramsWithInstalledKeyOptions()`。
@@ -2192,7 +2196,8 @@ close 和 route cleanup 事件。
   形态还证明 peer Version Information 会先应用再执行 bounded drain，其 OrClose 形态在
   未选出 compatible version 时会排队 CONNECTION_CLOSE 并在 output draining 前停止。
   dropped datagram 不会驱动 backend，close-propagating peer-parameter 错误会在
-  output draining 前停止。
+  output draining 前停止。bounded-drain result 现在也会在 backend-driven protected
+  output 后返回 drain 后 deadline。
 - 2026-06-11：新增 cross-connection pending-work-to-output 和
   pending-work-to-bounded-drain loop step：
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndPollDatagram()`

@@ -105,6 +105,9 @@ including explicit installed-key output options and terminal cleanup.
 The receive-to-pending-work/backend poll and bounded-drain results also expose
 the post-step deadline for ordinary in-space, ordered cross-space, explicit
 output, and compatible-version success paths.
+The base installed-key feed/backend poll and bounded-drain results now expose
+the post-step deadline after backend-driven protected output, including
+ordinary, explicit-output, compatible-version, and OrClose success paths.
 The single-connection due-deadline/backend poll result now exposes the same
 post-step deadline for ordinary, explicit-output, and ordered cross-space
 success paths, matching bounded-drain scheduling.
@@ -2475,7 +2478,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   forms reuse the same lifecycle path with one connection/backend pair and prove
   routed receive-to-backend-to-poll response delivery, close-before-poll
   suppression, compatible peer Version Information application, and
-  compatible-version close-before-poll suppression.
+  compatible-version close-before-poll suppression. The poll result now also
+  returns the post-output deadline after backend-driven protected output.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndPollDatagramWithInstalledKeyOptions()`
   and
@@ -2552,7 +2556,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   proves peer Version Information application before bounded drain, while its
   OrClose form queues CONNECTION_CLOSE and stops before output draining when no
   compatible version is selected. Dropped datagrams do not drive any backend,
-  and close-propagating peer-parameter errors stop before output draining.
+  and close-propagating peer-parameter errors stop before output draining. The
+  bounded-drain result now also returns the post-drain deadline after
+  backend-driven protected output.
 - 2026-06-11: Added cross-connection pending-work-to-output and
   pending-work-to-bounded-drain loop steps:
   `EndpointConnectionLifecycle.processPendingWorkAcrossConnectionsAndPollDatagram()`

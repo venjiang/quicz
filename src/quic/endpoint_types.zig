@@ -678,6 +678,8 @@ pub const EndpointFeedCryptoBackendDriveDatagramResult = struct {
     feed: EndpointFeedInstalledKeyDatagramResult,
     /// Backend drive and output result when `feed` routed to a connection.
     backend: ?EndpointCryptoBackendDriveDatagramResult = null,
+    /// Next endpoint-visible deadline after receive, backend progress, and output poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from feeding one installed-key datagram, then draining backend output.
@@ -686,6 +688,8 @@ pub const EndpointFeedCryptoBackendDriveDatagramDrainResult = struct {
     feed: EndpointFeedInstalledKeyDatagramResult,
     /// Backend drive and bounded output drain when `feed` routed to a connection.
     backend: ?EndpointCryptoBackendDriveDatagramDrainResult = null,
+    /// Next endpoint-visible deadline after receive, backend progress, and output drain.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Endpoint result after accepting a protected Initial and emitting a response.

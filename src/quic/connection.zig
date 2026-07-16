@@ -28012,6 +28012,10 @@ test "EndpointConnectionLifecycle single feed backend poll step returns response
     const response = backend_result.datagram orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(response.datagram);
     try std.testing.expectEqual(@as(u64, 167), response.connection_id);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 167), next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(PacketNumberSpace.handshake, next_deadline.recovery.?.space);
 
     try client.processProtectedHandshakeDatagramWithInstalledKeys(12, response.datagram);
     var response_crypto: [64]u8 = undefined;
@@ -28154,6 +28158,10 @@ test "EndpointConnectionLifecycle feeds installed-key datagram then drives backe
     defer std.testing.allocator.free(drained[1].datagram);
     try std.testing.expectEqual(@as(u64, 162), drained[0].connection_id);
     try std.testing.expectEqual(@as(u64, 162), drained[1].connection_id);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 162), next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(PacketNumberSpace.handshake, next_deadline.recovery.?.space);
 
     try client.processProtectedHandshakeDatagramWithInstalledKeys(12, drained[0].datagram);
     try client.processProtectedHandshakeDatagramWithInstalledKeys(13, drained[1].datagram);
