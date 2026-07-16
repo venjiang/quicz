@@ -61868,6 +61868,52 @@ test "EndpointConnectionLifecycle pending work counts retained one RTT key disca
     try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
 }
 
+test "EndpointConnectionLifecycle single pending-work selects after key discard" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer conn.deinit();
+    const local_secret = [_]u8{0x8a} ** protection.traffic_secret_len;
+    const peer_secret = [_]u8{0x8b} ** protection.traffic_secret_len;
+    try conn.confirmHandshake();
+    try conn.installOneRttTrafficSecrets(.{
+        .local = local_secret,
+        .peer = peer_secret,
+    });
+    conn.last_packet_activity_millis = 10;
+    try conn.initiateOneRttKeyUpdate();
+    try std.testing.expectEqual(@as(?bool, true), conn.localOneRttRetainsKeyGeneration(0));
+
+    const discard_deadline = conn.oneRttKeyDiscardDeadlineMillis() orelse return error.TestUnexpectedResult;
+    const before = try lifecycle.processPendingWorkAndSelectNextDeadline(
+        77,
+        &conn,
+        discard_deadline - 1,
+    );
+    try std.testing.expectEqual(@as(usize, 0), before.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), before.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), before.pending_work.key_discard_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), before.pending_work.recovery_serviced_count);
+    const unchanged = before.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 77), unchanged.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.key_discard, unchanged.kind);
+    try std.testing.expectEqual(discard_deadline, unchanged.deadline_millis);
+    try std.testing.expectEqual(@as(?bool, true), conn.localOneRttRetainsKeyGeneration(0));
+
+    const serviced = try lifecycle.processPendingWorkAndSelectNextDeadline(
+        77,
+        &conn,
+        discard_deadline,
+    );
+    try std.testing.expectEqual(@as(usize, 0), serviced.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), serviced.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), serviced.pending_work.key_discard_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), serviced.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(?bool, false), conn.localOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), serviced.next_deadline);
+}
+
 test "installed one RTT key update ACK confirmation rolls back with invalid payload" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
