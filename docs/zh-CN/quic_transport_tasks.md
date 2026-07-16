@@ -936,6 +936,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-16：accepted 0-RTT 现在会在 TLS 1.3 EncryptedExtensions 中发送
+  `early_data` acceptance signal。client 只在 PSK 已被选择且已存 ticket
+  允许 QUIC 0-RTT 时接受该 extension，并拒绝 unsolicited 或非空
+  EncryptedExtensions `early_data`。
+
 - 2026-07-16：配置了 PSK 的 pure-Zig TLS server 如果最终没有选择 PSK，
   现在会把 key schedule 重置回 no-PSK 基线。普通证书握手和 ticket identity
   mismatch fallback 不再被预置 PSK early secret 污染。

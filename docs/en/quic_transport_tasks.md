@@ -1053,6 +1053,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-16: Added the TLS 1.3 `early_data` acceptance signal in
+  EncryptedExtensions for accepted 0-RTT. The client now accepts that extension
+  only when PSK was selected and the stored ticket permitted QUIC 0-RTT, and
+  rejects unsolicited or non-empty `early_data` in EncryptedExtensions.
+
 - 2026-07-16: Reset the pure-Zig TLS server key schedule back to the no-PSK
   baseline when a configured PSK is not selected. A configured PSK no longer
   contaminates normal certificate handshakes or ticket-identity-mismatch
