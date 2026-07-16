@@ -49,7 +49,7 @@ version-information 原语）：
 | Connection ID 和 stateless reset | 必须具备。Routing、CID issue/retire、reset-token handling、close cleanup 和 inactive-CID reset emission 必须接入 endpoint lifecycle。 | 部分完成：已有 endpoint router、连接层 reset receive-to-draining 状态、endpoint installed-key feed 的 active-route reset 处理与 recovery timer disarm、client endpoint active reset receive-to-draining 处理、server endpoint route-bound active reset 上报及 close-deadline record 退役、server endpoint inactive-reset response path pairing、lifecycle helper 和 socket-backed loopback。TLS client/server transport 会为发包选择最新未退役的 peer `NEW_CONNECTION_ID`，并在没有该值时回退到已认证 Initial SCID；并发 TLS process server 现为每个接纳的连接生成独立的 8 字节 CSPRNG Initial SCID。完整 TLS-owned lifecycle 集成仍未完成。 |
 | Retry 和 address validation | 服务端健壮性和互通必须具备。 | 部分完成：并发 Retry 使用每个进程的新 token secret 与每次签发的新 nonce 熵；已有 token policy、Retry validation、address-validation loopback 和 TLS extension byte 校验；缺少生产存储/replay policy。 |
 | Path validation 和迁移 | 需要单路径 validation 和 route update；完整 multipath 不在范围内。 | 部分完成：已有 PATH_CHALLENGE/PATH_RESPONSE 和 route-update loopback；endpoint-owned server output 与 process server datagram send 现在可在已验证迁移后使用已提交 route tuple。独立进程 Zig migration 运行已在客户端迁移端口后完成 STREAM echo，并输出 `path_challenge_queued=true`、`route_updated=true` 和 `migrated=true`。生产 path policy 和外部迁移证据仍未完成。 |
-| 0-RTT | 第一轮 1-RTT stream echo 互通之后推进；不阻塞当前里程碑。 | 部分完成：已有显式 accept/reject、mock installed-key 0-RTT 路径、NewSessionTicket RFC 9001 sentinel 校验、按 ticket permission gate 的 ClientHello `early_data` 发送、绑定连接策略的 EncryptedExtensions acceptance、client rejection-driven key discard、server-side ticket-age policy，以及有界本地 PSK identity replay filter；生产/分布式 replay policy 仍缺。 |
+| 0-RTT | 第一轮 1-RTT stream echo 互通之后推进；不阻塞当前里程碑。 | 部分完成：已有显式 accept/reject、mock installed-key 0-RTT 路径、NewSessionTicket RFC 9001 sentinel 校验、按 ticket permission gate 的 ClientHello `early_data` 发送、绑定连接策略的 EncryptedExtensions acceptance、client rejection-driven key discard、server-side ticket-age policy，以及支持 snapshot/restore 的有界本地 PSK identity replay filter；生产/分布式 replay policy 仍缺。 |
 | RFC 9221 DATAGRAM | 可选扩展，不属于第一轮 transport 里程碑。 | Deferred。 |
 | HTTP/3 和 QPACK | transport 可互通后再做的应用层工作。 | Deferred。 |
 | QUIC v2 和 RFC 9368 compatible version negotiation | 可选扩展，除非选定互通目标要求。 | 已有部分 primitive；完整行为 deferred。 |
@@ -67,8 +67,9 @@ ticket identity，identity 不匹配时不会选择 PSK，也不会打开 0-RTT 
 server-side PSK selection 也可要求已存 ticket-age policy；stale ticket age 会在
 binder verification 或 0-RTT secret derivation 前保持 PSK unselected。
 配置后的 server 还可共享有界本地 PSK identity replay filter；重复使用的 ticket
-identity 会保持 PSK unselected，且不会派生 0-RTT secret。生产/分布式
-0-RTT replay policy 仍待实现。
+identity 会保持 PSK unselected，且不会派生 0-RTT secret。replay filter 现在可
+导出/恢复 fixed snapshot，调用方可持久化或分发已保留的 identity fingerprint。
+生产/分布式 0-RTT replay policy 仍待实现。
 TLS-owned 0-RTT acceptance signal 现在绑定到连接策略：server 只有在
 connection 接受已安装 peer 0-RTT key 时才发送 EncryptedExtensions
 `early_data`；client 一旦从 EncryptedExtensions 确认 server 拒绝 early data，

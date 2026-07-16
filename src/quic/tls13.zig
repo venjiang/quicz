@@ -201,11 +201,22 @@ pub const InstallKeys = struct {
 
 pub const psk_replay_fingerprint_len = Sha256.digest_length;
 
+/// Fixed replay-filter snapshot for external persistence or worker
+/// distribution. Entries keep oldest-to-newest eviction order.
+pub const ServerPskReplayFilterSnapshot = struct {
+    fingerprints: [64][psk_replay_fingerprint_len]u8 = undefined,
+    len: usize = 0,
+
+    pub fn entries(self: *const ServerPskReplayFilterSnapshot) []const [psk_replay_fingerprint_len]u8 {
+        return self.fingerprints[0..@min(self.len, self.fingerprints.len)];
+    }
+};
+
 /// Bounded server-side replay filter for TLS PSK ticket identities.
 ///
 /// The filter stores SHA-256 fingerprints of accepted ticket identities. It is
 /// intentionally local and bounded; callers that need cross-worker replay
-/// rejection must persist or distribute equivalent state outside the handshake.
+/// rejection can export/import snapshots around the handshake.
 pub const ServerPskReplayFilter = struct {
     fingerprints: [64][psk_replay_fingerprint_len]u8 = undefined,
     len: usize = 0,
@@ -215,8 +226,28 @@ pub const ServerPskReplayFilter = struct {
         return .{ .max_entries = @min(max_entries, 64) };
     }
 
+    pub fn initWithSnapshot(max_entries: usize, snapshot: ServerPskReplayFilterSnapshot) ServerPskReplayFilter {
+        var filter = ServerPskReplayFilter.init(max_entries);
+        const snapshot_len = @min(snapshot.len, snapshot.fingerprints.len);
+        const retained = @min(snapshot_len, filter.max_entries);
+        const start = snapshot_len - retained;
+        if (retained > 0) {
+            @memcpy(filter.fingerprints[0..retained], snapshot.fingerprints[start..snapshot_len]);
+        }
+        filter.len = retained;
+        return filter;
+    }
+
     pub fn entryCount(self: *const ServerPskReplayFilter) usize {
         return self.len;
+    }
+
+    pub fn exportSnapshot(self: *const ServerPskReplayFilter) ServerPskReplayFilterSnapshot {
+        var snapshot = ServerPskReplayFilterSnapshot{ .len = self.len };
+        if (self.len > 0) {
+            @memcpy(snapshot.fingerprints[0..self.len], self.fingerprints[0..self.len]);
+        }
+        return snapshot;
     }
 
     /// Record `identity` as consumed. Returns false when already consumed or
@@ -1227,6 +1258,27 @@ test "Tls13Handshake server consumes PSK identity through replay filter" {
     try std.testing.expect(!replay_server.psk_selected);
     try std.testing.expect(!replay_server.server_early_traffic_secret_derived);
     try std.testing.expectEqual(@as(usize, 1), replay_filter.entryCount());
+}
+
+test "ServerPskReplayFilter snapshot restores retained identities" {
+    var filter = ServerPskReplayFilter.init(2);
+    try std.testing.expect(filter.consume("ticket-a"));
+    try std.testing.expect(filter.consume("ticket-b"));
+    try std.testing.expect(filter.consume("ticket-c"));
+    try std.testing.expectEqual(@as(usize, 2), filter.entryCount());
+
+    const snapshot = filter.exportSnapshot();
+    try std.testing.expectEqual(@as(usize, 2), snapshot.entries().len);
+
+    var restored = ServerPskReplayFilter.initWithSnapshot(1, snapshot);
+    try std.testing.expectEqual(@as(usize, 1), restored.entryCount());
+    try std.testing.expect(!restored.consume("ticket-c"));
+    try std.testing.expect(restored.consume("ticket-b"));
+    try std.testing.expectEqual(@as(usize, 1), restored.entryCount());
+
+    var disabled = ServerPskReplayFilter.initWithSnapshot(0, snapshot);
+    try std.testing.expectEqual(@as(usize, 0), disabled.entryCount());
+    try std.testing.expect(!disabled.consume("ticket-c"));
 }
 
 test "Tls13Handshake server verifies PSK binder without deriving early secret when early_data absent" {
