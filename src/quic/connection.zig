@@ -62062,6 +62062,64 @@ test "EndpointConnectionLifecycle cross pending-work poll reports key discard wi
     try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
 }
 
+test "EndpointConnectionLifecycle cross pending-work drain reports key discard without draining output" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer conn.deinit();
+    const local_secret = [_]u8{0x92} ** protection.traffic_secret_len;
+    const peer_secret = [_]u8{0x93} ** protection.traffic_secret_len;
+    try conn.confirmHandshake();
+    try conn.installOneRttTrafficSecrets(.{
+        .local = local_secret,
+        .peer = peer_secret,
+    });
+    conn.last_packet_activity_millis = 10;
+    try conn.initiateOneRttKeyUpdate();
+    try conn.sendPing();
+    try std.testing.expectEqual(@as(?bool, true), conn.localOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_ping_count);
+
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xf2 };
+    const pending_connections = [_]EndpointConnectionReceiveView{.{
+        .connection_id = 81,
+        .connection = &conn,
+    }};
+    const poll_views = [_]EndpointConnectionPollView{.{
+        .connection_id = 81,
+        .connection = &conn,
+        .destination_connection_id = &server_dcid,
+    }};
+    const discard_deadline = conn.oneRttKeyDiscardDeadlineMillis() orelse return error.TestUnexpectedResult;
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    const result = try lifecycle.processPendingWorkAcrossConnectionsAndDrainDatagrams(
+        &pending_connections,
+        discard_deadline,
+        &poll_views,
+        .application,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), result.pending_work.key_discard_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), result.next_deadline);
+    try std.testing.expectEqual(@as(?bool, false), conn.localOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_ping_count);
+
+    const polled = (try lifecycle.pollDatagramAcrossConnections(
+        &poll_views,
+        discard_deadline,
+        .application,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, 81), polled.connection_id);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
+}
+
 test "installed one RTT key update ACK confirmation rolls back with invalid payload" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
