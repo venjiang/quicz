@@ -940,7 +940,8 @@ close 和 route cleanup 事件。
   ticket identity。identity 匹配时继续校验 binder、在 ServerHello 里选择
   PSK identity 0，并在 offer 了 early_data 时派生 0-RTT receive secret；
   identity 不匹配时保持 PSK unselected，且不会发送 `pre_shared_key`
-  ServerHello extension。
+  ServerHello extension。`Tls13Backend` 现在也暴露同一 identity binding，避免
+  connection-owned TLS adapter 直接修改裸 handshake state。
 
 - 2026-07-16：`CryptoBackend` client 0-RTT write-secret hook 现在受已存
   NewSessionTicket `early_data` 权限约束。只有 PSK 但没有 ticket，或 ticket 未携带

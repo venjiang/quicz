@@ -1057,7 +1057,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   configured ticket identity. Matching identities still verify the binder,
   select PSK identity 0, and derive the 0-RTT receive secret when early_data was
   offered; non-matching identities leave PSK unselected and emit no
-  `pre_shared_key` ServerHello extension.
+  `pre_shared_key` ServerHello extension. `Tls13Backend` now exposes the same
+  identity binding so connection-owned TLS adapters do not need to mutate the
+  raw handshake state.
 
 - 2026-07-16: Gated the pure-Zig `CryptoBackend` client 0-RTT write-secret
   hook on the stored NewSessionTicket `early_data` permission. A PSK without a

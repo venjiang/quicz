@@ -127,6 +127,13 @@ pub const Tls13Backend = struct {
         return .{ .hs = Tls13Handshake.initServerWithPsk(config, &[_]u8{}, psk) };
     }
 
+    /// Bind the configured server PSK to one expected ticket identity.
+    /// Without this optional binding, the underlying TLS handshake keeps the
+    /// external-PSK behavior and accepts any identity whose binder verifies.
+    pub fn setServerPskIdentity(self: *Tls13Backend, identity: []const u8) tls13.HandshakeError!void {
+        try self.hs.setServerPskIdentity(identity);
+    }
+
     /// Return a `CryptoBackend` value whose callbacks drive this backend.
     /// The value is only valid while `self` is stable.
     pub fn cryptoBackend(self: *Tls13Backend) CryptoBackend {
@@ -408,6 +415,22 @@ test "Tls13Backend resumptionPsk returns stored PSK" {
     const psk = backend.resumptionPsk().?;
     try std.testing.expectEqual(@as(usize, tls13.secret_len), psk.len);
     try std.testing.expectEqual(@as(u8, 0x01), psk[0]);
+}
+
+test "Tls13Backend setServerPskIdentity configures underlying TLS handshake" {
+    var backend = Tls13Backend.initServerWithPsk(.{
+        .alpn = &.{},
+    }, [_]u8{0xab} ** tls13.secret_len);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    try backend.setServerPskIdentity(&ticket);
+    try std.testing.expectEqual(ticket.len, backend.hs.server_psk_identity_len);
+    try std.testing.expectEqualSlices(
+        u8,
+        &ticket,
+        backend.hs.server_psk_identity[0..backend.hs.server_psk_identity_len],
+    );
+
+    try std.testing.expectError(error.DecodeError, backend.setServerPskIdentity(&[_]u8{}));
 }
 
 test "Tls13Backend pullEarlyTrafficSecret returns 0-RTT secret after ClientHello" {
