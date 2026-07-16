@@ -172,6 +172,15 @@ pub fn Tls13ServerEndpoint(
             installed_key: InstalledKeyDatagramRoutePollResult,
         };
 
+        /// Endpoint classification plus routed datagram processing result.
+        pub const DatagramProcessPathResult = union(enum) {
+            routed: RoutedDatagramProcessPathResult,
+            accept_initial: endpoint.InitialAcceptResult,
+            version_negotiation: DatagramResponsePathResult,
+            stateless_reset: DatagramResponsePathResult,
+            dropped,
+        };
+
         /// Routed installed-key backend processing with route-bound output.
         pub const RoutedBackendDatagramDrainPathResult = struct {
             route: endpoint.RouteResult,
@@ -1673,6 +1682,50 @@ pub fn Tls13ServerEndpoint(
                 },
             };
         }
+
+        /// Classify one UDP datagram and process it if it routes to an owned record.
+        ///
+        /// Non-routed Initial, Version Negotiation, stateless reset, and drop
+        /// results stay visible to the caller. Routed long-header and
+        /// short-header datagrams are dispatched through the endpoint owner.
+        pub fn processDatagramWithRoutePath(
+            self: *Self,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            unpredictable_prefix: []const u8,
+            supported_versions: []const quic_packet.Version,
+            installed_key_options: root.EndpointFeedInstalledKeyDatagramOptions,
+            scratch: []u8,
+            initial_token: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!DatagramProcessPathResult {
+            const action = try self.feedDatagramWithResponsePath(
+                installed_key_options.out,
+                path,
+                datagram,
+                unpredictable_prefix,
+                supported_versions,
+            );
+            return switch (action) {
+                .routed => |route| .{ .routed = try self.processRoutedDatagramWithRoutePath(
+                    route,
+                    path,
+                    now_millis,
+                    datagram,
+                    installed_key_options,
+                    scratch,
+                    initial_token,
+                    out,
+                    handshake_out,
+                ) },
+                .accept_initial => |initial| .{ .accept_initial = initial },
+                .version_negotiation => |response| .{ .version_negotiation = response },
+                .stateless_reset => |reset| .{ .stateless_reset = reset },
+                .dropped => .dropped,
+            };
+        }
     };
 }
 
@@ -2213,6 +2266,30 @@ test "Tls13ServerEndpoint pairs stateless endpoint responses with receive path" 
         },
         else => return error.TestUnexpectedResult,
     }
+    var process_scratch: [64]u8 = undefined;
+    var process_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var process_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    const processed_version_response = try endpoint_owner.processDatagramWithRoutePath(
+        path,
+        0,
+        &unsupported_initial,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &response_out,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &process_scratch,
+        &[_]u8{},
+        &process_initial_out,
+        &process_handshake_out,
+    );
+    switch (processed_version_response) {
+        .version_negotiation => |response| try std.testing.expect(response.path.eql(path)),
+        else => return error.TestUnexpectedResult,
+    }
 
     const retired_cid = [_]u8{ 0x31, 0x32, 0x33, 0x34 };
     const reset_token = [_]u8{0x9a} ** quic_packet.stateless_reset_token_len;
@@ -2367,12 +2444,12 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
     var route_out: [64]u8 = undefined;
     var initial_out: [1]root.EndpointPolledDatagramResult = undefined;
     var handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
-    const initial_route = try endpoint_owner.routeDatagram(path, initial_datagram);
-    const initial_dispatch = try endpoint_owner.processRoutedDatagramWithRoutePath(
-        initial_route,
+    const initial_dispatch = try endpoint_owner.processDatagramWithRoutePath(
         path,
         2,
         initial_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
         .{
             .space = .application,
             .out = &route_out,
@@ -2385,8 +2462,11 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
         &handshake_out,
     );
     const initial_result = switch (initial_dispatch) {
-        .long => |long| switch (long) {
-            .packet => |packet_result| packet_result,
+        .routed => |routed| switch (routed) {
+            .long => |long| switch (long) {
+                .packet => |packet_result| packet_result,
+                else => return error.TestUnexpectedResult,
+            },
             else => return error.TestUnexpectedResult,
         },
         else => return error.TestUnexpectedResult,
@@ -2420,12 +2500,12 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(handshake_datagram);
 
-    const handshake_route = try endpoint_owner.routeDatagram(path, handshake_datagram);
-    const handshake_dispatch = try endpoint_owner.processRoutedDatagramWithRoutePath(
-        handshake_route,
+    const handshake_dispatch = try endpoint_owner.processDatagramWithRoutePath(
         path,
         4,
         handshake_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
         .{
             .space = .application,
             .out = &route_out,
@@ -2438,8 +2518,11 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
         &handshake_out,
     );
     const handshake_result = switch (handshake_dispatch) {
-        .long => |long| switch (long) {
-            .packet => |packet_result| packet_result,
+        .routed => |routed| switch (routed) {
+            .long => |long| switch (long) {
+                .packet => |packet_result| packet_result,
+                else => return error.TestUnexpectedResult,
+            },
             else => return error.TestUnexpectedResult,
         },
         else => return error.TestUnexpectedResult,
@@ -2469,12 +2552,12 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
     try client.sendPing();
     const short_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(5, &server_cid)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(short_datagram);
-    const short_route = try endpoint_owner.routeDatagram(path, short_datagram);
-    const short_dispatch = try endpoint_owner.processRoutedDatagramWithRoutePath(
-        short_route,
+    const short_dispatch = try endpoint_owner.processDatagramWithRoutePath(
         path,
         6,
         short_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
         .{
             .space = .application,
             .out = &route_out,
@@ -2487,10 +2570,13 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
         &handshake_out,
     );
     switch (short_dispatch) {
-        .installed_key => |processed_short| {
-            try std.testing.expect((processed_short.feed orelse return error.TestUnexpectedResult).feed == .routed);
-            try std.testing.expectEqual(@as(?TestEndpoint.DatagramPathResult, null), processed_short.datagram);
-            try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), processed_short.next_deadline);
+        .routed => |routed| switch (routed) {
+            .installed_key => |processed_short| {
+                try std.testing.expect((processed_short.feed orelse return error.TestUnexpectedResult).feed == .routed);
+                try std.testing.expectEqual(@as(?TestEndpoint.DatagramPathResult, null), processed_short.datagram);
+                try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), processed_short.next_deadline);
+            },
+            else => return error.TestUnexpectedResult,
         },
         else => return error.TestUnexpectedResult,
     }
