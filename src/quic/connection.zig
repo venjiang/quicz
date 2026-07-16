@@ -72104,6 +72104,10 @@ test "Tls13Backend + Connection: PSK installs 0-RTT keys via traffic-secret hook
         .server_name = "example.com",
         .skip_cert_verify = true,
     }, resumption_psk);
+    const session_ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(client_backend.hs.session_ticket[0..session_ticket.len], &session_ticket);
+    client_backend.hs.session_ticket_len = session_ticket.len;
+    client_backend.hs.session_ticket_allows_early_data = true;
 
     var scratch: [8192]u8 = undefined;
 

@@ -276,11 +276,16 @@ pub const Tls13Backend = struct {
     }
 
     /// Return the client early traffic secret for 0-RTT, or null when the
-    /// client has no PSK or the ClientHello has not been built yet. The
-    /// secret protects 0-RTT early data; the caller derives packet-protection
-    /// keys via `protection.deriveAes128PacketProtectionKeys`. One-shot.
+    /// client has no PSK, lacks a ticket that permits QUIC 0-RTT, or the
+    /// ClientHello has not been built yet. The secret protects 0-RTT early
+    /// data; the caller derives packet-protection keys via
+    /// `protection.deriveAes128PacketProtectionKeys`. One-shot.
     pub fn pullEarlyTrafficSecret(self: *Tls13Backend) ?[tls13.secret_len]u8 {
-        if (!self.hs.has_psk or self.early_traffic_secret_sent or !self.client_hello_built) return null;
+        if (!self.hs.has_psk or
+            self.hs.session_ticket_len == 0 or
+            !self.hs.session_ticket_allows_early_data or
+            self.early_traffic_secret_sent or
+            !self.client_hello_built) return null;
         self.early_traffic_secret_sent = true;
         return self.hs.key_schedule.deriveEarlyTrafficSecret(self.hs.transcript.current());
     }
@@ -406,6 +411,10 @@ test "Tls13Backend pullEarlyTrafficSecret returns 0-RTT secret after ClientHello
         .alpn = &.{},
         .server_name = "example.com",
     }, [_]u8{0xab} ** tls13.secret_len);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(backend.hs.session_ticket[0..ticket.len], &ticket);
+    backend.hs.session_ticket_len = ticket.len;
+    backend.hs.session_ticket_allows_early_data = true;
     // Before the ClientHello is built, no early secret.
     try std.testing.expect(backend.pullEarlyTrafficSecret() == null);
     // Drive the ClientHello via the CryptoBackend pull hook (triggers pump).
@@ -417,6 +426,29 @@ test "Tls13Backend pullEarlyTrafficSecret returns 0-RTT secret after ClientHello
     try std.testing.expectEqual(@as(usize, tls13.secret_len), early.len);
     // One-shot: a second pull returns null.
     try std.testing.expect(backend.pullEarlyTrafficSecret() == null);
+}
+
+test "Tls13Backend pullEarlyTrafficSecret requires ticket early_data permission" {
+    var no_ticket = Tls13Backend.initClientWithPsk(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    }, [_]u8{0xab} ** tls13.secret_len);
+    var no_ticket_cb = no_ticket.cryptoBackend();
+    var no_ticket_out: [4096]u8 = undefined;
+    _ = try no_ticket_cb.pull(no_ticket_cb.context, .initial, &no_ticket_out);
+    try std.testing.expect(no_ticket.pullEarlyTrafficSecret() == null);
+
+    var disallowed = Tls13Backend.initClientWithPsk(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    }, [_]u8{0xab} ** tls13.secret_len);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(disallowed.hs.session_ticket[0..ticket.len], &ticket);
+    disallowed.hs.session_ticket_len = ticket.len;
+    var disallowed_cb = disallowed.cryptoBackend();
+    var disallowed_out: [4096]u8 = undefined;
+    _ = try disallowed_cb.pull(disallowed_cb.context, .initial, &disallowed_out);
+    try std.testing.expect(disallowed.pullEarlyTrafficSecret() == null);
 }
 
 test "Tls13Backend drives a full client handshake through CryptoBackend hooks" {
