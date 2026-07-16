@@ -225,6 +225,29 @@ pub const Tls13ClientEndpoint = struct {
         return result;
     }
 
+    /// Run one bounded client receive step and service one due deadline.
+    pub fn receiveDatagramStepWithRoutePath(
+        self: *Tls13ClientEndpoint,
+        now_millis: i64,
+        scratch: []u8,
+        datagram: []const u8,
+        receive_out: []ApplicationDatagramPathResult,
+        due_out: []ApplicationDatagramPathResult,
+    ) !DatagramStepPathResult {
+        const received = try self.receiveWithRoutePathOrCloseAndDrainDatagrams(
+            now_millis,
+            scratch,
+            datagram,
+            receive_out,
+        );
+        const due = try self.serviceDueDeadlineAndDrainDatagramsWithRoutePath(now_millis, due_out);
+        return .{
+            .receive = received,
+            .due = due,
+            .next_deadline = self.nextDeadline(),
+        };
+    }
+
     /// Move the client's registered UDP route after caller-selected migration.
     pub fn updatePath(self: *Tls13ClientEndpoint, new_path: endpoint.Udp4Tuple) endpoint.RouteError!endpoint.RouteResult {
         const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
@@ -585,6 +608,16 @@ pub const Tls13ClientEndpoint = struct {
         outbound_initial: ?ApplicationDatagramPathResult = null,
         outbound_handshake: ?ApplicationDatagramPathResult = null,
         drain: ApplicationDatagramPathDrainResult = .{},
+        next_deadline: ?client_transport.ClientTransportDeadline = null,
+    };
+
+    /// One client socket-loop receive step with bounded output and due work.
+    pub const DatagramStepPathResult = struct {
+        /// Route/process result for the received datagram.
+        receive: ReceiveOrCloseDatagramPathDrainResult,
+        /// Due deadline serviced after receive, if any was ready.
+        due: ?DueDeadlineDatagramPathDrainResult = null,
+        /// Next client-visible deadline after receive, drain, and due work.
         next_deadline: ?client_transport.ClientTransportDeadline = null,
     };
 
@@ -1236,6 +1269,87 @@ test "Tls13ClientEndpoint drains due recovery with committed route output" {
     try std.testing.expect(out[0].path.eql(new_path));
     try std.testing.expect(out[0].datagram.len != 0);
     const next_deadline = serviced.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expect(next_deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, next_deadline.recovery.space);
+}
+
+test "Tls13ClientEndpoint receive step drains due recovery with committed route output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b };
+    const decoy_dcid = [_]u8{ 0xe1, 0xe2, 0xe3, 0xe4 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = old_path.remote,
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        31,
+        old_path,
+        .{ .active_migration_disabled = false },
+        .{ .initial_rtt_ms = 100 },
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const traffic_secret = [_]u8{0x58} ** protection.traffic_secret_len;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xda, 0xdb, 0xdc, 0xdd };
+    const reset_token = [_]u8{0x68} ** packet.stateless_reset_token_len;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+    try client.transport.connection.sendPing();
+
+    const first = (try client.pollApplicationDatagramWithRoutePath(10)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first.datagram);
+    const deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, deadline.recovery.space);
+
+    _ = try client.updatePath(new_path);
+    try client.lifecycle.registerConnectionId(99, &decoy_dcid, new_path, .{ .active_migration_disabled = false });
+    const decoy_datagram = [_]u8{ 0x40, 0xe1, 0xe2, 0xe3, 0xe4, 0x00 };
+    var scratch: [128]u8 = undefined;
+    var receive_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    var due_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const step = try client.receiveDatagramStepWithRoutePath(
+        deadline.deadlineMillis(),
+        &scratch,
+        &decoy_datagram,
+        &receive_out,
+        &due_out,
+    );
+    try std.testing.expect(step.receive.receive == null);
+    try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), step.receive.receive_error);
+    try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), step.receive.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), step.receive.drain.first_error);
+    const due = step.due orelse return error.TestUnexpectedResult;
+    try std.testing.expect(due.deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, due.deadline.recovery.space);
+    try std.testing.expectEqual(@as(usize, 1), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), due.drain.first_error);
+    defer std.testing.allocator.free(due_out[0].datagram);
+    try std.testing.expect(due_out[0].path.eql(new_path));
+    try std.testing.expect(due_out[0].datagram.len != 0);
+    const next_deadline = step.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expect(next_deadline == .recovery);
     try std.testing.expectEqual(transport_types.PacketNumberSpace.application, next_deadline.recovery.space);
 }
