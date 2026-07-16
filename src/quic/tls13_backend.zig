@@ -134,6 +134,15 @@ pub const Tls13Backend = struct {
         try self.hs.setServerPskIdentity(identity);
     }
 
+    /// Bind the configured server PSK to a stored ticket-age policy.
+    pub fn setServerPskTicketAgePolicy(
+        self: *Tls13Backend,
+        ticket_age_add: u32,
+        max_age_ms: u32,
+    ) tls13.HandshakeError!void {
+        try self.hs.setServerPskTicketAgePolicy(ticket_age_add, max_age_ms);
+    }
+
     /// Return a `CryptoBackend` value whose callbacks drive this backend.
     /// The value is only valid while `self` is stable.
     pub fn cryptoBackend(self: *Tls13Backend) CryptoBackend {

@@ -1082,6 +1082,56 @@ test "Tls13Handshake initServerWithPsk derives matching client early traffic sec
     try std.testing.expectEqualSlices(u8, &client_early, &server.server_early_traffic_secret);
 }
 
+test "Tls13Handshake server applies PSK ticket age policy" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    const ticket_age_add: u32 = 0x01020304;
+
+    var valid_client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    @memcpy(valid_client.session_ticket[0..ticket.len], &ticket);
+    valid_client.session_ticket_len = ticket.len;
+    valid_client.session_ticket_age_add = ticket_age_add +% 1000;
+    valid_client.session_ticket_allows_early_data = true;
+    const valid_hello = (try valid_client.step()).send_data.data;
+
+    var valid_server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+    }, &tp, psk);
+    try valid_server.setServerPskTicketAgePolicy(ticket_age_add, 1000);
+    valid_server.provideData(valid_hello);
+    _ = try valid_server.step();
+    try std.testing.expect(valid_server.psk_selected);
+    try std.testing.expect(valid_server.peer_psk_binder_valid);
+    try std.testing.expect(valid_server.server_early_traffic_secret_derived);
+
+    var stale_client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    @memcpy(stale_client.session_ticket[0..ticket.len], &ticket);
+    stale_client.session_ticket_len = ticket.len;
+    stale_client.session_ticket_age_add = ticket_age_add +% 1001;
+    stale_client.session_ticket_allows_early_data = true;
+    const stale_hello = (try stale_client.step()).send_data.data;
+
+    var stale_server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+    }, &tp, psk);
+    try stale_server.setServerPskTicketAgePolicy(ticket_age_add, 1000);
+    stale_server.provideData(stale_hello);
+    _ = try stale_server.step();
+    try std.testing.expect(stale_server.peer_offered_psk);
+    try std.testing.expect(stale_server.peer_offered_early_data);
+    try std.testing.expect(!stale_server.psk_selected);
+    try std.testing.expect(!stale_server.peer_psk_binder_valid);
+    try std.testing.expect(!stale_server.server_early_traffic_secret_derived);
+}
+
 test "Tls13Handshake server verifies PSK binder without deriving early secret when early_data absent" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -1590,6 +1640,8 @@ pub const Tls13Handshake = struct {
     server_psk: ?[secret_len]u8 = null,
     server_psk_identity: [4096]u8 = undefined,
     server_psk_identity_len: usize = 0,
+    server_psk_ticket_age_add: ?u32 = null,
+    server_psk_max_ticket_age_ms: ?u32 = null,
 
     // Server-side: the client early traffic secret derived over the
     // ClientHello transcript once a matching PSK is in place. This is the
@@ -1651,6 +1703,8 @@ pub const Tls13Handshake = struct {
         self.session_ticket_allows_early_data = false;
         self.server_psk = null;
         self.server_psk_identity_len = 0;
+        self.server_psk_ticket_age_add = null;
+        self.server_psk_max_ticket_age_ms = null;
         self.peer_psk_identity_len = 0;
         self.peer_psk_obfuscated_ticket_age = 0;
         self.peer_offered_psk = false;
@@ -1719,6 +1773,8 @@ pub const Tls13Handshake = struct {
         self.session_ticket_allows_early_data = false;
         self.server_psk = null;
         self.server_psk_identity_len = 0;
+        self.server_psk_ticket_age_add = null;
+        self.server_psk_max_ticket_age_ms = null;
         self.peer_psk_identity_len = 0;
         self.peer_psk_obfuscated_ticket_age = 0;
         self.peer_offered_psk = false;
@@ -1767,6 +1823,18 @@ pub const Tls13Handshake = struct {
         if (identity.len == 0 or identity.len > self.server_psk_identity.len) return error.DecodeError;
         @memcpy(self.server_psk_identity[0..identity.len], identity);
         self.server_psk_identity_len = identity.len;
+    }
+
+    /// Restrict server-side PSK selection to tickets whose obfuscated age is
+    /// within `max_age_ms` after removing the stored `ticket_age_add`.
+    pub fn setServerPskTicketAgePolicy(
+        self: *Tls13Handshake,
+        ticket_age_add: u32,
+        max_age_ms: u32,
+    ) HandshakeError!void {
+        if (max_age_ms == 0) return error.DecodeError;
+        self.server_psk_ticket_age_add = ticket_age_add;
+        self.server_psk_max_ticket_age_ms = max_age_ms;
     }
 
     pub fn provideData(self: *Tls13Handshake, data: []const u8) void {
@@ -2857,13 +2925,14 @@ pub const Tls13Handshake = struct {
                         self.peer_psk_identity[0..self.peer_psk_identity_len],
                         self.server_psk_identity[0..self.server_psk_identity_len],
                     ));
+            const ticket_age_allowed = self.serverPskTicketAgeAllowed();
             // If the server holds a PSK and the offered identity matches the
-            // configured ticket identity, verify the binder. Derive the client
-            // early traffic secret only when the peer actually offered
-            // early_data; PSK-only resumption must not open a 0-RTT receive
-            // path. A non-matching identity leaves PSK unselected so the
-            // handshake can continue on the certificate path.
-            if (self.server_psk != null and identity_matches) {
+            // configured ticket identity and ticket-age policy, verify the
+            // binder. Derive the client early traffic secret only when the peer
+            // actually offered early_data; PSK-only resumption must not open a
+            // 0-RTT receive path. A non-matching or stale identity leaves PSK
+            // unselected so the handshake can continue on the certificate path.
+            if (self.server_psk != null and identity_matches and ticket_age_allowed) {
                 const binder_key = self.key_schedule.deriveBinderKey();
                 const expected = KeySchedule.computeFinishedVerifyData(binder_key, truncated_hash);
                 self.peer_psk_binder_valid = std.crypto.timing_safe.eql(
@@ -2886,6 +2955,13 @@ pub const Tls13Handshake = struct {
         }
         self.state = .server_send_server_hello;
         return ._continue;
+    }
+
+    fn serverPskTicketAgeAllowed(self: *const Tls13Handshake) bool {
+        const ticket_age_add = self.server_psk_ticket_age_add orelse return true;
+        const max_age_ms = self.server_psk_max_ticket_age_ms orelse return true;
+        const ticket_age_ms = self.peer_psk_obfuscated_ticket_age -% ticket_age_add;
+        return ticket_age_ms <= max_age_ms;
     }
 
     /// Build a ServerHello, complete the X25519 key exchange, and derive
