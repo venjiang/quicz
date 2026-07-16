@@ -349,6 +349,8 @@ pub const EndpointPendingWorkSweepDatagramResult = struct {
     pending_work: EndpointPendingWorkSweepResult,
     /// Protected datagram emitted after pending recovery work, if any.
     datagram: ?EndpointPolledDatagramResult = null,
+    /// Next endpoint-visible deadline after pending work and optional output poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from a pending-work sweep followed by bounded output draining.

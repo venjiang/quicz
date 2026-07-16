@@ -10752,7 +10752,10 @@ pub const EndpointConnectionLifecycle = struct {
             now_millis,
         );
         if (pending_work.recovery_serviced_count == 0) {
-            return .{ .pending_work = pending_work };
+            return .{
+                .pending_work = pending_work,
+                .next_deadline = self.nextDeadlineAcrossReceiveConnections(pending_connections),
+            };
         }
 
         return .{
@@ -10762,6 +10765,7 @@ pub const EndpointConnectionLifecycle = struct {
                 now_millis,
                 poll_space,
             ),
+            .next_deadline = self.nextDeadlineAcrossReceiveConnections(pending_connections),
         };
     }
 
@@ -10781,7 +10785,10 @@ pub const EndpointConnectionLifecycle = struct {
             now_millis,
         );
         if (pending_work.recovery_serviced_count == 0) {
-            return .{ .pending_work = pending_work };
+            return .{
+                .pending_work = pending_work,
+                .next_deadline = self.nextDeadlineAcrossReceiveConnections(pending_connections),
+            };
         }
 
         return .{
@@ -10790,6 +10797,7 @@ pub const EndpointConnectionLifecycle = struct {
                 poll_views,
                 now_millis,
             ),
+            .next_deadline = self.nextDeadlineAcrossReceiveConnections(pending_connections),
         };
     }
 

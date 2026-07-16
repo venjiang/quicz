@@ -17636,6 +17636,7 @@ test "EndpointConnectionLifecycle pending-work cross-connection poll waits for r
     );
     try std.testing.expectEqual(@as(usize, 0), no_recovery.pending_work.recovery_serviced_count);
     try std.testing.expectEqual(@as(?EndpointPolledDatagramResult, null), no_recovery.datagram);
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), no_recovery.next_deadline);
     try std.testing.expectEqual(@as(usize, 0), client.sentPacketCount(.application));
 
     const first = (try lifecycle.pollDatagram(201, &client, 20, .{
@@ -17660,6 +17661,10 @@ test "EndpointConnectionLifecycle pending-work cross-connection poll waits for r
     try std.testing.expectEqual(@as(u64, 201), probe.connection_id);
     try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
     try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
+    const recovered_next = recovered.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, recovered_next.kind);
+    try std.testing.expectEqual(@as(u64, 201), recovered_next.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, recovered_next.recovery.?.space);
 }
 
 test "EndpointConnectionLifecycle pending-work cross-connection drain returns bounded recovery output" {
@@ -17814,6 +17819,10 @@ test "EndpointConnectionLifecycle pending-work cross-connection poll keeps expli
     );
     try std.testing.expectEqual(@as(usize, 0), early.pending_work.recovery_serviced_count);
     try std.testing.expectEqual(@as(?EndpointPolledDatagramResult, null), early.datagram);
+    const early_next = early.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, early_next.kind);
+    try std.testing.expectEqual(@as(u64, 211), early_next.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, early_next.recovery.?.space);
     try std.testing.expectEqual(@as(usize, 1), client.sentPacketCount(.application));
 
     const due = try lifecycle.processPendingWorkAcrossConnectionsAndPollDatagramWithInstalledKeyOptions(
@@ -17827,6 +17836,10 @@ test "EndpointConnectionLifecycle pending-work cross-connection poll keeps expli
     try std.testing.expectEqual(@as(u64, 211), probe.connection_id);
     try std.testing.expectEqual(@as(usize, 2), client.sentPacketCount(.application));
     try std.testing.expectEqual(@as(u8, 1), client.recovery_state.pto_count);
+    const due_next = due.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, due_next.kind);
+    try std.testing.expectEqual(@as(u64, 211), due_next.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, due_next.recovery.?.space);
     try std.testing.expect(try protectedZeroRttContainsControlFrame(
         probe.datagram,
         secrets.client,

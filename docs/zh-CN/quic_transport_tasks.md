@@ -85,6 +85,8 @@ caller-owned socket loop 可以在一次调用中完成 pending recovery work、
 installed-key output drain 和下一次 wakeup 选择，而不用再单独查询 lifecycle。
 跨连接 pending-work bounded-drain result 现在也会在 caller-owned connection map 上返回
 相同的下一 deadline，包含显式 installed-key output options。
+对应的跨连接 pending-work poll result 现在也会在普通和显式输出 timer tick 后返回
+poll 后下一 deadline。
 
 Client endpoint 的错误路径不会再把无关待发送应用包误当作 close-on-error 输出：
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入
@@ -2176,7 +2178,9 @@ close 和 route cleanup 事件。
   timer 被 service 时不会偷跑普通 queued output；PTO wakeup 被 service 后可以返回一个
   protected output datagram；bounded drain 可在一个 loop step 中返回两个
   caller-owned connection 的 PTO output。bounded-drain result 现在还会在普通和显式输出
-  drain 后，从 caller-owned map 里选出下一 endpoint-visible deadline。
+  drain 后，从 caller-owned map 里选出下一 endpoint-visible deadline。output-poll result
+  现在也会在 no-op、普通 recovery poll 和显式 0-RTT recovery poll 路径后返回同样的
+  poll 后 deadline 信号。
 - 2026-06-10：新增 pending-work-to-backend-to-output 和
   pending-work-to-backend-to-bounded-drain loop step：
   `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendInSpaceAndPollDatagram()`、
