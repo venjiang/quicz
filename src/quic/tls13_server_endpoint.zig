@@ -172,9 +172,38 @@ pub fn Tls13ServerEndpoint(
             installed_key: InstalledKeyDatagramRoutePollResult,
         };
 
+        /// Installed-key receive result with bounded route-bound output drain.
+        pub const InstalledKeyDatagramRouteDrainResult = struct {
+            /// Receive, path validation, and route-update result when feed succeeded.
+            feed: ?root.EndpointFeedInstalledKeyPathUpdateResult = null,
+            /// Feed error returned after the endpoint had selected a record.
+            feed_error: ?root.EndpointProtectedDatagramError = null,
+            /// Peer-issued CID sequence whose stateless reset token matched.
+            stateless_reset_sequence_number: ?u64 = null,
+            /// Bounded protected output drain after receive or close-on-error handling.
+            drain: root.EndpointDatagramDrainResult = .{},
+            /// Next endpoint-visible deadline after receive processing and bounded output.
+            next_deadline: ?root.EndpointConnectionDeadline = null,
+        };
+
+        /// Routed datagram dispatch with bounded route-bound output drain.
+        pub const RoutedDatagramDrainPathResult = union(enum) {
+            long: LongDatagramProcessPathResult,
+            installed_key: InstalledKeyDatagramRouteDrainResult,
+        };
+
         /// Endpoint classification plus routed datagram processing result.
         pub const DatagramProcessPathResult = union(enum) {
             routed: RoutedDatagramProcessPathResult,
+            accept_initial: endpoint.InitialAcceptResult,
+            version_negotiation: DatagramResponsePathResult,
+            stateless_reset: DatagramResponsePathResult,
+            dropped,
+        };
+
+        /// Endpoint classification plus routed datagram processing and bounded drain.
+        pub const DatagramProcessDrainPathResult = union(enum) {
+            routed: RoutedDatagramDrainPathResult,
             accept_initial: endpoint.InitialAcceptResult,
             version_negotiation: DatagramResponsePathResult,
             stateless_reset: DatagramResponsePathResult,
@@ -862,6 +891,84 @@ pub fn Tls13ServerEndpoint(
                     .datagram = protected_datagram,
                     .path = output_path,
                 } else null,
+                .next_deadline = try self.nextDeadline(self.records.allocator),
+            };
+        }
+
+        fn processRoutedInstalledKeyDatagramAndDrainWithRoutePath(
+            self: *Self,
+            route: endpoint.RouteResult,
+            record: *Record,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+            out: []DatagramPathResult,
+        ) (root.EndpointProtectedDatagramError || endpoint.RouteError)!InstalledKeyDatagramRouteDrainResult {
+            const connection = connection_of(record);
+            const destination_connection_id = destination_connection_id_of(record);
+            if (datagram.len != 0 and quic_packet.parseHeaderForm(datagram[0]) == .short) {
+                if (connection.processStatelessResetDatagram(now_millis, datagram)) |sequence_number| {
+                    try self.lifecycle.armRecoveryTimerFromConnection(route.connection_id, connection);
+                    return .{
+                        .feed = .{ .feed = .dropped },
+                        .stateless_reset_sequence_number = sequence_number,
+                        .next_deadline = try self.nextDeadline(self.records.allocator),
+                    };
+                }
+            }
+            const feed = self.lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+                route.connection_id,
+                connection,
+                path,
+                now_millis,
+                datagram,
+                options,
+            ) catch |err| {
+                if (err != error.InvalidPacket) return err;
+                var result = InstalledKeyDatagramRouteDrainResult{
+                    .feed_error = err,
+                    .next_deadline = try self.nextDeadline(self.records.allocator),
+                };
+                if (connection.connectionState() == .closing) {
+                    result.drain = self.drainDatagramsWithRoutePath(
+                        route.connection_id,
+                        connection,
+                        now_millis,
+                        .{
+                            .space = .application,
+                            .destination_connection_id = destination_connection_id,
+                        },
+                        try self.currentRecordRoutePath(record),
+                        out,
+                    );
+                    result.next_deadline = try self.nextDeadline(self.records.allocator);
+                }
+                return result;
+            };
+            switch (feed.feed) {
+                .routed => {},
+                else => return .{
+                    .feed = feed,
+                    .next_deadline = try self.nextDeadline(self.records.allocator),
+                },
+            }
+            const output_path = feed.selected_output_path orelse
+                try self.lifecycle.currentRoutePath(route.destination_connection_id.asSlice());
+            const drain = self.drainDatagramsWithRoutePath(
+                route.connection_id,
+                connection,
+                now_millis,
+                .{
+                    .space = .application,
+                    .destination_connection_id = destination_connection_id,
+                },
+                output_path,
+                out,
+            );
+            return .{
+                .feed = feed,
+                .drain = drain,
                 .next_deadline = try self.nextDeadline(self.records.allocator),
             };
         }
@@ -1683,6 +1790,47 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Dispatch one already-routed UDP datagram and drain bounded output.
+        pub fn processRoutedDatagramAndDrainWithRoutePath(
+            self: *Self,
+            route: endpoint.RouteResult,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            installed_key_options: root.EndpointFeedInstalledKeyDatagramOptions,
+            scratch: []u8,
+            initial_token: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+            installed_key_out: []DatagramPathResult,
+        ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!RoutedDatagramDrainPathResult {
+            if (datagram.len == 0) return error.InvalidPacket;
+            return switch (quic_packet.parseHeaderForm(datagram[0])) {
+                .long => .{ .long = try self.processLongDatagramWithRoutePath(
+                    route.connection_id,
+                    path,
+                    now_millis,
+                    datagram,
+                    scratch,
+                    initial_token,
+                    out,
+                    handshake_out,
+                ) },
+                .short => short: {
+                    const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
+                    break :short .{ .installed_key = try self.processRoutedInstalledKeyDatagramAndDrainWithRoutePath(
+                        route,
+                        record,
+                        path,
+                        now_millis,
+                        datagram,
+                        installed_key_options,
+                        installed_key_out,
+                    ) };
+                },
+            };
+        }
+
         /// Classify one UDP datagram and process it if it routes to an owned record.
         ///
         /// Non-routed Initial, Version Negotiation, stateless reset, and drop
@@ -1719,6 +1867,48 @@ pub fn Tls13ServerEndpoint(
                     initial_token,
                     out,
                     handshake_out,
+                ) },
+                .accept_initial => |initial| .{ .accept_initial = initial },
+                .version_negotiation => |response| .{ .version_negotiation = response },
+                .stateless_reset => |reset| .{ .stateless_reset = reset },
+                .dropped => .dropped,
+            };
+        }
+
+        /// Classify one UDP datagram, process routed packets, and drain bounded output.
+        pub fn processDatagramAndDrainWithRoutePath(
+            self: *Self,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            unpredictable_prefix: []const u8,
+            supported_versions: []const quic_packet.Version,
+            installed_key_options: root.EndpointFeedInstalledKeyDatagramOptions,
+            scratch: []u8,
+            initial_token: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+            installed_key_out: []DatagramPathResult,
+        ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!DatagramProcessDrainPathResult {
+            const action = try self.feedDatagramWithResponsePath(
+                installed_key_options.out,
+                path,
+                datagram,
+                unpredictable_prefix,
+                supported_versions,
+            );
+            return switch (action) {
+                .routed => |route| .{ .routed = try self.processRoutedDatagramAndDrainWithRoutePath(
+                    route,
+                    path,
+                    now_millis,
+                    datagram,
+                    installed_key_options,
+                    scratch,
+                    initial_token,
+                    out,
+                    handshake_out,
+                    installed_key_out,
                 ) },
                 .accept_initial => |initial| .{ .accept_initial = initial },
                 .version_negotiation => |response| .{ .version_negotiation = response },
@@ -2547,6 +2737,7 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
         .local = server_1rtt,
         .peer = client_1rtt,
     });
+    try record.connection.validatePeerAddress();
     try client.confirmHandshake();
     try record.connection.confirmHandshake();
     try client.sendPing();
@@ -2573,8 +2764,59 @@ test "Tls13ServerEndpoint dispatches routed long packets with route paths" {
         .routed => |routed| switch (routed) {
             .installed_key => |processed_short| {
                 try std.testing.expect((processed_short.feed orelse return error.TestUnexpectedResult).feed == .routed);
-                try std.testing.expectEqual(@as(?TestEndpoint.DatagramPathResult, null), processed_short.datagram);
+                const polled_short = processed_short.datagram orelse return error.TestUnexpectedResult;
+                defer std.testing.allocator.free(polled_short.datagram);
+                try std.testing.expectEqual(record.handle, polled_short.connection_id);
+                try std.testing.expect(polled_short.path.eql(path));
+                try std.testing.expect(polled_short.datagram.len > 0);
                 try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), processed_short.next_deadline);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try client.sendPing();
+    const draining_short_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(7, &server_cid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(draining_short_datagram);
+    const migrated_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+    };
+    const challenge_data = [_]u8{ 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb };
+    var installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const short_drain_dispatch = try endpoint_owner.processDatagramAndDrainWithRoutePath(
+        migrated_path,
+        8,
+        draining_short_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &route_out,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+            .path_challenge_data = challenge_data,
+        },
+        &scratch,
+        &[_]u8{},
+        &initial_out,
+        &handshake_out,
+        &installed_key_out,
+    );
+    switch (short_drain_dispatch) {
+        .routed => |routed| switch (routed) {
+            .installed_key => |processed_short| {
+                try std.testing.expect((processed_short.feed orelse return error.TestUnexpectedResult).feed == .routed);
+                try std.testing.expectEqual(@as(usize, 1), processed_short.drain.datagrams_written);
+                defer std.testing.allocator.free(installed_key_out[0].datagram);
+                try std.testing.expectEqual(record.handle, installed_key_out[0].connection_id);
+                try std.testing.expect(installed_key_out[0].path.eql(migrated_path));
+                try std.testing.expect(installed_key_out[0].datagram.len > 0);
+                const next_deadline = processed_short.next_deadline orelse return error.TestUnexpectedResult;
+                try std.testing.expectEqual(record.handle, next_deadline.connection_id);
+                try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+                try std.testing.expectEqual(root.PacketNumberSpace.application, next_deadline.recovery.?.space);
             },
             else => return error.TestUnexpectedResult,
         },
