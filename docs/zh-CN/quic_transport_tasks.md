@@ -89,6 +89,9 @@ poll 后下一 deadline。
 相同的下一 deadline，包含显式 installed-key output options。
 对应的跨连接 pending-work poll result 现在也会在普通和显式输出 timer tick 后返回
 poll 后下一 deadline。
+receive-to-pending-work 的 poll 和 bounded-drain result 现在会在单连接与
+caller-owned connection map 两类 socket loop 中暴露同样的步骤后 deadline，覆盖显式
+installed-key output options 与终态 cleanup。
 
 Client endpoint 的错误路径不会再把无关待发送应用包误当作 close-on-error 输出：
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入
@@ -1818,7 +1821,8 @@ close 和 route cleanup 事件。
   和 `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAndProcessPendingWorkAndDrainDatagrams()`，
   作为 receive-to-pending-work-to-bounded-drain socket-loop step。单元测试证明 dropped
   input 在 pending work 后仍能 drain 已排队的 installed-key output，单连接入口会在任何
-  output drain 前先退休到期的 closing state。
+  output drain 前先退休到期的 closing state。result 现在也会在 drain 或终态 cleanup
+  后暴露步骤后的下一 deadline。
 - 2026-06-24：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions()`，
   以及
@@ -1826,7 +1830,8 @@ close 和 route cleanup 事件。
   让调用方持有 connection map 的 socket loop 和简单单连接 socket loop 都可以在
   receive processing 和 pending work 后继续保留显式 installed-key output 选择。单元测试证明
   dropped input 后仍能 drain 调用方选择的 0-RTT output，且 single-connection
-  explicit 形态在 due close cleanup 退休连接后仍会停止在 output 前。
+  explicit 形态在 due close cleanup 退休连接后仍会停止在 output 前。result 现在也会在
+  显式 drain 或终态 cleanup 后暴露步骤后的下一 deadline。
 - 2026-06-24：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram()`、
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions()`、
@@ -1836,7 +1841,8 @@ close 和 route cleanup 事件。
   作为 receive-to-pending-work-to-output socket-loop step。单元测试证明 dropped input
   在 pending work 后仍能 poll 已排队的 installed-key output，单连接入口会在 due closing
   state retire 后停止 output polling，显式 installed-key options 会保留调用方选择的 0-RTT
-  output，并覆盖 cross-connection 和 single-connection 两种形态。结果契约放在
+  output，并覆盖 cross-connection 和 single-connection 两种形态。result 现在也会在
+  poll 或终态 cleanup 后暴露步骤后的下一 deadline。结果契约放在
   `src/quic/endpoint_types.zig`，并从 `src/lib.zig` re-export。
 - 2026-06-24：新增
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDriveCryptoBackendsInSpaceWithCompatibleVersionAndSelectNextDeadline()`、

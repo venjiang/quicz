@@ -99,6 +99,9 @@ The cross-connection pending-work bounded-drain result now does the same across
 caller-owned connection maps, including explicit installed-key output options.
 The matching cross-connection pending-work poll result now also returns the
 post-poll next deadline for ordinary and explicit-output timer ticks.
+Receive-to-pending-work poll and bounded-drain results now expose the same
+post-step deadline for single-connection and caller-owned connection-map loops,
+including explicit installed-key output options and terminal cleanup.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
@@ -2081,7 +2084,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   as receive-to-pending-work-to-bounded-drain socket-loop steps. Unit coverage
   proves dropped input can still drain queued installed-key output after
   pending work, and the single-connection form retires due closing state before
-  any output drain.
+  any output drain. Results now also expose the post-step deadline after drain
+  or terminal cleanup.
 - 2026-06-24: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndDrainDatagramsWithInstalledKeyOptions()`
   and
@@ -2090,7 +2094,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   explicit installed-key output choices after receive processing and pending
   work. Unit coverage proves dropped input can still drain caller-selected
   0-RTT output, while the single-connection explicit form still stops before
-  output when due close cleanup retires the connection.
+  output when due close cleanup retires the connection. Results now also expose
+  the post-step deadline after explicit drain or terminal cleanup.
 - 2026-06-24: Added
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagram()`,
   `EndpointConnectionLifecycle.feedDatagramWithInstalledKeysAcrossConnectionsAndProcessPendingWorkAndPollDatagramWithInstalledKeyOptions()`,
@@ -2101,7 +2106,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   dropped input can still poll queued installed-key output after pending work,
   the single-connection form retires due closing state before output polling,
   and explicit installed-key options preserve caller-selected 0-RTT output in
-  both cross-connection and single-connection forms.
+  both cross-connection and single-connection forms. Results now also expose
+  the post-step deadline after poll or terminal cleanup.
   The result contract lives in `src/quic/endpoint_types.zig` and is re-exported
   from `src/lib.zig`.
 - 2026-06-24: Added

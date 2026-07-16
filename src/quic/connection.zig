@@ -23516,6 +23516,10 @@ test "EndpointConnectionLifecycle feed pending-work drain step emits queued outp
     try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
     try std.testing.expectEqual(@as(u64, 101), drain_out[0].connection_id);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 101), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, next_deadline.recovery.?.space);
 }
 
 test "EndpointConnectionLifecycle feed pending-work poll step emits queued output after dropped input" {
@@ -23574,6 +23578,10 @@ test "EndpointConnectionLifecycle feed pending-work poll step emits queued outpu
     defer std.testing.allocator.free(polled.datagram);
     try std.testing.expectEqual(@as(u64, 104), polled.connection_id);
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 104), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, next_deadline.recovery.?.space);
 }
 
 test "EndpointConnectionLifecycle feed pending-work poll step retires due close before poll" {
@@ -23629,6 +23637,7 @@ test "EndpointConnectionLifecycle feed pending-work poll step retires due close 
     try std.testing.expectEqual(ConnectionState.closed, conn.connectionState());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expect(result.next_deadline == null);
 }
 
 test "EndpointConnectionLifecycle feed pending-work explicit poll step keeps zero RTT output options" {
@@ -23702,6 +23711,10 @@ test "EndpointConnectionLifecycle feed pending-work explicit poll step keeps zer
         0,
         .{ .reset_stream = reset_frame },
     ));
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 106), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, next_deadline.recovery.?.space);
 }
 
 test "EndpointConnectionLifecycle feed pending-work drain step retires due close before drain" {
@@ -23760,6 +23773,7 @@ test "EndpointConnectionLifecycle feed pending-work drain step retires due close
     try std.testing.expectEqual(ConnectionState.closed, conn.connectionState());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expect(result.next_deadline == null);
 }
 
 test "EndpointConnectionLifecycle feed pending-work explicit drain step keeps zero RTT output options" {
@@ -23839,6 +23853,10 @@ test "EndpointConnectionLifecycle feed pending-work explicit drain step keeps ze
         0,
         .{ .reset_stream = reset_frame },
     ));
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 103), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, next_deadline.recovery.?.space);
 }
 
 test "EndpointConnectionLifecycle single feed pending-work explicit poll keeps zero RTT output options" {
@@ -23909,6 +23927,10 @@ test "EndpointConnectionLifecycle single feed pending-work explicit poll keeps z
         0,
         .{ .reset_stream = reset_frame },
     ));
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 107), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, next_deadline.recovery.?.space);
 }
 
 test "EndpointConnectionLifecycle single feed pending-work explicit drain keeps zero RTT output options" {
@@ -23984,6 +24006,10 @@ test "EndpointConnectionLifecycle single feed pending-work explicit drain keeps 
         0,
         .{ .reset_stream = reset_frame },
     ));
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 108), next_deadline.connection_id);
+    try std.testing.expectEqual(PacketNumberSpace.application, next_deadline.recovery.?.space);
 }
 
 test "EndpointConnectionLifecycle single feed pending-work explicit drain stops after close retire" {
@@ -24047,6 +24073,7 @@ test "EndpointConnectionLifecycle single feed pending-work explicit drain stops 
     try std.testing.expectEqual(ConnectionState.closed, conn.connectionState());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expect(result.next_deadline == null);
 }
 
 test "EndpointConnectionLifecycle installed-key feed keeps long packets out of stateless reset" {

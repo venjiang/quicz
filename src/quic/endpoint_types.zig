@@ -586,6 +586,8 @@ pub const EndpointFeedPendingWorkDatagramPollResult = struct {
     pending_work: EndpointPendingWorkSweepResult,
     /// Installed-key output emitted after receive and pending work, if any.
     datagram: ?EndpointPolledDatagramResult = null,
+    /// Next endpoint-visible deadline after receive, pending work, and optional output poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from feeding one installed-key datagram, processing pending work, then draining output.
@@ -596,6 +598,8 @@ pub const EndpointFeedPendingWorkDatagramDrainResult = struct {
     pending_work: EndpointPendingWorkSweepResult,
     /// Bounded output drain after receive and pending work.
     drain: EndpointDatagramDrainResult,
+    /// Next endpoint-visible deadline after receive, pending work, and output drain.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from feeding one installed-key datagram, processing pending work, driving backend, then selecting a wakeup.
