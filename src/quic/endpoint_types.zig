@@ -313,6 +313,8 @@ pub const EndpointPendingWorkDatagramResult = struct {
     pending_work: EndpointPendingWorkResult,
     /// Protected datagram emitted after a due recovery timer, if any.
     datagram: ?[]u8 = null,
+    /// Next endpoint-visible deadline after pending work and optional output poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Result from processing pending endpoint work and draining recovery output.

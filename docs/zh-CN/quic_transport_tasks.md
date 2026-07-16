@@ -83,6 +83,8 @@ output variants 中暴露 drain 后下一 deadline。
 单连接 pending-work bounded-drain result 现在也会返回 drain 后下一 deadline，因此
 caller-owned socket loop 可以在一次调用中完成 pending recovery work、bounded
 installed-key output drain 和下一次 wakeup 选择，而不用再单独查询 lifecycle。
+单连接 pending-work poll result 现在也会在普通和显式输出 timer tick 后返回同样的
+poll 后下一 deadline。
 跨连接 pending-work bounded-drain result 现在也会在 caller-owned connection map 上返回
 相同的下一 deadline，包含显式 installed-key output options。
 对应的跨连接 pending-work poll result 现在也会在普通和显式输出 timer tick 后返回
@@ -1470,7 +1472,9 @@ close 和 route cleanup 事件。
   `processPendingWork()` 的处理顺序，idle/close retirement 会直接返回且不轮询输出；
   只有请求的 packet-number space 上确实有到期 loss/PTO timer 被服务后，才调用
   `pollDatagram()`。单元测试证明 deadline 前调用无副作用；Application PTO 到期路径会发出
-  installed-key 1-RTT PING probe，并为该 probe 继续保持 endpoint recovery timer。
+  installed-key 1-RTT PING probe，并为该 probe 继续保持 endpoint recovery timer。result
+  现在还会在 no-op 与 due-poll 路径后暴露下一 endpoint-visible deadline，与 bounded-drain
+  helper 对齐。
 - 2026-06-10：新增 `EndpointPendingWorkDatagramDrainResult` 和
   `EndpointConnectionLifecycle.processPendingWorkAndDrainDatagrams()`，作为
   installed-key recovery wakeup bridge 的 bounded-output 形态。它保留与

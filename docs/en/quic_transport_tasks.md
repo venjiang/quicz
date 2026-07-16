@@ -93,6 +93,8 @@ The single-connection pending-work bounded-drain result now also returns the
 post-drain next deadline, so a caller-owned socket loop can service pending
 recovery work, drain bounded installed-key output, and keep its wakeup target
 without a separate lifecycle query.
+The single-connection pending-work poll result now returns the same post-poll
+next deadline for ordinary and explicit-output timer ticks.
 The cross-connection pending-work bounded-drain result now does the same across
 caller-owned connection maps, including explicit installed-key output options.
 The matching cross-connection pending-work poll result now also returns the
@@ -1662,7 +1664,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   actually serviced for the requested packet-number space. Unit coverage proves
   the before-deadline path is a no-op and the due Application PTO path emits an
   installed-key 1-RTT PING probe while keeping the endpoint recovery timer
-  armed for the probe.
+  armed for the probe. The result now also exposes the next endpoint-visible
+  deadline after no-op and due-poll paths, matching the bounded-drain helper.
 - 2026-06-10: Added
   `EndpointPendingWorkDatagramDrainResult` and
   `EndpointConnectionLifecycle.processPendingWorkAndDrainDatagrams()` as the

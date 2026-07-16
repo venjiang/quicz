@@ -13553,12 +13553,14 @@ pub const EndpointConnectionLifecycle = struct {
         const serviced = pending_work.recovery_serviced orelse return .{
             .pending_work = pending_work,
             .datagram = null,
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
         if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
 
         return .{
             .pending_work = pending_work,
             .datagram = try self.pollDatagram(connection_id, connection, now_millis, options),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
