@@ -145,6 +145,18 @@ pub fn Tls13ServerEndpoint(
             handshake: ?CryptoBackendDatagramDrainPathResult = null,
         };
 
+        /// Capacity drop metadata for a new Initial that was not admitted.
+        pub const InitialRecordCapacityDropResult = struct {
+            active_connections: usize,
+            active_connection_limit: usize,
+        };
+
+        /// Capacity-aware accepted Initial admission result.
+        pub const InitialRecordAdmissionAttemptPathResult = union(enum) {
+            admitted: InitialRecordAdmissionPathResult,
+            dropped_capacity: InitialRecordCapacityDropResult,
+        };
+
         /// Routed Initial processing with route-bound output drains.
         pub const InitialProcessPathResult = struct {
             initial: struct {
@@ -1282,6 +1294,46 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Try to admit an Initial without turning active-capacity exhaustion
+        /// into a socket-loop error.
+        ///
+        /// A `dropped_capacity` result means the caller still owns `record` and
+        /// no lifecycle route or timer was installed. Other errors keep the
+        /// existing throwing semantics from `acceptInitialRecordWithRoutePath`.
+        pub fn tryAcceptInitialRecordWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            record: *Record,
+            now_millis: i64,
+            initial_accept: endpoint.InitialAcceptResult,
+            server_source_connection_id: []const u8,
+            datagram: []const u8,
+            options: endpoint.AcceptedInitialRouteOptions,
+            scratch: []u8,
+            initial_out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedInitialError || root.Error)!InitialRecordAdmissionAttemptPathResult {
+            const admitted = self.acceptInitialRecordWithRoutePath(
+                connection_id,
+                record,
+                now_millis,
+                initial_accept,
+                server_source_connection_id,
+                datagram,
+                options,
+                scratch,
+                initial_out,
+                handshake_out,
+            ) catch |err| switch (err) {
+                error.ConnectionLimitReached => return .{ .dropped_capacity = .{
+                    .active_connections = self.activeConnectionCount(),
+                    .active_connection_limit = self.activeConnectionLimit(),
+                } },
+                else => return @errorCast(err),
+            };
+            return .{ .admitted = admitted };
+        }
+
         /// Drive one TLS packet-number space and drain its bounded output.
         pub fn driveBackend(
             self: *Self,
@@ -2413,6 +2465,38 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectEqual(@as(usize, 0), full_endpoint.activeConnectionCount());
     try std.testing.expectEqual(@as(usize, 0), full_endpoint.activeConnectionLimit());
     try std.testing.expectEqual(@as(usize, 0), (try full_endpoint.activeConnectionIds(&active_ids)).len);
+    const capacity_record = try std.testing.allocator.create(TestRecord);
+    capacity_record.* = .{
+        .handle = 11,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    defer {
+        capacity_record.deinit();
+        std.testing.allocator.destroy(capacity_record);
+    }
+    const capacity_attempt = try full_endpoint.tryAcceptInitialRecordWithRoutePath(
+        capacity_record.handle,
+        capacity_record,
+        3,
+        accepted_initial,
+        &accepted_server_scid,
+        initial_datagram,
+        .{ .active_migration_disabled = true },
+        &rejecting_scratch,
+        &rejecting_output,
+        &rejecting_output,
+    );
+    switch (capacity_attempt) {
+        .dropped_capacity => |dropped| {
+            try std.testing.expectEqual(@as(usize, 0), dropped.active_connections);
+            try std.testing.expectEqual(@as(usize, 0), dropped.active_connection_limit);
+        },
+        .admitted => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(full_endpoint.records.get(capacity_record.handle) == null);
+    try std.testing.expectEqual(@as(usize, 0), full_endpoint.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), full_endpoint.activeConnectionCount());
 
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
