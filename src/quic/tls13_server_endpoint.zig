@@ -210,6 +210,18 @@ pub fn Tls13ServerEndpoint(
             dropped,
         };
 
+        /// One server socket-loop receive step with route-bound output and pending work.
+        pub const DatagramStepPathResult = struct {
+            /// Endpoint classification plus routed datagram processing result.
+            process: DatagramProcessDrainPathResult,
+            /// Pending work swept across endpoint-owned records after receive.
+            pending_work: root.EndpointPendingWorkSweepResult,
+            /// Bounded route-bound output after pending recovery work, if any.
+            pending_drain: DatagramPathDrainResult,
+            /// Next endpoint-visible deadline after receive, drain, and pending work.
+            next_deadline: ?root.EndpointConnectionDeadline = null,
+        };
+
         /// Routed installed-key backend processing with route-bound output.
         pub const RoutedBackendDatagramDrainPathResult = struct {
             route: endpoint.RouteResult,
@@ -1914,6 +1926,59 @@ pub fn Tls13ServerEndpoint(
                 .version_negotiation => |response| .{ .version_negotiation = response },
                 .stateless_reset => |reset| .{ .stateless_reset = reset },
                 .dropped => .dropped,
+            };
+        }
+
+        /// Run one bounded server receive step and sweep endpoint pending work.
+        pub fn receiveDatagramStepWithRoutePath(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            unpredictable_prefix: []const u8,
+            supported_versions: []const quic_packet.Version,
+            installed_key_options: root.EndpointFeedInstalledKeyDatagramOptions,
+            scratch: []u8,
+            initial_token: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+            installed_key_out: []DatagramPathResult,
+            pending_space: root.EndpointInstalledKeyDatagramSpace,
+            pending_out: []DatagramPathResult,
+        ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!DatagramStepPathResult {
+            const process = try self.processDatagramAndDrainWithRoutePath(
+                path,
+                now_millis,
+                datagram,
+                unpredictable_prefix,
+                supported_versions,
+                installed_key_options,
+                scratch,
+                initial_token,
+                out,
+                handshake_out,
+                installed_key_out,
+            );
+            const pending_work = try self.records.processPendingWork(
+                &self.lifecycle,
+                allocator,
+                now_millis,
+            );
+            const pending_drain = if (pending_work.recovery_serviced_count == 0)
+                DatagramPathDrainResult{}
+            else
+                self.drainDatagramsAcrossRecordsWithRoutePath(
+                    allocator,
+                    now_millis,
+                    pending_space,
+                    pending_out,
+                );
+            return .{
+                .process = process,
+                .pending_work = pending_work,
+                .pending_drain = pending_drain,
+                .next_deadline = try self.nextDeadline(allocator),
             };
         }
     };
@@ -3853,6 +3918,77 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     const next_deadline = pending_drain.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(second_record.handle, next_deadline.connection_id);
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+
+    try second_record.connection.sendPing();
+    const step_first = (try endpoint_owner.pollDatagramWithRoutePath(
+        no_allocation_allocator.allocator(),
+        20,
+        .application,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(step_first.datagram);
+    const step_deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(second_record.handle, step_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, step_deadline.kind);
+
+    const unsupported_initial = [_]u8{
+        0xc0,
+        0xfa,
+        0xce,
+        0xb0,
+        0x0c,
+        0x02,
+        0xaa,
+        0xbb,
+        0x03,
+        0x11,
+        0x22,
+        0x33,
+        0x00,
+    };
+    var route_out: [128]u8 = undefined;
+    var scratch: [64]u8 = undefined;
+    var initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    var step_pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const step = try endpoint_owner.receiveDatagramStepWithRoutePath(
+        no_allocation_allocator.allocator(),
+        first_path,
+        step_deadline.deadline_millis,
+        &unsupported_initial,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &route_out,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &scratch,
+        &[_]u8{},
+        &initial_out,
+        &handshake_out,
+        &installed_key_out,
+        .application,
+        &step_pending_out,
+    );
+    switch (step.process) {
+        .version_negotiation => |response| try std.testing.expect(response.path.eql(first_path)),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), step.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), step.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 1), step.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 1), step.pending_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), step.pending_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), step.pending_drain.first_route_error);
+    defer std.testing.allocator.free(step_pending_out[0].datagram);
+    try std.testing.expectEqual(second_record.handle, step_pending_out[0].connection_id);
+    try std.testing.expect(step_pending_out[0].path.eql(second_path));
+    try std.testing.expect(step_pending_out[0].datagram.len != 0);
+    const step_next_deadline = step.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(second_record.handle, step_next_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, step_next_deadline.kind);
 }
 
 test "Tls13ServerEndpoint pairs Initial due recovery output with committed route path" {
