@@ -23457,6 +23457,7 @@ pub const EndpointConnectionLifecycle = struct {
                 datagram,
                 poll_options,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -23485,6 +23486,7 @@ pub const EndpointConnectionLifecycle = struct {
                 datagram,
                 poll_options,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -23693,6 +23695,7 @@ pub const EndpointConnectionLifecycle = struct {
                 poll_options,
                 out,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 
@@ -23752,6 +23755,7 @@ pub const EndpointConnectionLifecycle = struct {
                 poll_options,
                 out,
             ),
+            .next_deadline = self.nextDeadline(connection_id, connection),
         };
     }
 

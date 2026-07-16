@@ -135,6 +135,8 @@ pub const EndpointRoutedDatagramResult = struct {
     route: endpoint.RouteResult,
     /// Installed-key output emitted after receive processing, if any.
     datagram: ?EndpointPolledDatagramResult = null,
+    /// Next endpoint-visible deadline after routed receive processing and output poll.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Endpoint result after routing input and draining installed-key output.
@@ -143,6 +145,8 @@ pub const EndpointRoutedDatagramDrainResult = struct {
     route: endpoint.RouteResult,
     /// Bounded installed-key output drain result after receive processing.
     drain: EndpointDatagramDrainResult,
+    /// Next endpoint-visible deadline after routed receive processing and output drain.
+    next_deadline: ?EndpointConnectionDeadline = null,
 };
 
 /// Endpoint result after routing input and selecting the next wakeup.

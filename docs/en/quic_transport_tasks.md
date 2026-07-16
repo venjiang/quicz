@@ -126,6 +126,9 @@ The route-bound client receive and close-on-error poll results now also expose
 the post-receive next deadline, so socket loops can update their wait target
 without a separate lifecycle query after Retry follow-up, protected close
 emission, or preserved-output route mismatch with no newly armed timer.
+Routed installed-key short-packet receive poll and bounded-drain results now
+also expose the post-output next deadline after route-owned 1-RTT receive,
+including protected close output from OrClose drain paths.
 The bounded variant
 `Tls13ClientEndpoint.receiveWithRoutePathOrCloseAndDrainDatagrams()` follows
 the same close boundary, drains route-bound protected close output into
@@ -1042,6 +1045,13 @@ QUIC unless the gap is named and the verification evidence is added here.
 | Interop | Partial | A certificate-verified Zig client completes a FIN-terminated protected STREAM echo against a local independent `quic-go` v0.59.0 server; separate Go and Rust clients complete the inverse echo direction against the Zig server. | Record repeatable peer-version evidence and add Retry, loss/recovery, version-negotiation, broader server, and application-protocol scenarios. |
 
 ## Progress Notes
+
+- 2026-07-16: Added `next_deadline` to routed installed-key short receive
+  poll/drain results. `EndpointRoutedDatagramResult` and
+  `EndpointRoutedDatagramDrainResult` now let route-owned 1-RTT socket loops
+  process one protected short packet, poll or bounded-drain installed-key
+  output, and keep the next endpoint deadline without a separate query. Tests
+  cover ACK output poll, ACK output drain, and OrClose protected close drain.
 
 - 2026-06-24: Caller-keyed long-header backend-drive poll/drain helpers now
   treat backend-confirmed Handshake-space discard as a no-output result when

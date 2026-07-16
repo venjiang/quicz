@@ -113,6 +113,9 @@ Client endpoint 的错误路径不会再把无关待发送应用包误当作 clo
 route-bound client receive 与 close-on-error poll result 现在也会暴露 receive 后的
 下一 deadline；Retry follow-up、protected close 发送、以及未新 arm timer 的保留输出
 route mismatch 后，socket loop 不再需要单独查询 lifecycle。
+routed installed-key short-packet receive 的 poll 和 bounded-drain result 现在也会在
+route-owned 1-RTT receive 后暴露 output 后下一 deadline，包含 OrClose drain 路径的
+protected close output。
 有界版本 `Tls13ClientEndpoint.receiveWithRoutePathOrCloseAndDrainDatagrams()`
 采用相同 close 边界：认证后的 frame error 会把 route-bound protected close output
 drain 到调用方持有的 slot，并返回 drain 后下一 deadline；未进入 closing 的 route mismatch
@@ -926,6 +929,12 @@ close 和 route cleanup 事件。
 以上仅是有界的 1-RTT short-packet 证据。Initial 和 Handshake 接收路径仍保持当前的有序规则，尚未记录外部 server 互通结果。
 
 ## 进展记录
+
+- 2026-07-16：`EndpointRoutedDatagramResult` 和
+  `EndpointRoutedDatagramDrainResult` 现在包含 `next_deadline`。route-owned
+  1-RTT socket loop 可以在一次调用中处理 routed protected short packet、poll
+  或 bounded-drain installed-key output，并获得下一 endpoint deadline。测试覆盖
+  ACK output poll、ACK output drain 和 OrClose protected close drain。
 
 - 2026-06-24：caller-keyed long-header backend-drive poll/drain helper 现在会
   在 backend 确认握手并已丢弃待 poll/drain 的 Handshake packet number space

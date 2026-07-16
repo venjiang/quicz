@@ -50814,6 +50814,7 @@ test "EndpointConnectionLifecycle routes installed-key short receive and polls A
     defer client.deinit();
     var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
     });
     defer server.deinit();
     try server.validatePeerAddress();
@@ -50886,6 +50887,9 @@ test "EndpointConnectionLifecycle routes installed-key short receive and polls A
     try std.testing.expectEqual(server_connection_id, ack.connection_id);
     defer std.testing.allocator.free(ack.datagram);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next_deadline.kind);
 
     const client_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
         client_connection_id,
@@ -51085,6 +51089,7 @@ test "EndpointConnectionLifecycle routes installed-key short receive and drains 
     defer client.deinit();
     var server = try Connection.init(std.testing.allocator, .server, .{
         .initial_rtt_ms = 100,
+        .max_idle_timeout_ms = 30,
     });
     defer server.deinit();
     try server.validatePeerAddress();
@@ -51162,6 +51167,9 @@ test "EndpointConnectionLifecycle routes installed-key short receive and drains 
     try std.testing.expectEqual(server_connection_id, out[0].connection_id);
     defer std.testing.allocator.free(out[0].datagram);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, next_deadline.kind);
 
     const client_route = try client_lifecycle.processRoutedProtectedShortDatagramWithInstalledKeys(
         client_connection_id,
@@ -51233,6 +51241,9 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive drains clo
     try std.testing.expectEqual(server_connection_id, result.route.connection_id);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
+    const next_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(server_connection_id, next_deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.close_timeout, next_deadline.kind);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
     try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
