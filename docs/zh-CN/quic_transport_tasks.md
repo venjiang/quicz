@@ -1822,8 +1822,8 @@ close 和 route cleanup 事件。
 - 2026-06-18：把 QUIC wire-length 预算 helper 拆到 `src/quic/wire_len.zig`，
   同时保持 `src/lib.zig` 的内部兼容别名。新模块负责 varint 长度、protected
   long/short datagram 长度、ACK/CRYPTO/STREAM/control frame 长度和 bounded frame data
-  切片预算。新增单元测试覆盖 varint 边界和 Initial/short datagram 最小长度扩展，证明该拆分
-  不改变发送路径的长度预算语义。
+  切片预算。新增单元测试覆盖 varint 边界、Initial/short datagram 最小长度扩展，以及跨
+  varint 长度扩展点的 STREAM/CRYPTO payload sizing，证明该拆分不改变发送路径的长度预算语义。
 - 2026-06-18：把 ACK/frame packet-type 规则 helper 拆到
   `src/quic/frame_rules.zig`，同时保持 `src/lib.zig` 的公开
   `framePacketTypeErrorCode()` 包装和内部兼容别名。新模块负责 ACK range 校验、ACK

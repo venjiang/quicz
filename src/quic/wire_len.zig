@@ -332,3 +332,15 @@ test "protected datagram minimum plaintext length expands to target" {
     const short_plaintext_len = try protectedShortPlaintextLenForMinDatagram(8, 2, 10, 1200);
     try std.testing.expect((try protectedShortDatagramWireLen(8, 2, short_plaintext_len)) >= 1200);
 }
+
+test "max frame data length respects varint boundary expansion" {
+    try std.testing.expectEqual(@as(usize, 3), try maxStreamFrameDataLen(0, 0, 100, 6));
+    try std.testing.expectEqual(@as(usize, 63), try maxStreamFrameDataLen(0, 0, 100, 67));
+    try std.testing.expectEqual(@as(usize, 64), try maxStreamFrameDataLen(0, 0, 100, 68));
+    try std.testing.expectError(error.BufferTooSmall, maxStreamFrameDataLen(0, 0, 100, 2));
+
+    try std.testing.expectEqual(@as(usize, 3), try maxCryptoFrameDataLen(0, 100, 6));
+    try std.testing.expectEqual(@as(usize, 63), try maxCryptoFrameDataLen(0, 100, 67));
+    try std.testing.expectEqual(@as(usize, 64), try maxCryptoFrameDataLen(0, 100, 68));
+    try std.testing.expectError(error.BufferTooSmall, maxCryptoFrameDataLen(0, 100, 2));
+}
