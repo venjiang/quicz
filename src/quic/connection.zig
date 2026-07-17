@@ -62443,6 +62443,78 @@ test "EndpointConnectionLifecycle cross explicit pending-work drain reports key 
     try std.testing.expectEqual(@as(usize, 0), conn.pending_ping_count);
 }
 
+test "EndpointConnectionLifecycle cross due-deadline poll reports key discard without polling output" {
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var fast = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer fast.deinit();
+    var slow = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer slow.deinit();
+    const local_secret = [_]u8{0x9c} ** protection.traffic_secret_len;
+    const peer_secret = [_]u8{0x9d} ** protection.traffic_secret_len;
+    try fast.confirmHandshake();
+    try slow.confirmHandshake();
+    try fast.installOneRttTrafficSecrets(.{
+        .local = local_secret,
+        .peer = peer_secret,
+    });
+    try slow.installOneRttTrafficSecrets(.{
+        .local = local_secret,
+        .peer = peer_secret,
+    });
+    fast.last_packet_activity_millis = 10;
+    slow.last_packet_activity_millis = 1000;
+    try fast.initiateOneRttKeyUpdate();
+    try slow.initiateOneRttKeyUpdate();
+    try fast.sendPing();
+    try std.testing.expectEqual(@as(?bool, true), fast.localOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?bool, true), slow.localOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(usize, 1), fast.pending_ping_count);
+
+    const fast_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xf7 };
+    const slow_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xf8 };
+    const connections = [_]EndpointConnectionPollView{
+        .{
+            .connection_id = 86,
+            .connection = &fast,
+            .destination_connection_id = &fast_dcid,
+        },
+        .{
+            .connection_id = 87,
+            .connection = &slow,
+            .destination_connection_id = &slow_dcid,
+        },
+    };
+    const fast_deadline = fast.oneRttKeyDiscardDeadlineMillis() orelse return error.TestUnexpectedResult;
+    const slow_deadline = slow.oneRttKeyDiscardDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(fast_deadline < slow_deadline);
+
+    const before = try lifecycle.processDueDeadlineAcrossConnectionsAndPollDatagram(&connections, fast_deadline - 1);
+    try std.testing.expect(before == null);
+    try std.testing.expectEqual(@as(?bool, true), fast.localOneRttRetainsKeyGeneration(0));
+
+    const due = (try lifecycle.processDueDeadlineAcrossConnectionsAndPollDatagram(
+        &connections,
+        fast_deadline,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 86), due.deadline.connection_id);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.key_discard, due.deadline.kind);
+    try std.testing.expect(due.pending_work.key_discard_serviced);
+    try std.testing.expectEqual(@as(?EndpointLossDetectionTimerDeadline, null), due.pending_work.recovery_serviced);
+    try std.testing.expectEqual(@as(?[]u8, null), due.datagram);
+    try std.testing.expectEqual(@as(?bool, false), fast.localOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?bool, true), slow.localOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(usize, 1), fast.pending_ping_count);
+
+    const polled = (try lifecycle.pollDatagram(86, &fast, fast_deadline, .{
+        .space = .application,
+        .destination_connection_id = &fast_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled);
+    try std.testing.expectEqual(@as(usize, 0), fast.pending_ping_count);
+}
+
 test "installed one RTT key update ACK confirmation rolls back with invalid payload" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
