@@ -417,6 +417,10 @@ fn validateVersionNegotiationVersion(version: Version) PacketError!void {
     if (@intFromEnum(version) == 0) return error.InvalidVersionList;
 }
 
+fn validateVersionedPacketVersion(version: Version) PacketError!void {
+    if (@intFromEnum(version) == 0) return error.InvalidVersionNegotiation;
+}
+
 fn validateLongHeaderCidLen(len: usize) PacketError!void {
     if (len > 20) return error.InvalidConnectionIdLength;
 }
@@ -443,6 +447,7 @@ pub fn encodeLongHeaderWithPacketNumberEncoding(
 ) !void {
     try validateLongHeaderCidLen(header.dcid.len);
     try validateLongHeaderCidLen(header.scid.len);
+    try validateVersionedPacketVersion(header.version);
     if (header.packet_type == .retry) {
         return error.UnsupportedPacketType;
     }
@@ -512,6 +517,7 @@ fn parseLongHeaderInternal(
     var version_buf: [4]u8 = undefined;
     try reader.readNoEof(&version_buf);
     const version: Version = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
+    try validateVersionedPacketVersion(version);
     const packet_type = longHeaderPacketTypeFromBits(version, packet_type_bits);
     if (packet_type == .retry) return error.UnsupportedPacketType;
 
@@ -846,6 +852,7 @@ pub fn parseVersionNegotiationPacket(data: []const u8, allocator: std.mem.Alloca
 pub fn encodeRetryPacket(writer: anytype, retry: RetryPacket) !void {
     try validateLongHeaderCidLen(retry.dcid.len);
     try validateLongHeaderCidLen(retry.scid.len);
+    try validateVersionedPacketVersion(retry.version);
     if (retry.token.len == 0) return error.InvalidRetryPacket;
 
     const type_bits = longHeaderPacketTypeBits(retry.version, .retry);
@@ -879,6 +886,7 @@ pub fn parseRetryPacket(data: []const u8, allocator: std.mem.Allocator) !RetryPa
     var version_buf: [4]u8 = undefined;
     try reader.readNoEof(&version_buf);
     const version: Version = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
+    try validateVersionedPacketVersion(version);
     const packet_type = longHeaderPacketTypeFromBits(version, packet_type_bits);
     if (packet_type != .retry) return error.InvalidRetryPacket;
 
@@ -1699,6 +1707,29 @@ test "retry packet validates connection id lengths and allocation failures" {
     try std.testing.expectError(error.OutOfMemory, parseRetryPacket(writer.getWritten(), failing_allocator.allocator()));
 }
 
+test "retry packet rejects zero version" {
+    const input = RetryPacket{
+        .version = @enumFromInt(0),
+        .dcid = &[_]u8{0xaa},
+        .scid = &[_]u8{0xbb},
+        .token = &[_]u8{0xcc},
+        .integrity_tag = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 },
+    };
+
+    var raw: [32]u8 = undefined;
+    var writer = buffer.fixedWriter(&raw);
+    try std.testing.expectError(error.InvalidVersionNegotiation, encodeRetryPacket(writer.writer(), input));
+
+    const wire = [_]u8{
+        0xf0, // long + fixed + v1-style retry bits
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+    };
+    try std.testing.expectError(error.InvalidVersionNegotiation, parseRetryPacket(&wire, std.testing.allocator));
+}
+
 test "reconstructPacketNumber follows RFC 9000 sample" {
     const largest_authenticated = 0xa82f30ea;
     const expected_packet_number = largest_authenticated + 1;
@@ -1784,6 +1815,32 @@ test "long header rejects non-zero reserved bits" {
 
     var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.InvalidReservedBits, parseLongHeader(in.reader(), std.testing.allocator));
+}
+
+test "versioned long headers reject zero version" {
+    const input = LongHeader{
+        .version = @enumFromInt(0),
+        .dcid = &[_]u8{0xaa},
+        .scid = &[_]u8{0xbb},
+        .packet_type = .initial,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    };
+
+    var raw: [32]u8 = undefined;
+    var writer = buffer.fixedWriter(&raw);
+    try std.testing.expectError(error.InvalidVersionNegotiation, encodeLongHeader(writer.writer(), input));
+
+    const wire = [_]u8{
+        0xc0, // long + fixed + initial
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+    };
+    var in = buffer.fixedReader(&wire);
+    try std.testing.expectError(error.InvalidVersionNegotiation, parseLongHeader(in.reader(), std.testing.allocator));
 }
 
 test "retry long header is outside the minimal codec" {

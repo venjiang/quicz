@@ -1069,6 +1069,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened versioned long-header and Retry packet validation.
+  The packet codec now rejects zero as the version for Initial/Handshake/0-RTT
+  long headers and Retry packets, leaving zero-version handling to the Version
+  Negotiation codec only.
+
 - 2026-07-17: Tightened RFC 8999 Version Negotiation version-list
   validation. Encoders and parsers now reject zero as a supported version while
   leaving reserved-version greasing available.

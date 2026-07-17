@@ -948,6 +948,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 versioned long-header 和 Retry packet 校验。
+  packet codec 现在会拒绝 Initial/Handshake/0-RTT long header 以及 Retry
+  packet 使用 zero version；zero-version 只留给 Version Negotiation codec 处理。
+
 - 2026-07-17：收紧 RFC 8999 Version Negotiation version-list 校验。
   编码和解析都会拒绝把 zero version 当作 supported version，同时保留
   reserved-version greasing。
