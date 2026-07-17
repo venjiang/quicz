@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Centralized receive-side packet-number adjacency checks. Retained
+  packet ranges now use a bounded helper for `n + 1` adjacency tests so
+  duplicate detection and ACK range merging stay overflow-safe at the `u64`
+  ceiling.
+
 - 2026-07-17: Tightened generic QUIC varint wire-length classification.
   `quicVarIntWireLen()` now reports values above the QUIC varint ceiling as
   `InvalidPacket` instead of an internal sizing failure.

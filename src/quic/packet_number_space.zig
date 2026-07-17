@@ -56,7 +56,7 @@ pub const ReceivedPacketRanges = struct {
             const range = self.ranges[index];
             if (packet_number > range.largest) return true;
             if (packet_number >= range.smallest) return false;
-            if (range.smallest != 0 and packet_number + 1 == range.smallest) return true;
+            if (isImmediatelyBefore(packet_number, range.smallest)) return true;
         }
         return self.count < max_ranges;
     }
@@ -84,9 +84,9 @@ pub const ReceivedPacketRanges = struct {
                 return self.insert(index, .{ .smallest = packet_number, .largest = packet_number });
             }
             if (packet_number >= range.smallest) return false;
-            if (range.smallest != 0 and packet_number + 1 == range.smallest) {
+            if (isImmediatelyBefore(packet_number, range.smallest)) {
                 self.ranges[index].smallest = packet_number;
-                if (index + 1 < self.count and self.ranges[index + 1].largest + 1 == packet_number) {
+                if (index + 1 < self.count and isImmediatelyBefore(self.ranges[index + 1].largest, packet_number)) {
                     self.ranges[index].smallest = self.ranges[index + 1].smallest;
                     self.remove(index + 1);
                 }
@@ -139,6 +139,11 @@ pub const ReceivedPacketRanges = struct {
     fn remove(self: *ReceivedPacketRanges, index: usize) void {
         std.mem.copyForwards(ReceivedPacketRange, self.ranges[index .. self.count - 1], self.ranges[index + 1 .. self.count]);
         self.count -= 1;
+    }
+
+    fn isImmediatelyBefore(previous: u64, next: u64) bool {
+        if (previous == std.math.maxInt(u64)) return false;
+        return previous + 1 == next;
     }
 };
 

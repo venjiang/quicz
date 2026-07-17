@@ -973,6 +973,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：集中 receive-side packet-number adjacency 校验。保留的 packet
+  range 现在通过有界 helper 做 `n + 1` 邻接判断，确保重复包检测和 ACK range
+  合并在 `u64` 上限处保持 overflow-safe。
+
 - 2026-07-17：收紧通用 QUIC varint wire-length 错误分类。
   `quicVarIntWireLen()` 现在会把超过 QUIC varint 上限的值报为
   `InvalidPacket`，而不是 internal sizing failure。
