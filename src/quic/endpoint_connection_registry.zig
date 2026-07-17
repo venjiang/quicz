@@ -359,24 +359,32 @@ pub fn EndpointConnectionRegistry(
             comptime destination_connection_id: *const fn (*const Record) []const u8,
             comptime source_connection_id: *const fn (*const Record) []const u8,
         ) root.Error!?root.EndpointDueWorkDatagramDrainResult {
+            var result: ?root.EndpointDueWorkDatagramDrainResult = null;
             if (self.poll_view_scratch) |views| {
-                return lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
+                result = try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
                     try self.fillPollViews(views, destination_connection_id, source_connection_id),
                     now_millis,
                     out,
                 );
+            } else {
+                const views = try self.pollViews(
+                    allocator,
+                    destination_connection_id,
+                    source_connection_id,
+                );
+                defer allocator.free(views);
+                result = try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
+                    views,
+                    now_millis,
+                    out,
+                );
             }
-            const views = try self.pollViews(
-                allocator,
-                destination_connection_id,
-                source_connection_id,
-            );
-            defer allocator.free(views);
-            return lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
-                views,
-                now_millis,
-                out,
-            );
+            if (result) |due_work| {
+                if (due_work.pending_work.idle_retired != null or due_work.pending_work.close_retired != null) {
+                    self.remove(due_work.deadline.connection_id) catch unreachable;
+                }
+            }
+            return result;
         }
 
         /// Poll the first installed-key datagram from endpoint-owned records.
@@ -586,4 +594,95 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
     second_adopted = true;
     try std.testing.expectEqual(@as(usize, 1), registry.count());
     try std.testing.expect(!registry.hasCapacity());
+}
+
+test "EndpointConnectionRegistry removes record after due idle retirement" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: root.Connection,
+
+        fn connectionRef(self: *@This()) *root.Connection {
+            return &self.connection;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const Registry = EndpointConnectionRegistry(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.deinit,
+    );
+
+    var registry = try Registry.initWithCapacity(std.testing.allocator, 1);
+    defer registry.deinit();
+    var lifecycle = root.EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer if (record_owned) {
+        if (record_initialized) record.deinit();
+        std.testing.allocator.destroy(record);
+    };
+    record.* = .{
+        .handle = 42,
+        .connection = try root.Connection.init(std.testing.allocator, .server, .{ .max_idle_timeout_ms = 10 }),
+    };
+    record_initialized = true;
+    record.connection.last_packet_activity_millis = 10;
+
+    const path = root.endpoint.Udp4Tuple{
+        .local = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
+    };
+    try lifecycle.registerConnectionId(record.handle, TestRecord.sourceConnectionId(record), path, .{});
+    errdefer _ = lifecycle.retireConnection(record.handle);
+    try registry.adopt(record.handle, record);
+    record_owned = false;
+
+    const idle_deadline = (try registry.nextDeadline(&lifecycle, std.testing.allocator)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.idle_timeout, idle_deadline.kind);
+    try std.testing.expectEqual(@as(u64, 42), idle_deadline.connection_id);
+    try std.testing.expectEqual(@as(i64, 20), idle_deadline.deadline_millis);
+
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    var out: [1]root.EndpointPolledDatagramResult = undefined;
+    try std.testing.expect((try registry.processDueDeadlineAndDrainDatagrams(
+        &lifecycle,
+        no_allocation_allocator.allocator(),
+        19,
+        &out,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    )) == null);
+    try std.testing.expectEqual(@as(usize, 1), registry.count());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+
+    const due = (try registry.processDueDeadlineAndDrainDatagrams(
+        &lifecycle,
+        no_allocation_allocator.allocator(),
+        20,
+        &out,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.idle_timeout, due.deadline.kind);
+    try std.testing.expect(due.pending_work.idle_retired != null);
+    try std.testing.expectEqual(@as(?root.EndpointConnectionRetireResult, null), due.pending_work.close_retired);
+    try std.testing.expectEqual(@as(usize, 0), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(usize, 0), registry.count());
+    try std.testing.expect(registry.hasCapacity());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
 }
