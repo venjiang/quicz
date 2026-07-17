@@ -10798,10 +10798,41 @@ pub const Connection = struct {
             if (new_data.len == 0) return .{ .offset = new_offset, .data = new_data };
         }
 
-        for (stream_state.pending.items) |pending| {
-            if (!streamRangesOverlap(new_offset, new_data.len, pending.offset, pending.data.len)) continue;
-            if (new_offset == pending.offset and new_data.len == pending.data.len and std.mem.eql(u8, new_data, pending.data)) {
-                return .{ .offset = new_offset, .data = new_data[0..0] };
+        var pending_index: usize = 0;
+        while (pending_index < stream_state.pending.items.len) {
+            const pending = stream_state.pending.items[pending_index];
+            if (!streamRangesOverlap(new_offset, new_data.len, pending.offset, pending.data.len)) {
+                pending_index += 1;
+                continue;
+            }
+            const new_end = streamEndOffset(new_offset, new_data.len) orelse return error.InvalidPacket;
+            const pending_end = streamEndOffset(pending.offset, pending.data.len) orelse return error.InvalidPacket;
+            const overlap_start = @max(new_offset, pending.offset);
+            const overlap_end = @min(new_end, pending_end);
+            const incoming_start = std.math.cast(usize, overlap_start - new_offset) orelse return error.InvalidPacket;
+            const pending_start = std.math.cast(usize, overlap_start - pending.offset) orelse return error.InvalidPacket;
+            const overlap_len = std.math.cast(usize, overlap_end - overlap_start) orelse return error.InvalidPacket;
+            if (!std.mem.eql(
+                u8,
+                new_data[incoming_start..][0..overlap_len],
+                pending.data[pending_start..][0..overlap_len],
+            )) {
+                return error.InvalidPacket;
+            }
+
+            if (overlap_start == new_offset and overlap_end == new_end) {
+                return .{ .offset = overlap_end, .data = new_data[0..0] };
+            }
+            if (overlap_start == new_offset) {
+                new_offset = overlap_end;
+                new_data = new_data[overlap_len..];
+                pending_index = 0;
+                continue;
+            }
+            if (overlap_end == new_end) {
+                new_data = new_data[0..incoming_start];
+                pending_index = 0;
+                continue;
             }
             return error.InvalidPacket;
         }
@@ -70971,7 +71002,7 @@ test "processDatagram rejects overlapping out-of-order stream data" {
         .stream_id = 0,
         .offset = 3,
         .fin = false,
-        .data = "de",
+        .data = "xe",
     } });
 
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1, out.getWritten()));
@@ -70979,6 +71010,78 @@ test "processDatagram rejects overlapping out-of-order stream data" {
     try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items[0].data.items.len);
     try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items[0].pending.items.len);
     try std.testing.expectEqual(@as(u64, 2), conn.recv_data_bytes);
+}
+
+test "processDatagram trims duplicate suffix overlap with pending stream data" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 2,
+        .fin = false,
+        .data = "cd",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items[0].pending.items.len);
+    try std.testing.expectEqual(@as(u64, 2), conn.recv_data_bytes);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 3,
+        .fin = true,
+        .data = "de",
+    } });
+    try conn.processDatagram(1, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 2), conn.recv_streams.items[0].pending.items.len);
+    try std.testing.expectEqual(@as(u64, 3), conn.recv_data_bytes);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "ab",
+    } });
+    try conn.processDatagram(2, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 0), conn.recv_streams.items[0].pending.items.len);
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+    try std.testing.expectEqual(@as(?u64, 5), conn.recv_streams.items[0].final_size);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvOnStream(0, &read_buf)).?;
+    try std.testing.expectEqualStrings("abcde", read_buf[0..n]);
+}
+
+test "processDatagram ignores duplicate subrange inside pending stream data" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 2,
+        .fin = false,
+        .data = "cde",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items[0].pending.items.len);
+    try std.testing.expectEqual(@as(u64, 3), conn.recv_data_bytes);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 3,
+        .fin = false,
+        .data = "d",
+    } });
+    try conn.processDatagram(1, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), conn.recv_streams.items[0].pending.items.len);
+    try std.testing.expectEqual(@as(u64, 3), conn.recv_data_bytes);
 }
 
 test "processDatagram rolls back out-of-order pending stream data when payload is invalid" {
