@@ -59837,6 +59837,57 @@ test "processVersionNegotiationDatagram ignores packets after Retry" {
     try std.testing.expectEqualStrings(&retry_scid, client.retrySourceConnectionId().?);
 }
 
+test "processVersionNegotiationDatagram ignores packets after peer Initial" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const initial_secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.sendCryptoInSpace(.initial, "server initial");
+    const server_initial = (try server.pollProtectedLongCryptoDatagramInSpace(
+        .initial,
+        10,
+        &client_scid,
+        &server_scid,
+        &[_]u8{},
+        initial_secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(server_initial);
+
+    const client_versions = [_]packet.Version{ .v2, .v1 };
+    const server_versions = [_]packet.Version{.v2};
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try packet.encodeVersionNegotiationPacket(out.writer(), .{
+        .dcid = &client_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+    });
+    defer client.deinit();
+
+    try client.processProtectedLongDatagramInSpace(.initial, 11, initial_secrets.server, server_initial);
+    try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?packet.Version, null), try client.processVersionNegotiationDatagram(
+        12,
+        &original_dcid,
+        &client_scid,
+        out.getWritten(),
+    ));
+    try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
+    try std.testing.expectError(error.InvalidPacket, client.versionNegotiationFollowupConfig());
+    var crypto_buf: [32]u8 = undefined;
+    const recv_len = (try client.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("server initial", crypto_buf[0..recv_len]);
+}
+
 test "processVersionNegotiationDatagram rejects no mutual version without mutation" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
