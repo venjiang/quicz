@@ -3563,7 +3563,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   packet was already processed still clear sent-packet state, bytes in flight,
   and PTO backoff, but they no longer update RTT estimates. Tests cover the
   connection ACK path and the recovery accounting helper; `loss_recovery` now
-  prints `old-largest ACK preserved RTT`.
+  prints `old-largest ACK preserved RTT`. Direct recovery tests also cover the
+  RFC 9002 rule that ACK delay is not subtracted when it would pull adjusted RTT
+  below the min RTT sample.
 - 2026-05-29: Added RFC 9000 ACK range structural validation on the
   connection-level ACK API path. Caller-constructed ACK/ACK_ECN frames now
   reject ranges that would compute negative packet numbers before recovery

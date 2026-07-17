@@ -471,6 +471,30 @@ test "ACK accounting can skip RTT sample while resetting PTO" {
     try std.testing.expectEqual(initial_window, recovery.congestion_window);
 }
 
+test "ACK delay does not reduce adjusted RTT below min RTT" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+
+    recovery.onPacketSent(1200);
+    recovery.onPacketAcked(1200, 0, 100, 0);
+    try std.testing.expectEqual(@as(?u64, 100), recovery.min_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 100), recovery.smoothed_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 50), recovery.rttvar_ms);
+
+    recovery.onPacketSent(1200);
+    recovery.onPacketAcked(1200, 1, 110, 20);
+    try std.testing.expectEqual(@as(?u64, 100), recovery.min_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, 110), recovery.latest_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 101), recovery.smoothed_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 40), recovery.rttvar_ms);
+
+    recovery.onPacketSent(1200);
+    recovery.onPacketAcked(1200, 2, 150, 20);
+    try std.testing.expectEqual(@as(?u64, 100), recovery.min_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, 150), recovery.latest_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 104), recovery.smoothed_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 37), recovery.rttvar_ms);
+}
+
 test "pto uses rtt variance and exponential backoff" {
     var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100, .max_ack_delay_ms = 25 });
 
