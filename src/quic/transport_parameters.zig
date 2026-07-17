@@ -6,6 +6,7 @@ const protocol_limits = @import("protocol_limits.zig");
 const max_connection_id_len = protocol_limits.max_connection_id_len;
 const max_udp_payload_size_default = 65_527;
 const max_stream_count = protocol_limits.max_stream_count;
+const max_quic_varint = protocol_limits.max_quic_varint;
 
 /// RFC 9000 transport parameter identifiers.
 pub const ParameterId = enum(u64) {
@@ -208,13 +209,21 @@ fn validateChosenVersion(version: packet.Version) !void {
     if (packet.isReservedVersion(version)) return error.InvalidParameterValue;
 }
 
+fn versionInformationValueLen(available_count: usize) !u64 {
+    const available_len = std.math.mul(usize, 4, available_count) catch return error.InvalidParameterLength;
+    const value_len = std.math.add(usize, 4, available_len) catch return error.InvalidParameterLength;
+    const value_len_u64 = std.math.cast(u64, value_len) orelse return error.InvalidParameterLength;
+    if (value_len_u64 > max_quic_varint) return error.InvalidParameterLength;
+    return value_len_u64;
+}
+
 fn encodeVersionInformation(writer: anytype, version_information: VersionInformation) !void {
     try validateChosenVersion(version_information.chosen_version);
+    const value_len = try versionInformationValueLen(version_information.available_versions.len);
     for (version_information.available_versions) |available| {
         try validateVersion(available);
     }
 
-    const value_len = 4 + 4 * version_information.available_versions.len;
     try packet.encodeVarInt(writer, @intFromEnum(ParameterId.version_information));
     try packet.encodeVarInt(writer, value_len);
 
@@ -577,6 +586,15 @@ test "transport parameters reject malformed version information" {
         .version_information = .{
             .chosen_version = .v1,
             .available_versions = &too_long,
+        },
+    }));
+
+    const oversized_available: []const packet.Version = too_long[0..].ptr[0..std.math.maxInt(usize)];
+    writer = buffer.fixedWriter(&raw);
+    try std.testing.expectError(error.InvalidParameterLength, encode(writer.writer(), .{
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = oversized_available,
         },
     }));
 }

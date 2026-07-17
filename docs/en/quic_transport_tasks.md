@@ -1069,6 +1069,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened RFC 9368 `version_information` length budgeting.
+  Available Version vector length now uses checked arithmetic and rejects
+  impossible encoded lengths before writing.
+
 - 2026-07-17: Tightened Retry Integrity Tag pseudo-packet length budgeting.
   Original DCID length plus Retry bytes now use checked arithmetic and reject
   impossible inputs with `InvalidPayloadLength` before allocation.

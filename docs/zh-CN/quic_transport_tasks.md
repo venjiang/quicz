@@ -948,6 +948,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 RFC 9368 `version_information` 长度预算。
+  Available Version vector length 现在使用 checked arithmetic，并在写入前拒绝
+  不可能的编码长度。
+
 - 2026-07-17：收紧 Retry Integrity Tag pseudo-packet 长度预算。
   Original DCID length 加 Retry bytes 现在使用 checked arithmetic，并在分配前对
   不可能输入返回 `InvalidPayloadLength`。
