@@ -1856,6 +1856,73 @@ test "Tls13ClientEndpoint receive enters draining on active stateless reset" {
     try std.testing.expectEqual(@as(usize, 0), client.lifecycle.routeCount());
 }
 
+test "Tls13ClientEndpoint receive step reports active stateless reset and close deadline" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        15,
+        path,
+        .{ .active_migration_disabled = false },
+        .{ .initial_rtt_ms = 100 },
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const peer_connection_id = [_]u8{ 0xfa, 0xfb, 0xfc, 0xfd };
+    const reset_token = [_]u8{0xbc} ** packet.stateless_reset_token_len;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+    try client.transport.connection.confirmHandshake();
+    _ = try client.transport.connection.recordPacketSentInSpace(.application, 1, 64);
+    try client.lifecycle.armRecoveryTimerFromConnection(client.connection_id, &client.transport.connection);
+    try std.testing.expectEqual(@as(usize, 1), client.lifecycle.recoveryTimerCount());
+
+    var reset_prefix: [1 + client_scid.len]u8 = undefined;
+    reset_prefix[0] = 0x40;
+    @memcpy(reset_prefix[1..], &client_scid);
+    var reset_datagram: [64]u8 = undefined;
+    var reset_writer = buffer.fixedWriter(&reset_datagram);
+    try packet.encodeStatelessReset(reset_writer.writer(), &reset_prefix, reset_token);
+
+    var scratch: [128]u8 = undefined;
+    var receive_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    var due_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const step = try client.receiveDatagramStepWithRoutePath(
+        10,
+        &scratch,
+        reset_writer.getWritten(),
+        &receive_out,
+        &due_out,
+    );
+    const received = step.receive.receive orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u64, 0), received.stateless_reset_sequence_number);
+    try std.testing.expect(!received.transport.application_processed);
+    try std.testing.expectEqual(transport_types.ConnectionState.draining, client.transport.connection.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), step.receive.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), step.receive.drain.first_error);
+    try std.testing.expect(step.due == null);
+    try std.testing.expectEqual(@as(usize, 0), client.lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
+    const next_deadline = step.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expect(next_deadline == .close_timeout);
+    try std.testing.expectEqual(client.transport.closeDeadlineMillis().?, next_deadline.deadlineMillis());
+}
+
 test "Tls13ClientEndpoint retires its route when idle deadline closes the client" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68 };
