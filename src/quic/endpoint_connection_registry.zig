@@ -171,12 +171,12 @@ pub fn EndpointConnectionRegistry(
             out: []root.EndpointConnectionView,
         ) root.Error![]root.EndpointConnectionView {
             if (out.len < self.count()) return error.BufferTooSmall;
-            var iterator = self.records.valueIterator();
+            var iterator = self.records.iterator();
             var index: usize = 0;
-            while (iterator.next()) |record| : (index += 1) {
+            while (iterator.next()) |entry| : (index += 1) {
                 out[index] = .{
-                    .connection_id = record.*.handle,
-                    .connection = connection_of(record.*),
+                    .connection_id = entry.key_ptr.*,
+                    .connection = connection_of(entry.value_ptr.*),
                 };
             }
             return out[0..index];
@@ -188,12 +188,12 @@ pub fn EndpointConnectionRegistry(
             out: []root.EndpointConnectionReceiveView,
         ) root.Error![]root.EndpointConnectionReceiveView {
             if (out.len < self.count()) return error.BufferTooSmall;
-            var iterator = self.records.valueIterator();
+            var iterator = self.records.iterator();
             var index: usize = 0;
-            while (iterator.next()) |record| : (index += 1) {
+            while (iterator.next()) |entry| : (index += 1) {
                 out[index] = .{
-                    .connection_id = record.*.handle,
-                    .connection = connection_of(record.*),
+                    .connection_id = entry.key_ptr.*,
+                    .connection = connection_of(entry.value_ptr.*),
                 };
             }
             return out[0..index];
@@ -207,14 +207,14 @@ pub fn EndpointConnectionRegistry(
             comptime source_connection_id: *const fn (*const Record) []const u8,
         ) root.Error![]root.EndpointConnectionPollView {
             if (out.len < self.count()) return error.BufferTooSmall;
-            var iterator = self.records.valueIterator();
+            var iterator = self.records.iterator();
             var index: usize = 0;
-            while (iterator.next()) |record| : (index += 1) {
+            while (iterator.next()) |entry| : (index += 1) {
                 out[index] = .{
-                    .connection_id = record.*.handle,
-                    .connection = connection_of(record.*),
-                    .destination_connection_id = destination_connection_id(record.*),
-                    .source_connection_id = source_connection_id(record.*),
+                    .connection_id = entry.key_ptr.*,
+                    .connection = connection_of(entry.value_ptr.*),
+                    .destination_connection_id = destination_connection_id(entry.value_ptr.*),
+                    .source_connection_id = source_connection_id(entry.value_ptr.*),
                 };
             }
             return out[0..index];
@@ -667,6 +667,78 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
     second_adopted = true;
     try std.testing.expectEqual(@as(usize, 1), registry.count());
     try std.testing.expect(!registry.hasCapacity());
+}
+
+test "EndpointConnectionRegistry lifecycle views use registry connection handle" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: root.Connection,
+
+        fn connectionRef(self: *@This()) *root.Connection {
+            return &self.connection;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const Registry = EndpointConnectionRegistry(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.deinit,
+    );
+
+    var registry = try Registry.initWithCapacity(std.testing.allocator, 1);
+    defer registry.deinit();
+
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer {
+        if (record_owned) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = 99,
+        .connection = try root.Connection.init(std.testing.allocator, .client, .{}),
+    };
+    record_initialized = true;
+    try registry.adopt(7, record);
+    record_owned = false;
+
+    var deadline_views: [1]root.EndpointConnectionView = undefined;
+    const deadlines = try registry.fillDeadlineViews(&deadline_views);
+    try std.testing.expectEqual(@as(usize, 1), deadlines.len);
+    try std.testing.expectEqual(@as(u64, 7), deadlines[0].connection_id);
+    try std.testing.expect(deadlines[0].connection == &record.connection);
+
+    var receive_views: [1]root.EndpointConnectionReceiveView = undefined;
+    const receives = try registry.fillReceiveViews(&receive_views);
+    try std.testing.expectEqual(@as(usize, 1), receives.len);
+    try std.testing.expectEqual(@as(u64, 7), receives[0].connection_id);
+    try std.testing.expect(receives[0].connection == &record.connection);
+
+    var poll_views: [1]root.EndpointConnectionPollView = undefined;
+    const polls = try registry.fillPollViews(
+        &poll_views,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    );
+    try std.testing.expectEqual(@as(usize, 1), polls.len);
+    try std.testing.expectEqual(@as(u64, 7), polls[0].connection_id);
+    try std.testing.expect(polls[0].connection == &record.connection);
+    try std.testing.expectEqualStrings("peer", polls[0].destination_connection_id);
+    try std.testing.expectEqualStrings("local", polls[0].source_connection_id);
 }
 
 test "EndpointConnectionRegistry removes record after due idle retirement" {

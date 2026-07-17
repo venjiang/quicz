@@ -973,6 +973,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：加固 endpoint registry lifecycle view handle。deadline、
+  receive 和 poll view 现在使用 registry 持有的 connection handle key，而不是
+  record 字段；即使嵌入 record 保存了不同本地 handle，endpoint-owned lifecycle
+  操作也能保持一致。
+
 - 2026-07-17：补充 registry 层 fair cross-record output polling 直接测试。
   `EndpointConnectionRegistry` 现在有 bounded-capacity 测试，证明无分配重复
   poll 会在两个已有排队输出的 active record 之间轮转，然后返回 empty。

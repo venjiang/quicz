@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Hardened endpoint registry lifecycle view handles. Deadline,
+  receive, and poll views now use the registry-owned connection handle key
+  rather than a record field, so endpoint-owned lifecycle operations stay
+  consistent even when the embedded record stores a different local handle.
+
 - 2026-07-17: Added direct registry coverage for fair cross-record output
   polling. `EndpointConnectionRegistry` now has a bounded-capacity test proving
   repeated no-allocation polls rotate between two queued active records before
