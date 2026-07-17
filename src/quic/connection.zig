@@ -6544,6 +6544,9 @@ pub const Connection = struct {
                 if (stream_frame.fin and end_offset != final_size) {
                     return semanticCloseError(.final_size_error, frame_type_value, "final size");
                 }
+                if (streamFrameHasConflictingOverlap(stream_state.*, stream_frame.offset, stream_frame.data) catch return null) {
+                    return semanticCloseError(.protocol_violation, frame_type_value, "stream data");
+                }
                 const final_size_usize = std.math.cast(usize, final_size) orelse return null;
                 if (stream_state.data.items.len >= final_size_usize) return null;
                 if (stream_state.reset_error_code != null) return null;
@@ -11001,6 +11004,7 @@ pub const Connection = struct {
             if (stream_state.final_size) |final_size| {
                 if (end_offset > final_size) return error.InvalidPacket;
                 if (stream_frame.fin and end_offset != final_size) return error.InvalidPacket;
+                if (try streamFrameHasConflictingOverlap(stream_state.*, stream_frame.offset, stream_frame.data)) return error.InvalidPacket;
                 const final_size_usize = std.math.cast(usize, final_size) orelse return error.Internal;
                 if (stream_state.data.items.len >= final_size_usize) return;
                 if (stream_state.reset_error_code != null) return;
@@ -70648,6 +70652,51 @@ test "processDatagramOrClose queues protocol violation close for conflicting STR
     }
 }
 
+test "processDatagramOrClose queues protocol violation close for conflicting late STREAM after final data" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = true,
+        .data = "hello",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(?u64, 5), conn.recv_streams.items[0].final_size);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "HELLO",
+    } });
+    const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(1, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+    try std.testing.expectEqualStrings("hello", conn.recv_streams.items[0].data.items);
+
+    var close_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(1, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("stream data", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
 test "processDatagramOrClose queues protocol violation close for ACK of unsent packet" {
     var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
@@ -71092,7 +71141,39 @@ test "receive stream rejects data after final size" {
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, out.getWritten()));
 }
 
-test "receive stream discards late STREAM after all data is received" {
+test "receive stream discards duplicate late STREAM after all data is received" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = true,
+        .data = "hello",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = 0,
+        .offset = 0,
+        .fin = false,
+        .data = "hello",
+    } });
+    try conn.processDatagram(1, out.getWritten());
+    try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
+    try std.testing.expectEqualStrings("hello", conn.recv_streams.items[0].data.items);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvOnStream(0, &read_buf)).?;
+    try std.testing.expectEqualStrings("hello", read_buf[0..n]);
+    try std.testing.expect(try conn.recvStreamFinished(0));
+}
+
+test "receive stream rejects conflicting late STREAM after all data is received" {
     var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
 
@@ -71114,14 +71195,9 @@ test "receive stream discards late STREAM after all data is received" {
         .fin = false,
         .data = "HELLO",
     } });
-    try conn.processDatagram(1, out.getWritten());
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1, out.getWritten()));
     try std.testing.expectEqual(@as(u64, 5), conn.recv_data_bytes);
     try std.testing.expectEqualStrings("hello", conn.recv_streams.items[0].data.items);
-
-    var read_buf: [8]u8 = undefined;
-    const n = (try conn.recvOnStream(0, &read_buf)).?;
-    try std.testing.expectEqualStrings("hello", read_buf[0..n]);
-    try std.testing.expect(try conn.recvStreamFinished(0));
 }
 
 test "receive stream rejects end offset beyond QUIC varint range" {
