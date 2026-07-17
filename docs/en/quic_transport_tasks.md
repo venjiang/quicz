@@ -1069,6 +1069,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened long-header length-field validation. Encoders now
+  reject oversized token or packet Length varints with `InvalidLength` before
+  writing any partial header bytes.
+
 - 2026-07-17: Tightened versioned long-header and Retry packet validation.
   The packet codec now rejects zero as the version for Initial/Handshake/0-RTT
   long headers and Retry packets, leaving zero-version handling to the Version

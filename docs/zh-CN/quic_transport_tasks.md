@@ -948,6 +948,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 long-header length-field 校验。编码器现在会在写入任何
+  partial header bytes 前，以 `InvalidLength` 拒绝 oversized token 或 packet
+  Length varint。
+
 - 2026-07-17：收紧 versioned long-header 和 Retry packet 校验。
   packet codec 现在会拒绝 Initial/Handshake/0-RTT long header 以及 Retry
   packet 使用 zero version；zero-version 只留给 Version Negotiation codec 处理。

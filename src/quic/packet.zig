@@ -30,6 +30,7 @@ pub const HeaderForm = enum { long, short };
 pub const stateless_reset_token_len: usize = 16;
 pub const min_stateless_reset_datagram_len: usize = stateless_reset_token_len + 5;
 pub const max_packet_number: u64 = (@as(u64, 1) << 62) - 1;
+const max_quic_varint = max_packet_number;
 
 /// RFC 9000 packet number encoding decision for a packet header.
 ///
@@ -421,6 +422,10 @@ fn validateVersionedPacketVersion(version: Version) PacketError!void {
     if (@intFromEnum(version) == 0) return error.InvalidVersionNegotiation;
 }
 
+fn validateLengthVarInt(value: u64) PacketError!void {
+    if (value > max_quic_varint) return error.InvalidLength;
+}
+
 fn validateLongHeaderCidLen(len: usize) PacketError!void {
     if (len > 20) return error.InvalidConnectionIdLength;
 }
@@ -457,6 +462,11 @@ pub fn encodeLongHeaderWithPacketNumberEncoding(
     try validatePacketNumberEncodingMatches(header.packet_number, packet_number_encoding);
 
     const wire_length = std.math.add(u64, header.payload_length, packet_number_encoding.len) catch return error.InvalidLength;
+    try validateLengthVarInt(wire_length);
+    if (header.packet_type == .initial) {
+        const token_len = std.math.cast(u64, header.token.len) orelse return error.InvalidLength;
+        try validateLengthVarInt(token_len);
+    }
 
     var first_byte: u8 = 0;
     first_byte |= 0x80; // Header Form = long
@@ -1841,6 +1851,39 @@ test "versioned long headers reject zero version" {
     };
     var in = buffer.fixedReader(&wire);
     try std.testing.expectError(error.InvalidVersionNegotiation, parseLongHeader(in.reader(), std.testing.allocator));
+}
+
+test "long header rejects oversized length varints before writing" {
+    var raw: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&raw);
+
+    const oversized_payload = LongHeader{
+        .version = .v1,
+        .dcid = &[_]u8{0xaa},
+        .scid = &[_]u8{0xbb},
+        .packet_type = .handshake,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = max_quic_varint,
+    };
+    try std.testing.expectError(error.InvalidLength, encodeLongHeader(writer.writer(), oversized_payload));
+    try std.testing.expectEqual(@as(usize, 0), writer.getWritten().len);
+
+    const oversized_token_len = std.math.cast(usize, max_quic_varint + 1) orelse return error.SkipZigTest;
+    const oversized_token: []const u8 = @as([*]const u8, @ptrFromInt(1))[0..oversized_token_len];
+    const oversized_initial_token = LongHeader{
+        .version = .v1,
+        .dcid = &[_]u8{0xaa},
+        .scid = &[_]u8{0xbb},
+        .packet_type = .initial,
+        .token = oversized_token,
+        .packet_number = 0,
+        .payload_length = 0,
+    };
+
+    writer = buffer.fixedWriter(&raw);
+    try std.testing.expectError(error.InvalidLength, encodeLongHeader(writer.writer(), oversized_initial_token));
+    try std.testing.expectEqual(@as(usize, 0), writer.getWritten().len);
 }
 
 test "retry long header is outside the minimal codec" {
