@@ -495,6 +495,7 @@ fn parseNewSessionTicketExtensions(extensions: []const u8) HandshakeError!bool {
     var saw_early_data = false;
     while (pos < extensions.len) {
         if (pos + 4 > extensions.len) return error.DecodeError;
+        const header_offset = pos;
         const ext_type = readU16(extensions[pos..]);
         pos += 2;
         const ext_len = readU16(extensions[pos..]);
@@ -502,6 +503,7 @@ fn parseNewSessionTicketExtensions(extensions: []const u8) HandshakeError!bool {
         if (pos + ext_len > extensions.len) return error.DecodeError;
         const ext_data = extensions[pos .. pos + ext_len];
         pos += ext_len;
+        if (extensionTypeSeenBefore(extensions, header_offset, ext_type)) return error.DecodeError;
 
         if (ext_type == @intFromEnum(ExtType.early_data)) {
             if (saw_early_data) return error.DecodeError;
@@ -650,6 +652,20 @@ test "parseNewSessionTicket rejects invalid QUIC early_data values" {
         0x2a, 0x00, 0x00,
     };
     try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&wrong_length));
+}
+
+test "parseNewSessionTicket rejects duplicate unknown extensions" {
+    const msg = [_]u8{
+        0x04, 0x00, 0x00, 0x1b, // type=new_session_ticket, length=27
+        0x00, 0x00, 0x0e, 0x10, // ticket_lifetime=3600
+        0x00, 0x00, 0x00, 0x01, // ticket_age_add=1
+        0x02, 0xaa, 0xbb, // nonce_len=2, nonce=0xaabb
+        0x00, 0x04, 0xcc, 0xdd, 0xee, 0xff, // ticket_len=4, ticket
+        0x00, 0x08, // extensions_len=8
+        0xaa, 0xaa, 0x00, 0x00, // unknown extension
+        0xaa, 0xaa, 0x00, 0x00, // duplicate unknown extension
+    };
+    try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&msg));
 }
 
 test "parseNewSessionTicket rejects wrong type and truncation" {
