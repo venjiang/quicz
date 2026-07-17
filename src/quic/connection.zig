@@ -61814,6 +61814,64 @@ test "EndpointConnectionLifecycle wakes to discard expired retained 1 RTT keys" 
     try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
 }
 
+test "EndpointConnectionLifecycle key discard due-deadline drain does not drain output" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xde };
+    const client_dcid = [_]u8{ 0x11, 0x22, 0x33, 0x45 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{ .initial_rtt_ms = 100 });
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{ .initial_rtt_ms = 100 });
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try client.confirmHandshake();
+    try server.confirmHandshake();
+    try client.installOneRttTrafficSecrets(.{
+        .local = secrets.client.secret,
+        .peer = secrets.server.secret,
+    });
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    try client.initiateOneRttKeyUpdate();
+    try client.sendPing();
+    const update = (try client.pollProtectedShortDatagramWithInstalledKeys(100, &server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(update);
+    try server.processProtectedShortDatagramWithInstalledKeys(100, server_dcid.len, update);
+    try std.testing.expectEqual(@as(?bool, true), server.peerOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+
+    const discard_deadline = server.oneRttKeyDiscardDeadlineMillis() orelse return error.TestUnexpectedResult;
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+    var out: [1]EndpointPolledDatagramResult = undefined;
+    const due = (try lifecycle.processDueDeadlineAndDrainDatagrams(
+        8,
+        &server,
+        discard_deadline,
+        &client_dcid,
+        &server_dcid,
+        &out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.key_discard, due.deadline.kind);
+    try std.testing.expect(due.pending_work.key_discard_serviced);
+    try std.testing.expectEqual(@as(usize, 0), due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), due.drain.first_error);
+    try std.testing.expectEqual(@as(?bool, false), server.peerOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
+
+    const ack = (try lifecycle.pollDatagram(8, &server, discard_deadline, .{
+        .space = .application,
+        .destination_connection_id = &client_dcid,
+        .source_connection_id = &server_dcid,
+    })) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(ack);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+}
+
 test "EndpointConnectionLifecycle pending work counts retained one RTT key discard" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const server_dcid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
