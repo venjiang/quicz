@@ -264,9 +264,24 @@ fn validateFrameSliceLen(data: []const u8) FrameError!void {
     if (data_len > max_quic_varint) return error.InvalidFrameValue;
 }
 
+fn validateFrameVarInt(value: u64) FrameError!void {
+    if (value > max_quic_varint) return error.InvalidFrameValue;
+}
+
 fn validateNewTokenFrame(new_token: NewTokenFrame) FrameError!void {
     if (new_token.token.len == 0) return error.InvalidFrameValue;
     try validateFrameSliceLen(new_token.token);
+}
+
+fn validateConnectionCloseFrame(close: ConnectionCloseFrame) FrameError!void {
+    try validateFrameVarInt(close.error_code);
+    try validateFrameVarInt(close.frame_type);
+    try validateFrameSliceLen(close.reason_phrase);
+}
+
+fn validateApplicationCloseFrame(close: ApplicationCloseFrame) FrameError!void {
+    try validateFrameVarInt(close.error_code);
+    try validateFrameSliceLen(close.reason_phrase);
 }
 
 fn validateStreamCount(maximum_streams: u64) FrameError!void {
@@ -493,7 +508,7 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeAll(&path_response.data);
         },
         .connection_close => |close| {
-            try validateFrameSliceLen(close.reason_phrase);
+            try validateConnectionCloseFrame(close);
             try writer.writeByte(@intFromEnum(FrameType.connection_close));
             try packet.encodeVarInt(writer, close.error_code);
             try packet.encodeVarInt(writer, close.frame_type);
@@ -501,7 +516,7 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeAll(close.reason_phrase);
         },
         .application_close => |close| {
-            try validateFrameSliceLen(close.reason_phrase);
+            try validateApplicationCloseFrame(close);
             try writer.writeByte(@intFromEnum(FrameType.application_close));
             try packet.encodeVarInt(writer, close.error_code);
             try packet.encodeVarInt(writer, close.reason_phrase.len);
@@ -1205,6 +1220,32 @@ test "frame encoders reject oversized variable data lengths before writing" {
     try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .application_close = .{
         .error_code = 0,
         .reason_phrase = oversized_data,
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+}
+
+test "close frame encoders reject oversized varint fields before writing" {
+    var buf: [8]u8 = undefined;
+    var out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .connection_close = .{
+        .error_code = max_quic_varint + 1,
+        .frame_type = @intFromEnum(FrameType.padding),
+        .reason_phrase = "",
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .connection_close = .{
+        .error_code = 0,
+        .frame_type = max_quic_varint + 1,
+        .reason_phrase = "",
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .application_close = .{
+        .error_code = max_quic_varint + 1,
+        .reason_phrase = "",
     } }));
     try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
 }
