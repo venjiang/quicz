@@ -381,7 +381,7 @@ pub fn EndpointConnectionRegistry(
             }
             if (result) |due_work| {
                 if (due_work.pending_work.idle_retired != null or due_work.pending_work.close_retired != null) {
-                    self.remove(due_work.deadline.connection_id) catch unreachable;
+                    self.remove(due_work.deadline.connection_id) catch return error.Internal;
                 }
             }
             return result;

@@ -973,6 +973,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：加固 endpoint registry 终态 cleanup。due idle/close retirement
+  后如果 endpoint-owned record 移除遇到 stale 状态，现在返回 internal
+  consistency error，而不是依赖 panic-only 路径。
+
 - 2026-07-17：恢复 Version Negotiation CID 处理。VN packet 的 DCID/SCID 长度
   继续由 packet 内 1 字节长度字段约束，而不是套用 QUIC long-header CID 上限，
   保留 long-CID VN roundtrip。

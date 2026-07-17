@@ -1098,6 +1098,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Hardened endpoint registry terminal cleanup. A stale
+  endpoint-owned record removal after due idle/close retirement now reports an
+  internal consistency error instead of relying on a panic-only path.
+
 - 2026-07-17: Restored Version Negotiation CID handling. VN packet DCID/SCID
   lengths remain governed by the packet's one-byte length fields rather than
   QUIC long-header CID limits, preserving long-CID VN round trips.
