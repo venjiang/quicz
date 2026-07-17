@@ -973,6 +973,14 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧本地 connection-ID issuance 边界。当本地 sequence 超过
+  QUIC varint 上限后，发出 NEW_CONNECTION_ID 现在会在修改 CID 状态前返回
+  `InvalidPacket`。
+
+- 2026-07-17：收紧 protected datagram total-length overflow 错误分类。
+  protected long/short datagram length prediction 现在会把 header 加 payload 的
+  `usize` 溢出报为 `BufferTooSmall`，而不是 internal wire-length failure。
+
 - 2026-07-17：对齐 protected Initial wire-length prediction 与 packet
   encoding。Initial token length 超过 QUIC varint 上限时，现在会在 protected
   packet construction 前作为 invalid packet envelope 拒绝。

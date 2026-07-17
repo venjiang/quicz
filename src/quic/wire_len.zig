@@ -48,12 +48,12 @@ pub fn protectedLongDatagramWireLen(
     if (header.packet_type == .initial) {
         const token_len_u64 = std.math.cast(u64, header.token.len) orelse return error.BufferTooSmall;
         if (token_len_u64 > max_quic_varint) return error.InvalidPacket;
-        header_len = try addWireLen(header_len, try quicVarIntWireLen(token_len_u64));
-        header_len = try addWireLen(header_len, header.token.len);
+        header_len = try addDatagramWireLen(header_len, try quicVarIntWireLen(token_len_u64));
+        header_len = try addDatagramWireLen(header_len, header.token.len);
     }
-    header_len = try addWireLen(header_len, try quicVarIntWireLen(wire_length));
-    header_len = try addWireLen(header_len, packet_number_len);
-    return try addWireLen(header_len, protected_payload_len);
+    header_len = try addDatagramWireLen(header_len, try quicVarIntWireLen(wire_length));
+    header_len = try addDatagramWireLen(header_len, packet_number_len);
+    return try addDatagramWireLen(header_len, protected_payload_len);
 }
 
 pub fn protectedLongPlaintextLenForMinDatagram(
@@ -66,7 +66,7 @@ pub fn protectedLongPlaintextLenForMinDatagram(
     var expanded_len = plaintext_len;
     while (try protectedLongDatagramWireLen(header, packet_number_len, expanded_len) < min_datagram_len) {
         const current_len = try protectedLongDatagramWireLen(header, packet_number_len, expanded_len);
-        expanded_len = try addWireLen(expanded_len, min_datagram_len - current_len);
+        expanded_len = try addDatagramWireLen(expanded_len, min_datagram_len - current_len);
     }
     return expanded_len;
 }
@@ -80,9 +80,9 @@ pub fn protectedShortDatagramWireLen(
     if (dcid_len > max_connection_id_len) return error.InvalidPacket;
     const protected_payload_len = std.math.add(usize, plaintext_len, protection.aead_tag_len) catch return error.BufferTooSmall;
     var len: usize = 1;
-    len = try addWireLen(len, dcid_len);
-    len = try addWireLen(len, packet_number_len);
-    return try addWireLen(len, protected_payload_len);
+    len = try addDatagramWireLen(len, dcid_len);
+    len = try addDatagramWireLen(len, packet_number_len);
+    return try addDatagramWireLen(len, protected_payload_len);
 }
 
 pub fn protectedShortPlaintextLenForMinDatagram(
@@ -95,13 +95,17 @@ pub fn protectedShortPlaintextLenForMinDatagram(
     var expanded_len = plaintext_len;
     while (try protectedShortDatagramWireLen(dcid_len, packet_number_len, expanded_len) < min_datagram_len) {
         const current_len = try protectedShortDatagramWireLen(dcid_len, packet_number_len, expanded_len);
-        expanded_len = try addWireLen(expanded_len, min_datagram_len - current_len);
+        expanded_len = try addDatagramWireLen(expanded_len, min_datagram_len - current_len);
     }
     return expanded_len;
 }
 
 pub fn addWireLen(current: usize, extra: usize) Error!usize {
     return std.math.add(usize, current, extra) catch return error.Internal;
+}
+
+fn addDatagramWireLen(current: usize, extra: usize) Error!usize {
+    return std.math.add(usize, current, extra) catch return error.BufferTooSmall;
 }
 
 pub fn streamFrameWireLen(stream_id: u64, offset: u64, data_len: usize) Error!usize {
@@ -468,6 +472,10 @@ test "protected short datagram wire length rejects payload overflow" {
     try std.testing.expectError(
         error.BufferTooSmall,
         protectedShortDatagramWireLen(8, 4, std.math.maxInt(usize)),
+    );
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        protectedShortDatagramWireLen(8, 4, std.math.maxInt(usize) - protection.aead_tag_len),
     );
 }
 

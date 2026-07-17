@@ -1098,6 +1098,15 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened local connection-ID issuance bounds. Issuing a
+  NEW_CONNECTION_ID after the local sequence exceeds the QUIC varint ceiling now
+  returns `InvalidPacket` before mutating CID state.
+
+- 2026-07-17: Tightened protected datagram total-length overflow
+  classification. Protected long/short datagram length prediction now reports
+  header-plus-payload `usize` overflow as `BufferTooSmall` instead of an
+  internal wire-length failure.
+
 - 2026-07-17: Aligned protected Initial wire-length prediction with packet
   encoding. Initial token lengths above the QUIC varint ceiling are now
   rejected as invalid packet envelopes before protected packet construction.

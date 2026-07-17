@@ -2219,7 +2219,7 @@ pub const Connection = struct {
     ) Error!u64 {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (connection_id.len == 0 or connection_id.len > max_connection_id_len) return error.InvalidPacket;
-        if (self.next_local_connection_id_sequence > max_quic_varint) return error.Internal;
+        if (self.next_local_connection_id_sequence > max_quic_varint) return error.InvalidPacket;
         if (retire_prior_to > self.next_local_connection_id_sequence) return error.InvalidPacket;
         if (self.localConnectionIdCountAfterRetirePriorTo(retire_prior_to) >= self.peer_active_connection_id_limit) return error.InvalidPacket;
         if (self.localConnectionIdValueExists(connection_id)) return error.InvalidPacket;
@@ -65155,6 +65155,21 @@ test "issueConnectionId rejects duplicate CIDs duplicate reset tokens and peer a
     try std.testing.expectEqual(@as(u64, 1), try conn.issueConnectionId(&cid1, token1, 0));
     try std.testing.expectError(error.InvalidPacket, conn.issueConnectionId(&cid2, token2, 0));
     try std.testing.expectEqual(@as(u64, 2), conn.localConnectionIdCount());
+}
+
+test "issueConnectionId rejects sequence numbers outside QUIC varint bounds before mutation" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    conn.next_local_connection_id_sequence = max_quic_varint + 1;
+
+    const cid = [_]u8{ 0xc1, 0xd0, 0x00, 0x01 };
+    const token = [_]u8{0x5a} ** packet.stateless_reset_token_len;
+
+    try std.testing.expectError(error.InvalidPacket, conn.issueConnectionId(&cid, token, 0));
+    try std.testing.expectEqual(@as(u64, max_quic_varint + 1), conn.next_local_connection_id_sequence);
+    try std.testing.expectEqual(@as(u64, 0), conn.localConnectionIdCount());
+    try std.testing.expectEqual(@as(usize, 0), conn.pendingNewConnectionIdCount());
 }
 
 test "issueConnectionId allows replacement when retire_prior_to frees peer active limit" {
