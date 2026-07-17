@@ -973,6 +973,17 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：将 TLS server transport 的 peer Initial SCID 绑定进其持有的
+  `Connection`。endpoint-owned Retry/admission 路径认证 client Initial Source
+  Connection ID 后，现在会安装同一个稳定值，用于 transport-parameter 校验，以及
+  peer 发送 `NEW_CONNECTION_ID` 前的 1-RTT DCID fallback；后续 protected Initial
+  如果 SCID 不匹配会被拒绝。
+
+- 2026-07-17：对齐 client endpoint 单 datagram 终态 receive 处理。
+  `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 现在会像 bounded drain
+  版本一样把 `ConnectionClosed` 作为 receive result 返回；连接已 closed 后不会继续
+  poll close output，endpoint route 仍保留到正常退役路径处理。
+
 - 2026-07-17：收紧 TLS client transport 空 datagram 处理。
   `Tls13ClientTransport.receive()` 现在会把 zero-length UDP datagram 拒绝为
   `InvalidPacket`，不再返回成功 no-op receive；完整 packet 后的 all-zero tail

@@ -105,6 +105,7 @@ pub const Tls13ServerTransport = struct {
         connection_id: []const u8,
     ) Error!void {
         try validateConnectionId(connection_id, true);
+        try self.connection.setPeerInitialSourceConnectionId(connection_id);
         self.peer_initial_source_connection_id_len = connection_id.len;
         @memcpy(self.peer_initial_source_connection_id[0..connection_id.len], connection_id);
     }
@@ -324,9 +325,37 @@ test "Tls13ServerTransport owns endpoint connection IDs" {
     try std.testing.expectEqualSlices(u8, &.{ 5, 6, 7, 8 }, transport.peerInitialSourceConnectionId());
     try std.testing.expectEqualSlices(u8, &.{ 9, 10, 11, 12 }, transport.originalDestinationConnectionId());
     try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, transport.connection.localInitialSourceConnectionId().?);
-    try transport.setPeerInitialSourceConnectionId(&.{});
-    try std.testing.expectEqual(@as(usize, 0), transport.peerInitialSourceConnectionId().len);
+    try std.testing.expectEqualSlices(u8, &.{ 5, 6, 7, 8 }, transport.connection.peerInitialSourceConnectionId().?);
+    try std.testing.expectError(error.InvalidPacket, transport.setPeerInitialSourceConnectionId(&.{}));
     try std.testing.expectError(error.InvalidPacket, transport.setLocalInitialSourceConnectionId(&.{}));
+}
+
+test "Tls13ServerTransport sends to peer Initial source connection ID before NEW_CONNECTION_ID" {
+    var transport = try Tls13ServerTransport.init(std.testing.allocator, .{}, .{});
+    defer transport.deinit();
+
+    const traffic_secret = [_]u8{0x34} ** 32;
+    try transport.connection.validatePeerAddress();
+    try transport.connection.confirmHandshake();
+    try transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_initial_source_connection_id = [_]u8{ 0x41, 0x42, 0x43, 0x44 };
+    try transport.setPeerInitialSourceConnectionId(&peer_initial_source_connection_id);
+    try transport.connection.sendPing();
+
+    const datagram = (try transport.pollApplicationDatagram(1)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        protection.deriveAes128PacketProtectionKeys(traffic_secret),
+        datagram,
+        peer_initial_source_connection_id.len,
+        0,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &peer_initial_source_connection_id, opened.packet.header.dcid);
 }
 
 test "Tls13ServerTransport services idle lifecycle deadline" {

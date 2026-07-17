@@ -1759,6 +1759,24 @@ pub const Connection = struct {
         self.local_initial_source_connection_id_len = @intCast(scid.len);
     }
 
+    /// Store the peer's Initial Source Connection ID before packet processing
+    /// has captured it, or verify that a repeated binding matches exactly.
+    ///
+    /// Endpoint-owned Retry paths can authenticate the client SCID before the
+    /// protected follow-up Initial is processed. Once set, the value is stable
+    /// and is later used for transport-parameter validation and outgoing CID
+    /// fallback before the peer issues NEW_CONNECTION_ID.
+    pub fn setPeerInitialSourceConnectionId(self: *Connection, scid: []const u8) Error!void {
+        if (scid.len > max_connection_id_len) return error.InvalidPacket;
+        if (self.peer_initial_source_connection_id) |existing| {
+            if (!std.mem.eql(u8, existing, scid)) return error.InvalidPacket;
+            return;
+        }
+        const owned = self.allocator.alloc(u8, scid.len) catch return error.OutOfMemory;
+        @memcpy(owned, scid);
+        self.peer_initial_source_connection_id = owned;
+    }
+
     /// Return the peer's Initial Source Connection ID observed on its first Initial.
     ///
     /// The value is captured from a successfully opened protected Initial packet
@@ -3636,6 +3654,11 @@ pub const Connection = struct {
         }
         if (route.space == .initial and self.side == .client and decoded.packet.header.token.len != 0) {
             return error.InvalidPacket;
+        }
+        if (route.space == .initial) {
+            if (self.peer_initial_source_connection_id) |expected| {
+                if (!std.mem.eql(u8, expected, decoded.packet.header.scid)) return error.InvalidPacket;
+            }
         }
         const pending_peer_initial_scid = if (route.space == .initial and self.peer_initial_source_connection_id == null)
             self.allocator.dupe(u8, decoded.packet.header.scid) catch return error.OutOfMemory
@@ -12908,6 +12931,22 @@ test "applyPeerTransportParameters validates initial_source_connection_id" {
         .initial_max_data = 9,
     });
     try std.testing.expectEqual(@as(u64, 9), server.peer_max_data);
+}
+
+test "setPeerInitialSourceConnectionId binds peer CID fallback once" {
+    var connection = try Connection.init(std.testing.allocator, .server, .{});
+    defer connection.deinit();
+
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const other_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+
+    try connection.setPeerInitialSourceConnectionId(&client_scid);
+    try std.testing.expectEqualSlices(u8, &client_scid, connection.peerInitialSourceConnectionId().?);
+    try std.testing.expectEqualSlices(u8, &client_scid, connection.peerDestinationConnectionId().?);
+
+    try connection.setPeerInitialSourceConnectionId(&client_scid);
+    try std.testing.expectError(error.InvalidPacket, connection.setPeerInitialSourceConnectionId(&other_scid));
+    try std.testing.expectEqualSlices(u8, &client_scid, connection.peerInitialSourceConnectionId().?);
 }
 
 test "openStream enforces peer bidirectional stream limit until MAX_STREAMS_BIDI" {

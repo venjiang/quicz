@@ -1098,6 +1098,19 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Bound TLS server transport peer Initial SCID into the owned
+  `Connection`. Endpoint-owned Retry/admission paths that authenticate a
+  client Initial Source Connection ID now install the same stable value used by
+  transport-parameter validation and 1-RTT DCID fallback before
+  `NEW_CONNECTION_ID`; protected Initial processing rejects later SCID
+  mismatches.
+
+- 2026-07-17: Aligned client endpoint one-output terminal receive handling.
+  `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` now reports
+  `ConnectionClosed` as a receive result like the bounded drain variant,
+  without polling additional close output after the connection is already
+  closed and while preserving the endpoint route until normal retirement.
+
 - 2026-07-17: Tightened TLS client transport empty-datagram handling.
   `Tls13ClientTransport.receive()` now rejects zero-length UDP datagrams as
   `InvalidPacket` instead of returning a successful no-op receive result, while
