@@ -1261,10 +1261,7 @@ pub fn writeVersionNegotiationForUnsupportedVersion(
     if (datagram.len < 1) return error.InvalidDatagram;
     if ((datagram[0] & 0x80) == 0) return null;
     if ((datagram[0] & 0x40) == 0) return null;
-    if (supported_versions.len == 0) return error.InvalidVersionList;
-    for (supported_versions) |supported| {
-        if (@intFromEnum(supported) == 0) return error.InvalidVersionList;
-    }
+    try validateSupportedVersions(supported_versions);
 
     const ids = try peekLongHeaderConnectionIds(datagram);
     if (@intFromEnum(ids.version) == 0) return null;
@@ -1297,10 +1294,8 @@ pub fn peekInitialAcceptDatagram(
 ) RouteError!?InitialAcceptResult {
     if (datagram.len < 1) return error.InvalidDatagram;
     if ((datagram[0] & 0x80) == 0) return null;
-    if (supported_versions.len == 0) return error.InvalidVersionList;
-    for (supported_versions) |supported| {
-        if (@intFromEnum(supported) == 0) return error.InvalidVersionList;
-    }
+    if ((datagram[0] & 0x40) == 0) return null;
+    try validateSupportedVersions(supported_versions);
 
     var reader = buffer.fixedReader(datagram);
     const first_byte = reader.readByte() catch return error.InvalidDatagram;
@@ -1311,7 +1306,6 @@ pub fn peekInitialAcceptDatagram(
     reader.readNoEof(&version_buf) catch return error.InvalidDatagram;
     const version: packet.Version = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
     if (@intFromEnum(version) == 0) return null;
-    if ((first_byte & 0x40) == 0) return error.InvalidDatagram;
     if (!versionListContains(supported_versions, version)) return null;
     if (packet.longHeaderPacketTypeFromBits(version, packet_type_bits) != .initial) return null;
 
@@ -1392,6 +1386,14 @@ fn versionListContains(versions: []const packet.Version, version: packet.Version
         if (@intFromEnum(candidate) == @intFromEnum(version)) return true;
     }
     return false;
+}
+
+fn validateSupportedVersions(supported_versions: []const packet.Version) RouteError!void {
+    if (supported_versions.len == 0) return error.InvalidVersionList;
+    for (supported_versions) |supported| {
+        if (@intFromEnum(supported) == 0) return error.InvalidVersionList;
+        if (packet.isReservedVersion(supported)) return error.InvalidVersionList;
+    }
 }
 
 fn testPath(remote_port: u16) Udp4Tuple {
@@ -1786,9 +1788,14 @@ test "Endpoint version negotiation ignores non-triggering datagrams" {
     ));
 
     const zero_version = [_]packet.Version{@enumFromInt(0)};
+    const reserved_version = [_]packet.Version{@enumFromInt(0x0a0a0a0a)};
     try std.testing.expectError(
         error.InvalidVersionList,
         writeVersionNegotiationForUnsupportedVersion(&response_buf, &supported, &zero_version),
+    );
+    try std.testing.expectError(
+        error.InvalidVersionList,
+        writeVersionNegotiationForUnsupportedVersion(&response_buf, &supported, &reserved_version),
     );
     try std.testing.expectError(
         error.InvalidVersionList,
@@ -2171,6 +2178,11 @@ test "Endpoint Initial accept ignores non-Initial and rejects malformed Initial 
         0x01, 0xaa, 0x01, 0xbb, 0x00,
         0x02, 0x00, 0xaa,
     };
+    const fixed_bit_clear_initial = [_]u8{
+        0x80, 0x00, 0x00, 0x00, 0x01,
+        0x01, 0xaa, 0x01, 0xbb, 0x00,
+        0x02, 0x00, 0xaa,
+    };
     const truncated_initial = [_]u8{
         0xc0, 0x00, 0x00, 0x00, 0x01,
         0x08, 0xaa, 0xbb,
@@ -2185,12 +2197,15 @@ test "Endpoint Initial accept ignores non-Initial and rejects malformed Initial 
     try std.testing.expect((try peekInitialAcceptDatagram(path, &version_negotiation, &supported_versions)) == null);
     try std.testing.expect((try peekInitialAcceptDatagram(path, &handshake, &supported_versions)) == null);
     try std.testing.expect((try peekInitialAcceptDatagram(path, &unsupported_initial, &supported_versions)) == null);
+    try std.testing.expect((try peekInitialAcceptDatagram(path, &fixed_bit_clear_initial, &supported_versions)) == null);
     try std.testing.expectError(error.InvalidDatagram, peekInitialAcceptDatagram(path, &truncated_initial, &supported_versions));
     try std.testing.expectError(error.InvalidDatagram, peekInitialAcceptDatagram(path, &bad_length_initial, &supported_versions));
     try std.testing.expectError(error.InvalidVersionList, peekInitialAcceptDatagram(path, &bad_length_initial, &[_]packet.Version{}));
 
     const zero_version = [_]packet.Version{@enumFromInt(0)};
     try std.testing.expectError(error.InvalidVersionList, peekInitialAcceptDatagram(path, &bad_length_initial, &zero_version));
+    const reserved_version = [_]packet.Version{@enumFromInt(0x0a0a0a0a)};
+    try std.testing.expectError(error.InvalidVersionList, peekInitialAcceptDatagram(path, &bad_length_initial, &reserved_version));
 }
 
 test "EndpointRouter reports path changes and active migration rejection" {

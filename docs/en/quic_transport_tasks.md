@@ -65,7 +65,9 @@ packet/key/token and RFC 9368 version-information primitives:
 Endpoint Version Negotiation response generation now enforces the QUIC fixed
 bit before emitting a response. Unsupported-version long-header datagrams with
 the fixed bit clear are ignored instead of producing a Version Negotiation
-packet.
+packet. Endpoint helpers now also reject local supported-version lists that
+contain reserved greasing versions, matching the existing zero-version
+rejection.
 
 Mutual-version selection now skips forbidden zero-version preferred entries in
 addition to reserved greasing versions, preserving the RFC 8999 invariant that
@@ -1084,6 +1086,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 | Interop | Partial | A certificate-verified Zig client completes a FIN-terminated protected STREAM echo against a local independent `quic-go` v0.59.0 server; separate Go and Rust clients complete the inverse echo direction against the Zig server. | Record repeatable peer-version evidence and add Retry, loss/recovery, version-negotiation, broader server, and application-protocol scenarios. |
 
 ## Progress Notes
+
+- 2026-07-17: Tightened endpoint Initial accept triggering. Supported-version
+  long-header datagrams with the fixed bit clear are now ignored before Initial
+  header parsing.
 
 - 2026-07-17: Tightened endpoint Version Negotiation response triggering.
   Unsupported-version long headers with the QUIC fixed bit clear now produce no

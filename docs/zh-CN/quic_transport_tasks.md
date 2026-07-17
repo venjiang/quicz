@@ -58,7 +58,8 @@ version-information 原语）：
 
 endpoint Version Negotiation response 生成现在会先校验 QUIC fixed bit。
 fixed bit 为 0 的 unsupported-version long-header datagram 会被忽略，不再生成
-Version Negotiation packet。
+Version Negotiation packet。endpoint helper 现在也会拒绝包含 reserved greasing
+version 的本地 supported-version list，与现有 zero-version 拒绝保持一致。
 
 mutual-version selection 现在除 reserved greasing version 外，也会跳过禁止使用的
 zero-version preferred entry，保持 RFC 8999 中 version zero 只用于 Version
@@ -961,6 +962,9 @@ close 和 route cleanup 事件。
 以上仅是有界的 1-RTT short-packet 证据。Initial 和 Handshake 接收路径仍保持当前的有序规则，尚未记录外部 server 互通结果。
 
 ## 进展记录
+
+- 2026-07-17：收紧 endpoint Initial accept 触发条件。fixed bit 为 0 的
+  supported-version long-header datagram 现在会在 Initial header 解析前被忽略。
 
 - 2026-07-17：收紧 endpoint Version Negotiation response 触发条件。fixed bit
   为 0 的 unsupported-version long header 现在不会生成 Version Negotiation
