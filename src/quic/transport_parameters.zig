@@ -117,6 +117,7 @@ fn validatePreferredAddressConnectionIdLen(cid: []const u8) !void {
 }
 
 fn validateIntegerParameter(id: ParameterId, value: u64) !void {
+    if (value > max_quic_varint) return error.InvalidParameterValue;
     switch (id) {
         .max_udp_payload_size => if (value < 1200 or value > max_udp_payload_size_default) return error.InvalidParameterValue,
         .initial_max_streams_bidi, .initial_max_streams_uni => if (value > max_stream_count) return error.InvalidParameterValue,
@@ -135,12 +136,25 @@ fn parseIntegerValue(id: ParameterId, value: []const u8) !u64 {
     return parsed.value;
 }
 
+fn validateParameterIdVarInt(id: u64) !void {
+    if (id > max_quic_varint) return error.InvalidParameterValue;
+}
+
+fn validateParameterValueLen(value: []const u8) !u64 {
+    const value_len = std.math.cast(u64, value.len) orelse return error.InvalidParameterLength;
+    if (value_len > max_quic_varint) return error.InvalidParameterLength;
+    return value_len;
+}
+
 fn encodeIntegerValue(writer: anytype, id: ParameterId, value: u64) !void {
     try validateIntegerParameter(id, value);
     try encodeUncheckedIntegerValue(writer, id, value);
 }
 
 fn encodeUncheckedIntegerValue(writer: anytype, id: ParameterId, value: u64) !void {
+    try validateParameterIdVarInt(@intFromEnum(id));
+    if (value > max_quic_varint) return error.InvalidParameterValue;
+
     var raw: [8]u8 = undefined;
     var value_writer = buffer.fixedWriter(&raw);
     try packet.encodeVarInt(value_writer.writer(), value);
@@ -148,8 +162,10 @@ fn encodeUncheckedIntegerValue(writer: anytype, id: ParameterId, value: u64) !vo
 }
 
 fn encodeBytesValue(writer: anytype, id: ParameterId, value: []const u8) !void {
+    try validateParameterIdVarInt(@intFromEnum(id));
+    const value_len = try validateParameterValueLen(value);
     try packet.encodeVarInt(writer, @intFromEnum(id));
-    try packet.encodeVarInt(writer, value.len);
+    try packet.encodeVarInt(writer, value_len);
     try writer.writeAll(value);
 }
 
@@ -158,9 +174,11 @@ fn encodeBytesValue(writer: anytype, id: ParameterId, value: []const u8) !void {
 /// This helper is intentionally separate from `TransportParameters` because
 /// reserved parameters have no semantics and must be ignored by receivers.
 pub fn encodeReservedParameter(writer: anytype, id: u64, value: []const u8) !void {
+    try validateParameterIdVarInt(id);
+    const value_len = try validateParameterValueLen(value);
     if (!isReservedParameterId(id)) return error.InvalidParameterValue;
     try packet.encodeVarInt(writer, id);
-    try packet.encodeVarInt(writer, value.len);
+    try packet.encodeVarInt(writer, value_len);
     try writer.writeAll(value);
 }
 
@@ -644,6 +662,25 @@ test "transport parameters reject invalid values and lengths" {
     writer = buffer.fixedWriter(&raw);
     try encodeUncheckedIntegerValue(writer.writer(), .active_connection_id_limit, 1);
     try std.testing.expectError(error.InvalidParameterValue, parse(writer.getWritten(), std.testing.allocator));
+}
+
+test "transport parameter encoders reject oversized varint fields before writing" {
+    var raw: [16]u8 = undefined;
+    var writer = buffer.fixedWriter(&raw);
+    try std.testing.expectError(error.InvalidParameterValue, encode(writer.writer(), .{
+        .max_idle_timeout = max_quic_varint + 1,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), writer.getWritten().len);
+
+    writer = buffer.fixedWriter(&raw);
+    try std.testing.expectError(error.InvalidParameterValue, encodeReservedParameter(writer.writer(), max_quic_varint + 1, &[_]u8{}));
+    try std.testing.expectEqual(@as(usize, 0), writer.getWritten().len);
+
+    const oversized_len = std.math.cast(usize, max_quic_varint + 1) orelse return error.SkipZigTest;
+    const oversized_value: []const u8 = @as([*]const u8, @ptrFromInt(1))[0..oversized_len];
+    writer = buffer.fixedWriter(&raw);
+    try std.testing.expectError(error.InvalidParameterLength, encodeBytesValue(writer.writer(), .stateless_reset_token, oversized_value));
+    try std.testing.expectEqual(@as(usize, 0), writer.getWritten().len);
 }
 
 test "transport parameters reject malformed zero-length and preferred-address values" {

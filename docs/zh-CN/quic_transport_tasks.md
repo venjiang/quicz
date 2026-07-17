@@ -948,6 +948,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 transport-parameter varint 与 value-length 校验。
+  编码器现在会在写入 partial parameter bytes 前拒绝 oversized integer values、
+  reserved parameter IDs 和 byte value lengths。
+
 - 2026-07-17：收紧 protected long-header CID length 预算。protected
   long-header length 计算现在会在 base header arithmetic 前拒绝 oversized
   DCID/SCID。

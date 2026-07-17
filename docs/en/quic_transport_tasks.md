@@ -1069,6 +1069,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened transport-parameter varint and value-length
+  validation. Encoders now reject oversized integer values, reserved parameter
+  IDs, and byte value lengths before writing partial parameter bytes.
+
 - 2026-07-17: Tightened protected long-header CID length budgeting. Protected
   long-header length calculation now rejects oversized DCID/SCID values before
   base header arithmetic.
