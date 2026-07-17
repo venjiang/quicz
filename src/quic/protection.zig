@@ -898,8 +898,14 @@ fn varIntLen(value: u64) ProtectionError!usize {
 
 fn longHeaderLen(header: packet.LongHeader, pn_len: u8, wire_length: u64) !usize {
     if (pn_len == 0 or pn_len > 4) return error.InvalidPacketNumberLength;
+    if (header.dcid.len > max_connection_id_len or header.scid.len > max_connection_id_len) return error.InvalidConnectionIdLength;
     const token_len = if (header.packet_type == .initial) header.token.len else 0;
-    var len: usize = 1 + 4 + 1 + header.dcid.len + 1 + header.scid.len;
+    var len: usize = 1;
+    len = std.math.add(usize, len, 4) catch return error.InvalidPayloadLength;
+    len = std.math.add(usize, len, 1) catch return error.InvalidPayloadLength;
+    len = std.math.add(usize, len, header.dcid.len) catch return error.InvalidPayloadLength;
+    len = std.math.add(usize, len, 1) catch return error.InvalidPayloadLength;
+    len = std.math.add(usize, len, header.scid.len) catch return error.InvalidPayloadLength;
     if (header.packet_type == .initial) {
         const token_len_u64 = std.math.cast(u64, token_len) orelse return error.InvalidPayloadLength;
         len = std.math.add(usize, len, try varIntLen(token_len_u64)) catch return error.InvalidPayloadLength;
@@ -1714,4 +1720,19 @@ test "protected long header length rejects token overflow" {
     };
 
     try std.testing.expectError(error.InvalidPayloadLength, longHeaderLen(header, 4, 4));
+}
+
+test "protected long header length rejects oversized connection IDs" {
+    const oversized_cid = [_]u8{0xaa} ** (max_connection_id_len + 1);
+    const header = packet.LongHeader{
+        .packet_type = .initial,
+        .version = .v1,
+        .dcid = &oversized_cid,
+        .scid = "source",
+        .token = "",
+        .packet_number = 0,
+        .payload_length = 0,
+    };
+
+    try std.testing.expectError(error.InvalidConnectionIdLength, longHeaderLen(header, 4, 4));
 }

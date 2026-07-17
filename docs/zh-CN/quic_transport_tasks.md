@@ -948,6 +948,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 protected long-header CID length 预算。protected
+  long-header length 计算现在会在 base header arithmetic 前拒绝 oversized
+  DCID/SCID。
+
 - 2026-07-17：收紧 ACK/ACK_ECN frame scalar 校验。ACK 字段、ACK range
   count、ACK range 和 ECN counters 现在会在写入 partial frame bytes 前拒绝
   oversized QUIC varint 值。

@@ -1069,6 +1069,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened protected long-header CID length budgeting. Protected
+  long-header length calculation now rejects oversized DCID/SCID values before
+  base header arithmetic.
+
 - 2026-07-17: Tightened ACK/ACK_ECN frame scalar validation. ACK fields, ACK
   range counts, ACK ranges, and ECN counters now reject oversized QUIC varint
   values before writing partial frame bytes.
