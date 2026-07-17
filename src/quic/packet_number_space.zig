@@ -73,9 +73,9 @@ pub const ReceivedPacketRanges = struct {
         while (index < self.count) : (index += 1) {
             const range = self.ranges[index];
             if (packet_number > range.largest) {
-                if (range.largest != std.math.maxInt(u64) and packet_number == range.largest + 1) {
+                if (isImmediatelyBefore(range.largest, packet_number)) {
                     self.ranges[index].largest = packet_number;
-                    if (index != 0 and packet_number != std.math.maxInt(u64) and self.ranges[index - 1].smallest == packet_number + 1) {
+                    if (index != 0 and isImmediatelyBefore(packet_number, self.ranges[index - 1].smallest)) {
                         self.ranges[index - 1].smallest = self.ranges[index].smallest;
                         self.remove(index);
                     }

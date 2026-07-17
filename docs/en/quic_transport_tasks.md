@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Completed receive-side packet-number adjacency helper routing.
+  `ReceivedPacketRanges.record()` now uses the bounded adjacency helper for both
+  forward extension and neighbor coalescing, keeping all receive-range `n + 1`
+  checks on one overflow-safe path.
+
 - 2026-07-17: Centralized receive-side packet-number adjacency checks. Retained
   packet ranges now use a bounded helper for `n + 1` adjacency tests so
   duplicate detection and ACK range merging stay overflow-safe at the `u64`

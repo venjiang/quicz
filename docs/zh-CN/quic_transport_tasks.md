@@ -973,6 +973,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：完成 receive-side packet-number adjacency helper 收敛。
+  `ReceivedPacketRanges.record()` 的 forward extension 和相邻 range 合并现在都
+  使用有界 adjacency helper，让所有 receive-range `n + 1` 校验走同一条
+  overflow-safe 路径。
+
 - 2026-07-17：集中 receive-side packet-number adjacency 校验。保留的 packet
   range 现在通过有界 helper 做 `n + 1` 邻接判断，确保重复包检测和 ACK range
   合并在 `u64` 上限处保持 overflow-safe。
