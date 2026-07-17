@@ -42,6 +42,7 @@ pub fn protectedLongDatagramWireLen(
     const protected_payload_len = std.math.add(usize, plaintext_len, protection.aead_tag_len) catch return error.BufferTooSmall;
     const protected_payload_len_u64 = std.math.cast(u64, protected_payload_len) orelse return error.BufferTooSmall;
     const wire_length = std.math.add(u64, protected_payload_len_u64, packet_number_len) catch return error.BufferTooSmall;
+    if (wire_length > max_quic_varint) return error.BufferTooSmall;
 
     var header_len: usize = 1 + 4 + 1 + header.dcid.len + 1 + header.scid.len;
     if (header.packet_type == .initial) {
@@ -448,6 +449,10 @@ test "protected long datagram wire length rejects payload overflow" {
     try std.testing.expectError(
         error.BufferTooSmall,
         protectedLongDatagramWireLen(header, 4, std.math.maxInt(usize)),
+    );
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        protectedLongDatagramWireLen(header, 4, max_quic_varint),
     );
 }
 
