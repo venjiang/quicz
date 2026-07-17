@@ -268,9 +268,9 @@ pub fn Tls13ServerEndpoint(
             self: *Self,
             connection_id: u64,
             pending_work: root.EndpointPendingWorkResult,
-        ) void {
+        ) root.Error!void {
             if (pending_work.idle_retired == null and pending_work.close_retired == null) return;
-            self.records.remove(connection_id) catch unreachable;
+            self.records.remove(connection_id) catch return error.Internal;
         }
 
         /// Create an endpoint with dynamically allocated record and route storage.
@@ -506,7 +506,7 @@ pub fn Tls13ServerEndpoint(
                 .drain = .{},
             };
 
-            self.retireRecordAfterTerminalPendingWork(deadline.connection_id, pending_drain.pending_work);
+            try self.retireRecordAfterTerminalPendingWork(deadline.connection_id, pending_drain.pending_work);
             return .{
                 .deadline = deadline,
                 .pending_work = pending_drain.pending_work,
@@ -585,7 +585,7 @@ pub fn Tls13ServerEndpoint(
                 connection,
                 now_millis,
             );
-            self.retireRecordAfterTerminalPendingWork(deadline.connection_id, pending_work);
+            try self.retireRecordAfterTerminalPendingWork(deadline.connection_id, pending_work);
 
             return .{
                 .deadline = deadline,

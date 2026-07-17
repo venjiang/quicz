@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Hardened server endpoint terminal record cleanup.
+  `Tls13ServerEndpoint` now reports an internal consistency error if due
+  idle/close retirement cannot remove the endpoint-owned record, instead of
+  relying on an unreachable cleanup path.
+
 - 2026-07-17: Hardened endpoint registry terminal cleanup. A stale
   endpoint-owned record removal after due idle/close retirement now reports an
   internal consistency error instead of relying on a panic-only path.

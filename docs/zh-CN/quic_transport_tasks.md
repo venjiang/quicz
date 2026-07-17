@@ -973,6 +973,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：加固 server endpoint 终态 record cleanup。
+  `Tls13ServerEndpoint` 在 due idle/close retirement 后如果无法移除
+  endpoint-owned record，现在返回 internal consistency error，而不是依赖
+  unreachable cleanup 路径。
+
 - 2026-07-17：加固 endpoint registry 终态 cleanup。due idle/close retirement
   后如果 endpoint-owned record 移除遇到 stale 状态，现在返回 internal
   consistency error，而不是依赖 panic-only 路径。
