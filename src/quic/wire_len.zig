@@ -47,6 +47,7 @@ pub fn protectedLongDatagramWireLen(
     var header_len: usize = 1 + 4 + 1 + header.dcid.len + 1 + header.scid.len;
     if (header.packet_type == .initial) {
         const token_len_u64 = std.math.cast(u64, header.token.len) orelse return error.BufferTooSmall;
+        if (token_len_u64 > max_quic_varint) return error.InvalidPacket;
         header_len = try addWireLen(header_len, try quicVarIntWireLen(token_len_u64));
         header_len = try addWireLen(header_len, header.token.len);
     }
@@ -430,6 +431,13 @@ test "protected datagram wire length rejects invalid packet envelopes" {
 
     invalid = header;
     invalid.token = "unexpected";
+    try std.testing.expectError(error.InvalidPacket, protectedLongDatagramWireLen(invalid, 2, 0));
+
+    const oversized_token_len = std.math.cast(usize, max_quic_varint + 1) orelse return error.SkipZigTest;
+    const oversized_token: []const u8 = @as([*]const u8, @ptrFromInt(1))[0..oversized_token_len];
+    invalid = header;
+    invalid.packet_type = .initial;
+    invalid.token = oversized_token;
     try std.testing.expectError(error.InvalidPacket, protectedLongDatagramWireLen(invalid, 2, 0));
 
     try std.testing.expectError(error.InvalidPacket, protectedShortDatagramWireLen(max_connection_id_len + 1, 2, 0));

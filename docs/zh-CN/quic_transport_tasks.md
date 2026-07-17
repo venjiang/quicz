@@ -973,6 +973,14 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：对齐 protected Initial wire-length prediction 与 packet
+  encoding。Initial token length 超过 QUIC varint 上限时，现在会在 protected
+  packet construction 前作为 invalid packet envelope 拒绝。
+
+- 2026-07-17：加固 receive-side packet-number range tracking 的 `u64` 上限边界。
+  当记录的 packet number 把保留 range 扩展到最大值时，检查相邻 range 合并不再发生
+  整数溢出。
+
 - 2026-07-17：收紧 typed peer transport-parameter 校验。直接调用
   `applyPeerTransportParameters()` 时，现在会在修改 peer send limit 前拒绝
   oversized typed integer value 和超过 QUIC UDP payload 上限的 peer
@@ -987,9 +995,9 @@ close 和 route cleanup 事件。
   暴露 internal varint sizing failure。
 
 - 2026-07-17：收紧 protected packet-envelope wire-length 校验。long-header
-  length prediction 现在会拒绝过长 CID、version zero、Retry 和非 Initial packet
-  上的异常 token；short-header length prediction 会在 protected packet
-  construction 前拒绝过长 destination CID。
+  length prediction 现在会拒绝过长 CID、version zero、Retry、过大的 Initial token
+  和非 Initial packet 上的异常 token；short-header length prediction 会在 protected
+  packet construction 前拒绝过长 destination CID。
 
 - 2026-07-17：收紧 stream-count 控制帧 wire-length 校验。
   `MAX_STREAMS_*` 和 `STREAMS_BLOCKED_*` length prediction 现在会在

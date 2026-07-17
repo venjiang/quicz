@@ -1098,6 +1098,14 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Aligned protected Initial wire-length prediction with packet
+  encoding. Initial token lengths above the QUIC varint ceiling are now
+  rejected as invalid packet envelopes before protected packet construction.
+
+- 2026-07-17: Hardened receive-side packet-number range tracking at the `u64`
+  ceiling. Recording a packet number that extends a retained range to the
+  maximum value no longer overflows while checking adjacent-range coalescing.
+
 - 2026-07-17: Tightened typed peer transport-parameter validation. Direct
   `applyPeerTransportParameters()` calls now reject oversized typed integer
   values and peer `max_udp_payload_size` values above the QUIC UDP payload
@@ -1113,8 +1121,9 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 - 2026-07-17: Tightened protected packet-envelope wire-length validation.
   Long-header length prediction now rejects oversized CIDs, version zero,
-  Retry, and unexpected non-Initial tokens; short-header length prediction
-  rejects oversized destination CIDs before protected packet construction.
+  Retry, oversized Initial tokens, and unexpected non-Initial tokens;
+  short-header length prediction rejects oversized destination CIDs before
+  protected packet construction.
 
 - 2026-07-17: Tightened stream-count control-frame wire-length validation.
   `MAX_STREAMS_*` and `STREAMS_BLOCKED_*` length prediction now rejects values

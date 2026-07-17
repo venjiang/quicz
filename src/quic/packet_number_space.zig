@@ -75,7 +75,7 @@ pub const ReceivedPacketRanges = struct {
             if (packet_number > range.largest) {
                 if (range.largest != std.math.maxInt(u64) and packet_number == range.largest + 1) {
                     self.ranges[index].largest = packet_number;
-                    if (index != 0 and self.ranges[index - 1].smallest == packet_number + 1) {
+                    if (index != 0 and packet_number != std.math.maxInt(u64) and self.ranges[index - 1].smallest == packet_number + 1) {
                         self.ranges[index - 1].smallest = self.ranges[index].smallest;
                         self.remove(index);
                     }
@@ -264,4 +264,17 @@ test "received packet ranges reject forgotten packets after bounded eviction" {
     }
     try std.testing.expect(received.count < ReceivedPacketRanges.max_ranges);
     try std.testing.expect(!received.canRecord(1));
+}
+
+test "received packet ranges handle maximum packet number adjacency without overflow" {
+    var received = ReceivedPacketRanges{};
+    try std.testing.expect(received.record(std.math.maxInt(u64)));
+    try std.testing.expect(received.record(std.math.maxInt(u64) - 2));
+    try std.testing.expect(received.record(std.math.maxInt(u64) - 1));
+
+    const ack = received.ackFrame() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u64)), ack.largest_acknowledged);
+    try std.testing.expectEqual(@as(u64, 2), ack.first_ack_range);
+    try std.testing.expectEqual(@as(usize, 0), ack.ranges.len);
+    try std.testing.expect(!received.record(std.math.maxInt(u64)));
 }
