@@ -2030,6 +2030,9 @@ pub const Connection = struct {
         if (self.retry_source_connection_id != null) return null;
         if (self.initial_packet_space.discarded) return null;
         if (self.initial_packet_space.next_peer_packet_number != 0) return null;
+        if (self.handshake_packet_space.discarded) return null;
+        if (self.handshake_packet_space.next_peer_packet_number != 0) return null;
+        if (self.next_peer_packet_number != 0) return null;
 
         var negotiation = packet.parseVersionNegotiationPacket(datagram, self.allocator) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -59957,6 +59960,43 @@ test "processVersionNegotiationDatagram ignores packets before Initial send" {
     try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
     try std.testing.expectError(error.InvalidPacket, client.versionNegotiationFollowupConfig());
     try std.testing.expectEqual(@as(u64, 0), client.nextPacketNumber(.initial));
+}
+
+test "processVersionNegotiationDatagram ignores packets after non-Initial peer packets" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const client_versions = [_]packet.Version{ .v2, .v1 };
+    const server_versions = [_]packet.Version{.v2};
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try packet.encodeVersionNegotiationPacket(out.writer(), .{
+        .dcid = &client_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+    const version_negotiation = out.getWritten();
+    const ping = [_]u8{@intFromEnum(frame.FrameType.ping)};
+
+    inline for (.{ PacketNumberSpace.handshake, PacketNumberSpace.application }) |space| {
+        var client = try Connection.init(std.testing.allocator, .client, .{
+            .chosen_version = .v1,
+            .available_versions = &client_versions,
+        });
+        defer client.deinit();
+
+        _ = try client.recordPacketSentInSpace(.initial, 0, 1200);
+        try client.processDatagramInSpace(space, 10, &ping);
+        try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(space));
+        try std.testing.expectEqual(@as(?packet.Version, null), try client.processVersionNegotiationDatagram(
+            11,
+            &original_dcid,
+            &client_scid,
+            version_negotiation,
+        ));
+        try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
+        try std.testing.expectError(error.InvalidPacket, client.versionNegotiationFollowupConfig());
+        try std.testing.expectEqual(@as(u64, 1), client.nextPeerPacketNumber(space));
+    }
 }
 
 test "processVersionNegotiationDatagram rejects no mutual version without mutation" {
