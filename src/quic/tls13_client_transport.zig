@@ -321,6 +321,7 @@ pub const Tls13ClientTransport = struct {
             );
             return .{ .version_negotiation_selected_version = selected };
         }
+        if ((datagram[0] & 0x40) == 0) return error.InvalidPacket;
         if (isRetryDatagram(datagram)) {
             if (self.retry_received) return error.InvalidPacket;
             try self.connection.processRetryDatagram(now_millis, &self.original_destination_connection_id, datagram);
@@ -456,6 +457,8 @@ test "Tls13ClientTransport recognizes Retry and zero-only padding boundaries" {
     var scratch: [1]u8 = undefined;
     try std.testing.expectError(error.InvalidPacket, transport.receive(1, &scratch, &[_]u8{}));
     try std.testing.expectError(error.InvalidPacket, transport.receive(1, &scratch, &[_]u8{ 0, 0, 0 }));
+    try std.testing.expectError(error.InvalidPacket, transport.receive(1, &scratch, &[_]u8{ 0x20, 0x01, 0x02 }));
+    try std.testing.expectError(error.InvalidPacket, transport.receive(1, &scratch, &[_]u8{ 0x80, 0, 0, 0, 1 }));
     try std.testing.expectEqual(@as(u64, 0), transport.connection.nextPeerPacketNumber(.initial));
     try std.testing.expect(!transport.retry_received);
 }

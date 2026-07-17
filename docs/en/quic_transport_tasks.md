@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Hardened TLS client receive fixed-bit handling. Version
+  Negotiation remains the only fixed-bit exception; all other fixed-bit-clear
+  datagrams are rejected as `InvalidPacket` before Retry, long-packet, short-
+  packet, or installed-key state paths.
+
 - 2026-07-17: Hardened server endpoint direct routed datagram handling.
   Already-routed long/short processing entrypoints now reject fixed-bit-clear
   datagrams before installed-key or long-packet dispatch, keeping the direct

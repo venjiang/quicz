@@ -973,6 +973,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：加固 TLS client receive 的 fixed-bit 处理。Version Negotiation
+  保持唯一 fixed-bit 例外；其他 fixed-bit-clear datagram 会在进入 Retry、
+  long-packet、short-packet 或 installed-key 状态路径前返回 `InvalidPacket`。
+
 - 2026-07-17：加固 server endpoint 的直接 routed datagram 处理。
   已路由的 long/short 处理入口现在会在 installed-key 或 long-packet dispatch
   前拒绝 fixed-bit-clear datagram，与 endpoint receive 分类层保持同一边界。
