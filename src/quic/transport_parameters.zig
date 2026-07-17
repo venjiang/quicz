@@ -4,7 +4,7 @@ const packet = @import("packet.zig");
 const protocol_limits = @import("protocol_limits.zig");
 
 const max_connection_id_len = protocol_limits.max_connection_id_len;
-const max_udp_payload_size_default = 65_527;
+pub const max_udp_payload_size_default = 65_527;
 const max_stream_count = protocol_limits.max_stream_count;
 const max_quic_varint = protocol_limits.max_quic_varint;
 

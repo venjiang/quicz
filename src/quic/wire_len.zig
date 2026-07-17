@@ -265,7 +265,7 @@ pub fn newConnectionIdFrameWireLen(local_id: LocalConnectionId) Error!usize {
 pub fn newTokenFrameWireLen(token: []const u8) Error!usize {
     if (token.len == 0) return error.InvalidPacket;
     const token_len = std.math.cast(u64, token.len) orelse return error.BufferTooSmall;
-    if (token_len > max_quic_varint) return error.BufferTooSmall;
+    if (token_len > max_quic_varint) return error.InvalidPacket;
 
     var len: usize = 1; // frame type
     len = try addWireLen(len, try quicVarIntWireLen(token_len));
@@ -278,7 +278,7 @@ pub fn handshakeDoneFrameWireLen() usize {
 
 pub fn closeReasonLenWireLen(reason_len: usize) Error!usize {
     const value = std.math.cast(u64, reason_len) orelse return error.BufferTooSmall;
-    if (value > max_quic_varint) return error.BufferTooSmall;
+    if (value > max_quic_varint) return error.InvalidPacket;
     return quicVarIntWireLen(value);
 }
 
@@ -547,6 +547,10 @@ test "new connection id wire length rejects invalid local ids" {
         .connection_id = &[_]u8{},
         .stateless_reset_token = token,
     }));
+}
+
+test "close reason wire length rejects oversized QUIC varints as invalid packets" {
+    try std.testing.expectError(error.InvalidPacket, closeReasonLenWireLen(max_quic_varint + 1));
 }
 
 test "ack wire length rejects invalid ACK ranges and oversized varints" {

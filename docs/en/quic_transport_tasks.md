@@ -1098,6 +1098,15 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened typed peer transport-parameter validation. Direct
+  `applyPeerTransportParameters()` calls now reject oversized typed integer
+  values and peer `max_udp_payload_size` values above the QUIC UDP payload
+  ceiling before mutating peer send limits.
+
+- 2026-07-17: Tightened close/new-token frame length error classification.
+  Oversized close reason lengths and oversized NEW_TOKEN token lengths now stay
+  on the invalid-packet path instead of being reported as buffer sizing issues.
+
 - 2026-07-17: Tightened protected long-header datagram length overflow
   handling. Length prediction now reports a too-large QUIC Length field as
   `BufferTooSmall` instead of surfacing an internal varint sizing failure.

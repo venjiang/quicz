@@ -2808,6 +2808,7 @@ pub const Connection = struct {
         self: Connection,
         params: transport_parameters.TransportParameters,
     ) PeerTransportParameterValidationError!void {
+        try validatePeerTransportParameterIntegerBounds(params);
         if (self.side == .server) {
             if (params.original_destination_connection_id != null or
                 params.stateless_reset_token != null or
@@ -2833,6 +2834,28 @@ pub const Connection = struct {
         try self.validateRetrySourceConnectionIdParameter(params.retry_source_connection_id);
         if (params.preferred_address) |preferred| {
             _ = try PreferredAddress.fromTransportParameter(preferred);
+        }
+    }
+
+    fn validatePeerTransportParameterIntegerBounds(params: transport_parameters.TransportParameters) Error!void {
+        const integer_values = [_]u64{
+            params.max_idle_timeout,
+            params.max_udp_payload_size,
+            params.initial_max_data,
+            params.initial_max_stream_data_bidi_local,
+            params.initial_max_stream_data_bidi_remote,
+            params.initial_max_stream_data_uni,
+            params.initial_max_streams_bidi,
+            params.initial_max_streams_uni,
+            params.ack_delay_exponent,
+            params.max_ack_delay,
+            params.active_connection_id_limit,
+        };
+        for (integer_values) |value| {
+            if (value > max_quic_varint) return error.InvalidPacket;
+        }
+        if (params.max_udp_payload_size > transport_parameters.max_udp_payload_size_default) {
+            return error.InvalidPacket;
         }
     }
 
@@ -11919,6 +11942,41 @@ test "applyPeerTransportParameters keeps local recovery datagram size when peer 
     try std.testing.expectEqual(@as(usize, 1250), conn.recovery_state.max_datagram_size);
     try std.testing.expectEqual(@as(usize, 20_000), conn.congestionWindow(.application));
     try std.testing.expectEqual(@as(usize, 625), conn.recovery_state.congestion_avoidance_bytes_acked);
+}
+
+test "applyPeerTransportParameters rejects typed values outside wire bounds" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1250,
+    });
+    defer conn.deinit();
+
+    try conn.applyPeerTransportParameters(.{
+        .max_udp_payload_size = 1200,
+        .initial_max_data = 9,
+    });
+    try std.testing.expectEqual(@as(u64, 9), conn.peer_max_data);
+    try std.testing.expectEqual(@as(usize, 1200), conn.peer_max_udp_payload_size);
+
+    try std.testing.expectError(error.InvalidPacket, conn.applyPeerTransportParameters(.{
+        .max_udp_payload_size = transport_parameters.max_udp_payload_size_default + 1,
+        .initial_max_data = 10,
+    }));
+    try std.testing.expectError(error.InvalidPacket, conn.applyPeerTransportParameters(.{
+        .max_idle_timeout = max_quic_varint + 1,
+        .initial_max_data = 11,
+    }));
+    try std.testing.expectError(error.InvalidPacket, conn.applyPeerTransportParameters(.{
+        .initial_max_data = max_quic_varint + 1,
+    }));
+    try std.testing.expectError(error.InvalidPacket, conn.applyPeerTransportParameters(.{
+        .initial_max_stream_data_bidi_local = max_quic_varint + 1,
+    }));
+    try std.testing.expectError(error.InvalidPacket, conn.applyPeerTransportParameters(.{
+        .active_connection_id_limit = max_quic_varint + 1,
+    }));
+
+    try std.testing.expectEqual(@as(u64, 9), conn.peer_max_data);
+    try std.testing.expectEqual(@as(usize, 1200), conn.peer_max_udp_payload_size);
 }
 
 test "effectiveIdleTimeoutMillis uses shorter non-zero endpoint value" {

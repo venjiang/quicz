@@ -973,6 +973,15 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 typed peer transport-parameter 校验。直接调用
+  `applyPeerTransportParameters()` 时，现在会在修改 peer send limit 前拒绝
+  oversized typed integer value 和超过 QUIC UDP payload 上限的 peer
+  `max_udp_payload_size`。
+
+- 2026-07-17：收紧 close/new-token frame length 错误分类。过大的 close
+  reason length 和过大的 NEW_TOKEN token length 现在会走 invalid-packet 路径，而不是
+  报为 buffer sizing issue。
+
 - 2026-07-17：收紧 protected long-header datagram length overflow 处理。
   length prediction 现在会把过大的 QUIC Length 字段报为 `BufferTooSmall`，而不是
   暴露 internal varint sizing failure。
