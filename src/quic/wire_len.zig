@@ -65,12 +65,11 @@ pub fn protectedShortDatagramWireLen(
     plaintext_len: usize,
 ) Error!usize {
     if (packet_number_len == 0 or packet_number_len > 4) return error.InvalidPacket;
+    const protected_payload_len = std.math.add(usize, plaintext_len, protection.aead_tag_len) catch return error.BufferTooSmall;
     var len: usize = 1;
     len = try addWireLen(len, dcid_len);
     len = try addWireLen(len, packet_number_len);
-    len = try addWireLen(len, plaintext_len);
-    len = try addWireLen(len, protection.aead_tag_len);
-    return len;
+    return try addWireLen(len, protected_payload_len);
 }
 
 pub fn protectedShortPlaintextLenForMinDatagram(
@@ -364,6 +363,13 @@ test "protected long datagram wire length rejects payload overflow" {
     try std.testing.expectError(
         error.BufferTooSmall,
         protectedLongDatagramWireLen(header, 4, std.math.maxInt(usize)),
+    );
+}
+
+test "protected short datagram wire length rejects payload overflow" {
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        protectedShortDatagramWireLen(8, 4, std.math.maxInt(usize)),
     );
 }
 
