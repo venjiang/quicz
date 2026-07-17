@@ -1069,6 +1069,12 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened protected long-header length budgeting. Initial token
+  length, packet length-field width, and packet-number length additions now use
+  checked arithmetic and return `InvalidPayloadLength` instead of overflowing;
+  unit coverage exercises an oversized token-length boundary without touching
+  examples.
+
 - 2026-07-16: Added the TLS 1.3 `early_data` acceptance signal in
   EncryptedExtensions for accepted 0-RTT. The client now accepts that extension
   only when PSK was selected and the stored ticket permitted QUIC 0-RTT, and

@@ -901,11 +901,11 @@ fn longHeaderLen(header: packet.LongHeader, pn_len: u8, wire_length: u64) !usize
     var len: usize = 1 + 4 + 1 + header.dcid.len + 1 + header.scid.len;
     if (header.packet_type == .initial) {
         const token_len_u64 = std.math.cast(u64, token_len) orelse return error.InvalidPayloadLength;
-        len += try varIntLen(token_len_u64);
-        len += token_len;
+        len = std.math.add(usize, len, try varIntLen(token_len_u64)) catch return error.InvalidPayloadLength;
+        len = std.math.add(usize, len, token_len) catch return error.InvalidPayloadLength;
     }
-    len += try varIntLen(wire_length);
-    len += pn_len;
+    len = std.math.add(usize, len, try varIntLen(wire_length)) catch return error.InvalidPayloadLength;
+    len = std.math.add(usize, len, pn_len) catch return error.InvalidPayloadLength;
     return len;
 }
 
@@ -1694,4 +1694,19 @@ test "payload protection validates buffer lengths" {
     const ciphertext = [_]u8{0x00};
     var empty_plaintext = [_]u8{};
     try std.testing.expectError(error.InvalidPayloadLength, unprotectAes128Payload(secrets.client, 0, &associated_data, &ciphertext, tag, &empty_plaintext));
+}
+
+test "protected long header length rejects token overflow" {
+    const oversized_token: []const u8 = @as([*]const u8, @ptrFromInt(1))[0..std.math.maxInt(usize)];
+    const header = packet.LongHeader{
+        .packet_type = .initial,
+        .version = .v1,
+        .dcid = "destination",
+        .scid = "source",
+        .token = oversized_token,
+        .packet_number = 0,
+        .payload_length = 0,
+    };
+
+    try std.testing.expectError(error.InvalidPayloadLength, longHeaderLen(header, 4, 4));
 }

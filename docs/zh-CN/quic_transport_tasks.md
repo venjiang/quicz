@@ -948,6 +948,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 protected long-header 长度预算。Initial token length、
+  packet length-field width 和 packet-number length 现在使用 checked
+  arithmetic，并在溢出时返回 `InvalidPayloadLength`；单元测试覆盖 oversized
+  token-length 边界，未修改 examples。
+
 - 2026-07-16：accepted 0-RTT 现在会在 TLS 1.3 EncryptedExtensions 中发送
   `early_data` acceptance signal。client 只在 PSK 已被选择且已存 ticket
   允许 QUIC 0-RTT 时接受该 extension，并拒绝 unsolicited 或非空
