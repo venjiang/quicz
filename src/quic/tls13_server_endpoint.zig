@@ -5958,3 +5958,173 @@ test "Tls13ServerEndpoint bounded receive reports active stateless reset and ret
     try std.testing.expect(endpoint_owner.records.get(record_handle) == null);
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
 }
+
+test "Tls13ServerEndpoint receive step reports active stateless reset and close deadline" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: root.CryptoBackend,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "initial";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 1,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer endpoint_owner.deinit();
+
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+    };
+    const server_dcid = "local";
+    const peer_connection_id = [_]u8{ 0xda, 0xdb, 0xdc, 0xdd };
+    const reset_token = [_]u8{0xbc} ** quic_packet.stateless_reset_token_len;
+    var empty_backend = EmptyBackend{};
+
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer {
+        if (record_owned) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = 87,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    record_initialized = true;
+
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try record.connection.processDatagram(0, writer.getWritten());
+    try record.connection.validatePeerAddress();
+    try record.connection.confirmHandshake();
+    _ = try record.connection.recordPacketSentInSpace(.application, 1, 64);
+    try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, path, .{});
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(record.handle);
+    try endpoint_owner.records.adopt(record.handle, record);
+    record_owned = false;
+    const record_handle = record.handle;
+    try endpoint_owner.lifecycle.armRecoveryTimerFromConnection(record_handle, &record.connection);
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.recoveryTimerCount());
+
+    var reset_prefix: [1 + server_dcid.len]u8 = undefined;
+    reset_prefix[0] = 0x40;
+    @memcpy(reset_prefix[1..], server_dcid);
+    var reset_datagram: [64]u8 = undefined;
+    var reset_writer = buffer.fixedWriter(&reset_datagram);
+    try quic_packet.encodeStatelessReset(reset_writer.writer(), &reset_prefix, reset_token);
+
+    var route_out: [64]u8 = undefined;
+    var scratch: [64]u8 = undefined;
+    var initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    var pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const step = try endpoint_owner.receiveDatagramStepWithRoutePath(
+        std.testing.allocator,
+        path,
+        10,
+        reset_writer.getWritten(),
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &route_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &scratch,
+        &[_]u8{},
+        &initial_out,
+        &handshake_out,
+        &installed_key_out,
+        .application,
+        &pending_out,
+    );
+    const reset = switch (step.process) {
+        .routed => |routed| switch (routed) {
+            .installed_key => |installed_key| installed_key,
+            .long => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    const feed = reset.feed orelse return error.TestUnexpectedResult;
+    try std.testing.expect(feed.feed == .dropped);
+    try std.testing.expectEqual(@as(?u64, 0), reset.stateless_reset_sequence_number);
+    try std.testing.expectEqual(@as(usize, 0), reset.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), reset.drain.first_error);
+    try std.testing.expectEqual(connection_module.ConnectionState.draining, record.connection.connectionState());
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), step.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), step.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), step.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), step.pending_drain.datagrams_written);
+
+    const reset_next_deadline = reset.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record_handle, reset_next_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.close_timeout, reset_next_deadline.kind);
+    const step_next_deadline = step.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(reset_next_deadline, step_next_deadline);
+}
