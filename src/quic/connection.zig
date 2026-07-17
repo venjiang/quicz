@@ -10964,41 +10964,99 @@ pub const Connection = struct {
         data: []const u8,
     };
 
-    fn trimAlreadyReceivedCryptoData(
+    const PendingCryptoOverlap = struct {
+        pending: PendingCryptoFrame,
+        start: u64,
+        end: u64,
+    };
+
+    fn earliestPendingCryptoOverlap(
+        packet_space: PacketNumberSpaceView,
+        start: u64,
+        end: u64,
+    ) Error!?PendingCryptoOverlap {
+        var earliest: ?PendingCryptoOverlap = null;
+        for (packet_space.crypto_recv_pending.items) |pending| {
+            const pending_end = streamEndOffset(pending.offset, pending.data.len) orelse return error.InvalidPacket;
+            const overlap_start = @max(start, pending.offset);
+            const overlap_end = @min(end, pending_end);
+            if (overlap_start >= overlap_end) continue;
+            if (earliest == null or overlap_start < earliest.?.start) {
+                earliest = .{
+                    .pending = pending,
+                    .start = overlap_start,
+                    .end = overlap_end,
+                };
+            }
+        }
+        return earliest;
+    }
+
+    fn collectNewCryptoFrameDataSegments(
+        self: *Connection,
         packet_space: PacketNumberSpaceView,
         offset: u64,
         data: []const u8,
-    ) Error!ReceiveCryptoFrameData {
-        if (data.len == 0) return .{ .offset = offset, .data = data };
+        segments: ?*std.ArrayList(ReceiveCryptoFrameData),
+    ) Error!void {
+        if (data.len == 0) return;
 
         const contiguous_len = std.math.cast(u64, packet_space.crypto_recv_buffer.items.len) orelse return error.Internal;
-        var new_offset = offset;
-        var new_data = data;
+        const end_offset = streamEndOffset(offset, data.len) orelse return error.InvalidPacket;
+        var cursor = offset;
 
-        if (new_offset < contiguous_len) {
+        if (cursor < contiguous_len) {
             const duplicate_len_u64 = @min(
-                contiguous_len - new_offset,
-                std.math.cast(u64, new_data.len) orelse return error.InvalidPacket,
+                contiguous_len - cursor,
+                end_offset - cursor,
             );
             const duplicate_len = std.math.cast(usize, duplicate_len_u64) orelse return error.InvalidPacket;
-            const duplicate_start = std.math.cast(usize, new_offset) orelse return error.InvalidPacket;
+            const duplicate_start = std.math.cast(usize, cursor) orelse return error.InvalidPacket;
             const duplicate_end = std.math.add(usize, duplicate_start, duplicate_len) catch return error.InvalidPacket;
-            if (!std.mem.eql(u8, packet_space.crypto_recv_buffer.items[duplicate_start..duplicate_end], new_data[0..duplicate_len])) {
+            const incoming_start = std.math.cast(usize, cursor - offset) orelse return error.InvalidPacket;
+            if (!std.mem.eql(u8, packet_space.crypto_recv_buffer.items[duplicate_start..duplicate_end], data[incoming_start..][0..duplicate_len])) {
                 return error.InvalidPacket;
             }
-            new_offset = streamEndOffset(new_offset, duplicate_len) orelse return error.InvalidPacket;
-            new_data = new_data[duplicate_len..];
-            if (new_data.len == 0) return .{ .offset = new_offset, .data = new_data };
+            cursor = streamEndOffset(cursor, duplicate_len) orelse return error.InvalidPacket;
+            if (cursor == end_offset) return;
         }
 
-        for (packet_space.crypto_recv_pending.items) |pending| {
-            if (!streamRangesOverlap(new_offset, new_data.len, pending.offset, pending.data.len)) continue;
-            if (new_offset == pending.offset and new_data.len == pending.data.len and std.mem.eql(u8, new_data, pending.data)) {
-                return .{ .offset = new_offset, .data = new_data[0..0] };
+        while (cursor < end_offset) {
+            const overlap = try earliestPendingCryptoOverlap(packet_space, cursor, end_offset) orelse {
+                const start_index = std.math.cast(usize, cursor - offset) orelse return error.InvalidPacket;
+                if (segments) |out_segments| {
+                    out_segments.append(self.allocator, .{
+                        .offset = cursor,
+                        .data = data[start_index..],
+                    }) catch return error.OutOfMemory;
+                }
+                return;
+            };
+
+            if (overlap.start > cursor) {
+                const start_index = std.math.cast(usize, cursor - offset) orelse return error.InvalidPacket;
+                const segment_len = std.math.cast(usize, overlap.start - cursor) orelse return error.InvalidPacket;
+                if (segments) |out_segments| {
+                    out_segments.append(self.allocator, .{
+                        .offset = cursor,
+                        .data = data[start_index..][0..segment_len],
+                    }) catch return error.OutOfMemory;
+                }
+                cursor = overlap.start;
             }
-            return error.InvalidPacket;
+
+            const incoming_start = std.math.cast(usize, overlap.start - offset) orelse return error.InvalidPacket;
+            const pending_start = std.math.cast(usize, overlap.start - overlap.pending.offset) orelse return error.InvalidPacket;
+            const overlap_len = std.math.cast(usize, overlap.end - overlap.start) orelse return error.InvalidPacket;
+            if (!std.mem.eql(
+                u8,
+                data[incoming_start..][0..overlap_len],
+                overlap.pending.data[pending_start..][0..overlap_len],
+            )) {
+                return error.InvalidPacket;
+            }
+            cursor = overlap.end;
         }
-        return .{ .offset = new_offset, .data = new_data };
     }
 
     fn pendingCryptoFrameIndexAt(packet_space: PacketNumberSpaceView, offset: u64) ?usize {
@@ -11043,14 +11101,17 @@ pub const Connection = struct {
 
         const end_offset = streamEndOffset(crypto.offset, crypto.data.len) orelse return error.InvalidPacket;
         if (end_offset > self.config.max_crypto_buffer_size) return error.InvalidPacket;
-        const new_frame_data = try trimAlreadyReceivedCryptoData(packet_space, crypto.offset, crypto.data);
-        if (new_frame_data.data.len == 0) return;
+        var new_frame_segments: std.ArrayList(ReceiveCryptoFrameData) = .empty;
+        defer new_frame_segments.deinit(self.allocator);
+        try self.collectNewCryptoFrameDataSegments(packet_space, crypto.offset, crypto.data, &new_frame_segments);
 
-        const contiguous_len = std.math.cast(u64, packet_space.crypto_recv_buffer.items.len) orelse return error.Internal;
-        if (new_frame_data.offset == contiguous_len) {
-            packet_space.crypto_recv_buffer.appendSlice(self.allocator, new_frame_data.data) catch return error.OutOfMemory;
-        } else {
-            try self.queueCryptoFrame(packet_space.crypto_recv_pending, new_frame_data.offset, new_frame_data.data);
+        for (new_frame_segments.items) |new_frame_data| {
+            const contiguous_len = std.math.cast(u64, packet_space.crypto_recv_buffer.items.len) orelse return error.Internal;
+            if (new_frame_data.offset == contiguous_len) {
+                packet_space.crypto_recv_buffer.appendSlice(self.allocator, new_frame_data.data) catch return error.OutOfMemory;
+            } else {
+                try self.queueCryptoFrame(packet_space.crypto_recv_pending, new_frame_data.offset, new_frame_data.data);
+            }
         }
     }
 
@@ -13259,6 +13320,53 @@ test "processDatagram buffers out-of-order CRYPTO and ignores duplicate pending 
     const n = (try conn.recvCrypto(&read_buf)).?;
     try std.testing.expectEqualStrings("hello world", read_buf[0..n]);
     try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_pending.items.len);
+}
+
+test "processDatagram splits duplicate middle overlap with pending CRYPTO data" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{ .max_crypto_buffer_size = 5 });
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 2,
+        .data = "cd",
+    } });
+    try conn.processDatagram(0, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_buffer.items.len);
+    try std.testing.expectEqual(@as(usize, 1), conn.crypto_recv_pending.items.len);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 1,
+        .data = "bXde",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_buffer.items.len);
+    try std.testing.expectEqual(@as(usize, 1), conn.crypto_recv_pending.items.len);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 1,
+        .data = "bcde",
+    } });
+    try conn.processDatagram(2, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_buffer.items.len);
+    try std.testing.expectEqual(@as(usize, 3), conn.crypto_recv_pending.items.len);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "a",
+    } });
+    try conn.processDatagram(3, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 3), conn.crypto_recv_pending.items.len);
+
+    var read_buf: [8]u8 = undefined;
+    const n = (try conn.recvCrypto(&read_buf)).?;
+    try std.testing.expectEqualStrings("abcde", read_buf[0..n]);
+    try std.testing.expectEqual(@as(usize, 0), conn.crypto_recv_pending.items.len);
+    try std.testing.expectEqual(@as(?usize, null), try conn.recvCrypto(&read_buf));
 }
 
 test "processDatagram discards duplicate CRYPTO data without appending bytes" {
