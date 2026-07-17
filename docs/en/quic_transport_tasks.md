@@ -1098,6 +1098,12 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Hardened server endpoint routed record lookup. Once lifecycle
+  routing selects a connection handle, missing endpoint-owned records now report
+  an internal consistency error instead of classifying the peer datagram as
+  invalid. Caller-handle APIs still report `UnknownConnectionId` for explicit
+  unknown handles.
+
 - 2026-07-17: Made endpoint-owned installed-key output polling fair across
   active records. The registry now resumes cross-record poll/drain after the
   last record that produced output, so one busy route does not permanently

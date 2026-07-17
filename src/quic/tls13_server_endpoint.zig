@@ -739,7 +739,7 @@ pub fn Tls13ServerEndpoint(
                 .stateless_reset => |reset| return .{ .stateless_reset = reset },
                 .dropped => return .dropped,
             };
-            const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
+            const record = self.records.get(route.connection_id) orelse return error.Internal;
             return self.lifecycle.feedDatagramWithInstalledKeys(
                 route.connection_id,
                 connection_of(record),
@@ -778,7 +778,7 @@ pub fn Tls13ServerEndpoint(
                 .stateless_reset => |reset| return .{ .feed = .{ .feed = .{ .stateless_reset = reset } } },
                 .dropped => return .{ .feed = .{ .feed = .dropped } },
             };
-            const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
+            const record = self.records.get(route.connection_id) orelse return error.Internal;
             return self.lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrCloseAndPollDatagram(
                 route.connection_id,
                 connection_of(record),
@@ -835,7 +835,7 @@ pub fn Tls13ServerEndpoint(
                     .next_deadline = try self.nextDeadline(self.records.allocator),
                 },
             };
-            const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
+            const record = self.records.get(route.connection_id) orelse return error.Internal;
             return self.processRoutedInstalledKeyDatagramWithRoutePath(
                 route,
                 record,
@@ -1847,7 +1847,7 @@ pub fn Tls13ServerEndpoint(
                     handshake_out,
                 ) },
                 .short => short: {
-                    const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
+                    const record = self.records.get(route.connection_id) orelse return error.Internal;
                     break :short .{ .installed_key = try self.processRoutedInstalledKeyDatagramWithRoutePath(
                         route,
                         record,
@@ -1887,7 +1887,7 @@ pub fn Tls13ServerEndpoint(
                     handshake_out,
                 ) },
                 .short => short: {
-                    const record = self.records.get(route.connection_id) orelse return error.InvalidPacket;
+                    const record = self.records.get(route.connection_id) orelse return error.Internal;
                     break :short .{ .installed_key = try self.processRoutedInstalledKeyDatagramAndDrainWithRoutePath(
                         route,
                         record,
@@ -3475,7 +3475,7 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
 
     try endpoint_owner.records.remove(record.handle);
     try std.testing.expectError(
-        error.InvalidPacket,
+        error.Internal,
         endpoint_owner.feedDatagramWithInstalledKeys(
             no_allocation_allocator.allocator(),
             path,

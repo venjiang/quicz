@@ -973,6 +973,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：加固 server endpoint routed record lookup。lifecycle routing
+  一旦选中 connection handle，缺失 endpoint-owned record 现在报告内部一致性错误，
+  不再把它归类为 peer datagram invalid。显式 caller-handle API 对未知 handle
+  仍返回 `UnknownConnectionId`。
+
 - 2026-07-17：让 endpoint-owned installed-key 输出轮询在 active record
   之间保持公平。registry 现在会从上一次产出输出的 record 之后继续跨 record
   poll/drain，避免单个繁忙 route 长期饿死后续 endpoint-owned connection。
