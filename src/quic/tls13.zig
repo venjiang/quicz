@@ -1866,6 +1866,19 @@ fn namedGroupSeenBefore(groups: []const u8, current_group_offset: usize, group: 
     return false;
 }
 
+fn alpnProtocolSeenBefore(protocols: []const u8, current_entry_offset: usize, protocol: []const u8) bool {
+    var pos: usize = 0;
+    while (pos < current_entry_offset) {
+        if (pos + 1 > current_entry_offset) return false;
+        const len = protocols[pos];
+        pos += 1;
+        if (len == 0 or pos + len > current_entry_offset) return false;
+        if (std.mem.eql(u8, protocols[pos..][0..len], protocol)) return true;
+        pos += len;
+    }
+    return false;
+}
+
 fn clientHelloSupportedGroupsContains(extensions: []const u8, group: u16) ?bool {
     var pos: usize = 0;
     while (pos < extensions.len) {
@@ -3114,10 +3127,14 @@ pub const Tls13Handshake = struct {
                     var ap: usize = 2;
                     while (ap < el) {
                         if (ap + 1 > el) return error.DecodeError;
+                        const entry_offset = ap - 2;
                         const plen = ext[ap];
                         ap += 1;
                         if (plen == 0 or ap + plen > el) return error.DecodeError;
                         const proto = ext[ap .. ap + plen];
+                        if (alpnProtocolSeenBefore(ext[2..el], entry_offset, proto)) {
+                            return error.DecodeError;
+                        }
                         for (self.config.alpn) |our| {
                             if (std.mem.eql(u8, proto, our)) {
                                 self.negotiated_alpn_len = @min(plen, self.negotiated_alpn.len);
@@ -5768,6 +5785,35 @@ test "Tls13Handshake server rejects malformed ClientHello ALPN length" {
     writeU16(hello[alpn_ext.body_offset..][0..2], @as(u16, @intCast(alpn_ext.body_len - 1)));
 
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects duplicate ClientHello ALPN protocols" {
+    const protocol = "hq-interop";
+    const alpn = [_][]const u8{protocol};
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{ .alpn = &alpn }, &hello_buf);
+    const alpn_ext = try clientHelloExtension(base_hello, @intFromEnum(ExtType.alpn));
+    const duplicate_len = 1 + protocol.len;
+    const insert_offset = alpn_ext.body_offset + alpn_ext.body_len;
+
+    std.mem.copyBackwards(
+        u8,
+        hello_buf[insert_offset + duplicate_len .. base_hello.len + duplicate_len],
+        hello_buf[insert_offset..base_hello.len],
+    );
+    hello_buf[insert_offset] = @intCast(protocol.len);
+    @memcpy(hello_buf[insert_offset + 1 ..][0..protocol.len], protocol);
+    const list_len = readU16(hello_buf[alpn_ext.body_offset..]);
+    writeU16(hello_buf[alpn_ext.body_offset..][0..2], @as(u16, @intCast(list_len + duplicate_len)));
+    writeU16(hello_buf[alpn_ext.header_offset + 2 ..][0..2], @as(u16, @intCast(alpn_ext.body_len + duplicate_len)));
+    try setClientHelloBodyLen(&hello_buf, base_hello.len - 4 + duplicate_len);
+    const extensions_len = readU16(hello_buf[alpn_ext.extensions_len_offset..]);
+    writeU16(hello_buf[alpn_ext.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + duplicate_len)));
+    const hello = hello_buf[0 .. base_hello.len + duplicate_len];
+
+    var server = Tls13Handshake.initServer(.{ .alpn = &alpn }, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
 }
