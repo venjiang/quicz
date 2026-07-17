@@ -350,6 +350,23 @@ test "protected datagram wire length rejects invalid packet number lengths" {
     try std.testing.expectError(error.InvalidPacket, protectedShortDatagramWireLen(8, 5, 0));
 }
 
+test "protected long datagram wire length rejects payload overflow" {
+    const header = packet.LongHeader{
+        .packet_type = .handshake,
+        .version = .v1,
+        .dcid = "destination",
+        .scid = "source",
+        .token = "",
+        .packet_number = 0,
+        .payload_length = 0,
+    };
+
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        protectedLongDatagramWireLen(header, 4, std.math.maxInt(usize)),
+    );
+}
+
 test "max frame data length respects varint boundary expansion" {
     try std.testing.expectEqual(@as(usize, 3), try maxStreamFrameDataLen(0, 0, 100, 6));
     try std.testing.expectEqual(@as(usize, 63), try maxStreamFrameDataLen(0, 0, 100, 67));
