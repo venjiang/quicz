@@ -948,6 +948,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 variable-length frame data 校验。NEW_TOKEN 和
+  CONNECTION_CLOSE reason 编码器现在会在写入任何 partial frame bytes 前拒绝
+  oversized QUIC varint length。
+
 - 2026-07-17：收紧 long-header length-field 校验。编码器现在会在写入任何
   partial header bytes 前，以 `InvalidLength` 拒绝 oversized token 或 packet
   Length varint。
