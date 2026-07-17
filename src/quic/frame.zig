@@ -347,16 +347,30 @@ pub fn deinitFrame(frame: *Frame, allocator: std.mem.Allocator) void {
 }
 
 fn validateAckFrame(ack: AckFrame) FrameError!void {
+    try validateFrameVarInt(ack.largest_acknowledged);
+    try validateFrameVarInt(ack.ack_delay);
+    try validateFrameVarInt(ack.first_ack_range);
+    const range_count = std.math.cast(u64, ack.ranges.len) orelse return error.InvalidFrameLength;
+    try validateFrameVarInt(range_count);
     if (ack.first_ack_range > ack.largest_acknowledged) return error.InvalidAckRange;
 
     var smallest = ack.largest_acknowledged - ack.first_ack_range;
     for (ack.ranges) |range| {
+        try validateFrameVarInt(range.gap);
+        try validateFrameVarInt(range.ack_range);
         const skipped = std.math.add(u64, range.gap, 2) catch return error.InvalidAckRange;
         if (smallest < skipped) return error.InvalidAckRange;
         const range_largest = smallest - skipped;
         if (range.ack_range > range_largest) return error.InvalidAckRange;
         smallest = range_largest - range.ack_range;
     }
+}
+
+fn validateAckEcnFrame(ack_ecn: AckEcnFrame) FrameError!void {
+    try validateAckFrame(ack_ecn.ack);
+    try validateFrameVarInt(ack_ecn.ecn_counts.ect0_count);
+    try validateFrameVarInt(ack_ecn.ecn_counts.ect1_count);
+    try validateFrameVarInt(ack_ecn.ecn_counts.ecn_ce_count);
 }
 
 fn deinitAckFrame(ack: AckFrame, allocator: std.mem.Allocator) void {
@@ -419,10 +433,12 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeByte(@intFromEnum(FrameType.ping));
         },
         .ack => |ack| {
+            try validateAckFrame(ack);
             try writer.writeByte(@intFromEnum(FrameType.ack));
             try encodeAckFrameFields(writer, ack);
         },
         .ack_ecn => |ack_ecn| {
+            try validateAckEcnFrame(ack_ecn);
             try writer.writeByte(@intFromEnum(FrameType.ack_ecn));
             try encodeAckFrameFields(writer, ack_ecn.ack);
             try packet.encodeVarInt(writer, ack_ecn.ecn_counts.ect0_count);
@@ -1049,6 +1065,56 @@ test "encode/decode ack_ecn frame roundtrip" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "ack frame encoders reject oversized varint fields before writing" {
+    const oversized = max_quic_varint + 1;
+
+    var buf: [16]u8 = undefined;
+    var out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .ack = .{
+        .largest_acknowledged = oversized,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    const range = [_]AckRange{.{ .gap = 0, .ack_range = 0 }};
+    const oversized_ranges: []const AckRange = range[0..].ptr[0..std.math.maxInt(usize)];
+
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .ack = .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = oversized_ranges,
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    const oversized_range = [_]AckRange{.{ .gap = oversized, .ack_range = 0 }};
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .ack = .{
+        .largest_acknowledged = max_quic_varint,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &oversized_range,
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .ack_ecn = .{
+        .ack = .{
+            .largest_acknowledged = 0,
+            .ack_delay = 0,
+            .first_ack_range = 0,
+        },
+        .ecn_counts = .{
+            .ect0_count = oversized,
+            .ect1_count = 0,
+            .ecn_ce_count = 0,
+        },
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
 }
 
 test "ack_ecn with truncated ecn counts frees decoded ranges" {

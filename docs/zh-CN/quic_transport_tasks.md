@@ -948,6 +948,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 ACK/ACK_ECN frame scalar 校验。ACK 字段、ACK range
+  count、ACK range 和 ECN counters 现在会在写入 partial frame bytes 前拒绝
+  oversized QUIC varint 值。
+
 - 2026-07-17：收紧 transport-control frame scalar 校验。STREAM、
   RESET_STREAM、STOP_SENDING、flow-control、NEW_CONNECTION_ID 和
   RETIRE_CONNECTION_ID 编码器现在会在写入 partial frame bytes 前拒绝 oversized

@@ -1069,6 +1069,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened ACK/ACK_ECN frame scalar validation. ACK fields, ACK
+  range counts, ACK ranges, and ECN counters now reject oversized QUIC varint
+  values before writing partial frame bytes.
+
 - 2026-07-17: Tightened transport-control frame scalar validation. STREAM,
   RESET_STREAM, STOP_SENDING, flow-control, NEW_CONNECTION_ID, and
   RETIRE_CONNECTION_ID encoders now reject oversized QUIC varint fields before
