@@ -6635,12 +6635,17 @@ pub const Connection = struct {
 
     fn classifyCryptoFrameProcessingCloseError(
         self: *Connection,
+        packet_type: FramePacketType,
         crypto: frame.CryptoFrame,
         frame_type_value: u64,
     ) ?FramePayloadCloseError {
         const end_offset = streamEndOffset(crypto.offset, crypto.data.len) orelse return null;
         if (end_offset > self.config.max_crypto_buffer_size) {
             return semanticCloseError(.crypto_buffer_exceeded, frame_type_value, "crypto buffer");
+        }
+        const packet_space = self.packetNumberSpace(packetNumberSpaceForFramePacketType(packet_type));
+        if (cryptoFrameHasConflictingOverlap(packet_space, crypto.offset, crypto.data) catch return null) {
+            return semanticCloseError(.protocol_violation, frame_type_value, "crypto data");
         }
         return null;
     }
@@ -6726,7 +6731,7 @@ pub const Connection = struct {
                 .ack => |ack| self.classifyAckFrameProcessingCloseError(packet_type, ack, frame_type_value),
                 .ack_ecn => |ack_ecn| self.classifyAckFrameProcessingCloseError(packet_type, ack_ecn.ack, frame_type_value),
                 .stream => |stream_frame| self.classifyStreamFrameProcessingCloseError(stream_frame, frame_type_value),
-                .crypto => |crypto| self.classifyCryptoFrameProcessingCloseError(crypto, frame_type_value),
+                .crypto => |crypto| self.classifyCryptoFrameProcessingCloseError(packet_type, crypto, frame_type_value),
                 .reset_stream => |reset| self.classifyResetStreamFrameProcessingCloseError(reset, frame_type_value),
                 .stream_data_blocked => |blocked| self.classifyReceiveStreamIdCloseError(blocked.stream_id, frame_type_value),
                 .max_stream_data => |max_stream_data| self.classifySendControlStreamIdCloseError(max_stream_data.stream_id, frame_type_value),
@@ -10970,6 +10975,47 @@ pub const Connection = struct {
         end: u64,
     };
 
+    fn cryptoFrameHasConflictingOverlap(
+        packet_space: PacketNumberSpaceView,
+        offset: u64,
+        data: []const u8,
+    ) Error!bool {
+        if (data.len == 0) return false;
+
+        const end_offset = streamEndOffset(offset, data.len) orelse return error.InvalidPacket;
+        const contiguous_len = std.math.cast(u64, packet_space.crypto_recv_buffer.items.len) orelse return error.Internal;
+        const contiguous_overlap_start = offset;
+        const contiguous_overlap_end = @min(end_offset, contiguous_len);
+        if (contiguous_overlap_start < contiguous_overlap_end) {
+            const incoming_start = std.math.cast(usize, contiguous_overlap_start - offset) orelse return error.InvalidPacket;
+            const existing_start = std.math.cast(usize, contiguous_overlap_start) orelse return error.InvalidPacket;
+            const overlap_len = std.math.cast(usize, contiguous_overlap_end - contiguous_overlap_start) orelse return error.InvalidPacket;
+            if (!std.mem.eql(
+                u8,
+                packet_space.crypto_recv_buffer.items[existing_start..][0..overlap_len],
+                data[incoming_start..][0..overlap_len],
+            )) return true;
+        }
+
+        for (packet_space.crypto_recv_pending.items) |pending| {
+            const pending_end = streamEndOffset(pending.offset, pending.data.len) orelse return error.InvalidPacket;
+            const overlap_start = @max(offset, pending.offset);
+            const overlap_end = @min(end_offset, pending_end);
+            if (overlap_start >= overlap_end) continue;
+
+            const incoming_start = std.math.cast(usize, overlap_start - offset) orelse return error.InvalidPacket;
+            const pending_start = std.math.cast(usize, overlap_start - pending.offset) orelse return error.InvalidPacket;
+            const overlap_len = std.math.cast(usize, overlap_end - overlap_start) orelse return error.InvalidPacket;
+            if (!std.mem.eql(
+                u8,
+                pending.data[pending_start..][0..overlap_len],
+                data[incoming_start..][0..overlap_len],
+            )) return true;
+        }
+
+        return false;
+    }
+
     fn earliestPendingCryptoOverlap(
         packet_space: PacketNumberSpaceView,
         start: u64,
@@ -13431,6 +13477,65 @@ test "processDatagram rejects conflicting CRYPTO overlap and rolls back pending 
     } });
     try std.testing.expectError(error.InvalidPacket, conn.processDatagram(2, out.getWritten()));
     try std.testing.expectEqualStrings("hello", conn.crypto_recv_buffer.items);
+}
+
+test "processDatagramOrClose queues protocol violation close for conflicting CRYPTO data" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "hello",
+    } });
+    try conn.processDatagramOrClose(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 3,
+        .data = "xx",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(1, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    switch (conn.pending_close orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("crypto data", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "processDatagramOrClose queues protocol violation close for conflicting pending CRYPTO data" {
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 2,
+        .data = "cd",
+    } });
+    try conn.processDatagramOrClose(0, out.getWritten());
+    try std.testing.expectEqual(@as(usize, 1), conn.crypto_recv_pending.items.len);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .crypto = .{
+        .offset = 1,
+        .data = "bX",
+    } });
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(1, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    switch (conn.pending_close orelse return error.TestUnexpectedResult) {
+        .connection => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("crypto data", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "processDatagram enforces CRYPTO receive buffer limit" {
