@@ -1748,6 +1748,20 @@ fn encryptedExtensionsKnownExtensionBit(ext_type: u16) ?u4 {
     };
 }
 
+fn extensionTypeSeenBefore(extensions: []const u8, current_header_offset: usize, ext_type: u16) bool {
+    var pos: usize = 0;
+    while (pos < current_header_offset) {
+        if (pos + 4 > current_header_offset) return false;
+        const current_type = readU16(extensions[pos..]);
+        const current_len = readU16(extensions[pos + 2 ..]);
+        pos += 4;
+        if (pos + current_len > current_header_offset) return false;
+        if (current_type == ext_type) return true;
+        pos += current_len;
+    }
+    return false;
+}
+
 // ─── Write helpers ───────────────────────────────────────────────────
 
 fn writeU16(buf: []u8, val: u16) void {
@@ -2878,6 +2892,7 @@ pub const Tls13Handshake = struct {
         const ext_total = readU16(body[pos..]);
         pos += 2;
         if (pos + ext_total != body.len) return error.DecodeError;
+        const ext_start = pos;
         const ext_end = pos + ext_total;
 
         var have_key_share = false;
@@ -2894,12 +2909,16 @@ pub const Tls13Handshake = struct {
         const server_sig_scheme = signatureSchemeForPrivateKeyAlgorithm(self.config.private_key_algorithm);
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
+            const header_offset = pos;
             const et = readU16(body[pos..]);
             const el = readU16(body[pos + 2 ..]);
             pos += 4;
             if (pos + el > ext_end) return error.DecodeError;
             const ext = body[pos .. pos + el];
             pos += el;
+            if (extensionTypeSeenBefore(body[ext_start..ext_end], header_offset - ext_start, et)) {
+                return error.DecodeError;
+            }
             if (clientHelloKnownExtensionBit(et)) |bit| {
                 const mask = @as(u16, 1) << bit;
                 if (seen_known_extensions & mask != 0) return error.DecodeError;
@@ -5016,6 +5035,17 @@ test "Tls13Handshake server rejects duplicate known ClientHello extensions" {
     var hello_buf: [1024]u8 = undefined;
     const base_hello = try clientHelloBytes(.{}, &hello_buf);
     const hello = try appendDuplicateClientHelloExtension(&hello_buf, base_hello.len, @intFromEnum(ExtType.supported_versions));
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects duplicate unknown ClientHello extensions" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const with_unknown = try appendClientHelloRawExtension(&hello_buf, base_hello.len, 0xaaaa, &[_]u8{});
+    const hello = try appendClientHelloRawExtension(&hello_buf, with_unknown.len, 0xaaaa, &[_]u8{});
 
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
