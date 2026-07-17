@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened TLS client transport bare-padding datagram handling.
+  A UDP datagram that is entirely zero bytes is now rejected as
+  `InvalidPacket` before receive-side state mutation, while all-zero tail bytes
+  after a complete protected packet remain ignored.
+
 - 2026-07-17: Added direct coverage for the pre-bound peer Initial SCID match
   path. A protected Initial whose header SCID matches the endpoint-authenticated
   peer Initial Source Connection ID is accepted without replacing the stable

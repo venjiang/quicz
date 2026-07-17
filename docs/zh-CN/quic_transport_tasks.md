@@ -973,6 +973,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 TLS client transport 的裸 padding datagram 处理。
+  整个 UDP datagram 都是 0 字节时，现在会在 receive-side 状态变更前返回
+  `InvalidPacket`；完整 protected packet 后的 all-zero tail 仍会被忽略。
+
 - 2026-07-17：补充 pre-bound peer Initial SCID match 成功路径的直接覆盖。
   protected Initial 的 header SCID 与 endpoint 已认证的 peer Initial Source
   Connection ID 一致时，会在不替换稳定绑定的前提下被接受，并推进 Initial
