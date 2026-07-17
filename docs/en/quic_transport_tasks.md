@@ -1870,6 +1870,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   cross-connection pending-work API. `EndpointPollInstalledKeyDatagramOptions`
   now exposes its recovery packet-number-space mapping from `endpoint_types.zig`,
   so pending-work and due-deadline validation share one option-level rule.
+  Key-discard tests cover both poll and bounded-drain forms, proving cleanup
+  does not consume queued application output unless recovery fired.
 - 2026-06-18: Added
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()`
   and

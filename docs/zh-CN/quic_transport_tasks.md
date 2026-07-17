@@ -1641,6 +1641,8 @@ close 和 route cleanup 事件。
   这两个入口是单连接 pending-work 的显式输出命名，和跨连接 pending-work API 对齐。
   `EndpointPollInstalledKeyDatagramOptions` 现在在 `endpoint_types.zig` 中暴露 recovery
   packet-number-space 映射，使 pending-work 与 due-deadline 的校验复用同一条 options 规则。
+  key-discard 测试已覆盖 poll 和 bounded-drain 两种形态，证明未触发 recovery 时 cleanup
+  不会消费已排队的 application output。
 - 2026-06-18：新增
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndPollDatagramWithInstalledKeyOptions()` 和
   `EndpointConnectionLifecycle.driveCryptoBackendsInSpaceAndDrainDatagramsWithInstalledKeyOptions()`。
