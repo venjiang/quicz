@@ -241,8 +241,8 @@ output, then drives two TLS-owned 1-RTT key-phase transitions over real UDP.
 The first server ACK clears the client's update gate; the endpoint exposes the
 server's retained-key discard deadline as `.key_discard`, services it through
 the normal due-deadline path, and then rejects a replay protected with the
-expired previous generation (`stale_rejected=true`). The key-discard
-due-deadline bounded-drain path is also covered: it clears the retained key
+expired previous generation (`stale_rejected=true`). Key-discard due-deadline
+poll and bounded-drain paths are also covered: they clear the retained key
 without consuming the queued ACK/output that normal polling should still own.
 
 `zig build run-interop-event-loopback -- path` completes the same pure-Zig
