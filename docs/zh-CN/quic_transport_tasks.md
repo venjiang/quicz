@@ -973,6 +973,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：让 endpoint-owned installed-key 输出轮询在 active record
+  之间保持公平。registry 现在会从上一次产出输出的 record 之后继续跨 record
+  poll/drain，避免单个繁忙 route 长期饿死后续 endpoint-owned connection。
+  server endpoint 测试已覆盖两个排队 record 都会被 poll 到，随后输出集合为空。
+
 - 2026-07-17：加固 server Initial admission rollback。新 accepted record adopt
   后如果 Handshake backend drive 失败，record cleanup 失败会报告内部一致性错误，
   不再依赖 unreachable rollback。

@@ -27,6 +27,7 @@ pub fn EndpointConnectionRegistry(
         deadline_view_scratch: ?[]root.EndpointConnectionView,
         receive_view_scratch: ?[]root.EndpointConnectionReceiveView,
         poll_view_scratch: ?[]root.EndpointConnectionPollView,
+        next_poll_index: usize,
 
         /// Create an empty registry. Record handles must be unique while active.
         pub fn init(allocator: std.mem.Allocator) Self {
@@ -37,6 +38,7 @@ pub fn EndpointConnectionRegistry(
                 .deadline_view_scratch = null,
                 .receive_view_scratch = null,
                 .poll_view_scratch = null,
+                .next_poll_index = 0,
             };
         }
 
@@ -62,6 +64,7 @@ pub fn EndpointConnectionRegistry(
                 .deadline_view_scratch = deadline_view_scratch,
                 .receive_view_scratch = receive_view_scratch,
                 .poll_view_scratch = poll_view_scratch,
+                .next_poll_index = 0,
             };
         }
 
@@ -303,7 +306,8 @@ pub fn EndpointConnectionRegistry(
             }
 
             const drain = if (self.poll_view_scratch) |views|
-                lifecycle.drainDatagramsAcrossConnections(
+                self.drainDatagramsAcrossConnectionViews(
+                    lifecycle,
                     try self.fillPollViews(views, destination_connection_id, source_connection_id),
                     now_millis,
                     space,
@@ -316,7 +320,8 @@ pub fn EndpointConnectionRegistry(
                     source_connection_id,
                 );
                 defer allocator.free(views);
-                break :drain lifecycle.drainDatagramsAcrossConnections(
+                break :drain self.drainDatagramsAcrossConnectionViews(
+                    lifecycle,
                     views,
                     now_millis,
                     space,
@@ -327,6 +332,31 @@ pub fn EndpointConnectionRegistry(
                 .pending_work = pending_work,
                 .drain = drain,
             };
+        }
+
+        fn drainDatagramsAcrossConnectionViews(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            views: []const root.EndpointConnectionPollView,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+            out: []root.EndpointPolledDatagramResult,
+        ) root.EndpointDatagramDrainResult {
+            var result = root.EndpointDatagramDrainResult{};
+            while (result.datagrams_written < out.len) {
+                const polled = self.pollDatagramAcrossConnectionViews(
+                    lifecycle,
+                    views,
+                    now_millis,
+                    space,
+                ) catch |err| {
+                    result.first_error = err;
+                    return result;
+                };
+                out[result.datagrams_written] = polled orelse return result;
+                result.datagrams_written += 1;
+            }
+            return result;
         }
 
         /// Sweep endpoint-owned pending work and return the next live deadline.
@@ -387,7 +417,10 @@ pub fn EndpointConnectionRegistry(
             return result;
         }
 
-        /// Poll the first installed-key datagram from endpoint-owned records.
+        /// Poll one installed-key datagram from endpoint-owned records.
+        ///
+        /// Repeated calls resume after the last record that produced output so
+        /// one busy connection does not permanently starve later records.
         pub fn pollDatagramAcrossConnections(
             self: *Self,
             lifecycle: *root.EndpointConnectionLifecycle,
@@ -398,7 +431,8 @@ pub fn EndpointConnectionRegistry(
             comptime source_connection_id: *const fn (*const Record) []const u8,
         ) root.Error!?root.EndpointPolledDatagramResult {
             if (self.poll_view_scratch) |views| {
-                return lifecycle.pollDatagramAcrossConnections(
+                return self.pollDatagramAcrossConnectionViews(
+                    lifecycle,
                     try self.fillPollViews(views, destination_connection_id, source_connection_id),
                     now_millis,
                     space,
@@ -410,11 +444,50 @@ pub fn EndpointConnectionRegistry(
                 source_connection_id,
             );
             defer allocator.free(views);
-            return lifecycle.pollDatagramAcrossConnections(
+            return self.pollDatagramAcrossConnectionViews(
+                lifecycle,
                 views,
                 now_millis,
                 space,
             );
+        }
+
+        fn pollDatagramAcrossConnectionViews(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            views: []const root.EndpointConnectionPollView,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+        ) root.Error!?root.EndpointPolledDatagramResult {
+            if (views.len == 0) {
+                self.next_poll_index = 0;
+                return null;
+            }
+            const start = self.next_poll_index % views.len;
+            var offset: usize = 0;
+            while (offset < views.len) : (offset += 1) {
+                const index = (start + offset) % views.len;
+                const view = views[index];
+                const datagram = try lifecycle.pollDatagram(
+                    view.connection_id,
+                    view.connection,
+                    now_millis,
+                    .{
+                        .space = space,
+                        .destination_connection_id = view.destination_connection_id,
+                        .source_connection_id = view.source_connection_id,
+                    },
+                );
+                if (datagram) |bytes| {
+                    self.next_poll_index = (index + 1) % views.len;
+                    return .{
+                        .connection_id = view.connection_id,
+                        .datagram = bytes,
+                    };
+                }
+            }
+            self.next_poll_index = start;
+            return null;
         }
 
         /// Classify and process one installed-key datagram against the owned records.

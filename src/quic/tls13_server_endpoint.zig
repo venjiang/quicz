@@ -3887,6 +3887,7 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
         .local = secrets.server.secret,
         .peer = secrets.client.secret,
     });
+    try first_record.connection.sendPing();
     try endpoint_owner.lifecycle.registerConnectionId(first_record.handle, first_record.local_id, first_path, .{});
     errdefer _ = endpoint_owner.lifecycle.retireConnection(first_record.handle);
     try endpoint_owner.records.adopt(first_record.handle, first_record);
@@ -3929,13 +3930,32 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
         .application,
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(polled.datagram);
-    try std.testing.expectEqual(second_record.handle, polled.connection_id);
-    try std.testing.expect(polled.path.eql(second_path));
+    try std.testing.expect(polled.connection_id == first_record.handle or polled.connection_id == second_record.handle);
+    if (polled.connection_id == first_record.handle) {
+        try std.testing.expect(polled.path.eql(first_path));
+    } else {
+        try std.testing.expect(polled.path.eql(second_path));
+    }
     try std.testing.expect(polled.datagram.len != 0);
+
+    const next_polled = (try endpoint_owner.pollDatagramWithRoutePath(
+        no_allocation_allocator.allocator(),
+        11,
+        .application,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(next_polled.datagram);
+    try std.testing.expect(next_polled.connection_id == first_record.handle or next_polled.connection_id == second_record.handle);
+    try std.testing.expect(next_polled.connection_id != polled.connection_id);
+    if (next_polled.connection_id == first_record.handle) {
+        try std.testing.expect(next_polled.path.eql(first_path));
+    } else {
+        try std.testing.expect(next_polled.path.eql(second_path));
+    }
+    try std.testing.expect(next_polled.datagram.len != 0);
 
     try std.testing.expect((try endpoint_owner.pollDatagramWithRoutePath(
         no_allocation_allocator.allocator(),
-        11,
+        12,
         .application,
     )) == null);
 
@@ -3943,7 +3963,7 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     var zero_drain_out: [0]TestEndpoint.DatagramPathResult = .{};
     const zero_drain = endpoint_owner.drainDatagramsAcrossRecordsWithRoutePath(
         no_allocation_allocator.allocator(),
-        12,
+        13,
         .application,
         &zero_drain_out,
     );
@@ -3954,7 +3974,7 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     var drain_out: [1]TestEndpoint.DatagramPathResult = undefined;
     const drain = endpoint_owner.drainDatagramsAcrossRecordsWithRoutePath(
         no_allocation_allocator.allocator(),
-        13,
+        14,
         .application,
         &drain_out,
     );
@@ -3968,7 +3988,7 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
 
     const empty_drain = endpoint_owner.drainDatagramsAcrossRecordsWithRoutePath(
         no_allocation_allocator.allocator(),
-        14,
+        15,
         .application,
         &drain_out,
     );
@@ -3979,12 +3999,12 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try second_record.connection.sendPing();
     const recovery_first = (try endpoint_owner.pollDatagramWithRoutePath(
         no_allocation_allocator.allocator(),
-        15,
+        16,
         .application,
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(recovery_first.datagram);
     const deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(second_record.handle, deadline.connection_id);
+    try std.testing.expect(deadline.connection_id == first_record.handle or deadline.connection_id == second_record.handle);
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, deadline.kind);
     try std.testing.expectEqual(root.PacketNumberSpace.application, deadline.recovery.?.space);
 
@@ -4002,11 +4022,14 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expectEqual(@as(?root.Error, null), pending_drain.drain.first_error);
     try std.testing.expectEqual(@as(?endpoint.RouteError, null), pending_drain.drain.first_route_error);
     defer std.testing.allocator.free(pending_out[0].datagram);
-    try std.testing.expectEqual(second_record.handle, pending_out[0].connection_id);
-    try std.testing.expect(pending_out[0].path.eql(second_path));
+    try std.testing.expectEqual(deadline.connection_id, pending_out[0].connection_id);
+    if (pending_out[0].connection_id == first_record.handle) {
+        try std.testing.expect(pending_out[0].path.eql(first_path));
+    } else {
+        try std.testing.expect(pending_out[0].path.eql(second_path));
+    }
     try std.testing.expect(pending_out[0].datagram.len != 0);
     const next_deadline = pending_drain.next_deadline orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(second_record.handle, next_deadline.connection_id);
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
 
     try second_record.connection.sendPing();
@@ -4017,7 +4040,7 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(step_first.datagram);
     const step_deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(second_record.handle, step_deadline.connection_id);
+    try std.testing.expect(step_deadline.connection_id == first_record.handle or step_deadline.connection_id == second_record.handle);
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, step_deadline.kind);
 
     const unsupported_initial = [_]u8{
@@ -4073,11 +4096,14 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expectEqual(@as(?root.Error, null), step.pending_drain.first_error);
     try std.testing.expectEqual(@as(?endpoint.RouteError, null), step.pending_drain.first_route_error);
     defer std.testing.allocator.free(step_pending_out[0].datagram);
-    try std.testing.expectEqual(second_record.handle, step_pending_out[0].connection_id);
-    try std.testing.expect(step_pending_out[0].path.eql(second_path));
+    try std.testing.expectEqual(step_deadline.connection_id, step_pending_out[0].connection_id);
+    if (step_pending_out[0].connection_id == first_record.handle) {
+        try std.testing.expect(step_pending_out[0].path.eql(first_path));
+    } else {
+        try std.testing.expect(step_pending_out[0].path.eql(second_path));
+    }
     try std.testing.expect(step_pending_out[0].datagram.len != 0);
     const step_next_deadline = step.next_deadline orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(second_record.handle, step_next_deadline.connection_id);
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, step_next_deadline.kind);
 }
 

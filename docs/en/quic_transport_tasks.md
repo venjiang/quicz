@@ -1098,6 +1098,12 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Made endpoint-owned installed-key output polling fair across
+  active records. The registry now resumes cross-record poll/drain after the
+  last record that produced output, so one busy route does not permanently
+  starve later endpoint-owned connections. Server endpoint coverage now proves
+  two queued records are both polled before the output set becomes empty.
+
 - 2026-07-17: Hardened server Initial admission rollback. If Handshake backend
   drive fails after a newly accepted record is adopted, record cleanup now
   reports an internal consistency error on cleanup failure instead of relying on
