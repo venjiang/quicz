@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Aligned client endpoint fixed-bit receive reporting with the
+  TLS client transport. Socket-facing client endpoint receive helpers now
+  surface empty and non-Version-Negotiation fixed-bit-clear datagrams as
+  `InvalidPacket` receive results instead of leaking route-layer errors.
+
 - 2026-07-17: Hardened TLS client receive fixed-bit handling. Version
   Negotiation remains the only fixed-bit exception; all other fixed-bit-clear
   datagrams are rejected as `InvalidPacket` before Retry, long-packet, short-

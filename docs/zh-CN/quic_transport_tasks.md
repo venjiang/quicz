@@ -973,6 +973,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：对齐 client endpoint 与 TLS client transport 的 fixed-bit
+  receive 上报。socket-facing client endpoint receive helper 现在会把空 datagram
+  和非 Version Negotiation 的 fixed-bit-clear datagram 作为 `InvalidPacket`
+  receive result 返回，不再泄漏 route 层错误。
+
 - 2026-07-17：加固 TLS client receive 的 fixed-bit 处理。Version Negotiation
   保持唯一 fixed-bit 例外；其他 fixed-bit-clear datagram 会在进入 Retry、
   long-packet、short-packet 或 installed-key 状态路径前返回 `InvalidPacket`。

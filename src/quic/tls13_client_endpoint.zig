@@ -95,6 +95,8 @@ pub const Tls13ClientEndpoint = struct {
         scratch: []u8,
         datagram: []const u8,
     ) !ReceiveResult {
+        if (datagram.len == 0) return error.InvalidPacket;
+        if (!isVersionNegotiationDatagram(datagram) and (datagram[0] & 0x40) == 0) return error.InvalidPacket;
         const route = try self.lifecycle.routeDatagram(self.path, datagram);
         if (route.connection_id != self.connection_id) return error.InvalidPacket;
         if (datagram.len != 0 and packet.parseHeaderForm(datagram[0]) == .short) {
@@ -695,6 +697,11 @@ pub const Tls13ClientEndpoint = struct {
     };
 };
 
+fn isVersionNegotiationDatagram(datagram: []const u8) bool {
+    return datagram.len >= 5 and (datagram[0] & 0x80) != 0 and
+        std.mem.readInt(u32, datagram[1..5], .big) == 0;
+}
+
 test "Tls13ClientEndpoint registers its client route before begin" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28 };
@@ -762,6 +769,44 @@ test "Tls13ClientEndpoint begins with committed route path" {
     try std.testing.expect(initial.path.eql(new_path));
     try std.testing.expect(initial.datagram.len >= 1200);
     try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
+}
+
+test "Tls13ClientEndpoint reports fixed-bit-clear datagrams as receive errors" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        29,
+        path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    var scratch: [128]u8 = undefined;
+    const invalid_datagrams = [_][]const u8{
+        &[_]u8{},
+        &[_]u8{ 0x20, 0x01, 0x02 },
+        &[_]u8{ 0x80, 0, 0, 0, 1 },
+    };
+    for (invalid_datagrams) |datagram| {
+        const received = try client.receiveWithRoutePathOrClose(10, &scratch, datagram);
+        try std.testing.expect(received.receive == null);
+        try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), received.receive_error);
+        try std.testing.expect(received.outbound_initial == null);
+        try std.testing.expect(received.outbound_handshake == null);
+        try std.testing.expect(received.outbound_application == null);
+        try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
+        try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
+    }
 }
 
 test "Tls13ClientEndpoint polls application output with committed route path" {
