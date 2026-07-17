@@ -1069,6 +1069,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened Retry Integrity Tag pseudo-packet length budgeting.
+  Original DCID length plus Retry bytes now use checked arithmetic and reject
+  impossible inputs with `InvalidPayloadLength` before allocation.
+
 - 2026-07-17: Tightened protected long-header length budgeting. Initial token
   length, packet length-field width, and packet-number length additions now use
   checked arithmetic and return `InvalidPayloadLength` instead of overflowing;

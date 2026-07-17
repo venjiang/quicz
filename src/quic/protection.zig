@@ -487,7 +487,8 @@ pub fn retryIntegrityTag(
 ) ![aead_tag_len]u8 {
     if (original_destination_connection_id.len > max_connection_id_len) return error.InvalidConnectionIdLength;
     const profile = try retryIntegrityProfileForDatagram(retry_without_integrity_tag);
-    const pseudo_len = 1 + original_destination_connection_id.len + retry_without_integrity_tag.len;
+    var pseudo_len = std.math.add(usize, 1, original_destination_connection_id.len) catch return error.InvalidPayloadLength;
+    pseudo_len = std.math.add(usize, pseudo_len, retry_without_integrity_tag.len) catch return error.InvalidPayloadLength;
     const pseudo_packet = try allocator.alloc(u8, pseudo_len);
     defer allocator.free(pseudo_packet);
 
@@ -1677,6 +1678,10 @@ test "retry integrity validates input bounds" {
 
     const unknown_version_retry = [_]u8{ 0xff, 0x0a, 0x0a, 0x0a, 0x0a };
     try std.testing.expectError(error.UnsupportedVersion, retryIntegrityTag(std.testing.allocator, &original_dcid, &unknown_version_retry));
+
+    var retry_prefix = [_]u8{ 0xff, 0x00, 0x00, 0x00, 0x01 };
+    const oversized_retry: []const u8 = retry_prefix[0..].ptr[0..std.math.maxInt(usize)];
+    try std.testing.expectError(error.InvalidPayloadLength, retryIntegrityTag(std.testing.allocator, &original_dcid, oversized_retry));
 
     const too_short_retry = [_]u8{0xff} ** aead_tag_len;
     try std.testing.expectError(error.InvalidPayloadLength, verifyRetryIntegrityTag(std.testing.allocator, &original_dcid, &too_short_retry));
