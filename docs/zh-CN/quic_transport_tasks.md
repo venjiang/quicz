@@ -973,6 +973,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：加固 endpoint registry closed-record sweep。
+  `EndpointConnectionRegistry.removeClosedRecords()` 在 closed-record cleanup
+  期间遇到 endpoint-owned record table 异常变化时会报告内部一致性错误，不再依赖
+  unreachable removal 路径。
+
 - 2026-07-17：加固 TLS Linux CSPRNG 填充。纯 Zig TLS 随机字节生成现在会循环
   调用 Linux `getrandom` 直到填满请求 buffer，并对瞬时 `EINTR`/`EAGAIN`
   结果重试，不再接受部分熵。

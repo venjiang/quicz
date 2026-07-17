@@ -232,7 +232,7 @@ pub fn EndpointConnectionRegistry(
         }
 
         /// Remove every record whose connection has reached the closed state.
-        pub fn removeClosedRecords(self: *Self) usize {
+        pub fn removeClosedRecords(self: *Self) root.Error!usize {
             var removed_count: usize = 0;
             while (true) {
                 var closed_connection_id: ?u64 = null;
@@ -244,7 +244,7 @@ pub fn EndpointConnectionRegistry(
                     }
                 }
                 const connection_id = closed_connection_id orelse break;
-                self.remove(connection_id) catch unreachable;
+                self.remove(connection_id) catch return error.Internal;
                 removed_count += 1;
             }
             return removed_count;
@@ -273,7 +273,7 @@ pub fn EndpointConnectionRegistry(
                     now_millis,
                 );
             };
-            _ = self.removeClosedRecords();
+            _ = try self.removeClosedRecords();
             return pending_work;
         }
 

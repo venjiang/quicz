@@ -1098,6 +1098,12 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Hardened endpoint registry closed-record sweep.
+  `EndpointConnectionRegistry.removeClosedRecords()` now reports an internal
+  consistency error if the endpoint-owned record table changes unexpectedly
+  during closed-record cleanup, instead of relying on an unreachable removal
+  path.
+
 - 2026-07-17: Hardened TLS Linux CSPRNG filling. Pure-Zig TLS random byte
   generation now loops until Linux `getrandom` fills the requested buffer and
   retries transient `EINTR`/`EAGAIN` results instead of accepting partial
