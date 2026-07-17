@@ -310,6 +310,7 @@ pub const Tls13ClientTransport = struct {
         scratch: []u8,
         datagram: []const u8,
     ) ClientTransportError!ReceiveResult {
+        if (datagram.len == 0) return error.InvalidPacket;
         if (isVersionNegotiationDatagram(datagram)) {
             const selected = try self.connection.processVersionNegotiationDatagram(
                 now_millis,
@@ -441,6 +442,18 @@ test "Tls13ClientTransport recognizes Retry and zero-only padding boundaries" {
     try std.testing.expect(isZeroOnlyPadding(&[_]u8{ 0, 0, 0 }));
     try std.testing.expect(!isZeroOnlyPadding(&[_]u8{}));
     try std.testing.expect(!isZeroOnlyPadding(&[_]u8{ 0x40, 0 }));
+
+    const alpn = [_][]const u8{"hq-interop"};
+    var transport = try Tls13ClientTransport.init(
+        std.testing.allocator,
+        .{},
+        .{ .alpn = &alpn },
+        .{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        .{ 8, 7, 6, 5, 4, 3, 2, 1 },
+    );
+    defer transport.deinit();
+    var scratch: [1]u8 = undefined;
+    try std.testing.expectError(error.InvalidPacket, transport.receive(1, &scratch, &[_]u8{}));
 }
 
 test "Tls13ClientTransport services idle lifecycle deadline" {

@@ -973,6 +973,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 TLS client transport 空 datagram 处理。
+  `Tls13ClientTransport.receive()` 现在会把 zero-length UDP datagram 拒绝为
+  `InvalidPacket`，不再返回成功 no-op receive；完整 packet 后的 all-zero tail
+  处理保持不变。
+
 - 2026-07-17：加固 endpoint registry lifecycle view handle。deadline、
   receive 和 poll view 现在使用 registry 持有的 connection handle key，而不是
   record 字段；即使嵌入 record 保存了不同本地 handle，endpoint-owned lifecycle

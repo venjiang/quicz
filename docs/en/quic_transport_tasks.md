@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened TLS client transport empty-datagram handling.
+  `Tls13ClientTransport.receive()` now rejects zero-length UDP datagrams as
+  `InvalidPacket` instead of returning a successful no-op receive result, while
+  preserving the existing all-zero tail handling after complete packets.
+
 - 2026-07-17: Hardened endpoint registry lifecycle view handles. Deadline,
   receive, and poll views now use the registry-owned connection handle key
   rather than a record field, so endpoint-owned lifecycle operations stay
