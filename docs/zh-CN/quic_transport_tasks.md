@@ -971,10 +971,6 @@ close 和 route cleanup 事件。
   现在会拒绝 frame encoder 无法合法序列化的 stream ID、offset，以及
   offset-plus-data range。
 
-- 2026-07-17：收紧 control-frame wire-length 预算。RETIRE_CONNECTION_ID、
-  BLOCKED 和 MAX frame length helper 现在会把超出 QUIC varint 的字段归类为
-  invalid packet，而不是 internal sizing failure。
-
 - 2026-07-17：收紧 RFC 9368 first-flight compatibility helper。直接兼容性
   检查现在会拒绝 zero 与 reserved version，并忽略包含不可协商版本的
   compatibility-table entry。

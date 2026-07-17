@@ -1095,10 +1095,6 @@ QUIC unless the gap is named and the verification evidence is added here.
   predictors now reject stream IDs, offsets, and offset-plus-data ranges that
   the frame encoders cannot legally serialize.
 
-- 2026-07-17: Tightened control-frame wire-length budgeting. RETIRE_CONNECTION_ID,
-  BLOCKED, and MAX frame length helpers now classify oversized QUIC varint
-  fields as invalid packets instead of internal sizing failures.
-
 - 2026-07-17: Tightened RFC 9368 first-flight compatibility helpers. Direct
   compatibility checks now reject zero and reserved versions, and ignore
   compatibility-table entries that name non-negotiable versions.
