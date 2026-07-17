@@ -3826,8 +3826,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   exponential backoff does not widen the threshold. `Recovery` now separates the
   base PTO calculation used by persistent congestion from the backed-off PTO
   used for probe timers. Tests cover direct recovery-state PTO backoff,
-  ACK-driven persistent congestion after PTO backoff, and `loss_recovery` prints
-  the persistent-congestion duration evidence.
+  PTO-count saturation before integer overflow, ACK-driven persistent
+  congestion after PTO backoff, and `loss_recovery` prints the
+  persistent-congestion duration evidence.
 - 2026-05-27: Aligned inbound datagram handling for closing and draining
   states. Frame-payload and protected receive entry points now discard inbound
   datagrams while the close timer is still active, without parsing invalid

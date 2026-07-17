@@ -3361,9 +3361,9 @@ close 和 route cleanup 事件。
 - 2026-05-27：修正 RFC 9002 persistent congestion duration，避免 PTO
   exponential backoff 放大 persistent congestion 判定阈值。`Recovery` 现在把
   persistent congestion 使用的 base PTO 计算，与 probe timer 使用的 backed-off
-  PTO 计算分开。测试覆盖 recovery state 的 PTO backoff、PTO backoff 后 ACK
-  驱动的 persistent congestion；`loss_recovery` 会打印 persistent-congestion
-  duration 证据。
+  PTO 计算分开。测试覆盖 recovery state 的 PTO backoff、PTO-count 溢出前的饱和、
+  PTO backoff 后 ACK 驱动的 persistent congestion；`loss_recovery` 会打印
+  persistent-congestion duration 证据。
 - 2026-05-27：对齐 closing 和 draining 状态的入站 datagram 处理语义。
   frame-payload 与 protected receive 入口现在会在 close timer 仍有效时直接丢弃
   入站 datagram，不解析非法字节、不生成 ACK，也不推进 peer packet-number 状态；

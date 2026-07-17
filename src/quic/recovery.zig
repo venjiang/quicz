@@ -485,6 +485,19 @@ test "pto uses rtt variance and exponential backoff" {
     try std.testing.expect(recovery.ptoMs() < 650);
 }
 
+test "pto expiration count saturates before overflowing" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    recovery.pto_count = std.math.maxInt(u8) - 1;
+
+    recovery.onPtoExpired();
+    try std.testing.expectEqual(std.math.maxInt(u8), recovery.pto_count);
+    try std.testing.expectEqual(std.math.maxInt(u64), recovery.ptoMs());
+
+    recovery.onPtoExpired();
+    try std.testing.expectEqual(std.math.maxInt(u8), recovery.pto_count);
+    try std.testing.expectEqual(std.math.maxInt(u64), recovery.ptoMsWithoutMaxAckDelay());
+}
+
 test "congestion recovery period avoids repeated loss reduction and ACK growth" {
     var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
     const initial_window = recovery.congestion_window;
