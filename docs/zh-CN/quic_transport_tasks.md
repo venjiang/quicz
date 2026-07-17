@@ -973,6 +973,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：补充 pre-bound peer Initial SCID mismatch 拒绝路径的直接覆盖。
+  protected Initial 的 header SCID 如果和 endpoint 已认证的 peer Initial Source
+  Connection ID 不一致，会在 packet number 或 CRYPTO receive buffer 发生变更前
+  被拒绝，保持 Retry/admission 路径使用的稳定 CID 绑定。
+
 - 2026-07-17：将 TLS server transport 的 peer Initial SCID 绑定进其持有的
   `Connection`。endpoint-owned Retry/admission 路径认证 client Initial Source
   Connection ID 后，现在会安装同一个稳定值，用于 transport-parameter 校验，以及

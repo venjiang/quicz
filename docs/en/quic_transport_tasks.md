@@ -1098,6 +1098,12 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Added direct coverage for pre-bound peer Initial SCID mismatch
+  rejection. A protected Initial whose header SCID differs from the
+  endpoint-authenticated peer Initial Source Connection ID is rejected before
+  packet-number or CRYPTO receive-buffer mutation, preserving the stable CID
+  binding used by Retry/admission paths.
+
 - 2026-07-17: Bound TLS server transport peer Initial SCID into the owned
   `Connection`. Endpoint-owned Retry/admission paths that authenticate a
   client Initial Source Connection ID now install the same stable value used by
