@@ -21,7 +21,7 @@ pub fn quicVarIntWireLen(value: u64) Error!usize {
     if (value <= 16383) return 2;
     if (value <= 1073741823) return 4;
     if (value <= max_quic_varint) return 8;
-    return error.Internal;
+    return error.InvalidPacket;
 }
 
 fn quicFrameVarIntWireLen(value: u64) Error!usize {
@@ -367,7 +367,7 @@ test "varint wire length boundaries" {
     try std.testing.expectEqual(@as(usize, 4), try quicVarIntWireLen(1073741823));
     try std.testing.expectEqual(@as(usize, 8), try quicVarIntWireLen(1073741824));
     try std.testing.expectEqual(@as(usize, 8), try quicVarIntWireLen(max_quic_varint));
-    try std.testing.expectError(error.Internal, quicVarIntWireLen(max_quic_varint + 1));
+    try std.testing.expectError(error.InvalidPacket, quicVarIntWireLen(max_quic_varint + 1));
 }
 
 test "protected datagram minimum plaintext length expands to target" {

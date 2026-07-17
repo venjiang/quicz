@@ -1098,6 +1098,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened generic QUIC varint wire-length classification.
+  `quicVarIntWireLen()` now reports values above the QUIC varint ceiling as
+  `InvalidPacket` instead of an internal sizing failure.
+
 - 2026-07-17: Tightened local connection-ID issuance bounds. Issuing a
   NEW_CONNECTION_ID after the local sequence exceeds the QUIC varint ceiling now
   returns `InvalidPacket` before mutating CID state.

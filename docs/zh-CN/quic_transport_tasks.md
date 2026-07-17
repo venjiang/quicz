@@ -973,6 +973,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧通用 QUIC varint wire-length 错误分类。
+  `quicVarIntWireLen()` 现在会把超过 QUIC varint 上限的值报为
+  `InvalidPacket`，而不是 internal sizing failure。
+
 - 2026-07-17：收紧本地 connection-ID issuance 边界。当本地 sequence 超过
   QUIC varint 上限后，发出 NEW_CONNECTION_ID 现在会在修改 CID 状态前返回
   `InvalidPacket`。
