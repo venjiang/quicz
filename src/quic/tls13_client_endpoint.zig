@@ -596,6 +596,22 @@ pub const Tls13ClientEndpoint = struct {
         return self.pollApplicationDatagramWithRoutePath(now_millis);
     }
 
+    /// Queue a protected application CONNECTION_CLOSE and drain route-bound output.
+    pub fn closeWithRoutePathAndDrainDatagrams(
+        self: *Tls13ClientEndpoint,
+        application_error_code: u64,
+        frame_type: u64,
+        reason: []const u8,
+        now_millis: i64,
+        out: []ApplicationDatagramPathResult,
+    ) !CloseDatagramPathDrainResult {
+        try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
+        return .{
+            .drain = try self.drainApplicationDatagramsWithRoutePath(now_millis, out),
+            .next_deadline = self.nextDeadline(),
+        };
+    }
+
     /// Return the active close deadline after `close()` has queued a close.
     pub fn closeDeadlineMillis(self: *const Tls13ClientEndpoint) ?i64 {
         return self.transport.closeDeadlineMillis();
@@ -654,6 +670,12 @@ pub const Tls13ClientEndpoint = struct {
         /// Due deadline serviced after receive, if any was ready.
         due: ?DueDeadlineDatagramPathDrainResult = null,
         /// Next client-visible deadline after receive, drain, and due work.
+        next_deadline: ?client_transport.ClientTransportDeadline = null,
+    };
+
+    /// Client close result with bounded route-bound output.
+    pub const CloseDatagramPathDrainResult = struct {
+        drain: ApplicationDatagramPathDrainResult = .{},
         next_deadline: ?client_transport.ClientTransportDeadline = null,
     };
 
@@ -1967,6 +1989,63 @@ test "Tls13ClientEndpoint closes with committed route output" {
     defer std.testing.allocator.free(close_datagram.datagram);
     try std.testing.expect(close_datagram.path.eql(new_path));
     try std.testing.expect(close_datagram.datagram.len != 0);
+    try std.testing.expect(client.closeDeadlineMillis() != null);
+}
+
+test "Tls13ClientEndpoint drains close output with committed route and deadline" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = old_path.remote,
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        11,
+        old_path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const traffic_secret = [_]u8{0x87} ** 32;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xda, 0xdb, 0xdc, 0xdd };
+    const reset_token = [_]u8{0x98} ** 16;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+    _ = try client.updatePath(new_path);
+
+    var out: [2]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const closed = try client.closeWithRoutePathAndDrainDatagrams(0, 0, "done", 1, &out);
+    try std.testing.expectEqual(@as(usize, 2), closed.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), closed.drain.first_error);
+    for (out[0..closed.drain.datagrams_written]) |drained| {
+        defer std.testing.allocator.free(drained.datagram);
+        try std.testing.expect(drained.path.eql(new_path));
+        try std.testing.expect(drained.datagram.len != 0);
+    }
+    const close_deadline = closed.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expect(close_deadline == .close_timeout);
     try std.testing.expect(client.closeDeadlineMillis() != null);
 }
 
