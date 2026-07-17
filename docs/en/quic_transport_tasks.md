@@ -90,6 +90,9 @@ agreement, matching RFC 8446's client key_share uniqueness rule.
 It also rejects ClientHello KeyShareEntry groups that are absent from the
 peer's supported_groups extension while preserving the existing NoKeyShare
 surface for an X25519 key_share omitted from supported_groups.
+Server-side ClientHello parsing now rejects duplicate SNI `ServerName`
+`name_type` entries, including duplicate unknown name types, before accepting
+or copying the host_name value.
 Server-side Finished verification now has direct non-PSK loopback coverage: a
 tampered client Finished verify_data is rejected and the server does not enter
 the complete state.

@@ -3155,6 +3155,7 @@ pub const Tls13Handshake = struct {
                     const list_len = readU16(ext[0..2]);
                     if (list_len == 0 or 2 + list_len != el) return error.DecodeError;
                     var sp: usize = 2;
+                    var seen_name_types = [_]bool{false} ** 256;
                     var saw_host_name = false;
                     while (sp < el) {
                         if (sp + 3 > el) return error.DecodeError;
@@ -3164,6 +3165,8 @@ pub const Tls13Handshake = struct {
                         if (name_len == 0 or sp + name_len > el) return error.DecodeError;
                         const offered_name = ext[sp .. sp + name_len];
                         sp += name_len;
+                        if (seen_name_types[name_type]) return error.DecodeError;
+                        seen_name_types[name_type] = true;
                         if (name_type == 0) {
                             if (saw_host_name) return error.DecodeError;
                             saw_host_name = true;
@@ -5199,6 +5202,40 @@ fn appendClientHelloKeyShareEntry(buf: []u8, msg_len: usize, group: u16, key_exc
     return buf[0 .. msg_len + entry_len];
 }
 
+fn appendClientHelloServerNameEntry(buf: []u8, msg_len: usize, name_type: u8, name: []const u8) ![]u8 {
+    if (name.len == 0 or name.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
+    const ext = try clientHelloExtension(buf[0..msg_len], @intFromEnum(ExtType.server_name));
+    if (ext.body_len < 2) return error.TestUnexpectedResult;
+
+    const list_len: usize = readU16(buf[ext.body_offset..]);
+    if (2 + list_len != ext.body_len) return error.TestUnexpectedResult;
+
+    const entry_len = 3 + name.len;
+    const max_u16 = std.math.maxInt(u16);
+    if (list_len + entry_len > max_u16) return error.TestUnexpectedResult;
+    if (ext.body_len + entry_len > max_u16) return error.TestUnexpectedResult;
+    if (msg_len + entry_len > buf.len) return error.TestUnexpectedResult;
+
+    const insert_offset = ext.body_offset + ext.body_len;
+    std.mem.copyBackwards(
+        u8,
+        buf[insert_offset + entry_len .. msg_len + entry_len],
+        buf[insert_offset..msg_len],
+    );
+    buf[insert_offset] = name_type;
+    writeU16(buf[insert_offset + 1 ..][0..2], @as(u16, @intCast(name.len)));
+    @memcpy(buf[insert_offset + 3 ..][0..name.len], name);
+
+    writeU16(buf[ext.body_offset..][0..2], @as(u16, @intCast(list_len + entry_len)));
+    writeU16(buf[ext.header_offset + 2 ..][0..2], @as(u16, @intCast(ext.body_len + entry_len)));
+    try setClientHelloBodyLen(buf, msg_len - 4 + entry_len);
+
+    const extensions_len: usize = readU16(buf[ext.extensions_len_offset..]);
+    if (extensions_len + entry_len > max_u16) return error.TestUnexpectedResult;
+    writeU16(buf[ext.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + entry_len)));
+    return buf[0 .. msg_len + entry_len];
+}
+
 test "Tls13Handshake server rejects duplicate known ClientHello extensions" {
     var hello_buf: [1024]u8 = undefined;
     const base_hello = try clientHelloBytes(.{}, &hello_buf);
@@ -5709,6 +5746,19 @@ test "Tls13Handshake server rejects oversized ClientHello SNI host_name" {
     try std.testing.expect(std.meta.activeTag(client_hello_action) == .send_data);
 
     server.provideData(client_hello_action.send_data.data);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects duplicate ClientHello SNI name types" {
+    var hello_buf: [2048]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{
+        .server_name = "example.com",
+    }, &hello_buf);
+    const with_unknown_name = try appendClientHelloServerNameEntry(&hello_buf, base_hello.len, 1, "one");
+    const hello = try appendClientHelloServerNameEntry(&hello_buf, with_unknown_name.len, 1, "two");
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
 }
 

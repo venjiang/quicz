@@ -81,6 +81,8 @@ protected long-header length budget 现在会拒绝使 QUIC Length 字段超过 
 它也会拒绝不在 peer `supported_groups` extension 中的 ClientHello
 KeyShareEntry group，同时保留 X25519 key_share 未列入 supported_groups 时的既有
 `NoKeyShare` 表面。
+server-side ClientHello 解析现在还会拒绝重复的 SNI `ServerName`
+`name_type` entry，包括重复的未知 name type，然后才接受或复制 host_name。
 server-side Finished verification 现在有直接非 PSK loopback 覆盖：篡改后的
 client Finished verify_data 会被拒绝，server 不会进入 complete 状态。
 NewSessionTicket 解析现在会先拒绝重复的 extension type，包括重复的未知
