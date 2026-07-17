@@ -963,15 +963,20 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 STREAM/CRYPTO wire-length 预算。frame length predictor
+  现在会拒绝 frame encoder 无法合法序列化的 stream ID、offset，以及
+  offset-plus-data range。
+
 - 2026-07-17：收紧 RFC 9368 first-flight compatibility helper。直接兼容性
   检查现在会拒绝 zero 与 reserved version，并忽略包含不可协商版本的
   compatibility-table entry。
 
 - 2026-07-17：收紧 endpoint routing 输入校验。fixed bit 为 0 的 datagram
   现在会在 route/reset handling 前被丢弃；short-header fixed-bit 失败不能匹配
-  active route 或 inactive reset token；非 Version Negotiation 的 fixed-bit-clear
-  long header 不能触发 inactive-CID reset-token lookup；long-header CID peeking
-  现在会拒绝超长 DCID/SCID。
+  active route 或 inactive reset token；直接 long-header routing 会拒绝非 Version
+  Negotiation 的 fixed-bit-clear packet；非 Version Negotiation 的 fixed-bit-clear
+  long header 不能触发 inactive-CID reset-token lookup；long-header CID peeking 现在会
+  拒绝超长 DCID/SCID。
 
 - 2026-07-17：收紧 endpoint Initial accept 触发条件。fixed bit 为 0 的
   supported-version long-header datagram 现在会在 Initial header 解析前被忽略；

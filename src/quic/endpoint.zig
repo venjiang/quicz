@@ -1144,6 +1144,11 @@ pub const EndpointRouter = struct {
     ) RouteError!RouteResult {
         if (datagram.len < 1) return error.InvalidDatagram;
         if ((datagram[0] & 0x80) != 0) {
+            if ((datagram[0] & 0x40) == 0) {
+                if (datagram.len < 5) return error.InvalidDatagram;
+                const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
+                if (@intFromEnum(version) != 0) return error.InvalidDatagram;
+            }
             return self.routeConnectionId(try peekLongDestinationConnectionId(datagram), path);
         }
         if ((datagram[0] & 0x40) == 0) return error.InvalidDatagram;
@@ -1700,6 +1705,13 @@ test "EndpointRouter routes long and short datagrams by destination CID" {
     try std.testing.expectEqual(@as(u64, 7), long_route.connection_id);
     try std.testing.expect(!long_route.path_changed);
     try std.testing.expectEqualSlices(u8, &dcid, long_route.destination_connection_id.asSlice());
+
+    const fixed_bit_clear_long = [_]u8{
+        0x80, 0x00, 0x00, 0x00, 0x01,
+        0x04, 0xaa, 0xbb, 0xcc, 0xdd,
+        0x00,
+    };
+    try std.testing.expectError(error.InvalidDatagram, router.routeDatagram(path, &fixed_bit_clear_long));
 
     const short_datagram = [_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
     const short_route = try router.routeDatagram(path, &short_datagram);

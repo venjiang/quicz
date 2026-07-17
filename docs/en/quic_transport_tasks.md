@@ -1087,15 +1087,21 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened STREAM/CRYPTO wire-length budgeting. Frame length
+  predictors now reject stream IDs, offsets, and offset-plus-data ranges that
+  the frame encoders cannot legally serialize.
+
 - 2026-07-17: Tightened RFC 9368 first-flight compatibility helpers. Direct
   compatibility checks now reject zero and reserved versions, and ignore
   compatibility-table entries that name non-negotiable versions.
 
 - 2026-07-17: Tightened endpoint routing input validation. Fixed-bit-clear
   datagrams are dropped before route/reset handling, short-header fixed-bit
-  failures cannot match active routes or inactive reset tokens, fixed-bit-clear
-  non-Version-Negotiation long headers cannot trigger inactive-CID reset-token
-  lookup, and long-header CID peeking now rejects oversized DCID/SCID lengths.
+  failures cannot match active routes or inactive reset tokens, direct
+  long-header routing rejects fixed-bit-clear non-Version-Negotiation packets,
+  fixed-bit-clear non-Version-Negotiation long headers cannot trigger
+  inactive-CID reset-token lookup, and long-header CID peeking now rejects
+  oversized DCID/SCID lengths.
 
 - 2026-07-17: Tightened endpoint Initial accept triggering. Supported-version
   long-header datagrams with the fixed bit clear are now ignored before Initial

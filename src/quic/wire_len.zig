@@ -92,6 +92,9 @@ pub fn addWireLen(current: usize, extra: usize) Error!usize {
 }
 
 pub fn streamFrameWireLen(stream_id: u64, offset: u64, data_len: usize) Error!usize {
+    if (stream_id > max_quic_varint) return error.InvalidPacket;
+    try validateFrameDataRange(offset, data_len);
+
     var len: usize = 1; // frame type
     len = try addWireLen(len, try quicVarIntWireLen(stream_id));
     if (offset != 0) {
@@ -102,10 +105,20 @@ pub fn streamFrameWireLen(stream_id: u64, offset: u64, data_len: usize) Error!us
 }
 
 pub fn cryptoFrameWireLen(offset: u64, data_len: usize) Error!usize {
+    try validateFrameDataRange(offset, data_len);
+
     var len: usize = 1; // frame type
     len = try addWireLen(len, try quicVarIntWireLen(offset));
     len = try addWireLen(len, try quicVarIntWireLen(std.math.cast(u64, data_len) orelse return error.Internal));
     return addWireLen(len, data_len);
+}
+
+fn validateFrameDataRange(offset: u64, data_len: usize) Error!void {
+    if (offset > max_quic_varint) return error.InvalidPacket;
+    const data_len_u64 = std.math.cast(u64, data_len) orelse return error.InvalidPacket;
+    if (data_len_u64 > max_quic_varint) return error.InvalidPacket;
+    const end_offset = std.math.add(u64, offset, data_len_u64) catch return error.InvalidPacket;
+    if (end_offset > max_quic_varint) return error.InvalidPacket;
 }
 
 pub fn maxStreamFrameDataLen(stream_id: u64, offset: u64, remaining: usize, max_datagram_size: usize) Error!usize {
@@ -383,6 +396,17 @@ test "max frame data length respects varint boundary expansion" {
     try std.testing.expectEqual(@as(usize, 63), try maxCryptoFrameDataLen(0, 100, 67));
     try std.testing.expectEqual(@as(usize, 64), try maxCryptoFrameDataLen(0, 100, 68));
     try std.testing.expectError(error.BufferTooSmall, maxCryptoFrameDataLen(0, 100, 2));
+}
+
+test "stream and crypto wire length reject unsendable data ranges" {
+    try std.testing.expectError(error.InvalidPacket, streamFrameWireLen(max_quic_varint + 1, 0, 0));
+    try std.testing.expectError(error.InvalidPacket, streamFrameWireLen(0, max_quic_varint + 1, 0));
+    try std.testing.expectError(error.InvalidPacket, streamFrameWireLen(0, max_quic_varint, 1));
+    try std.testing.expectError(error.InvalidPacket, streamFrameWireLen(0, 1, std.math.maxInt(usize)));
+
+    try std.testing.expectError(error.InvalidPacket, cryptoFrameWireLen(max_quic_varint + 1, 0));
+    try std.testing.expectError(error.InvalidPacket, cryptoFrameWireLen(max_quic_varint, 1));
+    try std.testing.expectError(error.InvalidPacket, cryptoFrameWireLen(1, std.math.maxInt(usize)));
 }
 
 test "max frame data length ignores unsendable remaining bytes" {
