@@ -1292,8 +1292,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   `src/lib.zig` now calls the focused module for Version Negotiation follow-up
   and backend peer-version selection while preserving the public `quicz`
   facade. Unit coverage in the split module covers reserved-version skipping,
-  authenticated extra-version selection, and inconsistent client follow-up
-  config rejection.
+  authenticated extra-version selection, reserved chosen-version rejection, and
+  inconsistent client follow-up config rejection.
 - 2026-06-18: Moved public connection configuration and
   fixed-storage preferred-address transport-parameter modeling into
   `src/quic/connection_config.zig` while keeping `src/lib.zig` as the stable

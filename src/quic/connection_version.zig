@@ -50,7 +50,7 @@ pub fn selectMutualVersionWithExtra(
 /// Validate local RFC 9368 version-information configuration before connection use.
 pub fn validateLocalVersionInformation(side: ConnectionSide, config: Config) Error!void {
     if (isZeroVersion(config.chosen_version)) return error.InvalidPacket;
-    if (side == .server and packet.isReservedVersion(config.chosen_version)) return error.InvalidPacket;
+    if (packet.isReservedVersion(config.chosen_version)) return error.InvalidPacket;
     for (config.available_versions) |available| {
         if (isZeroVersion(available)) return error.InvalidPacket;
     }
@@ -88,5 +88,17 @@ test "validateLocalVersionInformation rejects inconsistent client follow-up conf
         .chosen_version = .v2,
         .available_versions = &available,
         .version_negotiation_selected_version = .v2,
+    }));
+}
+
+test "validateLocalVersionInformation rejects reserved chosen versions" {
+    const reserved = [_]packet.Version{@enumFromInt(0x0a0a0a0a)};
+
+    try std.testing.expectError(error.InvalidPacket, validateLocalVersionInformation(.client, .{
+        .chosen_version = reserved[0],
+        .available_versions = &reserved,
+    }));
+    try std.testing.expectError(error.InvalidPacket, validateLocalVersionInformation(.server, .{
+        .chosen_version = reserved[0],
     }));
 }
