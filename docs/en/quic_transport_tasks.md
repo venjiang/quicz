@@ -1087,9 +1087,17 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened MAX/BLOCKED wire-length error classification.
+  RETIRE_CONNECTION_ID, MAX_*, and *_BLOCKED length predictors now report
+  oversized QUIC varints as invalid packets instead of internal errors.
+
 - 2026-07-17: Tightened STREAM/CRYPTO wire-length budgeting. Frame length
   predictors now reject stream IDs, offsets, and offset-plus-data ranges that
   the frame encoders cannot legally serialize.
+
+- 2026-07-17: Tightened control-frame wire-length budgeting. RETIRE_CONNECTION_ID,
+  BLOCKED, and MAX frame length helpers now classify oversized QUIC varint
+  fields as invalid packets instead of internal sizing failures.
 
 - 2026-07-17: Tightened RFC 9368 first-flight compatibility helpers. Direct
   compatibility checks now reject zero and reserved versions, and ignore

@@ -23,6 +23,11 @@ pub fn quicVarIntWireLen(value: u64) Error!usize {
     return error.Internal;
 }
 
+fn quicFrameVarIntWireLen(value: u64) Error!usize {
+    if (value > max_quic_varint) return error.InvalidPacket;
+    return quicVarIntWireLen(value);
+}
+
 pub fn protectedLongDatagramWireLen(
     header: packet.LongHeader,
     packet_number_len: u8,
@@ -217,7 +222,7 @@ pub fn stopSendingFrameWireLen(stop_sending: frame.StopSendingFrame) Error!usize
 
 pub fn retireConnectionIdFrameWireLen(sequence_number: u64) Error!usize {
     const len: usize = 1; // frame type
-    return addWireLen(len, try quicVarIntWireLen(sequence_number));
+    return addWireLen(len, try quicFrameVarIntWireLen(sequence_number));
 }
 
 pub fn newConnectionIdFrameWireLen(local_id: LocalConnectionId) Error!usize {
@@ -282,17 +287,17 @@ pub fn blockedFrameWireLen(blocked: PendingBlockedFrame) Error!usize {
     var len: usize = 1; // frame type
     switch (blocked) {
         .data => |data| {
-            return addWireLen(len, try quicVarIntWireLen(data.maximum_data));
+            return addWireLen(len, try quicFrameVarIntWireLen(data.maximum_data));
         },
         .stream_data => |stream_data| {
-            len = try addWireLen(len, try quicVarIntWireLen(stream_data.stream_id));
-            return addWireLen(len, try quicVarIntWireLen(stream_data.maximum_stream_data));
+            len = try addWireLen(len, try quicFrameVarIntWireLen(stream_data.stream_id));
+            return addWireLen(len, try quicFrameVarIntWireLen(stream_data.maximum_stream_data));
         },
         .streams_bidi => |streams| {
-            return addWireLen(len, try quicVarIntWireLen(streams.maximum_streams));
+            return addWireLen(len, try quicFrameVarIntWireLen(streams.maximum_streams));
         },
         .streams_uni => |streams| {
-            return addWireLen(len, try quicVarIntWireLen(streams.maximum_streams));
+            return addWireLen(len, try quicFrameVarIntWireLen(streams.maximum_streams));
         },
     }
 }
@@ -301,17 +306,17 @@ pub fn maxFrameWireLen(max_frame: PendingMaxFrame) Error!usize {
     var len: usize = 1; // frame type
     switch (max_frame) {
         .data => |data| {
-            return addWireLen(len, try quicVarIntWireLen(data.maximum_data));
+            return addWireLen(len, try quicFrameVarIntWireLen(data.maximum_data));
         },
         .stream_data => |stream_data| {
-            len = try addWireLen(len, try quicVarIntWireLen(stream_data.stream_id));
-            return addWireLen(len, try quicVarIntWireLen(stream_data.maximum_stream_data));
+            len = try addWireLen(len, try quicFrameVarIntWireLen(stream_data.stream_id));
+            return addWireLen(len, try quicFrameVarIntWireLen(stream_data.maximum_stream_data));
         },
         .streams_bidi => |streams| {
-            return addWireLen(len, try quicVarIntWireLen(streams.maximum_streams));
+            return addWireLen(len, try quicFrameVarIntWireLen(streams.maximum_streams));
         },
         .streams_uni => |streams| {
-            return addWireLen(len, try quicVarIntWireLen(streams.maximum_streams));
+            return addWireLen(len, try quicFrameVarIntWireLen(streams.maximum_streams));
         },
     }
 }
@@ -407,6 +412,33 @@ test "stream and crypto wire length reject unsendable data ranges" {
     try std.testing.expectError(error.InvalidPacket, cryptoFrameWireLen(max_quic_varint + 1, 0));
     try std.testing.expectError(error.InvalidPacket, cryptoFrameWireLen(max_quic_varint, 1));
     try std.testing.expectError(error.InvalidPacket, cryptoFrameWireLen(1, std.math.maxInt(usize)));
+}
+
+test "control frame wire length rejects oversized QUIC varints as invalid packets" {
+    try std.testing.expectError(error.InvalidPacket, retireConnectionIdFrameWireLen(max_quic_varint + 1));
+    try std.testing.expectError(error.InvalidPacket, blockedFrameWireLen(.{ .data = .{ .maximum_data = max_quic_varint + 1 } }));
+    try std.testing.expectError(error.InvalidPacket, blockedFrameWireLen(.{ .stream_data = .{
+        .stream_id = max_quic_varint + 1,
+        .maximum_stream_data = 0,
+    } }));
+    try std.testing.expectError(error.InvalidPacket, blockedFrameWireLen(.{ .stream_data = .{
+        .stream_id = 0,
+        .maximum_stream_data = max_quic_varint + 1,
+    } }));
+    try std.testing.expectError(error.InvalidPacket, blockedFrameWireLen(.{ .streams_bidi = .{ .maximum_streams = max_quic_varint + 1 } }));
+    try std.testing.expectError(error.InvalidPacket, blockedFrameWireLen(.{ .streams_uni = .{ .maximum_streams = max_quic_varint + 1 } }));
+
+    try std.testing.expectError(error.InvalidPacket, maxFrameWireLen(.{ .data = .{ .maximum_data = max_quic_varint + 1 } }));
+    try std.testing.expectError(error.InvalidPacket, maxFrameWireLen(.{ .stream_data = .{
+        .stream_id = max_quic_varint + 1,
+        .maximum_stream_data = 0,
+    } }));
+    try std.testing.expectError(error.InvalidPacket, maxFrameWireLen(.{ .stream_data = .{
+        .stream_id = 0,
+        .maximum_stream_data = max_quic_varint + 1,
+    } }));
+    try std.testing.expectError(error.InvalidPacket, maxFrameWireLen(.{ .streams_bidi = .{ .maximum_streams = max_quic_varint + 1 } }));
+    try std.testing.expectError(error.InvalidPacket, maxFrameWireLen(.{ .streams_uni = .{ .maximum_streams = max_quic_varint + 1 } }));
 }
 
 test "max frame data length ignores unsendable remaining bytes" {
