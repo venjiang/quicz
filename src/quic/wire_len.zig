@@ -175,16 +175,31 @@ pub fn maxCryptoFrameDataLen(offset: u64, remaining: usize, max_datagram_size: u
 }
 
 pub fn ackFrameWireLen(ack: frame.AckFrame) Error!usize {
+    try validateAckFrameWireRange(ack);
+
     var len: usize = 1; // frame type
-    len = try addWireLen(len, try quicVarIntWireLen(ack.largest_acknowledged));
-    len = try addWireLen(len, try quicVarIntWireLen(ack.ack_delay));
-    len = try addWireLen(len, try quicVarIntWireLen(std.math.cast(u64, ack.ranges.len) orelse return error.Internal));
-    len = try addWireLen(len, try quicVarIntWireLen(ack.first_ack_range));
+    len = try addWireLen(len, try quicFrameVarIntWireLen(ack.largest_acknowledged));
+    len = try addWireLen(len, try quicFrameVarIntWireLen(ack.ack_delay));
+    len = try addWireLen(len, try quicFrameVarIntWireLen(std.math.cast(u64, ack.ranges.len) orelse return error.InvalidPacket));
+    len = try addWireLen(len, try quicFrameVarIntWireLen(ack.first_ack_range));
     for (ack.ranges) |range| {
-        len = try addWireLen(len, try quicVarIntWireLen(range.gap));
-        len = try addWireLen(len, try quicVarIntWireLen(range.ack_range));
+        len = try addWireLen(len, try quicFrameVarIntWireLen(range.gap));
+        len = try addWireLen(len, try quicFrameVarIntWireLen(range.ack_range));
     }
     return len;
+}
+
+fn validateAckFrameWireRange(ack: frame.AckFrame) Error!void {
+    if (ack.first_ack_range > ack.largest_acknowledged) return error.InvalidPacket;
+
+    var smallest = ack.largest_acknowledged - ack.first_ack_range;
+    for (ack.ranges) |range| {
+        const skipped = std.math.add(u64, range.gap, 2) catch return error.InvalidPacket;
+        if (smallest < skipped) return error.InvalidPacket;
+        const range_largest = smallest - skipped;
+        if (range.ack_range > range_largest) return error.InvalidPacket;
+        smallest = range_largest - range.ack_range;
+    }
 }
 
 pub fn pathResponseFrameWireLen() usize {
@@ -439,6 +454,58 @@ test "control frame wire length rejects oversized QUIC varints as invalid packet
     } }));
     try std.testing.expectError(error.InvalidPacket, maxFrameWireLen(.{ .streams_bidi = .{ .maximum_streams = max_quic_varint + 1 } }));
     try std.testing.expectError(error.InvalidPacket, maxFrameWireLen(.{ .streams_uni = .{ .maximum_streams = max_quic_varint + 1 } }));
+}
+
+test "ack wire length rejects invalid ACK ranges and oversized varints" {
+    try std.testing.expectError(error.InvalidPacket, ackFrameWireLen(.{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 2,
+        .ranges = &[_]frame.AckRange{},
+    }));
+
+    const invalid_ranges = [_]frame.AckRange{.{ .gap = 0, .ack_range = 0 }};
+    try std.testing.expectError(error.InvalidPacket, ackFrameWireLen(.{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &invalid_ranges,
+    }));
+
+    try std.testing.expectError(error.InvalidPacket, ackFrameWireLen(.{
+        .largest_acknowledged = max_quic_varint + 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &[_]frame.AckRange{},
+    }));
+    try std.testing.expectError(error.InvalidPacket, ackFrameWireLen(.{
+        .largest_acknowledged = 0,
+        .ack_delay = max_quic_varint + 1,
+        .first_ack_range = 0,
+        .ranges = &[_]frame.AckRange{},
+    }));
+    try std.testing.expectError(error.InvalidPacket, ackFrameWireLen(.{
+        .largest_acknowledged = max_quic_varint + 1,
+        .ack_delay = 0,
+        .first_ack_range = max_quic_varint + 1,
+        .ranges = &[_]frame.AckRange{},
+    }));
+
+    const oversized_range = [_]frame.AckRange{.{ .gap = max_quic_varint + 1, .ack_range = 0 }};
+    try std.testing.expectError(error.InvalidPacket, ackFrameWireLen(.{
+        .largest_acknowledged = 10,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &oversized_range,
+    }));
+
+    const oversized_ack_range = [_]frame.AckRange{.{ .gap = 0, .ack_range = max_quic_varint + 1 }};
+    try std.testing.expectError(error.InvalidPacket, ackFrameWireLen(.{
+        .largest_acknowledged = max_quic_varint + 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+        .ranges = &oversized_ack_range,
+    }));
 }
 
 test "max frame data length ignores unsendable remaining bytes" {

@@ -963,6 +963,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 ACK wire-length 预算。ACK length prediction 现在会在
+  packetizing pending ACK output 前拒绝非法 ACK range 和 oversized ACK varint
+  字段。
+
 - 2026-07-17：收紧 MAX/BLOCKED wire-length 错误分类。
   RETIRE_CONNECTION_ID、MAX_* 和 *_BLOCKED length predictor 现在会把 oversized
   QUIC varint 报为 invalid packet，而不是 internal error。

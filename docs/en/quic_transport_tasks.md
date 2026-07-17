@@ -1087,6 +1087,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened ACK wire-length budgeting. ACK length prediction now
+  rejects invalid ACK ranges and oversized ACK varint fields before packetizing
+  pending ACK output.
+
 - 2026-07-17: Tightened MAX/BLOCKED wire-length error classification.
   RETIRE_CONNECTION_ID, MAX_*, and *_BLOCKED length predictors now report
   oversized QUIC varints as invalid packets instead of internal errors.
