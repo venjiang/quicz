@@ -1089,7 +1089,8 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 - 2026-07-17: Tightened endpoint Initial accept triggering. Supported-version
   long-header datagrams with the fixed bit clear are now ignored before Initial
-  header parsing.
+  header parsing, and endpoint supported-version lists now reject reserved
+  greasing versions.
 
 - 2026-07-17: Tightened endpoint Version Negotiation response triggering.
   Unsupported-version long headers with the QUIC fixed bit clear now produce no

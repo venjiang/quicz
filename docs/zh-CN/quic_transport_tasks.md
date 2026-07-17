@@ -964,7 +964,8 @@ close 和 route cleanup 事件。
 ## 进展记录
 
 - 2026-07-17：收紧 endpoint Initial accept 触发条件。fixed bit 为 0 的
-  supported-version long-header datagram 现在会在 Initial header 解析前被忽略。
+  supported-version long-header datagram 现在会在 Initial header 解析前被忽略；
+  endpoint supported-version list 现在也会拒绝 reserved greasing version。
 
 - 2026-07-17：收紧 endpoint Version Negotiation response 触发条件。fixed bit
   为 0 的 unsupported-version long header 现在不会生成 Version Negotiation
