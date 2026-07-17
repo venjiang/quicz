@@ -203,8 +203,13 @@ fn validateVersion(version: packet.Version) !void {
     if (@intFromEnum(version) == 0) return error.InvalidParameterValue;
 }
 
+fn validateChosenVersion(version: packet.Version) !void {
+    try validateVersion(version);
+    if (packet.isReservedVersion(version)) return error.InvalidParameterValue;
+}
+
 fn encodeVersionInformation(writer: anytype, version_information: VersionInformation) !void {
-    try validateVersion(version_information.chosen_version);
+    try validateChosenVersion(version_information.chosen_version);
     for (version_information.available_versions) |available| {
         try validateVersion(available);
     }
@@ -266,7 +271,7 @@ fn parseVersionInformation(value: []const u8, allocator: std.mem.Allocator) !Ver
     if (value.len < 4 or value.len % 4 != 0) return error.InvalidParameterLength;
 
     const chosen_version: packet.Version = @enumFromInt(std.mem.readInt(u32, value[0..4], .big));
-    try validateVersion(chosen_version);
+    try validateChosenVersion(chosen_version);
 
     const available_count = value.len / 4 - 1;
     const available_versions = try allocator.alloc(packet.Version, available_count);
@@ -536,6 +541,35 @@ test "transport parameters reject malformed version information" {
         0x00, 0x00, 0x00, 0x00,
     });
     try std.testing.expectError(error.InvalidParameterValue, parse(writer.getWritten(), std.testing.allocator));
+
+    writer = buffer.fixedWriter(&raw);
+    try encodeBytesValue(writer.writer(), .version_information, &[_]u8{
+        0x0a, 0x0a, 0x0a, 0x0a,
+        0x00, 0x00, 0x00, 0x01,
+    });
+    try std.testing.expectError(error.InvalidParameterValue, parse(writer.getWritten(), std.testing.allocator));
+
+    const reserved_chosen = TransportParameters{
+        .version_information = .{
+            .chosen_version = @enumFromInt(0x0a0a0a0a),
+            .available_versions = &[_]packet.Version{.v1},
+        },
+    };
+    writer = buffer.fixedWriter(&raw);
+    try std.testing.expectError(error.InvalidParameterValue, encode(writer.writer(), reserved_chosen));
+
+    const reserved_available = TransportParameters{
+        .version_information = .{
+            .chosen_version = .v1,
+            .available_versions = &[_]packet.Version{@enumFromInt(0x0a0a0a0a)},
+        },
+    };
+    writer = buffer.fixedWriter(&raw);
+    try encode(writer.writer(), reserved_available);
+    var parsed_reserved_available = try parse(writer.getWritten(), std.testing.allocator);
+    defer parsed_reserved_available.deinit(std.testing.allocator);
+    try std.testing.expectEqual(packet.Version.v1, parsed_reserved_available.version_information.?.chosen_version);
+    try std.testing.expect(parsed_reserved_available.version_information.?.containsAvailableVersion(@enumFromInt(0x0a0a0a0a)));
 
     const too_long = [_]packet.Version{ .v1, .v2 };
     writer = buffer.fixedWriter(raw[0..9]);
