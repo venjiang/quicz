@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Added direct coverage for the pre-bound peer Initial SCID match
+  path. A protected Initial whose header SCID matches the endpoint-authenticated
+  peer Initial Source Connection ID is accepted without replacing the stable
+  binding, while advancing Initial packet-number and CRYPTO receive state.
+
 - 2026-07-17: Added direct coverage for pre-bound peer Initial SCID mismatch
   rejection. A protected Initial whose header SCID differs from the
   endpoint-authenticated peer Initial Source Connection ID is rejected before

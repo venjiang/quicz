@@ -973,6 +973,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：补充 pre-bound peer Initial SCID match 成功路径的直接覆盖。
+  protected Initial 的 header SCID 与 endpoint 已认证的 peer Initial Source
+  Connection ID 一致时，会在不替换稳定绑定的前提下被接受，并推进 Initial
+  packet-number 与 CRYPTO receive 状态。
+
 - 2026-07-17：补充 pre-bound peer Initial SCID mismatch 拒绝路径的直接覆盖。
   protected Initial 的 header SCID 如果和 endpoint 已认证的 peer Initial Source
   Connection ID 不一致，会在 packet number 或 CRYPTO receive buffer 发生变更前

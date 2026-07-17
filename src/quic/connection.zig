@@ -12977,6 +12977,38 @@ test "pre-bound peer Initial source CID rejects mismatched protected Initial" {
     try std.testing.expectEqual(@as(usize, 0), server.initial_packet_space.crypto_recv_buffer.items.len);
 }
 
+test "pre-bound peer Initial source CID accepts matching protected Initial" {
+    const dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &dcid);
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+
+    try server.setPeerInitialSourceConnectionId(&client_scid);
+    try client.sendCryptoInSpace(.initial, "client initial");
+    const protected = (try client.pollInitialProtectedDatagram(
+        0,
+        &dcid,
+        &client_scid,
+        &[_]u8{},
+        secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(protected);
+
+    try server.processInitialProtectedDatagram(1, secrets.client, protected);
+    try std.testing.expectEqualSlices(u8, &client_scid, server.peerInitialSourceConnectionId().?);
+    try std.testing.expectEqualSlices(u8, &client_scid, server.peerDestinationConnectionId().?);
+    try std.testing.expectEqual(@as(u64, 1), server.nextPeerPacketNumber(.initial));
+    try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.initial));
+
+    var crypto_buf: [32]u8 = undefined;
+    const recv_len = (try server.recvCryptoInSpace(.initial, &crypto_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("client initial", crypto_buf[0..recv_len]);
+}
+
 test "openStream enforces peer bidirectional stream limit until MAX_STREAMS_BIDI" {
     var conn = try Connection.init(std.testing.allocator, .client, .{ .initial_max_streams_bidi = 1 });
     defer conn.deinit();
