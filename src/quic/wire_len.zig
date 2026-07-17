@@ -14,6 +14,7 @@ const PendingCloseFrame = connection_state.PendingCloseFrame;
 const PendingMaxFrame = connection_state.PendingMaxFrame;
 const max_connection_id_len = protocol_limits.max_connection_id_len;
 const max_quic_varint = protocol_limits.max_quic_varint;
+const max_stream_count = protocol_limits.max_stream_count;
 
 pub fn quicVarIntWireLen(value: u64) Error!usize {
     if (value <= 63) return 1;
@@ -242,11 +243,12 @@ pub fn retireConnectionIdFrameWireLen(sequence_number: u64) Error!usize {
 
 pub fn newConnectionIdFrameWireLen(local_id: LocalConnectionId) Error!usize {
     if (local_id.connection_id.len == 0 or local_id.connection_id.len > max_connection_id_len) return error.InvalidPacket;
+    if (local_id.sequence_number > max_quic_varint or local_id.retire_prior_to > max_quic_varint) return error.InvalidPacket;
     if (local_id.retire_prior_to > local_id.sequence_number) return error.InvalidPacket;
 
     var len: usize = 1; // frame type
-    len = try addWireLen(len, try quicVarIntWireLen(local_id.sequence_number));
-    len = try addWireLen(len, try quicVarIntWireLen(local_id.retire_prior_to));
+    len = try addWireLen(len, try quicFrameVarIntWireLen(local_id.sequence_number));
+    len = try addWireLen(len, try quicFrameVarIntWireLen(local_id.retire_prior_to));
     len = try addWireLen(len, 1); // connection ID length
     len = try addWireLen(len, local_id.connection_id.len);
     return addWireLen(len, local_id.stateless_reset_token.len);
@@ -309,9 +311,11 @@ pub fn blockedFrameWireLen(blocked: PendingBlockedFrame) Error!usize {
             return addWireLen(len, try quicFrameVarIntWireLen(stream_data.maximum_stream_data));
         },
         .streams_bidi => |streams| {
+            try validateStreamCountWireLen(streams.maximum_streams);
             return addWireLen(len, try quicFrameVarIntWireLen(streams.maximum_streams));
         },
         .streams_uni => |streams| {
+            try validateStreamCountWireLen(streams.maximum_streams);
             return addWireLen(len, try quicFrameVarIntWireLen(streams.maximum_streams));
         },
     }
@@ -328,12 +332,18 @@ pub fn maxFrameWireLen(max_frame: PendingMaxFrame) Error!usize {
             return addWireLen(len, try quicFrameVarIntWireLen(stream_data.maximum_stream_data));
         },
         .streams_bidi => |streams| {
+            try validateStreamCountWireLen(streams.maximum_streams);
             return addWireLen(len, try quicFrameVarIntWireLen(streams.maximum_streams));
         },
         .streams_uni => |streams| {
+            try validateStreamCountWireLen(streams.maximum_streams);
             return addWireLen(len, try quicFrameVarIntWireLen(streams.maximum_streams));
         },
     }
+}
+
+fn validateStreamCountWireLen(maximum_streams: u64) Error!void {
+    if (maximum_streams > max_stream_count) return error.InvalidPacket;
 }
 
 test "varint wire length boundaries" {
@@ -454,6 +464,42 @@ test "control frame wire length rejects oversized QUIC varints as invalid packet
     } }));
     try std.testing.expectError(error.InvalidPacket, maxFrameWireLen(.{ .streams_bidi = .{ .maximum_streams = max_quic_varint + 1 } }));
     try std.testing.expectError(error.InvalidPacket, maxFrameWireLen(.{ .streams_uni = .{ .maximum_streams = max_quic_varint + 1 } }));
+}
+
+test "stream count wire length rejects values above the stream count limit" {
+    try std.testing.expectError(error.InvalidPacket, blockedFrameWireLen(.{ .streams_bidi = .{ .maximum_streams = max_stream_count + 1 } }));
+    try std.testing.expectError(error.InvalidPacket, blockedFrameWireLen(.{ .streams_uni = .{ .maximum_streams = max_stream_count + 1 } }));
+    try std.testing.expectError(error.InvalidPacket, maxFrameWireLen(.{ .streams_bidi = .{ .maximum_streams = max_stream_count + 1 } }));
+    try std.testing.expectError(error.InvalidPacket, maxFrameWireLen(.{ .streams_uni = .{ .maximum_streams = max_stream_count + 1 } }));
+}
+
+test "new connection id wire length rejects invalid local ids" {
+    var cid = [_]u8{1};
+    const token = [_]u8{0} ** 16;
+    try std.testing.expectError(error.InvalidPacket, newConnectionIdFrameWireLen(.{
+        .sequence_number = max_quic_varint + 1,
+        .retire_prior_to = 0,
+        .connection_id = &cid,
+        .stateless_reset_token = token,
+    }));
+    try std.testing.expectError(error.InvalidPacket, newConnectionIdFrameWireLen(.{
+        .sequence_number = max_quic_varint,
+        .retire_prior_to = max_quic_varint + 1,
+        .connection_id = &cid,
+        .stateless_reset_token = token,
+    }));
+    try std.testing.expectError(error.InvalidPacket, newConnectionIdFrameWireLen(.{
+        .sequence_number = 0,
+        .retire_prior_to = 1,
+        .connection_id = &cid,
+        .stateless_reset_token = token,
+    }));
+    try std.testing.expectError(error.InvalidPacket, newConnectionIdFrameWireLen(.{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &[_]u8{},
+        .stateless_reset_token = token,
+    }));
 }
 
 test "ack wire length rejects invalid ACK ranges and oversized varints" {

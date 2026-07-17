@@ -73,6 +73,10 @@ Mutual-version selection now skips forbidden zero-version preferred entries in
 addition to reserved greasing versions, preserving the RFC 8999 invariant that
 version zero is only used for Version Negotiation packet framing.
 
+`MAX_STREAMS_*` and `STREAMS_BLOCKED_*` wire-length budgeting now enforces the
+same stream-count ceiling as the frame encoder, so packetization rejects
+unsendable stream-count control frames before attempting to serialize them.
+
 Client and server TLS-owned transports now expose direct protected
 `CONNECTION_CLOSE` helpers plus close-deadline accessors. Focused tests decrypt
 the emitted 1-RTT close packets, verify the peer CID and close code, and service
@@ -1086,6 +1090,15 @@ QUIC unless the gap is named and the verification evidence is added here.
 | Interop | Partial | A certificate-verified Zig client completes a FIN-terminated protected STREAM echo against a local independent `quic-go` v0.59.0 server; separate Go and Rust clients complete the inverse echo direction against the Zig server. | Record repeatable peer-version evidence and add Retry, loss/recovery, version-negotiation, broader server, and application-protocol scenarios. |
 
 ## Progress Notes
+
+- 2026-07-17: Tightened stream-count control-frame wire-length validation.
+  `MAX_STREAMS_*` and `STREAMS_BLOCKED_*` length prediction now rejects values
+  above the stream-count limit before packetizing pending stream-limit output.
+
+- 2026-07-17: Tightened NEW_CONNECTION_ID wire-length validation. The pending
+  local-CID length helper now rejects non-encodable sequence numbers,
+  non-encodable `retire_prior_to` values, invalid retire ordering, and invalid
+  local CID lengths before protected packet construction.
 
 - 2026-07-17: Tightened ACK wire-length budgeting. ACK length prediction now
   rejects invalid ACK ranges and oversized ACK varint fields before packetizing
