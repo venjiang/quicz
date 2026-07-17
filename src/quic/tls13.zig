@@ -1762,6 +1762,20 @@ fn extensionTypeSeenBefore(extensions: []const u8, current_header_offset: usize,
     return false;
 }
 
+fn keyShareGroupSeenBefore(key_shares: []const u8, current_entry_offset: usize, group: u16) bool {
+    var pos: usize = 0;
+    while (pos < current_entry_offset) {
+        if (pos + 4 > current_entry_offset) return false;
+        const current_group = readU16(key_shares[pos..]);
+        const current_len = readU16(key_shares[pos + 2 ..]);
+        pos += 4;
+        if (pos + current_len > current_entry_offset) return false;
+        if (current_group == group) return true;
+        pos += current_len;
+    }
+    return false;
+}
+
 // ─── Write helpers ───────────────────────────────────────────────────
 
 fn writeU16(buf: []u8, val: u16) void {
@@ -2946,16 +2960,15 @@ pub const Tls13Handshake = struct {
                     const shares_len = readU16(ext[0..2]);
                     if (shares_len == 0 or 2 + shares_len != el) return error.DecodeError;
                     var sp: usize = 2; // skip client_shares_len
-                    var seen_x25519_key_share = false;
                     while (sp + 4 <= el) {
+                        const entry_offset = sp - 2;
                         const group = readU16(ext[sp..]);
                         const klen = readU16(ext[sp + 2 ..]);
                         sp += 4;
                         if (klen == 0) return error.DecodeError;
                         if (sp + klen > el) return error.DecodeError;
+                        if (keyShareGroupSeenBefore(ext[2..el], entry_offset, group)) return error.DecodeError;
                         if (group == group_x25519) {
-                            if (seen_x25519_key_share) return error.DecodeError;
-                            seen_x25519_key_share = true;
                             if (klen != 32 or sp + 32 > el) return error.DecodeError;
                             @memcpy(&self.peer_x25519_public, ext[sp..][0..32]);
                             have_key_share = true;
@@ -5031,6 +5044,40 @@ fn extendClientHelloExtensionBody(buf: []u8, msg_len: usize, ext_type: u16, extr
     return buf[0 .. msg_len + extra.len];
 }
 
+fn appendClientHelloKeyShareEntry(buf: []u8, msg_len: usize, group: u16, key_exchange: []const u8) ![]u8 {
+    if (key_exchange.len == 0 or key_exchange.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
+    const ext = try clientHelloExtension(buf[0..msg_len], @intFromEnum(ExtType.key_share));
+    if (ext.body_len < 2) return error.TestUnexpectedResult;
+
+    const shares_len: usize = readU16(buf[ext.body_offset..]);
+    if (2 + shares_len != ext.body_len) return error.TestUnexpectedResult;
+
+    const entry_len = 4 + key_exchange.len;
+    const max_u16 = std.math.maxInt(u16);
+    if (shares_len + entry_len > max_u16) return error.TestUnexpectedResult;
+    if (ext.body_len + entry_len > max_u16) return error.TestUnexpectedResult;
+    if (msg_len + entry_len > buf.len) return error.TestUnexpectedResult;
+
+    const insert_offset = ext.body_offset + ext.body_len;
+    std.mem.copyBackwards(
+        u8,
+        buf[insert_offset + entry_len .. msg_len + entry_len],
+        buf[insert_offset..msg_len],
+    );
+    writeU16(buf[insert_offset..][0..2], group);
+    writeU16(buf[insert_offset + 2 ..][0..2], @as(u16, @intCast(key_exchange.len)));
+    @memcpy(buf[insert_offset + 4 ..][0..key_exchange.len], key_exchange);
+
+    writeU16(buf[ext.body_offset..][0..2], @as(u16, @intCast(shares_len + entry_len)));
+    writeU16(buf[ext.header_offset + 2 ..][0..2], @as(u16, @intCast(ext.body_len + entry_len)));
+    try setClientHelloBodyLen(buf, msg_len - 4 + entry_len);
+
+    const extensions_len: usize = readU16(buf[ext.extensions_len_offset..]);
+    if (extensions_len + entry_len > max_u16) return error.TestUnexpectedResult;
+    writeU16(buf[ext.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + entry_len)));
+    return buf[0 .. msg_len + entry_len];
+}
+
 test "Tls13Handshake server rejects duplicate known ClientHello extensions" {
     var hello_buf: [1024]u8 = undefined;
     const base_hello = try clientHelloBytes(.{}, &hello_buf);
@@ -5446,6 +5493,17 @@ test "Tls13Handshake server rejects duplicate ClientHello X25519 key_share entri
     const extensions_len = readU16(hello_buf[key_share.extensions_len_offset..]);
     writeU16(hello_buf[key_share.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + share_entry_len)));
     const hello = hello_buf[0 .. base_hello.len + share_entry_len];
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects duplicate unsupported ClientHello key_share groups" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const with_first = try appendClientHelloKeyShareEntry(&hello_buf, base_hello.len, 0x0017, &[_]u8{0x01});
+    const hello = try appendClientHelloKeyShareEntry(&hello_buf, with_first.len, 0x0017, &[_]u8{0x02});
 
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
