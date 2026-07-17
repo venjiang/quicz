@@ -26,6 +26,7 @@ pub fn selectMutualVersion(
     offered_versions: []const packet.Version,
 ) ?packet.Version {
     for (preferred_versions) |preferred| {
+        if (isZeroVersion(preferred)) continue;
         if (packet.isReservedVersion(preferred)) continue;
         if (versionListContains(offered_versions, preferred)) return preferred;
     }
@@ -39,6 +40,7 @@ pub fn selectMutualVersionWithExtra(
     extra_version: packet.Version,
 ) ?packet.Version {
     for (preferred_versions) |preferred| {
+        if (isZeroVersion(preferred)) continue;
         if (packet.isReservedVersion(preferred)) continue;
         if (@intFromEnum(preferred) == @intFromEnum(extra_version) or versionListContains(offered_versions, preferred)) {
             return preferred;
@@ -67,9 +69,9 @@ pub fn validateLocalVersionInformation(side: ConnectionSide, config: Config) Err
     }
 }
 
-test "selectMutualVersion skips reserved preferred versions" {
-    const preferred = [_]packet.Version{ @enumFromInt(0x0a0a0a0a), .v2, .v1 };
-    const offered = [_]packet.Version{ .v1, .v2 };
+test "selectMutualVersion skips forbidden preferred versions" {
+    const preferred = [_]packet.Version{ @enumFromInt(0), @enumFromInt(0x0a0a0a0a), .v2, .v1 };
+    const offered = [_]packet.Version{ @enumFromInt(0), .v1, .v2 };
 
     try std.testing.expectEqual(packet.Version.v2, selectMutualVersion(&preferred, &offered).?);
 }
@@ -79,6 +81,13 @@ test "selectMutualVersionWithExtra accepts authenticated chosen version" {
     const offered = [_]packet.Version{.v1};
 
     try std.testing.expectEqual(packet.Version.v2, selectMutualVersionWithExtra(&preferred, &offered, .v2).?);
+}
+
+test "selectMutualVersionWithExtra skips forbidden preferred versions" {
+    const preferred = [_]packet.Version{ @enumFromInt(0), @enumFromInt(0x0a0a0a0a), .v1 };
+    const offered = [_]packet.Version{ @enumFromInt(0), .v1 };
+
+    try std.testing.expectEqual(packet.Version.v1, selectMutualVersionWithExtra(&preferred, &offered, @enumFromInt(0)));
 }
 
 test "validateLocalVersionInformation rejects inconsistent client follow-up config" {

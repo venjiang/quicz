@@ -573,8 +573,9 @@ pub const Tls13ClientEndpoint = struct {
         reason: []const u8,
         now_millis: i64,
     ) !?[]u8 {
-        try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
-        return self.pollApplicationDatagram(now_millis);
+        const datagram = try self.transport.close(application_error_code, frame_type, reason, now_millis);
+        try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+        return datagram;
     }
 
     /// Queue a protected application CONNECTION_CLOSE and return it with route.
@@ -591,7 +592,7 @@ pub const Tls13ClientEndpoint = struct {
 
     /// Return the active close deadline after `close()` has queued a close.
     pub fn closeDeadlineMillis(self: *const Tls13ClientEndpoint) ?i64 {
-        return self.transport.connection.closeDeadlineMillis();
+        return self.transport.closeDeadlineMillis();
     }
 
     /// Retire the registered route after the close deadline has elapsed.

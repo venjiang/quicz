@@ -122,6 +122,23 @@ pub const Tls13ClientTransport = struct {
         try self.connection.stopSending(stream_id, application_error_code);
     }
 
+    /// Queue a protected application CONNECTION_CLOSE and poll it for send.
+    pub fn close(
+        self: *Tls13ClientTransport,
+        application_error_code: u64,
+        frame_type: u64,
+        reason: []const u8,
+        now_millis: i64,
+    ) ClientTransportError!?[]u8 {
+        try self.connection.closeConnection(application_error_code, frame_type, reason);
+        return self.pollApplicationDatagram(now_millis);
+    }
+
+    /// Return the active close deadline after `close()` queues a close.
+    pub fn closeDeadlineMillis(self: *const Tls13ClientTransport) ?i64 {
+        return self.connection.closeDeadlineMillis();
+    }
+
     /// Return one protected 1-RTT application datagram queued by this transport.
     pub fn pollApplicationDatagram(
         self: *Tls13ClientTransport,
@@ -547,4 +564,60 @@ test "Tls13ClientTransport sends to the newest peer connection ID" {
     );
     defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
     try std.testing.expectEqualSlices(u8, &peer_connection_id, opened.packet.header.dcid);
+}
+
+test "Tls13ClientTransport closes with protected application output and deadline" {
+    const alpn = [_][]const u8{"hq-interop"};
+    var transport = try Tls13ClientTransport.init(
+        std.testing.allocator,
+        .{},
+        .{ .alpn = &alpn },
+        .{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        .{ 8, 7, 6, 5, 4, 3, 2, 1 },
+    );
+    defer transport.deinit();
+
+    const traffic_secret = [_]u8{0x64} ** 32;
+    try transport.connection.confirmHandshake();
+    try transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xba, 0xbb, 0xbc, 0xbd };
+    const reset_token = [_]u8{0x65} ** 16;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try transport.connection.processDatagram(0, writer.getWritten());
+
+    const datagram = (try transport.close(77, 0, "client close", 10)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(datagram);
+    try std.testing.expectEqual(transport_types.ConnectionState.closing, transport.connection.connectionState());
+    const close_deadline = transport.closeDeadlineMillis() orelse return error.TestUnexpectedResult;
+    const next_deadline = transport.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(next_deadline == .close_timeout);
+    try std.testing.expectEqual(close_deadline, next_deadline.deadlineMillis());
+
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        protection.deriveAes128PacketProtectionKeys(traffic_secret),
+        datagram,
+        peer_connection_id.len,
+        0,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &peer_connection_id, opened.packet.header.dcid);
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    try std.testing.expect(decoded.frame == .connection_close);
+    try std.testing.expectEqual(@as(u64, 77), decoded.frame.connection_close.error_code);
+
+    const serviced = (try transport.serviceDueDeadline(close_deadline)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(serviced == .close_timeout);
+    try std.testing.expectEqual(transport_types.ConnectionState.closed, transport.connection.connectionState());
 }

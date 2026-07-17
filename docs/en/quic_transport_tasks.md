@@ -62,6 +62,17 @@ packet/key/token and RFC 9368 version-information primitives:
 | qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
 | External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes certificate-verified QUIC/TLS handshakes with two independently implemented local servers, plus certificate-verified bidirectional STREAM FIN echoes through a `quic-go` v0.59.0 server that forces Retry and a separate run whose peer drops one post-handshake 1-RTT packet for PTO recovery; a v1-only `quic-go` server returns Version Negotiation to a Zig v2 Initial, after which Zig validates it and completes a fresh v1 certificate-verified stream echo. Go and Rust clients complete certificate-verified bidirectional STREAM FIN echoes against the local Zig server, including its bounded Retry path. A `quic-go` client also proves sequential stream-count credit release across streams 0-to-4-to-8-to-12, RESET_STREAM(41), server STOP_SENDING(42) followed by peer RESET_STREAM(42), uni stream 2-to-3 FIN exchange, and server PTO recovery after it drops four post-stream Zig datagrams or four server-flight datagrams before handshake completion. Broader server and application-protocol scenarios remain unproven. |
 
+Mutual-version selection now skips forbidden zero-version preferred entries in
+addition to reserved greasing versions, preserving the RFC 8999 invariant that
+version zero is only used for Version Negotiation packet framing.
+
+Client and server TLS-owned transports now expose direct protected
+`CONNECTION_CLOSE` helpers plus close-deadline accessors. Focused tests decrypt
+the emitted 1-RTT close packets, verify the peer CID and close code, and service
+the close timeout to the closed state. The client endpoint close path reuses the
+transport helper so socket owners no longer bypass the transport boundary for
+normal close emission.
+
 The pure-Zig TLS resumption path now preserves `ticket_age_add` from
 NewSessionTicket into the next ClientHello `obfuscated_ticket_age`, emits a
 CSPRNG-backed server ticket age add, and records the peer's offered obfuscated
@@ -1068,6 +1079,14 @@ QUIC unless the gap is named and the verification evidence is added here.
 | Interop | Partial | A certificate-verified Zig client completes a FIN-terminated protected STREAM echo against a local independent `quic-go` v0.59.0 server; separate Go and Rust clients complete the inverse echo direction against the Zig server. | Record repeatable peer-version evidence and add Retry, loss/recovery, version-negotiation, broader server, and application-protocol scenarios. |
 
 ## Progress Notes
+
+- 2026-07-17: Added protected TLS transport close facades. Client and server
+  TLS transports can now queue protected application CONNECTION_CLOSE output,
+  expose the close deadline, and preserve endpoint recovery-timer arming.
+
+- 2026-07-17: Tightened RFC 8999 mutual-version selection. Version
+  selection helpers now skip forbidden zero-version preferred entries in
+  addition to reserved greasing versions.
 
 - 2026-07-17: Tightened transport-parameter varint and value-length
   validation. Encoders now reject oversized integer values, reserved parameter

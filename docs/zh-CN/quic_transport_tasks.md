@@ -56,6 +56,16 @@ version-information 原语）：
 | qlog、PMTU discovery、GSO/GRO、高级 congestion selection | transport loop 可用后的运维/性能扩展。 | Deferred 或未实现。 |
 | 外部互通 | 声称第一轮可用 transport 里程碑前必须具备。 | 部分完成：客户端专用二进制已与两个来自不同实现家族的本机独立服务端完成证书校验的 QUIC/TLS 握手，并通过强制 Retry 的 `quic-go` v0.59.0 server、以及另一次由 peer 丢弃一个 post-handshake 1-RTT 包以触发 PTO recovery 的运行完成证书校验的双向 STREAM FIN echo；仅支持 v1 的 `quic-go` server 会对 Zig v2 Initial 返回 Version Negotiation，Zig 校验后创建全新的 v1 连接并完成证书校验 stream echo。Go 与 Rust 客户端已和本地 Zig server 完成证书校验的双向 STREAM FIN echo，包含有界 Retry 路径。`quic-go` client 还证明 Zig server 在 stream 0 到 4 到 8 到 12 的连续 stream-count 额度释放、接收 RESET_STREAM(41)、server 的 STOP_SENDING(42) 后收到对端 RESET_STREAM(42)、单向 stream 2 到 3 的 FIN 交换，以及丢弃 4 个 post-stream Zig datagram 或握手完成前 4 个 server-flight datagram 后的服务端 PTO recovery。更广泛的服务端和应用层场景尚未验证。 |
 
+mutual-version selection 现在除 reserved greasing version 外，也会跳过禁止使用的
+zero-version preferred entry，保持 RFC 8999 中 version zero 只用于 Version
+Negotiation packet framing 的不变量。
+
+Client 和 server TLS-owned transport 现在直接暴露 protected
+`CONNECTION_CLOSE` helper 与 close-deadline accessor。聚焦测试会解密发出的
+1-RTT close packet，校验 peer CID 和 close code，并服务 close timeout 到
+closed 状态。client endpoint close 路径现在复用 transport helper，socket owner
+不再需要绕过 transport 边界发出普通 close。
+
 纯 Zig TLS resumption 路径现在会把 NewSessionTicket 的 `ticket_age_add`
 保存到下一次 ClientHello 的 `obfuscated_ticket_age`，服务端会发出
 CSPRNG-backed ticket age add，并记录 peer 提供的 obfuscated ticket age。
@@ -947,6 +957,14 @@ close 和 route cleanup 事件。
 以上仅是有界的 1-RTT short-packet 证据。Initial 和 Handshake 接收路径仍保持当前的有序规则，尚未记录外部 server 互通结果。
 
 ## 进展记录
+
+- 2026-07-17：补齐 protected TLS transport close facade。client/server TLS
+  transport 现在可以排队 protected application CONNECTION_CLOSE output，暴露
+  close deadline，并保留 endpoint recovery timer arming。
+
+- 2026-07-17：收紧 RFC 8999 mutual-version selection。版本选择 helper 现在
+  除了跳过 reserved greasing version，也会跳过 forbidden zero-version
+  preferred entry。
 
 - 2026-07-17：收紧 transport-parameter varint 与 value-length 校验。
   编码器现在会在写入 partial parameter bytes 前拒绝 oversized integer values、
