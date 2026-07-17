@@ -1260,6 +1260,7 @@ pub fn writeVersionNegotiationForUnsupportedVersion(
 ) RouteError!?[]const u8 {
     if (datagram.len < 1) return error.InvalidDatagram;
     if ((datagram[0] & 0x80) == 0) return null;
+    if ((datagram[0] & 0x40) == 0) return null;
     if (supported_versions.len == 0) return error.InvalidVersionList;
     for (supported_versions) |supported| {
         if (@intFromEnum(supported) == 0) return error.InvalidVersionList;
@@ -1748,6 +1749,18 @@ test "Endpoint version negotiation ignores non-triggering datagrams" {
         0x00,
         0x01,
     };
+    const fixed_bit_clear = [_]u8{
+        0x80,
+        0xfa,
+        0xce,
+        0xb0,
+        0x0c,
+        0x01,
+        0xaa,
+        0x01,
+        0xbb,
+        0x00,
+    };
     const short_header = [_]u8{ 0x40, 0xaa, 0xbb };
 
     var response_buf: [64]u8 = undefined;
@@ -1759,6 +1772,11 @@ test "Endpoint version negotiation ignores non-triggering datagrams" {
     try std.testing.expectEqual(@as(?[]const u8, null), try writeVersionNegotiationForUnsupportedVersion(
         &response_buf,
         &version_negotiation,
+        &supported_versions,
+    ));
+    try std.testing.expectEqual(@as(?[]const u8, null), try writeVersionNegotiationForUnsupportedVersion(
+        &response_buf,
+        &fixed_bit_clear,
         &supported_versions,
     ));
     try std.testing.expectEqual(@as(?[]const u8, null), try writeVersionNegotiationForUnsupportedVersion(

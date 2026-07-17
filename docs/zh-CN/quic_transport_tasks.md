@@ -56,6 +56,10 @@ version-information 原语）：
 | qlog、PMTU discovery、GSO/GRO、高级 congestion selection | transport loop 可用后的运维/性能扩展。 | Deferred 或未实现。 |
 | 外部互通 | 声称第一轮可用 transport 里程碑前必须具备。 | 部分完成：客户端专用二进制已与两个来自不同实现家族的本机独立服务端完成证书校验的 QUIC/TLS 握手，并通过强制 Retry 的 `quic-go` v0.59.0 server、以及另一次由 peer 丢弃一个 post-handshake 1-RTT 包以触发 PTO recovery 的运行完成证书校验的双向 STREAM FIN echo；仅支持 v1 的 `quic-go` server 会对 Zig v2 Initial 返回 Version Negotiation，Zig 校验后创建全新的 v1 连接并完成证书校验 stream echo。Go 与 Rust 客户端已和本地 Zig server 完成证书校验的双向 STREAM FIN echo，包含有界 Retry 路径。`quic-go` client 还证明 Zig server 在 stream 0 到 4 到 8 到 12 的连续 stream-count 额度释放、接收 RESET_STREAM(41)、server 的 STOP_SENDING(42) 后收到对端 RESET_STREAM(42)、单向 stream 2 到 3 的 FIN 交换，以及丢弃 4 个 post-stream Zig datagram 或握手完成前 4 个 server-flight datagram 后的服务端 PTO recovery。更广泛的服务端和应用层场景尚未验证。 |
 
+endpoint Version Negotiation response 生成现在会先校验 QUIC fixed bit。
+fixed bit 为 0 的 unsupported-version long-header datagram 会被忽略，不再生成
+Version Negotiation packet。
+
 mutual-version selection 现在除 reserved greasing version 外，也会跳过禁止使用的
 zero-version preferred entry，保持 RFC 8999 中 version zero 只用于 Version
 Negotiation packet framing 的不变量。
@@ -957,6 +961,14 @@ close 和 route cleanup 事件。
 以上仅是有界的 1-RTT short-packet 证据。Initial 和 Handshake 接收路径仍保持当前的有序规则，尚未记录外部 server 互通结果。
 
 ## 进展记录
+
+- 2026-07-17：收紧 endpoint Version Negotiation response 触发条件。fixed bit
+  为 0 的 unsupported-version long header 现在不会生成 Version Negotiation
+  response。
+
+- 2026-07-17：收紧 address-validation token version binding。token 签发和
+  version-specific validation 现在会拒绝 forbidden zero 与 reserved
+  originating QUIC version。
 
 - 2026-07-17：补齐 protected TLS transport close facade。client/server TLS
   transport 现在可以排队 protected application CONNECTION_CLOSE output，暴露

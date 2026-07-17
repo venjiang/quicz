@@ -214,6 +214,7 @@ pub fn validateForVersion(
     if (now_millis < 0 or peer_address.len == 0 or peer_address.len > std.math.maxInt(u16)) {
         return error.InvalidToken;
     }
+    try validateTokenVersion(expected_originating_version);
     try validateEnvelope(encoded);
 
     var offset: usize = magic.len;
@@ -223,6 +224,7 @@ pub fn validateForVersion(
 
     const originating_version: packet.Version = @enumFromInt(std.mem.readInt(u32, encoded[offset..][0..version_len], .big));
     offset += version_len;
+    try validateTokenVersion(originating_version);
     if (@intFromEnum(originating_version) != @intFromEnum(expected_originating_version)) return error.InvalidToken;
 
     const issued_u64 = std.mem.readInt(u64, encoded[offset..][0..8], .big);
@@ -355,10 +357,16 @@ fn validateEnvelope(encoded: []const u8) Error!void {
 
 fn validateContext(context: Context) Error!void {
     if (context.issued_millis < 0 or context.lifetime_millis == 0) return error.InvalidToken;
+    try validateTokenVersion(context.originating_version);
     if (context.peer_address.len == 0 or context.peer_address.len > std.math.maxInt(u16)) {
         return error.InvalidToken;
     }
     _ = expiresAtMillis(context.issued_millis, context.lifetime_millis) orelse return error.InvalidToken;
+}
+
+fn validateTokenVersion(version: packet.Version) Error!void {
+    if (@intFromEnum(version) == 0) return error.InvalidToken;
+    if (packet.isReservedVersion(version)) return error.InvalidToken;
 }
 
 fn expiresAtMillis(issued_millis: i64, lifetime_millis: u64) ?i64 {
@@ -433,10 +441,35 @@ test "address validation token binds originating QUIC version" {
     const validation = try validateForVersion(secret, .new_token, .v2, 1_100, peer_address, encoded);
     try std.testing.expectEqual(packet.Version.v2, validation.originating_version);
     try std.testing.expectEqual(Kind.new_token, validation.kind);
+    try std.testing.expectError(
+        error.InvalidToken,
+        validateForVersion(secret, .new_token, @enumFromInt(0), 1_100, peer_address, encoded),
+    );
+    try std.testing.expectError(
+        error.InvalidToken,
+        validateForVersion(secret, .new_token, @enumFromInt(0x0a0a0a0a), 1_100, peer_address, encoded),
+    );
 
     const secrets = [_]Secret{secret};
     const rotated_validation = try validateAnySecretForVersion(&secrets, .new_token, .v2, 1_100, peer_address, encoded);
     try std.testing.expectEqual(packet.Version.v2, rotated_validation.originating_version);
+
+    try std.testing.expectError(error.InvalidToken, encode(std.testing.allocator, secret, .{
+        .kind = .new_token,
+        .originating_version = @enumFromInt(0),
+        .issued_millis = 1_000,
+        .lifetime_millis = 5_000,
+        .peer_address = peer_address,
+        .nonce = nonce,
+    }));
+    try std.testing.expectError(error.InvalidToken, encode(std.testing.allocator, secret, .{
+        .kind = .new_token,
+        .originating_version = @enumFromInt(0x0a0a0a0a),
+        .issued_millis = 1_000,
+        .lifetime_millis = 5_000,
+        .peer_address = peer_address,
+        .nonce = nonce,
+    }));
 }
 
 test "address validation token validates against rotated secrets" {
