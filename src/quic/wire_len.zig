@@ -114,7 +114,7 @@ pub fn maxStreamFrameDataLen(stream_id: u64, offset: u64, remaining: usize, max_
 
     var best: usize = 0;
     var low: usize = 1;
-    var high: usize = remaining;
+    var high: usize = @min(remaining, max_datagram_size);
     while (low <= high) {
         const mid = low + (high - low) / 2;
         const encoded_len = try streamFrameWireLen(stream_id, offset, mid);
@@ -138,7 +138,7 @@ pub fn maxCryptoFrameDataLen(offset: u64, remaining: usize, max_datagram_size: u
 
     var best: usize = 0;
     var low: usize = 1;
-    var high: usize = remaining;
+    var high: usize = @min(remaining, max_datagram_size);
     while (low <= high) {
         const mid = low + (high - low) / 2;
         const encoded_len = try cryptoFrameWireLen(offset, mid);
@@ -383,4 +383,9 @@ test "max frame data length respects varint boundary expansion" {
     try std.testing.expectEqual(@as(usize, 63), try maxCryptoFrameDataLen(0, 100, 67));
     try std.testing.expectEqual(@as(usize, 64), try maxCryptoFrameDataLen(0, 100, 68));
     try std.testing.expectError(error.BufferTooSmall, maxCryptoFrameDataLen(0, 100, 2));
+}
+
+test "max frame data length ignores unsendable remaining bytes" {
+    try std.testing.expectEqual(@as(usize, 63), try maxStreamFrameDataLen(0, 0, std.math.maxInt(usize), 67));
+    try std.testing.expectEqual(@as(usize, 63), try maxCryptoFrameDataLen(0, std.math.maxInt(usize), 67));
 }
