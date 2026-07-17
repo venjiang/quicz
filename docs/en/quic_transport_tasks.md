@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Hardened explicit server record retirement. Public
+  `Tls13ServerEndpoint.retireRecord()` now reports an internal consistency error
+  if the endpoint-owned record table changes unexpectedly during route/timer
+  retirement, while preserving the existing unknown-record result.
+
 - 2026-07-17: Hardened server endpoint terminal record cleanup.
   `Tls13ServerEndpoint` now reports an internal consistency error if due
   idle/close retirement cannot remove the endpoint-owned record, instead of

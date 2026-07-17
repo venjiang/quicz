@@ -973,6 +973,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：加固显式 server record retirement。公开
+  `Tls13ServerEndpoint.retireRecord()` 在 route/timer retirement 期间如果
+  endpoint-owned record table 出现非预期变化，现在返回 internal consistency
+  error，同时保留既有 unknown-record 结果。
+
 - 2026-07-17：加固 server endpoint 终态 record cleanup。
   `Tls13ServerEndpoint` 在 due idle/close retirement 后如果无法移除
   endpoint-owned record，现在返回 internal consistency error，而不是依赖

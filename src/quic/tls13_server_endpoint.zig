@@ -394,10 +394,10 @@ pub fn Tls13ServerEndpoint(
         pub fn retireRecord(
             self: *Self,
             connection_id: u64,
-        ) error{UnknownConnectionId}!root.EndpointConnectionRetireResult {
+        ) error{ Internal, UnknownConnectionId }!root.EndpointConnectionRetireResult {
             if (self.records.get(connection_id) == null) return error.UnknownConnectionId;
             const retired = self.lifecycle.retireConnection(connection_id);
-            self.records.remove(connection_id) catch unreachable;
+            self.records.remove(connection_id) catch return error.Internal;
             return retired;
         }
 
