@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Hardened server endpoint direct routed datagram handling.
+  Already-routed long/short processing entrypoints now reject fixed-bit-clear
+  datagrams before installed-key or long-packet dispatch, keeping the direct
+  route helpers aligned with endpoint receive classification.
+
 - 2026-07-17: Tightened TLS client transport bare-padding datagram handling.
   A UDP datagram that is entirely zero bytes is now rejected as
   `InvalidPacket` before receive-side state mutation, while all-zero tail bytes

@@ -1835,6 +1835,7 @@ pub fn Tls13ServerEndpoint(
             handshake_out: []root.EndpointPolledDatagramResult,
         ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!RoutedDatagramProcessPathResult {
             if (datagram.len == 0) return error.InvalidPacket;
+            if ((datagram[0] & 0x40) == 0) return error.InvalidPacket;
             return switch (quic_packet.parseHeaderForm(datagram[0])) {
                 .long => .{ .long = try self.processLongDatagramWithRoutePath(
                     route.connection_id,
@@ -1875,6 +1876,7 @@ pub fn Tls13ServerEndpoint(
             installed_key_out: []DatagramPathResult,
         ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!RoutedDatagramDrainPathResult {
             if (datagram.len == 0) return error.InvalidPacket;
+            if ((datagram[0] & 0x40) == 0) return error.InvalidPacket;
             return switch (quic_packet.parseHeaderForm(datagram[0])) {
                 .long => .{ .long = try self.processLongDatagramWithRoutePath(
                     route.connection_id,
@@ -3468,10 +3470,53 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
             .supported_versions = &[_]quic_packet.Version{.v1},
         },
     );
-    switch (feed_result) {
-        .routed => |route| try std.testing.expectEqual(record.handle, route.connection_id),
+    const route = switch (feed_result) {
+        .routed => |route| route,
         else => return error.TestUnexpectedResult,
-    }
+    };
+    try std.testing.expectEqual(record.handle, route.connection_id);
+
+    const fixed_bit_clear = [_]u8{ 0, 0, 0 };
+    var scratch: [64]u8 = undefined;
+    var route_out: [64]u8 = undefined;
+    var initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    const direct_options: root.EndpointFeedInstalledKeyDatagramOptions = .{
+        .space = .application,
+        .out = &route_out,
+        .unpredictable_prefix = &[_]u8{},
+        .supported_versions = &[_]quic_packet.Version{.v1},
+    };
+    try std.testing.expectError(
+        error.InvalidPacket,
+        endpoint_owner.processRoutedDatagramWithRoutePath(
+            route,
+            path,
+            3,
+            &fixed_bit_clear,
+            direct_options,
+            &scratch,
+            &[_]u8{},
+            &initial_out,
+            &handshake_out,
+        ),
+    );
+    var installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        endpoint_owner.processRoutedDatagramAndDrainWithRoutePath(
+            route,
+            path,
+            4,
+            &fixed_bit_clear,
+            direct_options,
+            &scratch,
+            &[_]u8{},
+            &initial_out,
+            &handshake_out,
+            &installed_key_out,
+        ),
+    );
 
     try endpoint_owner.records.remove(record.handle);
     try std.testing.expectError(

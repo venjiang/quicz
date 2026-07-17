@@ -973,6 +973,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：加固 server endpoint 的直接 routed datagram 处理。
+  已路由的 long/short 处理入口现在会在 installed-key 或 long-packet dispatch
+  前拒绝 fixed-bit-clear datagram，与 endpoint receive 分类层保持同一边界。
+
 - 2026-07-17：收紧 TLS client transport 的裸 padding datagram 处理。
   整个 UDP datagram 都是 0 字节时，现在会在 receive-side 状态变更前返回
   `InvalidPacket`；完整 protected packet 后的 all-zero tail 仍会被忽略。
