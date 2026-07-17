@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Hardened TLS Linux CSPRNG filling. Pure-Zig TLS random byte
+  generation now loops until Linux `getrandom` fills the requested buffer and
+  retries transient `EINTR`/`EAGAIN` results instead of accepting partial
+  entropy.
+
 - 2026-07-17: Hardened TLS X25519 key-pair generation. Pure-Zig TLS client
   and server initialization now resample rare invalid X25519 private scalars
   until a public key is produced, instead of panicking after a second invalid

@@ -973,6 +973,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：加固 TLS Linux CSPRNG 填充。纯 Zig TLS 随机字节生成现在会循环
+  调用 Linux `getrandom` 直到填满请求 buffer，并对瞬时 `EINTR`/`EAGAIN`
+  结果重试，不再接受部分熵。
+
 - 2026-07-17：加固 TLS X25519 key-pair 生成。纯 Zig TLS client/server
   初始化时遇到极罕见的无效 X25519 private scalar 会继续重采样直到生成 public
   key，而不是第二次随机失败后 panic。

@@ -390,8 +390,24 @@ pub fn secureRandomBytes(buf: []u8) void {
         .illumos,
         .serenity,
         => std.c.arc4random_buf(buf.ptr, buf.len),
-        .linux => _ = std.c.getrandom(buf.ptr, buf.len, 0),
+        .linux => secureRandomBytesLinux(buf),
         else => @compileError("secureRandomBytes: unsupported OS"),
+    }
+}
+
+fn secureRandomBytesLinux(buf: []u8) void {
+    var filled: usize = 0;
+    while (filled < buf.len) {
+        const rc = std.os.linux.getrandom(buf[filled..].ptr, buf.len - filled, 0);
+        switch (std.os.linux.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) @panic("secureRandomBytes: Linux getrandom returned no bytes");
+                filled += n;
+            },
+            .INTR, .AGAIN => continue,
+            else => @panic("secureRandomBytes: Linux getrandom failed"),
+        }
     }
 }
 
