@@ -767,6 +767,31 @@ test "Tls13Handshake clientProcessNewSessionTicket ignores zero-lifetime tickets
     try std.testing.expectEqual(@as(usize, 0), hs.session_ticket_len);
 }
 
+test "Tls13Handshake clientProcessNewSessionTicket ignores excessive-lifetime tickets" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp);
+    const shared_secret = [_]u8{0x01} ** 32;
+    hs.key_schedule.deriveHandshakeSecrets(&shared_secret, hs.transcript.current());
+    hs.key_schedule.deriveAppSecrets(hs.transcript.current());
+    hs.state = .connected;
+
+    const nst_msg = [_]u8{
+        0x04, 0x00, 0x00, 0x13,
+        0x00, 0x09, 0x3a, 0x81, // ticket_lifetime=604801: over seven days
+        0x00, 0x00, 0x00, 0x01,
+        0x02, 0xaa, 0xbb, 0x00,
+        0x04, 0xcc, 0xdd, 0xee,
+        0xff, 0x00, 0x00,
+    };
+    try hs.clientProcessNewSessionTicket(&nst_msg);
+    try std.testing.expect(hs.resumption_psk == null);
+    try std.testing.expectEqual(@as(usize, 0), hs.session_ticket_len);
+}
+
 test "Tls13Handshake clientProcessPostHandshake drains NewSessionTicket from input buffer" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -1722,6 +1747,7 @@ const hello_retry_request_random = [_]u8{
 const sig_ecdsa_secp256r1_sha256: u16 = 0x0403;
 const sig_ed25519: u16 = 0x0807;
 const sig_rsa_pss_rsae_sha256: u16 = 0x0804;
+const max_new_session_ticket_lifetime_sec: u32 = 604800;
 
 fn signatureSchemeForPrivateKeyAlgorithm(algorithm: PrivateKeyAlgorithm) u16 {
     return switch (algorithm) {
@@ -2218,7 +2244,7 @@ pub const Tls13Handshake = struct {
         if (self.state != .connected) return error.UnexpectedMessage;
         const nst = try parseNewSessionTicket(msg);
         if (nst.ticket.len > self.session_ticket.len) return error.DecodeError;
-        if (nst.ticket_lifetime == 0) return;
+        if (nst.ticket_lifetime == 0 or nst.ticket_lifetime > max_new_session_ticket_lifetime_sec) return;
         const rms = self.key_schedule.deriveResumptionMasterSecret(self.transcript.current());
         const resumption_psk = KeySchedule.derivePskFromTicket(rms, nst.ticket_nonce);
         const ticket_len = nst.ticket.len;
