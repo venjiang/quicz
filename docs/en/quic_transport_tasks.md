@@ -1098,10 +1098,24 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Hardened server Initial admission rollback. If Handshake backend
+  drive fails after a newly accepted record is adopted, record cleanup now
+  reports an internal consistency error on cleanup failure instead of relying on
+  unreachable rollback.
+
 - 2026-07-17: Stabilized the ACK-delay controlled-clock recovery test. The
   max-ack-delay RTT test now ACKs the packet numbers returned by packet send
   recording, so randomized initial packet-number seeds do not invalidate the
   RTT sample expectations.
+
+- 2026-07-17: Hardened server endpoint route-bound due-deadline lookup.
+  Route-bound due-deadline service now reports an internal consistency error
+  if the selected endpoint-owned record disappears after deadline selection.
+
+- 2026-07-17: Hardened server endpoint accepted-Initial rollback. If
+  Handshake-space backend driving fails after record adoption, the endpoint now
+  removes the adopted record explicitly and reports cleanup inconsistency as
+  an internal error instead of relying on an unreachable `errdefer` path.
 
 - 2026-07-17: Hardened server endpoint routed output polling. Route-bound
   installed-key output now reports an internal consistency error if the

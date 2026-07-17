@@ -973,9 +973,21 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：加固 server Initial admission rollback。新 accepted record adopt
+  后如果 Handshake backend drive 失败，record cleanup 失败会报告内部一致性错误，
+  不再依赖 unreachable rollback。
+
 - 2026-07-17：稳定 ACK-delay controlled-clock recovery 测试。max-ack-delay
   RTT 测试现在 ACK packet send recording 返回的真实 packet number，避免随机初始
   packet-number seed 破坏 RTT sample 预期。
+
+- 2026-07-17：加固 server endpoint route-bound due-deadline lookup。
+  route-bound due-deadline service 在 deadline selection 后遇到选中的
+  endpoint-owned record 消失时会报告内部一致性错误。
+
+- 2026-07-17：加固 server endpoint accepted-Initial rollback。Handshake-space
+  backend drive 在 record adopt 后失败时，endpoint 现在会显式移除已 adopt record，
+  并把 cleanup 不一致报告为 internal error，不再依赖 unreachable `errdefer` 路径。
 
 - 2026-07-17：加固 server endpoint routed output polling。route-bound
   installed-key output 在跨 record poll 与 route lookup 之间遇到 endpoint-owned

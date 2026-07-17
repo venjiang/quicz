@@ -1242,19 +1242,22 @@ pub fn Tls13ServerEndpoint(
             errdefer _ = self.lifecycle.retireConnection(connection_id);
 
             try self.records.adopt(connection_id, record);
-            errdefer self.records.remove(connection_id) catch unreachable;
             if (accepted.drain.first_error != null or !accepted.backend.handshake_keys_installed) {
                 return .{ .initial = accepted };
             }
+            const handshake = self.driveBackend(
+                connection_id,
+                .handshake,
+                scratch,
+                now_millis,
+                handshake_out,
+            ) catch |err| {
+                self.records.remove(connection_id) catch return error.Internal;
+                return err;
+            };
             return .{
                 .initial = accepted,
-                .handshake = try self.driveBackend(
-                    connection_id,
-                    .handshake,
-                    scratch,
-                    now_millis,
-                    handshake_out,
-                ),
+                .handshake = handshake,
             };
         }
 
