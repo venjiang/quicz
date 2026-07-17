@@ -1857,6 +1857,15 @@ fn keyShareGroupSeenBefore(key_shares: []const u8, current_entry_offset: usize, 
     return false;
 }
 
+fn namedGroupSeenBefore(groups: []const u8, current_group_offset: usize, group: u16) bool {
+    var pos: usize = 0;
+    while (pos < current_group_offset) : (pos += 2) {
+        if (pos + 2 > current_group_offset) return false;
+        if (readU16(groups[pos..]) == group) return true;
+    }
+    return false;
+}
+
 fn clientHelloSupportedGroupsContains(extensions: []const u8, group: u16) ?bool {
     var pos: usize = 0;
     while (pos < extensions.len) {
@@ -3131,7 +3140,11 @@ pub const Tls13Handshake = struct {
                     have_supported_groups = true;
                     var gp: usize = 2;
                     while (gp + 2 <= el) : (gp += 2) {
-                        if (readU16(ext[gp..]) == group_x25519) {
+                        const group = readU16(ext[gp..]);
+                        if (namedGroupSeenBefore(ext[2..el], gp - 2, group)) {
+                            return error.DecodeError;
+                        }
+                        if (group == group_x25519) {
                             client_supports_x25519 = true;
                         }
                     }
@@ -5580,6 +5593,31 @@ test "Tls13Handshake server rejects ClientHello supported_groups without X25519"
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.NoKeyShare, server.step());
+}
+
+test "Tls13Handshake server rejects duplicate ClientHello supported_groups entries" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const groups = try clientHelloExtension(base_hello, @intFromEnum(ExtType.supported_groups));
+    const insert_offset = groups.body_offset + groups.body_len;
+
+    std.mem.copyBackwards(
+        u8,
+        hello_buf[insert_offset + 2 .. base_hello.len + 2],
+        hello_buf[insert_offset..base_hello.len],
+    );
+    writeU16(hello_buf[insert_offset..][0..2], group_x25519);
+    const groups_len = readU16(hello_buf[groups.body_offset..]);
+    writeU16(hello_buf[groups.body_offset..][0..2], groups_len + 2);
+    writeU16(hello_buf[groups.header_offset + 2 ..][0..2], @as(u16, @intCast(groups.body_len + 2)));
+    try setClientHelloBodyLen(&hello_buf, base_hello.len - 4 + 2);
+    const extensions_len = readU16(hello_buf[groups.extensions_len_offset..]);
+    writeU16(hello_buf[groups.extensions_len_offset..][0..2], extensions_len + 2);
+    const hello = hello_buf[0 .. base_hello.len + 2];
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
 }
 
 test "Tls13Handshake server rejects missing ClientHello supported_groups" {
