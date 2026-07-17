@@ -2004,11 +2004,13 @@ pub const Connection = struct {
 
     /// Validate and act on one client-side Version Negotiation packet.
     ///
-    /// Incorrect connection-ID echoes and packets that include the client's
-    /// Original Version are ignored by returning null. A valid packet selects
-    /// the first server-offered version that appears in this client's
-    /// configured `available_versions`, records that this connection attempt
-    /// already reacted to Version Negotiation, and returns the selected version.
+    /// Incorrect connection-ID echoes, packets that include the client's
+    /// Original Version, and Version Negotiation received after this client has
+    /// already processed another peer packet are ignored by returning null. A
+    /// valid packet selects the first server-offered version that appears in
+    /// this client's configured `available_versions`, records that this
+    /// connection attempt already reacted to Version Negotiation, and returns
+    /// the selected version.
     pub fn processVersionNegotiationDatagram(
         self: *Connection,
         now_millis: i64,
@@ -2020,11 +2022,12 @@ pub const Connection = struct {
         self.expireCloseState(now_millis);
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
         if (self.side != .client) return error.InvalidPacket;
-        if (self.initial_packet_space.discarded) return error.InvalidPacket;
-        if (self.initial_packet_space.next_peer_packet_number != 0) return error.InvalidPacket;
         if (original_destination_connection_id.len > max_connection_id_len) return error.InvalidPacket;
         if (local_initial_source_connection_id.len > max_connection_id_len) return error.InvalidPacket;
         if (self.version_negotiation_selected_version != null) return null;
+        if (self.retry_source_connection_id != null) return null;
+        if (self.initial_packet_space.discarded) return null;
+        if (self.initial_packet_space.next_peer_packet_number != 0) return null;
 
         var negotiation = packet.parseVersionNegotiationPacket(datagram, self.allocator) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -59788,6 +59791,50 @@ test "processVersionNegotiationDatagram ignores unsafe or mismatched packets" {
     ));
     try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
     try std.testing.expectError(error.InvalidPacket, client.versionNegotiationFollowupConfig());
+}
+
+test "processVersionNegotiationDatagram ignores packets after Retry" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const retry_scid = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
+    const retry_token = "retry-token-for-client-address";
+    const retry = packet.RetryPacket{
+        .version = .v1,
+        .dcid = &client_scid,
+        .scid = &retry_scid,
+        .token = retry_token,
+        .integrity_tag = [_]u8{0} ** protection.aead_tag_len,
+    };
+    const retry_datagram = try protection.encodeRetryPacketWithIntegrity(std.testing.allocator, &original_dcid, retry);
+    defer std.testing.allocator.free(retry_datagram);
+
+    const client_versions = [_]packet.Version{ .v2, .v1 };
+    const server_versions = [_]packet.Version{.v2};
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try packet.encodeVersionNegotiationPacket(out.writer(), .{
+        .dcid = &client_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+    });
+    defer client.deinit();
+
+    try client.processRetryDatagram(10, &original_dcid, retry_datagram);
+    try std.testing.expectEqual(@as(?packet.Version, null), try client.processVersionNegotiationDatagram(
+        11,
+        &original_dcid,
+        &client_scid,
+        out.getWritten(),
+    ));
+    try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
+    try std.testing.expectError(error.InvalidPacket, client.versionNegotiationFollowupConfig());
+    try std.testing.expectEqualStrings(retry_token, client.latestRetryToken().?);
+    try std.testing.expectEqualStrings(&retry_scid, client.retrySourceConnectionId().?);
 }
 
 test "processVersionNegotiationDatagram rejects no mutual version without mutation" {
