@@ -87,6 +87,9 @@ NewSessionTicket 解析现在会先拒绝重复的 extension type，包括重复
 extension，再为后续 ClientHello 派生或存储 resumption PSK。
 client-side NewSessionTicket 处理现在会丢弃 lifetime 超过 TLS 1.3 七天上限的
 ticket，避免在当前无调用方时钟过期字段的实现中存储无法按期过期的 resumption PSK。
+现在还会把匹配当前缓存 ticket identity 的 zero-lifetime NewSessionTicket
+视为立即撤销，清除已存 resumption PSK 与 0-RTT permission，避免后续
+resumed ClientHello 继续使用已撤销 ticket。
 
 Client 和 server TLS-owned transport 现在直接暴露 protected
 `CONNECTION_CLOSE` helper 与 close-deadline accessor。聚焦测试会解密发出的

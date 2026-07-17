@@ -99,6 +99,9 @@ later ClientHello.
 Client-side NewSessionTicket handling now discards tickets whose lifetime
 exceeds TLS 1.3's seven-day limit instead of storing a resumption PSK that this
 caller-clock-free implementation cannot expire.
+It now also treats a zero-lifetime NewSessionTicket for the currently cached
+ticket identity as an immediate revocation, clearing the stored resumption PSK
+and 0-RTT permission before a later resumed ClientHello can use them.
 
 Client and server TLS-owned transports now expose direct protected
 `CONNECTION_CLOSE` helpers plus close-deadline accessors. Focused tests decrypt

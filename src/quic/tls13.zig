@@ -767,6 +767,45 @@ test "Tls13Handshake clientProcessNewSessionTicket ignores zero-lifetime tickets
     try std.testing.expectEqual(@as(usize, 0), hs.session_ticket_len);
 }
 
+test "Tls13Handshake clientProcessNewSessionTicket clears matching zero-lifetime ticket" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp);
+    const shared_secret = [_]u8{0x01} ** 32;
+    hs.key_schedule.deriveHandshakeSecrets(&shared_secret, hs.transcript.current());
+    hs.key_schedule.deriveAppSecrets(hs.transcript.current());
+    hs.state = .connected;
+
+    const valid_nst = [_]u8{
+        0x04, 0x00, 0x00, 0x13,
+        0x00, 0x00, 0x0e, 0x10,
+        0x00, 0x00, 0x00, 0x01,
+        0x02, 0xaa, 0xbb, 0x00,
+        0x04, 0xcc, 0xdd, 0xee,
+        0xff, 0x00, 0x00,
+    };
+    try hs.clientProcessNewSessionTicket(&valid_nst);
+    try std.testing.expect(hs.resumption_psk != null);
+    try std.testing.expectEqual(@as(usize, 4), hs.session_ticket_len);
+
+    const revoke_same_ticket = [_]u8{
+        0x04, 0x00, 0x00, 0x13,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x02,
+        0x02, 0xaa, 0xbb, 0x00,
+        0x04, 0xcc, 0xdd, 0xee,
+        0xff, 0x00, 0x00,
+    };
+    try hs.clientProcessNewSessionTicket(&revoke_same_ticket);
+    try std.testing.expect(hs.resumption_psk == null);
+    try std.testing.expectEqual(@as(usize, 0), hs.session_ticket_len);
+    try std.testing.expectEqual(@as(u32, 0), hs.session_ticket_age_add);
+    try std.testing.expect(!hs.session_ticket_allows_early_data);
+}
+
 test "Tls13Handshake clientProcessNewSessionTicket ignores excessive-lifetime tickets" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -2244,7 +2283,18 @@ pub const Tls13Handshake = struct {
         if (self.state != .connected) return error.UnexpectedMessage;
         const nst = try parseNewSessionTicket(msg);
         if (nst.ticket.len > self.session_ticket.len) return error.DecodeError;
-        if (nst.ticket_lifetime == 0 or nst.ticket_lifetime > max_new_session_ticket_lifetime_sec) return;
+        if (nst.ticket_lifetime == 0) {
+            if (self.session_ticket_len == nst.ticket.len and
+                std.mem.eql(u8, self.session_ticket[0..self.session_ticket_len], nst.ticket))
+            {
+                self.resumption_psk = null;
+                self.session_ticket_len = 0;
+                self.session_ticket_age_add = 0;
+                self.session_ticket_allows_early_data = false;
+            }
+            return;
+        }
+        if (nst.ticket_lifetime > max_new_session_ticket_lifetime_sec) return;
         const rms = self.key_schedule.deriveResumptionMasterSecret(self.transcript.current());
         const resumption_psk = KeySchedule.derivePskFromTicket(rms, nst.ticket_nonce);
         const ticket_len = nst.ticket.len;
