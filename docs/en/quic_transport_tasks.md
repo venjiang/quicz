@@ -2092,10 +2092,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   `src/quic/wire_len.zig` while keeping internal compatibility aliases in
   `src/lib.zig`. The new module owns varint length, protected long/short
   datagram length, ACK/CRYPTO/STREAM/control-frame length, and bounded frame
-  data slicing budgets. Unit coverage now checks varint boundaries and
-  Initial/short datagram minimum-length expansion, plus STREAM/CRYPTO payload
-  sizing across varint length expansion, to keep send-path budgeting behavior
-  unchanged.
+  data slicing budgets. Unit coverage now checks varint boundaries, invalid
+  packet-number lengths, Initial/short datagram minimum-length expansion, and
+  STREAM/CRYPTO payload sizing across varint length expansion to keep send-path
+  budgeting behavior unchanged.
 - 2026-06-18: Split ACK/frame packet-type rule helpers into
   `src/quic/frame_rules.zig` while keeping the public
   `framePacketTypeErrorCode()` wrapper and internal compatibility aliases in

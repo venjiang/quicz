@@ -333,6 +333,23 @@ test "protected datagram minimum plaintext length expands to target" {
     try std.testing.expect((try protectedShortDatagramWireLen(8, 2, short_plaintext_len)) >= 1200);
 }
 
+test "protected datagram wire length rejects invalid packet number lengths" {
+    const header = packet.LongHeader{
+        .packet_type = .handshake,
+        .version = .v1,
+        .dcid = "destination",
+        .scid = "source",
+        .token = "",
+        .packet_number = 0,
+        .payload_length = 0,
+    };
+
+    try std.testing.expectError(error.InvalidPacket, protectedLongDatagramWireLen(header, 0, 0));
+    try std.testing.expectError(error.InvalidPacket, protectedLongDatagramWireLen(header, 5, 0));
+    try std.testing.expectError(error.InvalidPacket, protectedShortDatagramWireLen(8, 0, 0));
+    try std.testing.expectError(error.InvalidPacket, protectedShortDatagramWireLen(8, 5, 0));
+}
+
 test "max frame data length respects varint boundary expansion" {
     try std.testing.expectEqual(@as(usize, 3), try maxStreamFrameDataLen(0, 0, 100, 6));
     try std.testing.expectEqual(@as(usize, 63), try maxStreamFrameDataLen(0, 0, 100, 67));
