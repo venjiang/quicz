@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Stabilized the ACK-delay controlled-clock recovery test. The
+  max-ack-delay RTT test now ACKs the packet numbers returned by packet send
+  recording, so randomized initial packet-number seeds do not invalidate the
+  RTT sample expectations.
+
 - 2026-07-17: Hardened server endpoint routed output polling. Route-bound
   installed-key output now reports an internal consistency error if the
   endpoint-owned record disappears between cross-record polling and route

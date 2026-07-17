@@ -529,7 +529,7 @@ pub fn Tls13ServerEndpoint(
         ) (root.Error || endpoint.RouteError)!?DueWorkDatagramPathDrainResult {
             const deadline = (try self.nextDeadline(allocator)) orelse return null;
             if (deadline.deadline_millis > now_millis) return null;
-            const record = self.records.get(deadline.connection_id) orelse return error.UnknownConnectionId;
+            const record = self.records.get(deadline.connection_id) orelse return error.Internal;
             const connection = connection_of(record);
             const source_connection_id = source_connection_id_of(record);
 

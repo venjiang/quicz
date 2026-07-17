@@ -15185,27 +15185,27 @@ test "ACK delay is capped by peer max_ack_delay after handshake confirmation" {
     try std.testing.expectEqual(@as(u64, 0), conn.ackDelayForRtt(.handshake, 20));
     try std.testing.expectEqual(@as(u64, 160), conn.ackDelayForRtt(.application, 20));
 
-    _ = try conn.recordPacketSentInSpace(.application, 0, 100);
+    const first_packet_number = try conn.recordPacketSentInSpace(.application, 0, 100);
     try conn.receiveAckInSpace(.application, 100, .{
-        .largest_acknowledged = 0,
+        .largest_acknowledged = first_packet_number,
         .ack_delay = 20,
         .first_ack_range = 0,
     });
     try std.testing.expectEqual(@as(u64, 100), conn.smoothedRttMillis(.application));
 
-    _ = try conn.recordPacketSentInSpace(.application, 100, 100);
+    const second_packet_number = try conn.recordPacketSentInSpace(.application, 100, 100);
     try conn.receiveAckInSpace(.application, 220, .{
-        .largest_acknowledged = 1,
+        .largest_acknowledged = second_packet_number,
         .ack_delay = 20,
         .first_ack_range = 0,
     });
     try std.testing.expectEqual(@as(u64, 102), conn.smoothedRttMillis(.application));
 
-    _ = try conn.recordPacketSentInSpace(.application, 220, 100);
+    const third_packet_number = try conn.recordPacketSentInSpace(.application, 220, 100);
     try conn.confirmHandshake();
     try std.testing.expectEqual(@as(u64, 10), conn.ackDelayForRtt(.application, 20));
     try conn.receiveAckInSpace(.application, 340, .{
-        .largest_acknowledged = 2,
+        .largest_acknowledged = third_packet_number,
         .ack_delay = 20,
         .first_ack_range = 0,
     });

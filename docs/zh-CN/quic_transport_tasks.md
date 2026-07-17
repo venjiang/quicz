@@ -973,6 +973,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：稳定 ACK-delay controlled-clock recovery 测试。max-ack-delay
+  RTT 测试现在 ACK packet send recording 返回的真实 packet number，避免随机初始
+  packet-number seed 破坏 RTT sample 预期。
+
 - 2026-07-17：加固 server endpoint routed output polling。route-bound
   installed-key output 在跨 record poll 与 route lookup 之间遇到 endpoint-owned
   record 消失时会报告内部一致性错误，不再依赖 unreachable 状态。
