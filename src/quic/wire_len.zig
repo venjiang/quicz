@@ -35,6 +35,10 @@ pub fn protectedLongDatagramWireLen(
     plaintext_len: usize,
 ) Error!usize {
     if (packet_number_len == 0 or packet_number_len > 4) return error.InvalidPacket;
+    if (header.dcid.len > max_connection_id_len or header.scid.len > max_connection_id_len) return error.InvalidPacket;
+    if (@intFromEnum(header.version) == 0) return error.InvalidPacket;
+    if (header.packet_type == .retry) return error.InvalidPacket;
+    if (header.packet_type != .initial and header.token.len != 0) return error.InvalidPacket;
     const protected_payload_len = std.math.add(usize, plaintext_len, protection.aead_tag_len) catch return error.BufferTooSmall;
     const protected_payload_len_u64 = std.math.cast(u64, protected_payload_len) orelse return error.BufferTooSmall;
     const wire_length = std.math.add(u64, protected_payload_len_u64, packet_number_len) catch return error.BufferTooSmall;
@@ -71,6 +75,7 @@ pub fn protectedShortDatagramWireLen(
     plaintext_len: usize,
 ) Error!usize {
     if (packet_number_len == 0 or packet_number_len > 4) return error.InvalidPacket;
+    if (dcid_len > max_connection_id_len) return error.InvalidPacket;
     const protected_payload_len = std.math.add(usize, plaintext_len, protection.aead_tag_len) catch return error.BufferTooSmall;
     var len: usize = 1;
     len = try addWireLen(len, dcid_len);
@@ -133,7 +138,8 @@ pub fn maxStreamFrameDataLen(stream_id: u64, offset: u64, remaining: usize, max_
 
     var best: usize = 0;
     var low: usize = 1;
-    var high: usize = @min(remaining, max_datagram_size);
+    const end_offset_budget = std.math.cast(usize, max_quic_varint - offset) orelse std.math.maxInt(usize);
+    var high: usize = @min(remaining, max_datagram_size, end_offset_budget);
     while (low <= high) {
         const mid = low + (high - low) / 2;
         const encoded_len = try streamFrameWireLen(stream_id, offset, mid);
@@ -157,7 +163,8 @@ pub fn maxCryptoFrameDataLen(offset: u64, remaining: usize, max_datagram_size: u
 
     var best: usize = 0;
     var low: usize = 1;
-    var high: usize = @min(remaining, max_datagram_size);
+    const end_offset_budget = std.math.cast(usize, max_quic_varint - offset) orelse std.math.maxInt(usize);
+    var high: usize = @min(remaining, max_datagram_size, end_offset_budget);
     while (low <= high) {
         const mid = low + (high - low) / 2;
         const encoded_len = try cryptoFrameWireLen(offset, mid);
@@ -392,6 +399,41 @@ test "protected datagram wire length rejects invalid packet number lengths" {
     try std.testing.expectError(error.InvalidPacket, protectedShortDatagramWireLen(8, 5, 0));
 }
 
+test "protected datagram wire length rejects invalid packet envelopes" {
+    var too_long_cid = [_]u8{0} ** (max_connection_id_len + 1);
+    const header = packet.LongHeader{
+        .packet_type = .handshake,
+        .version = .v1,
+        .dcid = "destination",
+        .scid = "source",
+        .token = "",
+        .packet_number = 0,
+        .payload_length = 0,
+    };
+
+    var invalid = header;
+    invalid.dcid = &too_long_cid;
+    try std.testing.expectError(error.InvalidPacket, protectedLongDatagramWireLen(invalid, 2, 0));
+
+    invalid = header;
+    invalid.scid = &too_long_cid;
+    try std.testing.expectError(error.InvalidPacket, protectedLongDatagramWireLen(invalid, 2, 0));
+
+    invalid = header;
+    invalid.version = @enumFromInt(0);
+    try std.testing.expectError(error.InvalidPacket, protectedLongDatagramWireLen(invalid, 2, 0));
+
+    invalid = header;
+    invalid.packet_type = .retry;
+    try std.testing.expectError(error.InvalidPacket, protectedLongDatagramWireLen(invalid, 2, 0));
+
+    invalid = header;
+    invalid.token = "unexpected";
+    try std.testing.expectError(error.InvalidPacket, protectedLongDatagramWireLen(invalid, 2, 0));
+
+    try std.testing.expectError(error.InvalidPacket, protectedShortDatagramWireLen(max_connection_id_len + 1, 2, 0));
+}
+
 test "protected long datagram wire length rejects payload overflow" {
     const header = packet.LongHeader{
         .packet_type = .handshake,
@@ -557,4 +599,11 @@ test "ack wire length rejects invalid ACK ranges and oversized varints" {
 test "max frame data length ignores unsendable remaining bytes" {
     try std.testing.expectEqual(@as(usize, 63), try maxStreamFrameDataLen(0, 0, std.math.maxInt(usize), 67));
     try std.testing.expectEqual(@as(usize, 63), try maxCryptoFrameDataLen(0, std.math.maxInt(usize), 67));
+}
+
+test "max frame data length respects the QUIC end offset limit" {
+    try std.testing.expectEqual(@as(usize, 1), try maxStreamFrameDataLen(0, max_quic_varint - 1, 10, 64));
+    try std.testing.expectEqual(@as(usize, 1), try maxCryptoFrameDataLen(max_quic_varint - 1, 10, 64));
+    try std.testing.expectError(error.BufferTooSmall, maxStreamFrameDataLen(0, max_quic_varint, 10, 64));
+    try std.testing.expectError(error.BufferTooSmall, maxCryptoFrameDataLen(max_quic_varint, 10, 64));
 }

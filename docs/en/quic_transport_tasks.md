@@ -76,6 +76,11 @@ version zero is only used for Version Negotiation packet framing.
 `MAX_STREAMS_*` and `STREAMS_BLOCKED_*` wire-length budgeting now enforces the
 same stream-count ceiling as the frame encoder, so packetization rejects
 unsendable stream-count control frames before attempting to serialize them.
+STREAM and CRYPTO max-payload budgeting now also caps binary-search candidates
+against QUIC's maximum end offset, preserving the last sendable bytes when an
+offset is near the protocol ceiling.
+Protected datagram wire-length prediction now rejects invalid long/short packet
+envelopes before protected packet construction.
 
 Client and server TLS-owned transports now expose direct protected
 `CONNECTION_CLOSE` helpers plus close-deadline accessors. Focused tests decrypt
@@ -1091,9 +1096,22 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened protected packet-envelope wire-length validation.
+  Long-header length prediction now rejects oversized CIDs, version zero,
+  Retry, and unexpected non-Initial tokens; short-header length prediction
+  rejects oversized destination CIDs before protected packet construction.
+
 - 2026-07-17: Tightened stream-count control-frame wire-length validation.
   `MAX_STREAMS_*` and `STREAMS_BLOCKED_*` length prediction now rejects values
   above the stream-count limit before packetizing pending stream-limit output.
+
+- 2026-07-17: Tightened STREAM/CRYPTO max-payload budgeting near the QUIC
+  end-offset ceiling. The max payload helpers now cap search candidates by the
+  remaining valid end-offset space instead of probing unsendable frame lengths.
+
+- 2026-07-17: Tightened protected datagram wire-length envelope validation.
+  Protected long/short packet length prediction now rejects invalid CID lengths,
+  zero-version long headers, Retry envelopes, and unexpected long-header tokens.
 
 - 2026-07-17: Tightened NEW_CONNECTION_ID wire-length validation. The pending
   local-CID length helper now rejects non-encodable sequence numbers,

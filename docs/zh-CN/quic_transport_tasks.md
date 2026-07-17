@@ -68,6 +68,10 @@ Negotiation packet framing 的不变量。
 `MAX_STREAMS_*` 和 `STREAMS_BLOCKED_*` 的 wire-length budget 现在会执行与
 frame encoder 相同的 stream-count 上限，packetization 会在序列化前拒绝不可发送的
 stream-count 控制帧。
+STREAM 和 CRYPTO max-payload budget 现在也会按 QUIC 最大 end offset 收窄二分
+候选长度，offset 接近协议上限时仍能保留最后可发送的字节。
+protected datagram wire-length prediction 现在会在 protected packet construction
+前拒绝非法 long/short packet envelope。
 
 Client 和 server TLS-owned transport 现在直接暴露 protected
 `CONNECTION_CLOSE` helper 与 close-deadline accessor。聚焦测试会解密发出的
@@ -967,9 +971,22 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 protected packet-envelope wire-length 校验。long-header
+  length prediction 现在会拒绝过长 CID、version zero、Retry 和非 Initial packet
+  上的异常 token；short-header length prediction 会在 protected packet
+  construction 前拒绝过长 destination CID。
+
 - 2026-07-17：收紧 stream-count 控制帧 wire-length 校验。
   `MAX_STREAMS_*` 和 `STREAMS_BLOCKED_*` length prediction 现在会在
   packetizing pending stream-limit output 前拒绝超过 stream-count 上限的值。
+
+- 2026-07-17：收紧接近 QUIC end-offset 上限时的 STREAM/CRYPTO max-payload
+  budget。max payload helper 现在会按剩余合法 end-offset 空间限制搜索候选，不再先
+  探测不可发送的 frame length。
+
+- 2026-07-17：收紧 protected datagram wire-length envelope 校验。protected
+  long/short packet length prediction 现在会拒绝非法 CID 长度、zero-version long
+  header、Retry envelope 和非 Initial long-header token。
 
 - 2026-07-17：收紧 NEW_CONNECTION_ID wire-length 校验。pending local-CID
   length helper 现在会在 protected packet construction 前拒绝不可编码的
