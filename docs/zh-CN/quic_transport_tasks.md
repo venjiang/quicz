@@ -973,6 +973,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 Version Negotiation CID 边界。parser 和 encoder 现在会拒绝
+  超过 QUIC long-header CID 上限的 destination/source connection ID，而不是接受
+  oversized VN CID。
+
 - 2026-07-17：完成 receive-side packet-number adjacency helper 收敛。
   `ReceivedPacketRanges.record()` 的 forward extension 和相邻 range 合并现在都
   使用有界 adjacency helper，让所有 receive-range `n + 1` 校验走同一条

@@ -411,7 +411,7 @@ pub fn deinitShortPacket(packet: *ShortPacket, allocator: std.mem.Allocator) voi
 }
 
 fn validateVersionNegotiationCidLen(len: usize) PacketError!void {
-    if (len > std.math.maxInt(u8)) return error.InvalidConnectionIdLength;
+    if (len > 20) return error.InvalidConnectionIdLength;
 }
 
 fn validateVersionNegotiationVersion(version: Version) PacketError!void {
@@ -829,10 +829,12 @@ pub fn parseVersionNegotiationPacket(data: []const u8, allocator: std.mem.Alloca
     if (std.mem.readInt(u32, &version_buf, .big) != 0) return error.InvalidVersionNegotiation;
 
     const dcid_len = try reader.readByte();
+    try validateVersionNegotiationCidLen(dcid_len);
     const dcid = try buffer.readOwnedBytes(reader, allocator, dcid_len);
     errdefer allocator.free(dcid);
 
     const scid_len = try reader.readByte();
+    try validateVersionNegotiationCidLen(scid_len);
     const scid = try buffer.readOwnedBytes(reader, allocator, scid_len);
     errdefer allocator.free(scid);
 
@@ -1331,11 +1333,11 @@ test "parseShortPacket preserves payload allocation failures" {
     );
 }
 
-test "encode/parse version negotiation packet roundtrip with long connection ids" {
-    var dcid: [21]u8 = undefined;
+test "encode/parse version negotiation packet roundtrip with maximum connection ids" {
+    var dcid: [20]u8 = undefined;
     for (&dcid, 0..) |*byte, i| byte.* = @as(u8, @intCast(i));
 
-    var scid: [22]u8 = undefined;
+    var scid: [20]u8 = undefined;
     for (&scid, 0..) |*byte, i| byte.* = @as(u8, @intCast(0x80 + i));
 
     const versions = [_]Version{ .v1, .v2 };
@@ -1358,6 +1360,36 @@ test "encode/parse version negotiation packet roundtrip with long connection ids
     try std.testing.expectEqualSlices(u8, input.dcid, parsed.dcid);
     try std.testing.expectEqualSlices(u8, input.scid, parsed.scid);
     try std.testing.expectEqualSlices(Version, input.versions, parsed.versions);
+}
+
+test "version negotiation packet rejects oversized connection ids" {
+    var raw: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&raw);
+    try writer.writer().writeAll(&[_]u8{
+        0x80,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x15,
+    });
+    for (0..21) |_| {
+        try writer.writer().writeByte(0xaa);
+    }
+    try writer.writer().writeAll(&[_]u8{
+        0x01, 0xbb,
+        0x00, 0x00,
+        0x00, 0x01,
+    });
+    try std.testing.expectError(error.InvalidConnectionIdLength, parseVersionNegotiationPacket(writer.getWritten(), std.testing.allocator));
+
+    var encode_writer = buffer.fixedWriter(&raw);
+    const oversized_dcid = [_]u8{0xaa} ** 21;
+    try std.testing.expectError(error.InvalidConnectionIdLength, encodeVersionNegotiationPacket(encode_writer.writer(), .{
+        .dcid = &oversized_dcid,
+        .scid = &[_]u8{0xbb},
+        .versions = &[_]Version{.v1},
+    }));
 }
 
 test "reserved version helper matches QUIC greasing pattern" {

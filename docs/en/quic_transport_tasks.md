@@ -1098,6 +1098,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened Version Negotiation CID bounds. The parser and encoder
+  now reject destination or source connection IDs longer than the QUIC
+  long-header CID limit instead of accepting oversized VN CIDs.
+
 - 2026-07-17: Completed receive-side packet-number adjacency helper routing.
   `ReceivedPacketRanges.record()` now uses the bounded adjacency helper for both
   forward extension and neighbor coalescing, keeping all receive-range `n + 1`
