@@ -3110,8 +3110,8 @@ close 和 route cleanup 事件。
   send 会先用该聚合值与当前 space 的 congestion window 做准入；PTO probe
   和 congestion probe 仍保留一次性绕过语义。测试覆盖 Initial 与 Handshake
   in-flight bytes 填满 congestion window 时 Application STREAM 留在队列中，
-  以及 Initial ACK 释放聚合预算后 STREAM 可以发送；`loss_recovery` 现在打印
-  `cross-space congestion gate`。
+  Initial ACK 释放聚合预算后 STREAM 可以发送，以及 bytes-in-flight 计账在整数溢出前
+  饱和；`loss_recovery` 现在打印 `cross-space congestion gate`。
 - 2026-05-29：新增 RFC 9002 largest-acknowledged RTT sampling。ACK frame
   的 largest acknowledged packet 已经处理过、但本次只新确认较低 range
   时，仍会清理 sent-packet state、bytes in flight 和 PTO backoff，但不再更新

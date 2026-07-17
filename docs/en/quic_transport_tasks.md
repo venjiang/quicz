@@ -3557,7 +3557,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   PTO and congestion probes keep their one-shot bypass behavior. Tests cover an
   Application STREAM remaining queued while Initial and Handshake in-flight
   bytes fill the congestion window, then sending after an Initial ACK frees
-  aggregate budget; `loss_recovery` now prints `cross-space congestion gate`.
+  aggregate budget, plus saturation of bytes-in-flight accounting before
+  integer overflow; `loss_recovery` now prints `cross-space congestion gate`.
 - 2026-05-29: Added RFC 9002 largest-acknowledged RTT sampling. ACKs that
   only newly acknowledge lower ranges after the frame's largest acknowledged
   packet was already processed still clear sent-packet state, bytes in flight,

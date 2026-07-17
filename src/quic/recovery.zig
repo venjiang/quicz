@@ -372,6 +372,19 @@ test "available congestion window saturates at zero" {
     try std.testing.expectEqual(@as(usize, 0), recovery.availableCongestionWindow());
 }
 
+test "sent packet accounting saturates bytes in flight" {
+    var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
+    recovery.bytes_in_flight = std.math.maxInt(usize) - 5;
+
+    recovery.onPacketSent(10);
+    try std.testing.expectEqual(std.math.maxInt(usize), recovery.bytes_in_flight);
+    try std.testing.expect(!recovery.canSend(1));
+    try std.testing.expectEqual(@as(usize, 0), recovery.availableCongestionWindow());
+
+    recovery.onPacketAckedWithoutRttSample(std.math.maxInt(usize), 0, false);
+    try std.testing.expectEqual(@as(usize, 0), recovery.bytes_in_flight);
+}
+
 test "NewReno slow start grows congestion window by acked bytes" {
     var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100 });
     const initial_window = recovery.congestion_window;
