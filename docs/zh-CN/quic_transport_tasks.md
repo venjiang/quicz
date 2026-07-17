@@ -963,6 +963,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 RFC 9368 first-flight compatibility helper。直接兼容性
+  检查现在会拒绝 zero 与 reserved version，并忽略包含不可协商版本的
+  compatibility-table entry。
+
 - 2026-07-17：收紧 endpoint routing 输入校验。fixed bit 为 0 的 datagram
   现在会在 route/reset handling 前被丢弃；short-header fixed-bit 失败不能匹配
   active route 或 inactive reset token；long-header CID peeking 现在会拒绝超长

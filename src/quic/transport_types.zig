@@ -1,3 +1,4 @@
+const std = @import("std");
 const packet = @import("packet.zig");
 const transport_parameters = @import("transport_parameters.zig");
 
@@ -42,8 +43,11 @@ pub fn canConvertFirstFlightVersion(
     negotiated_version: packet.Version,
     compatibilities: []const VersionCompatibility,
 ) bool {
+    if (!isNegotiableVersion(original_version) or !isNegotiableVersion(negotiated_version)) return false;
     if (@intFromEnum(original_version) == @intFromEnum(negotiated_version)) return true;
     for (compatibilities) |compatibility| {
+        if (!isNegotiableVersion(compatibility.original_version) or
+            !isNegotiableVersion(compatibility.negotiated_version)) continue;
         if (@intFromEnum(compatibility.original_version) == @intFromEnum(original_version) and
             @intFromEnum(compatibility.negotiated_version) == @intFromEnum(negotiated_version))
         {
@@ -51,6 +55,10 @@ pub fn canConvertFirstFlightVersion(
         }
     }
     return false;
+}
+
+fn isNegotiableVersion(version: packet.Version) bool {
+    return !isZeroVersion(version) and !packet.isReservedVersion(version);
 }
 
 /// Select a compatible QUIC version from authenticated client Version Information.
@@ -77,6 +85,23 @@ pub fn selectCompatibleVersion(
         )) return preferred;
     }
     return null;
+}
+
+test "canConvertFirstFlightVersion rejects zero and reserved versions" {
+    const zero: packet.Version = @enumFromInt(0);
+    const reserved: packet.Version = @enumFromInt(0x0a0a0a0a);
+
+    try std.testing.expect(!canConvertFirstFlightVersion(zero, zero, &[_]VersionCompatibility{}));
+    try std.testing.expect(!canConvertFirstFlightVersion(reserved, reserved, &[_]VersionCompatibility{}));
+    try std.testing.expect(!canConvertFirstFlightVersion(.v1, reserved, &[_]VersionCompatibility{.{
+        .original_version = .v1,
+        .negotiated_version = reserved,
+    }}));
+    try std.testing.expect(!canConvertFirstFlightVersion(zero, .v2, &[_]VersionCompatibility{.{
+        .original_version = zero,
+        .negotiated_version = .v2,
+    }}));
+    try std.testing.expect(canConvertFirstFlightVersion(.v1, .v1, &[_]VersionCompatibility{}));
 }
 
 /// Modeled connection lifecycle for the experimental frame-payload API.

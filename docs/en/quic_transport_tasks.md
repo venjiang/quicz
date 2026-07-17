@@ -1087,6 +1087,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened RFC 9368 first-flight compatibility helpers. Direct
+  compatibility checks now reject zero and reserved versions, and ignore
+  compatibility-table entries that name non-negotiable versions.
+
 - 2026-07-17: Tightened endpoint routing input validation. Fixed-bit-clear
   datagrams are dropped before route/reset handling, short-header fixed-bit
   failures cannot match active routes or inactive reset tokens, and long-header
