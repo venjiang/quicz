@@ -59888,6 +59888,38 @@ test "processVersionNegotiationDatagram ignores packets after peer Initial" {
     try std.testing.expectEqualStrings("server initial", crypto_buf[0..recv_len]);
 }
 
+test "processVersionNegotiationDatagram ignores packets after Initial discard" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const client_versions = [_]packet.Version{ .v2, .v1 };
+    const server_versions = [_]packet.Version{.v2};
+    var raw: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&raw);
+    try packet.encodeVersionNegotiationPacket(out.writer(), .{
+        .dcid = &client_scid,
+        .scid = &original_dcid,
+        .versions = &server_versions,
+    });
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .chosen_version = .v1,
+        .available_versions = &client_versions,
+    });
+    defer client.deinit();
+
+    try client.discardPacketNumberSpace(.initial);
+    try std.testing.expect(client.packetNumberSpaceDiscarded(.initial));
+    try std.testing.expectEqual(@as(?packet.Version, null), try client.processVersionNegotiationDatagram(
+        10,
+        &original_dcid,
+        &client_scid,
+        out.getWritten(),
+    ));
+    try std.testing.expectEqual(@as(?packet.Version, null), client.versionNegotiationSelectedVersion());
+    try std.testing.expectError(error.InvalidPacket, client.versionNegotiationFollowupConfig());
+    try std.testing.expect(client.packetNumberSpaceDiscarded(.initial));
+}
+
 test "processVersionNegotiationDatagram rejects no mutual version without mutation" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
