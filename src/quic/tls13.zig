@@ -395,6 +395,15 @@ pub fn secureRandomBytes(buf: []u8) void {
     }
 }
 
+fn generateX25519KeyPair(secret: *[32]u8) [32]u8 {
+    while (true) {
+        secureRandomBytes(secret);
+        if (X25519.recoverPublicKey(secret.*)) |public| {
+            return public;
+        } else |_| {}
+    }
+}
+
 fn expandLabel(
     secret: [secret_len]u8,
     label: []const u8,
@@ -1923,12 +1932,8 @@ pub const Tls13Handshake = struct {
         @memcpy(self.tp_encoded[0..tp_len], transport_params[0..tp_len]);
         self.tp_encoded_len = tp_len;
 
-        // Generate X25519 key pair
-        secureRandomBytes(&self.x25519_secret);
-        self.x25519_public = X25519.recoverPublicKey(self.x25519_secret) catch blk: {
-            secureRandomBytes(&self.x25519_secret);
-            break :blk X25519.recoverPublicKey(self.x25519_secret) catch unreachable;
-        };
+        // Generate X25519 key pair.
+        self.x25519_public = generateX25519KeyPair(&self.x25519_secret);
 
         return self;
     }
@@ -1993,12 +1998,8 @@ pub const Tls13Handshake = struct {
         @memcpy(self.tp_encoded[0..tp_len], transport_params[0..tp_len]);
         self.tp_encoded_len = tp_len;
 
-        // Generate X25519 key pair
-        secureRandomBytes(&self.x25519_secret);
-        self.x25519_public = X25519.recoverPublicKey(self.x25519_secret) catch blk: {
-            secureRandomBytes(&self.x25519_secret);
-            break :blk X25519.recoverPublicKey(self.x25519_secret) catch unreachable;
-        };
+        // Generate X25519 key pair.
+        self.x25519_public = generateX25519KeyPair(&self.x25519_secret);
 
         return self;
     }

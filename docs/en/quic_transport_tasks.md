@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Hardened TLS X25519 key-pair generation. Pure-Zig TLS client
+  and server initialization now resample rare invalid X25519 private scalars
+  until a public key is produced, instead of panicking after a second invalid
+  random draw.
+
 - 2026-07-17: Hardened explicit server record retirement. Public
   `Tls13ServerEndpoint.retireRecord()` now reports an internal consistency error
   if the endpoint-owned record table changes unexpectedly during route/timer
