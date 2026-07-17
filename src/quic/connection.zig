@@ -749,6 +749,18 @@ pub const Connection = struct {
         if (config.active_connection_id_limit < min_active_connection_id_limit) {
             return error.InvalidPacket;
         }
+        if (config.max_datagram_size > transport_parameters.max_udp_payload_size_default) {
+            return error.InvalidPacket;
+        }
+        if (config.max_idle_timeout_ms > max_quic_varint) {
+            return error.InvalidPacket;
+        }
+        if (config.initial_max_data > max_quic_varint or config.initial_max_stream_data > max_quic_varint) {
+            return error.InvalidPacket;
+        }
+        if (config.active_connection_id_limit > max_quic_varint) {
+            return error.InvalidPacket;
+        }
         if (config.ack_delay_exponent > 20) {
             return error.InvalidPacket;
         }
@@ -11273,6 +11285,21 @@ test "init validates initial stream count limits" {
     }));
     try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
         .active_connection_id_limit = 1,
+    }));
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = transport_parameters.max_udp_payload_size_default + 1,
+    }));
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
+        .max_idle_timeout_ms = max_quic_varint + 1,
+    }));
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
+        .initial_max_data = max_quic_varint + 1,
+    }));
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
+        .initial_max_stream_data = max_quic_varint + 1,
+    }));
+    try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
+        .active_connection_id_limit = max_quic_varint + 1,
     }));
     try std.testing.expectError(error.InvalidPacket, Connection.init(std.testing.allocator, .client, .{
         .ack_delay_exponent = 21,
