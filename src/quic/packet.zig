@@ -413,6 +413,10 @@ fn validateVersionNegotiationCidLen(len: usize) PacketError!void {
     if (len > std.math.maxInt(u8)) return error.InvalidConnectionIdLength;
 }
 
+fn validateVersionNegotiationVersion(version: Version) PacketError!void {
+    if (@intFromEnum(version) == 0) return error.InvalidVersionList;
+}
+
 fn validateLongHeaderCidLen(len: usize) PacketError!void {
     if (len > 20) return error.InvalidConnectionIdLength;
 }
@@ -772,6 +776,9 @@ pub fn encodeVersionNegotiationPacket(writer: anytype, packet: VersionNegotiatio
     try validateVersionNegotiationCidLen(packet.dcid.len);
     try validateVersionNegotiationCidLen(packet.scid.len);
     if (packet.versions.len == 0) return error.InvalidVersionList;
+    for (packet.versions) |version_value| {
+        try validateVersionNegotiationVersion(version_value);
+    }
 
     try writer.writeByte(0xc0); // Header Form = long; remaining bits are unused.
     try writer.writeAll(&[_]u8{ 0x00, 0x00, 0x00, 0x00 }); // Version = 0.
@@ -822,6 +829,7 @@ pub fn parseVersionNegotiationPacket(data: []const u8, allocator: std.mem.Alloca
     for (versions) |*version_value| {
         try reader.readNoEof(&version_buf);
         version_value.* = @enumFromInt(std.mem.readInt(u32, &version_buf, .big));
+        try validateVersionNegotiationVersion(version_value.*);
     }
 
     return .{
@@ -1387,6 +1395,34 @@ test "version negotiation packet rejects empty and truncated version lists" {
         0x00,
     };
     try std.testing.expectError(error.InvalidVersionList, parseVersionNegotiationPacket(&truncated_version, std.testing.allocator));
+}
+
+test "version negotiation packet rejects zero supported versions" {
+    const zero_supported_version = [_]u8{
+        0x80,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x01,
+        0xaa,
+        0x01,
+        0xbb,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+    };
+    try std.testing.expectError(error.InvalidVersionList, parseVersionNegotiationPacket(&zero_supported_version, std.testing.allocator));
+
+    var raw: [32]u8 = undefined;
+    var writer = buffer.fixedWriter(&raw);
+    const zero_versions = [_]Version{@enumFromInt(0)};
+    try std.testing.expectError(error.InvalidVersionList, encodeVersionNegotiationPacket(writer.writer(), .{
+        .dcid = &[_]u8{0xaa},
+        .scid = &[_]u8{0xbb},
+        .versions = &zero_versions,
+    }));
 }
 
 test "version negotiation packet validates header form and version field" {

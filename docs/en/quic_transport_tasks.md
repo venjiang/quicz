@@ -1069,6 +1069,10 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened RFC 8999 Version Negotiation version-list
+  validation. Encoders and parsers now reject zero as a supported version while
+  leaving reserved-version greasing available.
+
 - 2026-07-17: Tightened RFC 9368 `version_information` length budgeting.
   Available Version vector length now uses checked arithmetic and rejects
   impossible encoded lengths before writing.

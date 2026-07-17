@@ -948,6 +948,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 RFC 8999 Version Negotiation version-list 校验。
+  编码和解析都会拒绝把 zero version 当作 supported version，同时保留
+  reserved-version greasing。
+
 - 2026-07-17：收紧 RFC 9368 `version_information` 长度预算。
   Available Version vector length 现在使用 checked arithmetic，并在写入前拒绝
   不可能的编码长度。
