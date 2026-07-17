@@ -253,6 +253,8 @@ fn validateConnectionIdLen(len: usize) FrameError!void {
 }
 
 fn validateNewConnectionIdFrame(new_connection_id: NewConnectionIdFrame) FrameError!void {
+    try validateFrameVarInt(new_connection_id.sequence_number);
+    try validateFrameVarInt(new_connection_id.retire_prior_to);
     try validateConnectionIdLen(new_connection_id.connection_id.len);
     if (new_connection_id.retire_prior_to > new_connection_id.sequence_number) {
         return error.InvalidFrameValue;
@@ -282,6 +284,32 @@ fn validateConnectionCloseFrame(close: ConnectionCloseFrame) FrameError!void {
 fn validateApplicationCloseFrame(close: ApplicationCloseFrame) FrameError!void {
     try validateFrameVarInt(close.error_code);
     try validateFrameSliceLen(close.reason_phrase);
+}
+
+fn validateResetStreamFrame(reset: ResetStreamFrame) FrameError!void {
+    try validateFrameVarInt(reset.stream_id);
+    try validateFrameVarInt(reset.application_error_code);
+    try validateFrameVarInt(reset.final_size);
+}
+
+fn validateStopSendingFrame(stop_sending: StopSendingFrame) FrameError!void {
+    try validateFrameVarInt(stop_sending.stream_id);
+    try validateFrameVarInt(stop_sending.application_error_code);
+}
+
+fn validateStreamFrame(stream: StreamFrame) FrameError!void {
+    try validateFrameVarInt(stream.stream_id);
+    try validateFrameSliceEndOffset(stream.offset, stream.data);
+}
+
+fn validateMaxStreamDataFrame(max_stream_data: MaxStreamDataFrame) FrameError!void {
+    try validateFrameVarInt(max_stream_data.stream_id);
+    try validateFrameVarInt(max_stream_data.maximum_stream_data);
+}
+
+fn validateStreamDataBlockedFrame(stream_data_blocked: StreamDataBlockedFrame) FrameError!void {
+    try validateFrameVarInt(stream_data_blocked.stream_id);
+    try validateFrameVarInt(stream_data_blocked.maximum_stream_data);
 }
 
 fn validateStreamCount(maximum_streams: u64) FrameError!void {
@@ -402,12 +430,14 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try packet.encodeVarInt(writer, ack_ecn.ecn_counts.ecn_ce_count);
         },
         .reset_stream => |reset| {
+            try validateResetStreamFrame(reset);
             try writer.writeByte(@intFromEnum(FrameType.reset_stream));
             try packet.encodeVarInt(writer, reset.stream_id);
             try packet.encodeVarInt(writer, reset.application_error_code);
             try packet.encodeVarInt(writer, reset.final_size);
         },
         .stop_sending => |stop_sending| {
+            try validateStopSendingFrame(stop_sending);
             try writer.writeByte(@intFromEnum(FrameType.stop_sending));
             try packet.encodeVarInt(writer, stop_sending.stream_id);
             try packet.encodeVarInt(writer, stop_sending.application_error_code);
@@ -420,7 +450,7 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeAll(new_token.token);
         },
         .stream => |stream| {
-            try validateFrameSliceEndOffset(stream.offset, stream.data);
+            try validateStreamFrame(stream);
 
             var frame_type: u8 = @intFromEnum(FrameType.stream);
             if (stream.offset != 0) {
@@ -448,10 +478,12 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeAll(crypto.data);
         },
         .max_data => |max_data| {
+            try validateFrameVarInt(max_data.maximum_data);
             try writer.writeByte(@intFromEnum(FrameType.max_data));
             try packet.encodeVarInt(writer, max_data.maximum_data);
         },
         .max_stream_data => |max_stream_data| {
+            try validateMaxStreamDataFrame(max_stream_data);
             try writer.writeByte(@intFromEnum(FrameType.max_stream_data));
             try packet.encodeVarInt(writer, max_stream_data.stream_id);
             try packet.encodeVarInt(writer, max_stream_data.maximum_stream_data);
@@ -467,10 +499,12 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try packet.encodeVarInt(writer, max_streams.maximum_streams);
         },
         .data_blocked => |data_blocked| {
+            try validateFrameVarInt(data_blocked.maximum_data);
             try writer.writeByte(@intFromEnum(FrameType.data_blocked));
             try packet.encodeVarInt(writer, data_blocked.maximum_data);
         },
         .stream_data_blocked => |stream_data_blocked| {
+            try validateStreamDataBlockedFrame(stream_data_blocked);
             try writer.writeByte(@intFromEnum(FrameType.stream_data_blocked));
             try packet.encodeVarInt(writer, stream_data_blocked.stream_id);
             try packet.encodeVarInt(writer, stream_data_blocked.maximum_stream_data);
@@ -496,6 +530,7 @@ pub fn encodeFrame(writer: anytype, frame: Frame) !void {
             try writer.writeAll(&new_connection_id.stateless_reset_token);
         },
         .retire_connection_id => |retire_connection_id| {
+            try validateFrameVarInt(retire_connection_id.sequence_number);
             try writer.writeByte(@intFromEnum(FrameType.retire_connection_id));
             try packet.encodeVarInt(writer, retire_connection_id.sequence_number);
         },
@@ -1246,6 +1281,78 @@ test "close frame encoders reject oversized varint fields before writing" {
     try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .application_close = .{
         .error_code = max_quic_varint + 1,
         .reason_phrase = "",
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+}
+
+test "control frame encoders reject oversized varint fields before writing" {
+    const oversized = max_quic_varint + 1;
+    const token = [_]u8{0} ** 16;
+    const cid = [_]u8{0xaa};
+
+    var buf: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .reset_stream = .{
+        .stream_id = oversized,
+        .application_error_code = 0,
+        .final_size = 0,
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .stop_sending = .{
+        .stream_id = 0,
+        .application_error_code = oversized,
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .stream = .{
+        .stream_id = oversized,
+        .offset = 0,
+        .fin = false,
+        .data = "",
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .max_data = .{
+        .maximum_data = oversized,
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .max_stream_data = .{
+        .stream_id = 0,
+        .maximum_stream_data = oversized,
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .data_blocked = .{
+        .maximum_data = oversized,
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .stream_data_blocked = .{
+        .stream_id = oversized,
+        .maximum_stream_data = 0,
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = oversized,
+        .retire_prior_to = 0,
+        .connection_id = &cid,
+        .stateless_reset_token = token,
+    } }));
+    try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
+
+    out = buffer.fixedWriter(&buf);
+    try std.testing.expectError(error.InvalidFrameValue, encodeFrame(out.writer(), .{ .retire_connection_id = .{
+        .sequence_number = oversized,
     } }));
     try std.testing.expectEqual(@as(usize, 0), out.getWritten().len);
 }

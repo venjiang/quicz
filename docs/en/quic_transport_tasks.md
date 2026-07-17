@@ -1069,6 +1069,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened transport-control frame scalar validation. STREAM,
+  RESET_STREAM, STOP_SENDING, flow-control, NEW_CONNECTION_ID, and
+  RETIRE_CONNECTION_ID encoders now reject oversized QUIC varint fields before
+  writing partial frame bytes.
+
 - 2026-07-17: Tightened close-frame scalar validation. CONNECTION_CLOSE and
   APPLICATION_CLOSE encoders now reject oversized QUIC varint error code or
   frame type fields before writing partial frame bytes.
