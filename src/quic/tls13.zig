@@ -5758,6 +5758,77 @@ test "Tls13Handshake client↔server loopback completes with matching secrets" {
     try std.testing.expectEqualSlices(u8, &client_tp, server.peer_tp[0..server.peer_tp_len]);
 }
 
+test "Tls13Handshake server rejects client Finished with wrong verify_data" {
+    const seed = [_]u8{0x55} ** 32;
+    const server_kp = try EcdsaP256Sha256.KeyPair.generateDeterministic(seed);
+    const server_priv = server_kp.secret_key.bytes;
+
+    const alpn = [_][]const u8{"hq-interop"};
+    const client_tp = [_]u8{ 0x01, 0x02, 0x03 };
+    const server_tp = [_]u8{ 0xAA, 0xBB };
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+
+    var client = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = true,
+    }, &client_tp);
+    var server = Tls13Handshake.initServer(.{
+        .alpn = &alpn,
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &server_priv,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    }, &server_tp);
+
+    const client_hello = (try client.step()).send_data.data;
+    server.provideData(client_hello);
+
+    var server_initial: [512]u8 = undefined;
+    var server_initial_len: usize = 0;
+    var server_handshake: [4096]u8 = undefined;
+    var server_handshake_len: usize = 0;
+    while (true) {
+        const action = try server.step();
+        switch (action) {
+            .send_data => |send_data| {
+                if (send_data.level == .initial) {
+                    @memcpy(server_initial[server_initial_len..][0..send_data.data.len], send_data.data);
+                    server_initial_len += send_data.data.len;
+                } else {
+                    @memcpy(server_handshake[server_handshake_len..][0..send_data.data.len], send_data.data);
+                    server_handshake_len += send_data.data.len;
+                }
+            },
+            .install_keys, ._continue => continue,
+            .wait_for_data, .complete => break,
+        }
+    }
+    try std.testing.expect(server_initial_len > 0);
+    try std.testing.expect(server_handshake_len > 0);
+
+    client.provideData(server_initial[0..server_initial_len]);
+    client.provideData(server_handshake[0..server_handshake_len]);
+    var client_finished: [256]u8 = undefined;
+    var client_finished_len: usize = 0;
+    while (true) {
+        const action = try client.step();
+        switch (action) {
+            .send_data => |send_data| {
+                @memcpy(client_finished[client_finished_len..][0..send_data.data.len], send_data.data);
+                client_finished_len += send_data.data.len;
+            },
+            .install_keys, ._continue => continue,
+            .wait_for_data, .complete => break,
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 36), client_finished_len);
+
+    client_finished[4] ^= 0xff;
+    server.provideData(client_finished[0..client_finished_len]);
+    try std.testing.expectError(error.BadFinished, server.step());
+    try std.testing.expect(!server.isComplete());
+}
+
 test "Tls13Handshake PSK-selected loopback skips Certificate flight" {
     const alpn = [_][]const u8{"hq-interop"};
     const client_tp = [_]u8{ 0x01, 0x02, 0x03 };
