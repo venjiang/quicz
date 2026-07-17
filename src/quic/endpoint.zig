@@ -1024,6 +1024,11 @@ pub const EndpointRouter = struct {
     ) RouteError!?[stateless_reset_token_len]u8 {
         if (datagram.len < 1) return error.InvalidDatagram;
         if ((datagram[0] & 0x80) != 0) {
+            if ((datagram[0] & 0x40) == 0) {
+                if (datagram.len < 5) return error.InvalidDatagram;
+                const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
+                if (@intFromEnum(version) != 0) return null;
+            }
             const dcid = try ConnectionId.init(try peekLongDestinationConnectionId(datagram));
             if (self.findRouteIndexForPath(dcid, path) != null) return null;
             const reset_index = self.findStatelessResetTokenIndex(dcid) orelse return null;
@@ -2518,8 +2523,14 @@ test "EndpointRouter exposes stateless reset tokens only for inactive routes" {
         0x04, 0xaa, 0xbb, 0xcc, 0xdd,
         0x00,
     };
+    const fixed_bit_clear_long = [_]u8{
+        0x80, 0x00, 0x00, 0x00, 0x01,
+        0x04, 0xaa, 0xbb, 0xcc, 0xdd,
+        0x00,
+    };
     const long_token = (try router.statelessResetTokenForDatagram(path, &long_datagram)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u8, &token, &long_token);
+    try std.testing.expectEqual(@as(?[stateless_reset_token_len]u8, null), try router.statelessResetTokenForDatagram(path, &fixed_bit_clear_long));
     try std.testing.expectEqual(@as(usize, 1), router.statelessResetTokenCount());
 }
 
