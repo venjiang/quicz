@@ -973,6 +973,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：加固 server endpoint routed output polling。route-bound
+  installed-key output 在跨 record poll 与 route lookup 之间遇到 endpoint-owned
+  record 消失时会报告内部一致性错误，不再依赖 unreachable 状态。
+
 - 2026-07-17：加固 endpoint registry closed-record sweep。
   `EndpointConnectionRegistry.removeClosedRecords()` 在 closed-record cleanup
   期间遇到 endpoint-owned record table 异常变化时会报告内部一致性错误，不再依赖

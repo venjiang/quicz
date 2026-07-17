@@ -1055,7 +1055,7 @@ pub fn Tls13ServerEndpoint(
                 destination_connection_id_of,
                 source_connection_id_of,
             )) orelse return null;
-            const record = self.records.get(polled.connection_id) orelse unreachable;
+            const record = self.records.get(polled.connection_id) orelse return error.Internal;
             errdefer connection_of(record).allocator.free(polled.datagram);
             return .{
                 .connection_id = polled.connection_id,
@@ -1090,7 +1090,10 @@ pub fn Tls13ServerEndpoint(
                     return result;
                 };
                 const datagram = polled orelse return result;
-                const record = self.records.get(datagram.connection_id) orelse unreachable;
+                const record = self.records.get(datagram.connection_id) orelse {
+                    result.first_error = error.Internal;
+                    return result;
+                };
                 const path = self.currentRecordRoutePath(record) catch |err| {
                     connection_of(record).allocator.free(datagram.datagram);
                     result.first_route_error = err;

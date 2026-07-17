@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Hardened server endpoint routed output polling. Route-bound
+  installed-key output now reports an internal consistency error if the
+  endpoint-owned record disappears between cross-record polling and route
+  lookup, instead of relying on unreachable state.
+
 - 2026-07-17: Hardened endpoint registry closed-record sweep.
   `EndpointConnectionRegistry.removeClosedRecords()` now reports an internal
   consistency error if the endpoint-owned record table changes unexpectedly
