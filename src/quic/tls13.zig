@@ -5437,6 +5437,21 @@ test "Tls13Handshake server rejects ClientHello PSK binder with invalid length" 
     try std.testing.expectError(error.DecodeError, server.step());
 }
 
+test "Tls13Handshake server rejects undersized ClientHello PSK binders vector" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const psk_ext = try clientHelloExtension(hello, @intFromEnum(ExtType.pre_shared_key));
+
+    const identities_len = readU16(hello[psk_ext.body_offset..]);
+    const binders_len_offset = psk_ext.body_offset + 2 + identities_len;
+    writeU16(hello[binders_len_offset..][0..2], 32);
+
+    var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
 test "Tls13Handshake server rejects ClientHello without transport parameters" {
     var hello_buf: [1024]u8 = undefined;
     const hello = try clientHelloBytes(.{}, &hello_buf);
