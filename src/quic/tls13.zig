@@ -1776,6 +1776,29 @@ fn keyShareGroupSeenBefore(key_shares: []const u8, current_entry_offset: usize, 
     return false;
 }
 
+fn clientHelloSupportedGroupsContains(extensions: []const u8, group: u16) ?bool {
+    var pos: usize = 0;
+    while (pos < extensions.len) {
+        if (pos + 4 > extensions.len) return null;
+        const ext_type = readU16(extensions[pos..]);
+        const ext_len = readU16(extensions[pos + 2 ..]);
+        pos += 4;
+        if (pos + ext_len > extensions.len) return null;
+        const ext = extensions[pos .. pos + ext_len];
+        pos += ext_len;
+        if (ext_type != @intFromEnum(ExtType.supported_groups)) continue;
+        if (ext_len < 2) return null;
+        const groups_len = readU16(ext[0..2]);
+        if (groups_len == 0 or 2 + groups_len != ext_len or groups_len % 2 != 0) return null;
+        var group_pos: usize = 2;
+        while (group_pos + 2 <= ext_len) : (group_pos += 2) {
+            if (readU16(ext[group_pos..]) == group) return true;
+        }
+        return false;
+    }
+    return null;
+}
+
 // ─── Write helpers ───────────────────────────────────────────────────
 
 fn writeU16(buf: []u8, val: u16) void {
@@ -2968,6 +2991,12 @@ pub const Tls13Handshake = struct {
                         if (klen == 0) return error.DecodeError;
                         if (sp + klen > el) return error.DecodeError;
                         if (keyShareGroupSeenBefore(ext[2..el], entry_offset, group)) return error.DecodeError;
+                        if (clientHelloSupportedGroupsContains(body[ext_start..ext_end], group)) |listed| {
+                            if (!listed) {
+                                if (group == group_x25519) return error.NoKeyShare;
+                                return error.DecodeError;
+                            }
+                        }
                         if (group == group_x25519) {
                             if (klen != 32 or sp + 32 > el) return error.DecodeError;
                             @memcpy(&self.peer_x25519_public, ext[sp..][0..32]);
@@ -5504,6 +5533,16 @@ test "Tls13Handshake server rejects duplicate unsupported ClientHello key_share 
     const base_hello = try clientHelloBytes(.{}, &hello_buf);
     const with_first = try appendClientHelloKeyShareEntry(&hello_buf, base_hello.len, 0x0017, &[_]u8{0x01});
     const hello = try appendClientHelloKeyShareEntry(&hello_buf, with_first.len, 0x0017, &[_]u8{0x02});
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects ClientHello key_share groups absent from supported_groups" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const hello = try appendClientHelloKeyShareEntry(&hello_buf, base_hello.len, 0x0017, &[_]u8{0x01});
 
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
