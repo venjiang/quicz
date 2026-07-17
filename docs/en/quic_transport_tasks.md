@@ -1098,14 +1098,14 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Restored Version Negotiation CID handling. VN packet DCID/SCID
+  lengths remain governed by the packet's one-byte length fields rather than
+  QUIC long-header CID limits, preserving long-CID VN round trips.
+
 - 2026-07-17: Tightened endpoint-owned due-deadline cleanup.
   `EndpointConnectionRegistry.processDueDeadlineAndDrainDatagrams()` now removes
   endpoint-owned records after due idle or close retirement, restoring capacity
   in the same deadline service step.
-
-- 2026-07-17: Tightened Version Negotiation CID bounds. The parser and encoder
-  now reject destination or source connection IDs longer than the QUIC
-  long-header CID limit instead of accepting oversized VN CIDs.
 
 - 2026-07-17: Completed receive-side packet-number adjacency helper routing.
   `ReceivedPacketRanges.record()` now uses the bounded adjacency helper for both

@@ -973,14 +973,14 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：恢复 Version Negotiation CID 处理。VN packet 的 DCID/SCID 长度
+  继续由 packet 内 1 字节长度字段约束，而不是套用 QUIC long-header CID 上限，
+  保留 long-CID VN roundtrip。
+
 - 2026-07-17：收紧 endpoint-owned due-deadline cleanup。
   `EndpointConnectionRegistry.processDueDeadlineAndDrainDatagrams()` 现在会在
   due idle 或 close retirement 后移除 endpoint-owned record，并在同一次 deadline
   service step 中恢复容量。
-
-- 2026-07-17：收紧 Version Negotiation CID 边界。parser 和 encoder 现在会拒绝
-  超过 QUIC long-header CID 上限的 destination/source connection ID，而不是接受
-  oversized VN CID。
 
 - 2026-07-17：完成 receive-side packet-number adjacency helper 收敛。
   `ReceivedPacketRanges.record()` 的 forward extension 和相邻 range 合并现在都
