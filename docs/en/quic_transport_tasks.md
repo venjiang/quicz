@@ -1087,6 +1087,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Tightened endpoint routing input validation. Fixed-bit-clear
+  datagrams are dropped before route/reset handling, short-header fixed-bit
+  failures cannot match active routes or inactive reset tokens, and long-header
+  CID peeking now rejects oversized DCID/SCID lengths.
+
 - 2026-07-17: Tightened endpoint Initial accept triggering. Supported-version
   long-header datagrams with the fixed bit clear are now ignored before Initial
   header parsing, and endpoint supported-version lists now reject reserved

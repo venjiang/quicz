@@ -1029,6 +1029,7 @@ pub const EndpointRouter = struct {
             const reset_index = self.findStatelessResetTokenIndex(dcid) orelse return null;
             return self.reset_tokens.items[reset_index].token;
         }
+        if ((datagram[0] & 0x40) == 0) return null;
 
         if (try self.findShortRouteIndex(path, datagram)) |_| return null;
         const reset_index = (try self.findShortStatelessResetTokenIndex(datagram)) orelse return null;
@@ -1067,7 +1068,9 @@ pub const EndpointRouter = struct {
     /// answered with a stateless reset only when an inactive-CID token is known;
     /// otherwise the datagram is dropped. Malformed, ambiguous, or policy-
     /// rejected datagrams are surfaced as errors so callers do not accidentally
-    /// reset packets that still belong to an active connection.
+    /// reset packets that still belong to an active connection. Packets with
+    /// the QUIC fixed bit cleared are ignored before routing or stateless reset
+    /// handling.
     pub fn handleDatagram(
         self: *const EndpointRouter,
         out: []u8,
@@ -1075,6 +1078,14 @@ pub const EndpointRouter = struct {
         datagram: []const u8,
         unpredictable_prefix: []const u8,
     ) RouteError!DatagramAction {
+        if (datagram.len < 1) return error.InvalidDatagram;
+        if ((datagram[0] & 0x40) == 0) {
+            if ((datagram[0] & 0x80) == 0) return .dropped;
+            if (datagram.len < 5) return error.InvalidDatagram;
+            const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
+            if (@intFromEnum(version) != 0) return .dropped;
+        }
+
         if (self.routeDatagram(path, datagram)) |route| {
             return .{ .routed = route };
         } else |err| switch (err) {
@@ -1130,6 +1141,7 @@ pub const EndpointRouter = struct {
         if ((datagram[0] & 0x80) != 0) {
             return self.routeConnectionId(try peekLongDestinationConnectionId(datagram), path);
         }
+        if ((datagram[0] & 0x40) == 0) return error.InvalidDatagram;
         return self.routeShortDatagram(path, datagram);
     }
 
@@ -1160,6 +1172,8 @@ pub const EndpointRouter = struct {
     }
 
     fn findShortRouteIndex(self: *const EndpointRouter, path: Udp4Tuple, datagram: []const u8) RouteError!?usize {
+        if (datagram.len < 1) return error.InvalidDatagram;
+        if ((datagram[0] & 0x40) == 0) return null;
         var match_index: ?usize = null;
         for (self.routes.items, 0..) |route, index| {
             const cid = route.destination_connection_id.asSlice();
@@ -1236,6 +1250,8 @@ pub const EndpointRouter = struct {
     }
 
     fn findShortStatelessResetTokenIndex(self: *const EndpointRouter, datagram: []const u8) RouteError!?usize {
+        if (datagram.len < 1) return error.InvalidDatagram;
+        if ((datagram[0] & 0x40) == 0) return null;
         var match_index: ?usize = null;
         for (self.reset_tokens.items, 0..) |reset_route, index| {
             const cid = reset_route.destination_connection_id.asSlice();
@@ -1347,10 +1363,12 @@ pub fn peekLongHeaderConnectionIds(datagram: []const u8) RouteError!LongHeaderCo
     if ((datagram[0] & 0x80) == 0) return error.InvalidDatagram;
     const version: packet.Version = @enumFromInt(std.mem.readInt(u32, datagram[1..5], .big));
     const dcid_len = datagram[5];
+    if (dcid_len > max_connection_id_len) return error.InvalidConnectionIdLength;
     const dcid_start: usize = 6;
     const dcid_end = dcid_start + @as(usize, dcid_len);
     if (datagram.len < dcid_end + 1) return error.InvalidDatagram;
     const scid_len = datagram[dcid_end];
+    if (scid_len > max_connection_id_len) return error.InvalidConnectionIdLength;
     const scid_start = dcid_end + 1;
     const scid_end = scid_start + @as(usize, scid_len);
     if (datagram.len < scid_end) return error.InvalidDatagram;
@@ -1707,6 +1725,22 @@ test "Endpoint version negotiation response swaps connection IDs" {
     try std.testing.expectEqual(unsupported_version, ids.version);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0xbb }, ids.dcid);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0x11, 0x22, 0x33 }, ids.scid);
+
+    var too_long_dcid_buf: [64]u8 = undefined;
+    var too_long_dcid = buffer.fixedWriter(&too_long_dcid_buf);
+    try too_long_dcid.writeAll(&[_]u8{ 0xc0, 0xfa, 0xce, 0xb0, 0x0c });
+    try too_long_dcid.writeByte(@intCast(max_connection_id_len + 1));
+    try too_long_dcid.writeAll(&([_]u8{0xaa} ** (max_connection_id_len + 1)));
+    try too_long_dcid.writeByte(0);
+    try std.testing.expectError(error.InvalidConnectionIdLength, peekLongHeaderConnectionIds(too_long_dcid.getWritten()));
+
+    var too_long_scid_buf: [64]u8 = undefined;
+    var too_long_scid = buffer.fixedWriter(&too_long_scid_buf);
+    try too_long_scid.writeAll(&[_]u8{ 0xc0, 0xfa, 0xce, 0xb0, 0x0c });
+    try too_long_scid.writeByte(0);
+    try too_long_scid.writeByte(@intCast(max_connection_id_len + 1));
+    try too_long_scid.writeAll(&([_]u8{0xbb} ** (max_connection_id_len + 1)));
+    try std.testing.expectError(error.InvalidConnectionIdLength, peekLongHeaderConnectionIds(too_long_scid.getWritten()));
 
     var response_buf: [64]u8 = undefined;
     const response = (try writeVersionNegotiationForUnsupportedVersion(
@@ -2470,11 +2504,14 @@ test "EndpointRouter exposes stateless reset tokens only for inactive routes" {
 
     try router.registerConnectionId(7, &dcid, path, .{ .stateless_reset_token = token });
     const short_datagram = [_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
+    const fixed_bit_clear_short = [_]u8{ 0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
     try std.testing.expectEqual(@as(?[stateless_reset_token_len]u8, null), try router.statelessResetTokenForDatagram(path, &short_datagram));
+    try std.testing.expectEqual(@as(?[stateless_reset_token_len]u8, null), try router.statelessResetTokenForDatagram(path, &fixed_bit_clear_short));
 
     try std.testing.expect(try router.retireConnectionId(&dcid));
     const short_token = (try router.statelessResetTokenForDatagram(path, &short_datagram)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u8, &token, &short_token);
+    try std.testing.expectEqual(@as(?[stateless_reset_token_len]u8, null), try router.statelessResetTokenForDatagram(path, &fixed_bit_clear_short));
 
     const long_datagram = [_]u8{
         0xc0, 0x00, 0x00, 0x00, 0x01,
@@ -2670,6 +2707,8 @@ test "EndpointRouter rejects unknown duplicate ambiguous and malformed routes" {
     try std.testing.expectError(error.UnknownConnectionId, router.routeConnectionId(&[_]u8{0xcc}, path));
     try std.testing.expectError(error.AmbiguousConnectionId, router.routeDatagram(path, &[_]u8{ 0x40, 0xaa, 0xbb, 0x00 }));
     try std.testing.expectError(error.InvalidDatagram, router.routeDatagram(path, &[_]u8{0xc0}));
+    try std.testing.expectError(error.InvalidDatagram, router.routeDatagram(path, &[_]u8{ 0x00, 0xaa, 0xbb, 0x00 }));
+    try std.testing.expectEqual(@as(?usize, null), try router.findShortRouteIndex(path, &[_]u8{ 0x00, 0xaa, 0xbb, 0x00 }));
 
     var too_long: [max_connection_id_len + 1]u8 = undefined;
     @memset(&too_long, 0);
@@ -2687,6 +2726,10 @@ test "EndpointRouter rejects ambiguous stateless reset token prefixes" {
     try std.testing.expectError(
         error.AmbiguousConnectionId,
         router.statelessResetTokenForDatagram(testPath(50_000), &[_]u8{ 0x40, 0xaa, 0xbb, 0x00 }),
+    );
+    try std.testing.expectEqual(
+        @as(?[stateless_reset_token_len]u8, null),
+        try router.statelessResetTokenForDatagram(testPath(50_000), &[_]u8{ 0x00, 0xaa, 0xbb, 0x00 }),
     );
     try std.testing.expectError(
         error.DuplicateConnectionId,

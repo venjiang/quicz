@@ -963,6 +963,11 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：收紧 endpoint routing 输入校验。fixed bit 为 0 的 datagram
+  现在会在 route/reset handling 前被丢弃；short-header fixed-bit 失败不能匹配
+  active route 或 inactive reset token；long-header CID peeking 现在会拒绝超长
+  DCID/SCID。
+
 - 2026-07-17：收紧 endpoint Initial accept 触发条件。fixed bit 为 0 的
   supported-version long-header datagram 现在会在 Initial header 解析前被忽略；
   endpoint supported-version list 现在也会拒绝 reserved greasing version。
