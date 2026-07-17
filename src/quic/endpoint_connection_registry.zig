@@ -759,3 +759,119 @@ test "EndpointConnectionRegistry removes record after due idle retirement" {
     try std.testing.expect(registry.hasCapacity());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
 }
+
+test "EndpointConnectionRegistry rotates cross-record output polling" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: root.Connection,
+
+        fn connectionRef(self: *@This()) *root.Connection {
+            return &self.connection;
+        }
+
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return if (self.handle == 11) "peer-a" else "peer-b";
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return if (self.handle == 11) "local-a" else "local-b";
+        }
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const Registry = EndpointConnectionRegistry(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.deinit,
+    );
+
+    const secrets = try root.protection.deriveInitialSecrets(.v1, "registry-fair");
+    var registry = try Registry.initWithCapacity(std.testing.allocator, 2);
+    defer registry.deinit();
+    var lifecycle = root.EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const first_record = try std.testing.allocator.create(TestRecord);
+    var first_initialized = false;
+    var first_owned = true;
+    errdefer {
+        if (first_owned) {
+            if (first_initialized) first_record.deinit();
+            std.testing.allocator.destroy(first_record);
+        }
+    }
+    first_record.* = .{
+        .handle = 11,
+        .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
+    };
+    first_initialized = true;
+    try first_record.connection.validatePeerAddress();
+    try first_record.connection.confirmHandshake();
+    try first_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try first_record.connection.sendPing();
+    try registry.adopt(first_record.handle, first_record);
+    first_owned = false;
+
+    const second_record = try std.testing.allocator.create(TestRecord);
+    var second_initialized = false;
+    var second_owned = true;
+    errdefer {
+        if (second_owned) {
+            if (second_initialized) second_record.deinit();
+            std.testing.allocator.destroy(second_record);
+        }
+    }
+    second_record.* = .{
+        .handle = 12,
+        .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
+    };
+    second_initialized = true;
+    try second_record.connection.validatePeerAddress();
+    try second_record.connection.confirmHandshake();
+    try second_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try second_record.connection.sendPing();
+    try registry.adopt(second_record.handle, second_record);
+    second_owned = false;
+
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    const first = (try registry.pollDatagramAcrossConnections(
+        &lifecycle,
+        no_allocation_allocator.allocator(),
+        10,
+        .application,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(first.datagram);
+    try std.testing.expect(first.connection_id == first_record.handle or first.connection_id == second_record.handle);
+
+    const second = (try registry.pollDatagramAcrossConnections(
+        &lifecycle,
+        no_allocation_allocator.allocator(),
+        11,
+        .application,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(second.datagram);
+    try std.testing.expect(second.connection_id == first_record.handle or second.connection_id == second_record.handle);
+    try std.testing.expect(second.connection_id != first.connection_id);
+
+    try std.testing.expect((try registry.pollDatagramAcrossConnections(
+        &lifecycle,
+        no_allocation_allocator.allocator(),
+        12,
+        .application,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    )) == null);
+}

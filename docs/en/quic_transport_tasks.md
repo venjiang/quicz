@@ -1098,6 +1098,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 ## Progress Notes
 
+- 2026-07-17: Added direct registry coverage for fair cross-record output
+  polling. `EndpointConnectionRegistry` now has a bounded-capacity test proving
+  repeated no-allocation polls rotate between two queued active records before
+  returning empty.
+
 - 2026-07-17: Hardened server endpoint routed record lookup. Once lifecycle
   routing selects a connection handle, missing endpoint-owned records now report
   an internal consistency error instead of classifying the peer datagram as

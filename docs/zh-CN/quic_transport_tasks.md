@@ -973,6 +973,10 @@ close 和 route cleanup 事件。
 
 ## 进展记录
 
+- 2026-07-17：补充 registry 层 fair cross-record output polling 直接测试。
+  `EndpointConnectionRegistry` 现在有 bounded-capacity 测试，证明无分配重复
+  poll 会在两个已有排队输出的 active record 之间轮转，然后返回 empty。
+
 - 2026-07-17：加固 server endpoint routed record lookup。lifecycle routing
   一旦选中 connection handle，缺失 endpoint-owned record 现在报告内部一致性错误，
   不再把它归类为 peer datagram invalid。显式 caller-handle API 对未知 handle
