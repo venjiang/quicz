@@ -8712,6 +8712,8 @@ pub const Connection = struct {
             removed.deinit(self.allocator);
         }
 
+        if (acked_bytes == 0) return;
+
         const ecn_result = self.validateEcnAck(
             packet_space,
             ack.largest_acknowledged,
@@ -8764,13 +8766,6 @@ pub const Connection = struct {
             self.armCongestionProbeIfPendingData(space);
         }
 
-        if (acked_bytes == 0) {
-            if (persistent_congestion_established) {
-                packet_space.recovery_state.onPersistentCongestion();
-            }
-            self.refreshAntiDeadlockPtoTimer(space, now_millis);
-            return;
-        }
         if (local_key_update_acked) {
             self.local_one_rtt_key_update_ack_threshold = null;
         }
@@ -15353,6 +15348,33 @@ test "ACK does not sample RTT when only lower ranges are newly acknowledged" {
     try std.testing.expectEqual(@as(u8, 0), conn.recovery_state.pto_count);
     try std.testing.expectEqual(@as(?u64, 90), conn.recovery_state.latest_rtt_ms);
     try std.testing.expectEqual(@as(u64, 90), conn.smoothedRttMillis(.application));
+}
+
+test "duplicate ACK does not trigger loss detection without newly acknowledged packets" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    _ = try conn.recordPacketSentInSpace(.application, 300, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 500, 100);
+
+    const ack = frame.AckFrame{
+        .largest_acknowledged = 1,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    };
+
+    try conn.receiveAckInSpace(.application, 600, ack);
+    try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 100), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.sent_packets.items[0].packet_number);
+    try std.testing.expectEqual(@as(?i64, 675), conn.lossDetectionDeadlineMillis(.application));
+
+    try conn.receiveAckInSpace(.application, 700, ack);
+    try std.testing.expectEqual(@as(usize, 1), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 100), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.sent_packets.items[0].packet_number);
+    try std.testing.expectEqual(@as(?i64, 675), conn.lossDetectionDeadlineMillis(.application));
+    try std.testing.expectEqual(@as(?u64, 100), conn.recovery_state.latest_rtt_ms);
 }
 
 test "ACK marks packet-threshold losses in the selected packet number space" {
