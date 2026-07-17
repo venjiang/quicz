@@ -236,6 +236,14 @@ pub const Recovery = struct {
         return std.math.mul(u64, self.basePtoMs(true), persistent_congestion_threshold) catch std.math.maxInt(u64);
     }
 
+    /// Initial/Handshake persistent congestion duration from RFC 9002.
+    ///
+    /// Initial and Handshake packet number spaces use a zero max_ack_delay for
+    /// PTO, so their persistent-congestion period must use the same base PTO.
+    pub fn persistentCongestionDurationMsWithoutMaxAckDelay(self: Recovery) u64 {
+        return std.math.mul(u64, self.basePtoMs(false), persistent_congestion_threshold) catch std.math.maxInt(u64);
+    }
+
     /// Apply the persistent congestion response by reducing cwnd to kMinimumWindow.
     pub fn onPersistentCongestion(self: *Recovery) void {
         self.congestion_window = minimumCongestionWindow(self.max_datagram_size);
@@ -630,10 +638,12 @@ test "persistent congestion duration and response follow RFC 9002 bounds" {
     var recovery = Recovery.init(.{ .max_datagram_size = 1200, .initial_rtt_ms = 100, .max_ack_delay_ms = 25 });
 
     try std.testing.expectEqual(@as(u64, 975), recovery.persistentCongestionDurationMs());
+    try std.testing.expectEqual(@as(u64, 900), recovery.persistentCongestionDurationMsWithoutMaxAckDelay());
     recovery.onPtoExpired();
     recovery.onPtoExpired();
     try std.testing.expectEqual(@as(u64, 1300), recovery.ptoMs());
     try std.testing.expectEqual(@as(u64, 975), recovery.persistentCongestionDurationMs());
+    try std.testing.expectEqual(@as(u64, 900), recovery.persistentCongestionDurationMsWithoutMaxAckDelay());
 
     recovery.congestion_window = 12_000;
     recovery.ssthresh = 6_000;

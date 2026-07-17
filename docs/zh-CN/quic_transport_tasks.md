@@ -1006,6 +1006,11 @@ close 和 route cleanup 事件。
   ECN validation、RTT sampling、PTO refresh 和 loss detection 前返回，
   不会误触发 time-threshold loss。
 
+- 2026-07-17：按 packet number space 对齐 RFC 9002 persistent congestion
+  duration。Initial 和 Handshake 的 persistent-congestion 判定现在使用不含
+  `max_ack_delay` 的 PTO base；Application 仍保留 peer `max_ack_delay` 项。
+  可控时钟测试覆盖 long-packet-space 阈值。
+
 - 2026-07-17：对齐 client-side Version Negotiation discard state 与
   RFC 9000。client 发送 Initial 前收到的 Version Negotiation 会被忽略；
   client 处理 Retry 或任一 peer Initial、Handshake、Application packet 之后，

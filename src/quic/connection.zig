@@ -359,10 +359,18 @@ const LossDetectionResult = struct {
         self.pc_candidate_count += 1;
     }
 
-    fn persistentCongestionEstablished(self: LossDetectionResult, recovery_state: recovery.Recovery) bool {
+    fn persistentCongestionEstablished(
+        self: LossDetectionResult,
+        space: PacketNumberSpace,
+        recovery_state: recovery.Recovery,
+    ) bool {
         if (self.pc_candidate_count < 2 or !self.pc_contiguous_packet_numbers) return false;
+        const duration_ms = switch (space) {
+            .initial, .handshake => recovery_state.persistentCongestionDurationMsWithoutMaxAckDelay(),
+            .application => recovery_state.persistentCongestionDurationMs(),
+        };
         return elapsedMillis(self.pc_first_sent_time_millis, self.pc_last_sent_time_millis) >=
-            recovery_state.persistentCongestionDurationMs();
+            duration_ms;
     }
 };
 
@@ -8764,7 +8772,7 @@ pub const Connection = struct {
                 packet_space.recovery_state.onCongestionEvent(acked_packet.sent_time_millis, now_millis);
             }
         }
-        const persistent_congestion_established = loss_result.persistentCongestionEstablished(packet_space.recovery_state.*);
+        const persistent_congestion_established = loss_result.persistentCongestionEstablished(space, packet_space.recovery_state.*);
         if (loss_result.lost_bytes != 0) {
             congestion_probe_needed = congestion_probe_needed or
                 packet_space.recovery_state.wouldStartCongestionRecovery(loss_result.largest_lost_sent_time_millis.?);
@@ -9010,7 +9018,7 @@ pub const Connection = struct {
             if (congestion_probe_needed) {
                 self.armCongestionProbeIfPendingData(space);
             }
-            if (loss_result.persistentCongestionEstablished(packet_space.recovery_state.*)) {
+            if (loss_result.persistentCongestionEstablished(space, packet_space.recovery_state.*)) {
                 packet_space.recovery_state.onPersistentCongestion();
             }
         }
@@ -16121,6 +16129,43 @@ test "persistent congestion resets congestion window to minimum under controlled
     try std.testing.expectEqual(@as(usize, 6000), conn.recovery_state.ssthresh);
     // persistent congestion 清除 congestion recovery period，允许立即进入新一轮恢复
     try std.testing.expect(conn.recovery_state.wouldStartCongestionRecovery(1300));
+}
+
+test "Initial persistent congestion duration excludes max_ack_delay" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    try std.testing.expectEqual(@as(usize, 12000), conn.congestionWindow(.initial));
+    try std.testing.expectEqual(@as(u64, 900), conn.initial_packet_space.recovery_state.persistentCongestionDurationMsWithoutMaxAckDelay());
+    try std.testing.expectEqual(@as(u64, 975), conn.initial_packet_space.recovery_state.persistentCongestionDurationMs());
+
+    _ = try conn.recordPacketSentInSpace(.initial, 10, 100);
+    try conn.receiveAckInSpace(.initial, 110, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(?i64, 10), conn.initial_packet_space.first_rtt_sample_sent_time_millis);
+
+    _ = try conn.recordPacketSentInSpace(.initial, 200, 100);
+    _ = try conn.recordPacketSentInSpace(.initial, 1100, 100);
+    _ = try conn.recordPacketSentInSpace(.initial, 1101, 100);
+    _ = try conn.recordPacketSentInSpace(.initial, 1102, 100);
+    _ = try conn.recordPacketSentInSpace(.initial, 1103, 100);
+
+    try conn.receiveAckInSpace(.initial, 1200, .{
+        .largest_acknowledged = 5,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), conn.sentPacketCount(.initial));
+    try std.testing.expectEqual(@as(usize, 200), conn.bytesInFlight(.initial));
+    try std.testing.expectEqual(recovery.minimumCongestionWindow(1200), conn.congestionWindow(.initial));
+    try std.testing.expectEqual(@as(usize, 6000), conn.initial_packet_space.recovery_state.ssthresh);
 }
 
 test "EndpointConnectionLifecycle retires routes with recovery timer" {

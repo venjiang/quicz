@@ -1136,6 +1136,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   in-flight packet now return before ECN validation, RTT sampling, PTO refresh,
   or loss detection, so they cannot spuriously trigger time-threshold loss.
 
+- 2026-07-17: Aligned RFC 9002 persistent congestion duration with packet
+  number spaces. Initial and Handshake persistent-congestion checks now use the
+  zero-`max_ack_delay` PTO base, while Application keeps the peer
+  `max_ack_delay` term; controlled-clock tests cover the long-packet-space
+  threshold.
+
 - 2026-07-17: Aligned client-side Version Negotiation discard state with
   RFC 9000. Version Negotiation received before the client has sent its Initial
   is ignored, and after a client processes Retry or any peer Initial,
