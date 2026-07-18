@@ -2371,6 +2371,8 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectEqual(@as(u64, 3), server_unidirectional_stream);
     const server_bidirectional_stream = try endpoint_owner.openStream(record_handle);
     try std.testing.expectEqual(@as(u64, 1), server_bidirectional_stream);
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.sendStreamWithRoutePath(record_handle, server_bidirectional_stream, "missing route", false, 1));
+    try std.testing.expectEqual(@as(usize, 0), record.connection.send_queue.items.len);
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.resetStreamWithRoutePath(record_handle, server_unidirectional_stream, 41, 1));
     try std.testing.expectEqual(@as(usize, 0), record.connection.pending_reset_streams.items.len);
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.stopSendingWithRoutePath(record_handle, server_bidirectional_stream, 42, 1));

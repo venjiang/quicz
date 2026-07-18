@@ -2212,6 +2212,8 @@ test "Tls13ClientEndpoint route-bound controls fail before mutating when route i
     try std.testing.expectEqual(@as(u64, 0), stop_stream_id);
 
     _ = client.lifecycle.retireConnection(client.connection_id);
+    try std.testing.expectError(error.UnknownConnectionId, client.sendStreamWithRoutePath(stop_stream_id, "missing route", false, 1));
+    try std.testing.expectEqual(@as(usize, 0), client.transport.connection.send_queue.items.len);
     try std.testing.expectError(error.UnknownConnectionId, client.resetStreamWithRoutePath(reset_stream_id, 41, 1));
     try std.testing.expectEqual(@as(usize, 0), client.transport.connection.pending_reset_streams.items.len);
     try std.testing.expectError(error.UnknownConnectionId, client.stopSendingWithRoutePath(stop_stream_id, 42, 1));

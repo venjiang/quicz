@@ -279,8 +279,8 @@ Client and server endpoints now expose route-bound RESET_STREAM and
 STOP_SENDING polling helpers as well. Focused endpoint tests prove cancellation
 control datagrams are paired to the committed route without forcing callers to
 queue controls and poll output as separate steps. The same tests now cover
-missing-route failures before pending RESET_STREAM or STOP_SENDING state is
-queued.
+missing-route failures before STREAM data, pending RESET_STREAM, or
+STOP_SENDING state is queued.
 Client and server endpoint route-bound close helpers now also resolve the route
 before queuing CONNECTION_CLOSE. Focused tests prove missing routes return
 `UnknownConnectionId` while the selected connection stays active.
