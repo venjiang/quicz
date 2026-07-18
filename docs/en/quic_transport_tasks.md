@@ -68,7 +68,9 @@ still rejecting malformed extension vectors, duplicate extension types, and
 empty certificate entries. CertificateVerify parsing now also rejects empty
 signature vectors and unsupported signature schemes before any optional
 certificate-chain verification policy. ClientHello construction now rejects
-duplicate local ALPN protocol names before encoding the ALPN extension.
+duplicate local ALPN protocol names before encoding the ALPN extension, and
+server-side ClientHello processing now rejects empty, oversized, or duplicate
+local ALPN protocol names before ALPN selection.
 
 Endpoint Version Negotiation response generation now enforces the QUIC fixed
 bit before emitting a response. Unsupported-version long-header datagrams with

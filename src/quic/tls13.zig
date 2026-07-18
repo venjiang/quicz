@@ -3027,6 +3027,11 @@ pub const Tls13Handshake = struct {
     /// peer QUIC transport parameters, and update the transcript
     /// (RFC 8446 §4.1.2 + RFC 9001 §8).
     fn serverProcessClientHello(self: *Tls13Handshake) HandshakeError!Action {
+        for (self.config.alpn, 0..) |proto, index| {
+            if (proto.len == 0 or proto.len > std.math.maxInt(u8)) return error.DecodeError;
+            if (localAlpnProtocolSeenBefore(self.config.alpn, index, proto)) return error.DecodeError;
+        }
+
         const msg = self.readHandshakeMsg() orelse return .wait_for_data;
         if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.client_hello)) return error.UnexpectedMessage;
 
@@ -5953,6 +5958,39 @@ test "Tls13Handshake server rejects duplicate ClientHello ALPN protocols" {
     const hello = hello_buf[0 .. base_hello.len + duplicate_len];
 
     var server = Tls13Handshake.initServer(.{ .alpn = &alpn }, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects empty local ALPN protocol name" {
+    const client_alpn = [_][]const u8{"hq-interop"};
+    const server_alpn = [_][]const u8{""};
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{ .alpn = &client_alpn }, &hello_buf);
+
+    var server = Tls13Handshake.initServer(.{ .alpn = &server_alpn }, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects oversized local ALPN protocol name" {
+    const client_alpn = [_][]const u8{"hq-interop"};
+    const server_alpn = [_][]const u8{"a" ** 256};
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{ .alpn = &client_alpn }, &hello_buf);
+
+    var server = Tls13Handshake.initServer(.{ .alpn = &server_alpn }, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects duplicate local ALPN protocol names" {
+    const client_alpn = [_][]const u8{"hq-interop"};
+    const server_alpn = [_][]const u8{ "hq-interop", "hq-interop" };
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{ .alpn = &client_alpn }, &hello_buf);
+
+    var server = Tls13Handshake.initServer(.{ .alpn = &server_alpn }, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
 }
