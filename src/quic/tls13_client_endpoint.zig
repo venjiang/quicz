@@ -556,9 +556,32 @@ pub const Tls13ClientEndpoint = struct {
         return self.transport.openStream();
     }
 
+    /// Open a locally initiated unidirectional stream.
+    pub fn openUniStream(self: *Tls13ClientEndpoint) !u64 {
+        return self.transport.openUniStream();
+    }
+
     /// Queue FIN-terminated or open stream bytes.
     pub fn sendStream(self: *Tls13ClientEndpoint, stream_id: u64, data: []const u8, fin: bool) !void {
         try self.transport.sendStream(stream_id, data, fin);
+    }
+
+    /// Abort a locally writable stream and queue a RESET_STREAM frame.
+    pub fn resetStream(
+        self: *Tls13ClientEndpoint,
+        stream_id: u64,
+        application_error_code: u64,
+    ) !void {
+        try self.transport.resetStream(stream_id, application_error_code);
+    }
+
+    /// Ask the peer to stop sending on a receive-capable stream.
+    pub fn stopSending(
+        self: *Tls13ClientEndpoint,
+        stream_id: u64,
+        application_error_code: u64,
+    ) !void {
+        try self.transport.stopSending(stream_id, application_error_code);
     }
 
     /// Read received bytes from one application stream.
@@ -898,6 +921,36 @@ test "Tls13ClientEndpoint polls application output with committed route path" {
     const empty_drain = try client.drainApplicationDatagramsWithRoutePath(4, &drain_out);
     try std.testing.expectEqual(@as(usize, 0), empty_drain.datagrams_written);
     try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), empty_drain.first_error);
+}
+
+test "Tls13ClientEndpoint exposes unidirectional and stream cancellation controls" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        31,
+        path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const unidirectional_stream = try client.openUniStream();
+    try std.testing.expectEqual(@as(u64, 2), unidirectional_stream);
+    try client.resetStream(unidirectional_stream, 41);
+    try std.testing.expectEqual(@as(usize, 1), client.transport.connection.pending_reset_streams.items.len);
+
+    const bidirectional_stream = try client.openStream();
+    try client.stopSending(bidirectional_stream, 42);
+    try std.testing.expectEqual(@as(usize, 1), client.transport.connection.pending_stop_sending.items.len);
 }
 
 test "Tls13ClientEndpoint receive returns route-bound close on frame error" {
