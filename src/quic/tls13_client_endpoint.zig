@@ -596,6 +596,23 @@ pub const Tls13ClientEndpoint = struct {
         try self.transport.resetStream(stream_id, application_error_code);
     }
 
+    /// Queue RESET_STREAM and poll one datagram with the committed route.
+    pub fn resetStreamWithRoutePath(
+        self: *Tls13ClientEndpoint,
+        stream_id: u64,
+        application_error_code: u64,
+        now_millis: i64,
+    ) !?ApplicationDatagramPathResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        try self.transport.resetStream(stream_id, application_error_code);
+        const datagram = (try self.pollApplicationDatagram(now_millis)) orelse return null;
+        return .{
+            .datagram = datagram,
+            .path = path,
+        };
+    }
+
     /// Ask the peer to stop sending on a receive-capable stream.
     pub fn stopSending(
         self: *Tls13ClientEndpoint,
@@ -603,6 +620,23 @@ pub const Tls13ClientEndpoint = struct {
         application_error_code: u64,
     ) !void {
         try self.transport.stopSending(stream_id, application_error_code);
+    }
+
+    /// Queue STOP_SENDING and poll one datagram with the committed route.
+    pub fn stopSendingWithRoutePath(
+        self: *Tls13ClientEndpoint,
+        stream_id: u64,
+        application_error_code: u64,
+        now_millis: i64,
+    ) !?ApplicationDatagramPathResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        try self.transport.stopSending(stream_id, application_error_code);
+        const datagram = (try self.pollApplicationDatagram(now_millis)) orelse return null;
+        return .{
+            .datagram = datagram,
+            .path = path,
+        };
     }
 
     /// Read received bytes from one application stream.
@@ -934,21 +968,32 @@ test "Tls13ClientEndpoint polls application output with committed route path" {
     try std.testing.expect(polled.datagram.len != 0);
     try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
 
+    const reset_datagram = (try client.resetStreamWithRoutePath(stream_id, 41, 2)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(reset_datagram.datagram);
+    try std.testing.expect(reset_datagram.path.eql(new_path));
+    try std.testing.expect(reset_datagram.datagram.len != 0);
+    const stop_stream_id = try client.openStream();
+    try std.testing.expectEqual(@as(u64, 4), stop_stream_id);
+    const stop_datagram = (try client.stopSendingWithRoutePath(stop_stream_id, 42, 3)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(stop_datagram.datagram);
+    try std.testing.expect(stop_datagram.path.eql(new_path));
+    try std.testing.expect(stop_datagram.datagram.len != 0);
+
     try client.transport.connection.sendPing();
     var zero_drain_out: [0]Tls13ClientEndpoint.ApplicationDatagramPathResult = .{};
-    const zero_drain = try client.drainApplicationDatagramsWithRoutePath(2, &zero_drain_out);
+    const zero_drain = try client.drainApplicationDatagramsWithRoutePath(4, &zero_drain_out);
     try std.testing.expectEqual(@as(usize, 0), zero_drain.datagrams_written);
     try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), zero_drain.first_error);
 
     var drain_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
-    const drain = try client.drainApplicationDatagramsWithRoutePath(3, &drain_out);
+    const drain = try client.drainApplicationDatagramsWithRoutePath(5, &drain_out);
     try std.testing.expectEqual(@as(usize, 1), drain.datagrams_written);
     try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), drain.first_error);
     defer std.testing.allocator.free(drain_out[0].datagram);
     try std.testing.expect(drain_out[0].path.eql(new_path));
     try std.testing.expect(drain_out[0].datagram.len != 0);
 
-    const empty_drain = try client.drainApplicationDatagramsWithRoutePath(4, &drain_out);
+    const empty_drain = try client.drainApplicationDatagramsWithRoutePath(6, &drain_out);
     try std.testing.expectEqual(@as(usize, 0), empty_drain.datagrams_written);
     try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), empty_drain.first_error);
 }

@@ -1204,6 +1204,29 @@ pub fn Tls13ServerEndpoint(
             try connection_of(record).resetStream(stream_id, application_error_code);
         }
 
+        /// Queue RESET_STREAM and poll one datagram with the committed route.
+        pub fn resetStreamWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            stream_id: u64,
+            application_error_code: u64,
+            now_millis: i64,
+        ) (root.Error || endpoint.RouteError)!?OneRttDatagramPathResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
+            try connection_of(record).resetStream(stream_id, application_error_code);
+            const datagram = (try self.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                connection_id,
+                connection_of(record),
+                now_millis,
+                destination_connection_id_of(record),
+            )) orelse return null;
+            return .{
+                .datagram = datagram,
+                .path = path,
+            };
+        }
+
         /// Ask the peer to stop sending on a receive-capable stream.
         pub fn stopSending(
             self: *Self,
@@ -1213,6 +1236,29 @@ pub fn Tls13ServerEndpoint(
         ) (root.Error || error{UnknownConnectionId})!void {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             try connection_of(record).stopSending(stream_id, application_error_code);
+        }
+
+        /// Queue STOP_SENDING and poll one datagram with the committed route.
+        pub fn stopSendingWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            stream_id: u64,
+            application_error_code: u64,
+            now_millis: i64,
+        ) (root.Error || endpoint.RouteError)!?OneRttDatagramPathResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
+            try connection_of(record).stopSending(stream_id, application_error_code);
+            const datagram = (try self.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                connection_id,
+                connection_of(record),
+                now_millis,
+                destination_connection_id_of(record),
+            )) orelse return null;
+            return .{
+                .datagram = datagram,
+                .path = path,
+            };
         }
 
         /// Queue a transport CONNECTION_CLOSE and return it with the route.
@@ -2353,17 +2399,34 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     defer std.testing.allocator.free(stream_datagram.datagram);
     try std.testing.expect(stream_datagram.datagram.len != 0);
     try std.testing.expect(stream_datagram.path.eql(record_path));
-    try endpoint_owner.resetStream(record_handle, server_unidirectional_stream, 41);
-    try std.testing.expectEqual(@as(usize, 1), record.connection.pending_reset_streams.items.len);
-    try endpoint_owner.stopSending(record_handle, server_bidirectional_stream, 42);
-    try std.testing.expectEqual(@as(usize, 1), record.connection.pending_stop_sending.items.len);
+    const reset_datagram = (try endpoint_owner.resetStreamWithRoutePath(
+        record_handle,
+        server_unidirectional_stream,
+        41,
+        2,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(reset_datagram.datagram);
+    try std.testing.expect(reset_datagram.datagram.len != 0);
+    try std.testing.expect(reset_datagram.path.eql(record_path));
+    const stop_datagram = (try endpoint_owner.stopSendingWithRoutePath(
+        record_handle,
+        server_bidirectional_stream,
+        42,
+        3,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(stop_datagram.datagram);
+    try std.testing.expect(stop_datagram.datagram.len != 0);
+    try std.testing.expect(stop_datagram.path.eql(record_path));
     var stream_read_buffer: [8]u8 = undefined;
     try std.testing.expectEqual(@as(?usize, null), try endpoint_owner.recvStream(record_handle, server_bidirectional_stream, &stream_read_buffer));
     try std.testing.expect(!try endpoint_owner.streamFinished(record_handle, server_bidirectional_stream));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.openUniStream(99));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.sendStreamWithRoutePath(99, server_bidirectional_stream, "server", false, 1));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.resetStreamWithRoutePath(99, server_unidirectional_stream, 41, 2));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.stopSendingWithRoutePath(99, server_bidirectional_stream, 42, 3));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.resetStream(99, server_unidirectional_stream, 41));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.stopSending(99, server_bidirectional_stream, 42));
+    try record.connection.sendPing();
     const one_rtt = (try endpoint_owner.pollOneRttDatagram(record_handle, 1)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(one_rtt);
     try std.testing.expect(one_rtt.len != 0);
