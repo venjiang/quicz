@@ -239,6 +239,9 @@ record 的 route。
 `Tls13ClientEndpoint.sendStreamWithRoutePath()` 现在对 client application write
 也使用相同的 route-first 边界；committed-route output 测试现在证明 client stream
 data 会通过 endpoint-owned route 发出。
+client 和 server endpoint 的 route-bound close helper 现在也会先解析 route，再
+queue CONNECTION_CLOSE。聚焦测试证明缺失 route 返回 `UnknownConnectionId`，且选中
+connection 仍保持 active。
 
 ### Packet number 重排证据
 

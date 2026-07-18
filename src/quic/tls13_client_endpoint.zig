@@ -636,8 +636,14 @@ pub const Tls13ClientEndpoint = struct {
         reason: []const u8,
         now_millis: i64,
     ) !?ApplicationDatagramPathResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
         try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
-        return self.pollApplicationDatagramWithRoutePath(now_millis);
+        const datagram = (try self.pollApplicationDatagram(now_millis)) orelse return null;
+        return .{
+            .datagram = datagram,
+            .path = path,
+        };
     }
 
     /// Queue a protected application CONNECTION_CLOSE and drain route-bound output.
@@ -649,6 +655,8 @@ pub const Tls13ClientEndpoint = struct {
         now_millis: i64,
         out: []ApplicationDatagramPathResult,
     ) !CloseDatagramPathDrainResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
         try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
         return .{
             .drain = try self.drainApplicationDatagramsWithRoutePath(now_millis, out),
@@ -2132,6 +2140,34 @@ test "Tls13ClientEndpoint closes with committed route output" {
     try std.testing.expect(close_datagram.path.eql(new_path));
     try std.testing.expect(close_datagram.datagram.len != 0);
     try std.testing.expect(client.closeDeadlineMillis() != null);
+}
+
+test "Tls13ClientEndpoint close with route path fails before closing when route is missing" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        35,
+        path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    _ = client.lifecycle.retireConnection(client.connection_id);
+    try std.testing.expectError(error.UnknownConnectionId, client.closeWithRoutePath(0, 0, "missing route", 1));
+    try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
+    var close_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    try std.testing.expectError(error.UnknownConnectionId, client.closeWithRoutePathAndDrainDatagrams(0, 0, "missing route", 1, &close_out));
+    try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
 }
 
 test "Tls13ClientEndpoint drains close output with committed route and deadline" {

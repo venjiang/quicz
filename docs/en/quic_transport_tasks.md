@@ -275,6 +275,9 @@ endpoint boundary and stream output is paired to the selected record's route.
 `Tls13ClientEndpoint.sendStreamWithRoutePath()` now applies the same route-first
 boundary for client application writes, and the committed-route output test now
 proves client stream data is emitted through the endpoint-owned route.
+Client and server endpoint route-bound close helpers now also resolve the route
+before queuing CONNECTION_CLOSE. Focused tests prove missing routes return
+`UnknownConnectionId` while the selected connection stays active.
 
 ### Packet-number reordering evidence
 

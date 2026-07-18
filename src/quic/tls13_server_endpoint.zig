@@ -1225,8 +1225,18 @@ pub fn Tls13ServerEndpoint(
             now_millis: i64,
         ) (root.Error || endpoint.RouteError)!?OneRttDatagramPathResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
             try connection_of(record).closeConnection(error_code, frame_type, reason_phrase);
-            return self.pollOneRttDatagramWithRoutePath(connection_id, now_millis);
+            const datagram = (try self.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                connection_id,
+                connection_of(record),
+                now_millis,
+                destination_connection_id_of(record),
+            )) orelse return null;
+            return .{
+                .datagram = datagram,
+                .path = path,
+            };
         }
 
         /// Queue a transport CONNECTION_CLOSE and drain route-bound output.
@@ -1241,6 +1251,7 @@ pub fn Tls13ServerEndpoint(
             out: []DatagramPathResult,
         ) (root.Error || endpoint.RouteError)!CloseDatagramPathDrainResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            _ = try self.currentRecordRoutePath(record);
             try connection_of(record).closeConnection(error_code, frame_type, reason_phrase);
             return .{
                 .drain = self.drainDatagramsAcrossRecordsWithRoutePath(
@@ -2294,6 +2305,22 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     const record_handle = record.handle;
     try endpoint_owner.records.adopt(record_handle, record);
     record_owned = false;
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.closeWithRoutePath(record_handle, 0, 0, "missing route", 1));
+    try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
+    var missing_route_close_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        endpoint_owner.closeWithRoutePathAndDrainDatagrams(
+            std.testing.allocator,
+            record_handle,
+            0,
+            0,
+            "missing route",
+            1,
+            &missing_route_close_out,
+        ),
+    );
+    try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
     const record_path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5443),
