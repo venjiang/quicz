@@ -175,6 +175,10 @@ Client 的 route-bound due-recovery poll/drain 现在也会在 service PTO/recov
 recovery 状态；route 恢复后该 due recovery 仍可继续 service。
 Server 的 route-bound 跨 record output poll/drain 现在也会先解析选中 record 的已提交
 route，再 poll protected output，因此缺失 route 不会再消费已 queue 的 server 1-RTT packet。
+Server 的 route-bound due-recovery drain 现在也会在 service Application 或 Initial
+recovery timer 前解析选中 record 的已提交 route。缺失 route 会返回
+`UnknownConnectionId`，不会推进 recovery 状态；route 恢复后该 due recovery 仍可继续
+service。
 
 Client endpoint 的错误路径不会再把无关待发送应用包误当作 close-on-error 输出：
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入

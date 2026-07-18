@@ -203,6 +203,10 @@ Server route-bound cross-record output polling and draining now follow the
 same invariant by resolving each selected record's committed route before
 polling protected output, so missing routes no longer consume queued server
 1-RTT packets.
+Server route-bound due-recovery draining now resolves the selected record's
+committed route before servicing Application or Initial recovery timers.
+Missing routes return `UnknownConnectionId` without advancing recovery state,
+and the due recovery remains serviceable after route restoration.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
