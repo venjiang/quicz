@@ -115,7 +115,8 @@ secret；没有 early_data 的普通 PSK resumption 仍可重复使用。replay 
 导出/恢复 fixed snapshot，调用方可持久化或分发已保留的 identity fingerprint。
 生产/分布式 0-RTT replay policy 仍待实现。
 selected-PSK handshake 现在不再要求 ClientHello `signature_algorithms`，
-即使 server 配置了证书链；signature algorithm 校验只应用于最终回退到证书认证的路径。
+即使 server 配置了证书链；signature algorithm 校验只应用于最终回退到证书认证的路径，
+并且 PSK identity 不匹配时仍会拒绝缺失的 `signature_algorithms`。
 TLS-owned 0-RTT acceptance signal 现在绑定到连接策略：server 只有在
 connection 接受已安装 peer 0-RTT key 时才发送 EncryptedExtensions
 `early_data`；client 一旦从 EncryptedExtensions 确认 server 拒绝 early data，
@@ -1369,7 +1370,8 @@ close 和 route cleanup 事件。
 
 - 2026-07-18：修正 selected-PSK ClientHello 校验。配置了证书链的纯 Zig TLS
   server 不再在 PSK binder 验证并选中前强制要求 `signature_algorithms`；聚焦测试会在
-  移除该 extension 后刷新 binder，并证明 server 选择 PSK 且不进入证书路径。
+  移除该 extension 后刷新 binder，并证明 server 选择 PSK 且不进入证书路径；匹配的
+  fallback 测试证明 identity 不匹配时仍要求 `signature_algorithms` 才能走证书认证。
 
 - 2026-07-17：收紧纯 Zig TLS ClientHello supported_groups 校验。server 现在会在
   选择 X25519 或推进 handshake 前拒绝 `supported_groups` 里的重复 NamedGroup entry。

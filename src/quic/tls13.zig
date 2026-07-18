@@ -5702,6 +5702,26 @@ test "Tls13Handshake server accepts selected PSK without ClientHello signature_a
     try std.testing.expect(server.peer_psk_binder_valid);
 }
 
+test "Tls13Handshake server rejects PSK fallback without ClientHello signature_algorithms" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const sig_algs = try clientHelloExtension(hello, @intFromEnum(ExtType.signature_algorithms));
+    writeU16(hello[sig_algs.header_offset..][0..2], 0xaaaa);
+    try refreshClientHelloPskBinder(hello, psk);
+
+    const cert_der = [_]u8{ 0x30, 0x03, 0x01 };
+    const other_ticket = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    var server = Tls13Handshake.initServerWithPsk(.{
+        .cert_chain_der = &.{&cert_der},
+    }, &[_]u8{}, psk);
+    try server.setServerPskIdentity(&other_ticket);
+    server.provideData(hello);
+    try std.testing.expectError(error.MissingExtension, server.step());
+    try std.testing.expect(!server.psk_selected);
+    try std.testing.expect(!server.peer_psk_binder_valid);
+}
+
 test "Tls13Handshake server rejects unsupported CertificateVerify signature scheme" {
     var hello_buf: [1024]u8 = undefined;
     const hello = try clientHelloBytes(.{}, &hello_buf);

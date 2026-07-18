@@ -133,7 +133,8 @@ distribute retained identity fingerprints. Production/distributed 0-RTT replay
 policy remains pending.
 Selected-PSK handshakes no longer require ClientHello `signature_algorithms`
 even when the server is configured with a certificate chain; signature
-algorithm validation now applies only to the fallback certificate path.
+algorithm validation now applies only to the fallback certificate path, which
+still rejects missing `signature_algorithms` when PSK identity matching fails.
 The TLS-owned 0-RTT acceptance signal is now bound to connection policy:
 servers emit EncryptedExtensions `early_data` only when the connection accepts
 installed peer 0-RTT keys, and clients discard local 0-RTT send keys as soon as
@@ -1539,7 +1540,8 @@ QUIC unless the gap is named and the verification evidence is added here.
   pure-Zig TLS server does not require `signature_algorithms` before the PSK
   binder is verified and selected. The focused test refreshes the binder after
   removing that extension and proves the server selects PSK without entering
-  the certificate path.
+  the certificate path; a matching fallback test proves identity mismatch still
+  requires `signature_algorithms` before certificate authentication.
 
 - 2026-07-17: Tightened pure-Zig TLS ClientHello supported_groups validation.
   The server now rejects duplicate NamedGroup entries in `supported_groups`
