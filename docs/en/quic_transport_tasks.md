@@ -75,7 +75,9 @@ processing now also rejects empty or locally unmatchable oversized configured
 SNI names before peer SNI matching. When the certificate path is required,
 server-side ClientHello processing now rejects empty or oversized configured
 certificate chains plus missing or invalid configured private keys before
-emitting ServerHello.
+emitting ServerHello. Pure-Zig TLS input buffering now reports `DecodeError`
+after oversized handshake or post-handshake input instead of silently
+truncating CRYPTO bytes and waiting on a partial message.
 
 Endpoint Version Negotiation response generation now enforces the QUIC fixed
 bit before emitting a response. Unsupported-version long-header datagrams with

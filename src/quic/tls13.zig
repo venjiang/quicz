@@ -874,6 +874,16 @@ test "Tls13Handshake clientProcessPostHandshake rejects unsupported messages" {
     try std.testing.expectError(error.UnexpectedMessage, hs.clientProcessPostHandshake());
 }
 
+test "Tls13Handshake clientProcessPostHandshake rejects overflowed input" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    hs.state = .connected;
+    var oversized: [16385]u8 = undefined;
+    @memset(&oversized, 0);
+
+    hs.provideData(&oversized);
+    try std.testing.expectError(error.DecodeError, hs.clientProcessPostHandshake());
+}
+
 test "resumption PSK round-trips through initWithPsk" {
     var ks = KeySchedule.init();
     const shared_secret = [_]u8{0x01} ** 32;
@@ -2015,6 +2025,7 @@ pub const Tls13Handshake = struct {
     in_buf: [16384]u8 = undefined,
     in_len: usize = 0,
     in_offset: usize = 0,
+    input_overflow: bool = false,
 
     // Client random (for SSLKEYLOGFILE and ServerHello matching)
     client_random: [32]u8 = undefined,
@@ -2121,6 +2132,7 @@ pub const Tls13Handshake = struct {
         self.out_len = 0;
         self.in_len = 0;
         self.in_offset = 0;
+        self.input_overflow = false;
         self.pending_install_handshake = false;
         self.pending_install_app = false;
         self.negotiated_alpn_len = 0;
@@ -2187,6 +2199,7 @@ pub const Tls13Handshake = struct {
         self.out_len = 0;
         self.in_len = 0;
         self.in_offset = 0;
+        self.input_overflow = false;
         self.pending_install_handshake = false;
         self.pending_install_app = false;
         self.negotiated_alpn_len = 0;
@@ -2264,6 +2277,7 @@ pub const Tls13Handshake = struct {
     }
 
     pub fn provideData(self: *Tls13Handshake, data: []const u8) void {
+        if (self.input_overflow) return;
         if (self.in_offset > 0 and self.in_len - self.in_offset + data.len > self.in_buf.len) {
             const remaining = self.in_len - self.in_offset;
             if (remaining > 0) {
@@ -2272,9 +2286,11 @@ pub const Tls13Handshake = struct {
             self.in_len = remaining;
             self.in_offset = 0;
         }
-        const copy_len = @min(data.len, self.in_buf.len - self.in_len);
+        const available = self.in_buf.len - self.in_len;
+        const copy_len = @min(data.len, available);
         @memcpy(self.in_buf[self.in_len..][0..copy_len], data[0..copy_len]);
         self.in_len += copy_len;
+        if (copy_len != data.len) self.input_overflow = true;
     }
 
     /// Read one handshake message from the input buffer.
@@ -2294,6 +2310,7 @@ pub const Tls13Handshake = struct {
 
     /// Step the handshake state machine. Returns an action for the caller.
     pub fn step(self: *Tls13Handshake) HandshakeError!Action {
+        if (self.input_overflow) return error.DecodeError;
         if (self.pending_install_handshake) {
             self.pending_install_handshake = false;
             // Local = this endpoint's write secret; peer = remote's write secret.
@@ -2390,6 +2407,7 @@ pub const Tls13Handshake = struct {
     pub fn clientProcessPostHandshake(self: *Tls13Handshake) HandshakeError!void {
         if (self.is_server) return;
         if (self.state != .connected) return;
+        if (self.input_overflow) return error.DecodeError;
         while (self.readHandshakeMsg()) |msg| {
             if (msg.len > 0 and msg[0] == @intFromEnum(HandshakeType.new_session_ticket)) {
                 try self.clientProcessNewSessionTicket(msg);
@@ -3765,6 +3783,16 @@ test "Tls13Handshake client builds ClientHello with ALPN and key_share" {
     // Next step should wait for data (ServerHello)
     const next = try hs.step();
     try std.testing.expect(next == .wait_for_data);
+}
+
+test "Tls13Handshake client step rejects overflowed handshake input" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+    var oversized: [16385]u8 = undefined;
+    @memset(&oversized, 0);
+
+    hs.provideData(&oversized);
+    try std.testing.expectError(error.DecodeError, hs.step());
 }
 
 test "Tls13Handshake client builds ClientHello with transport parameters" {
@@ -5413,6 +5441,15 @@ test "Tls13Handshake server rejects duplicate known ClientHello extensions" {
 
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects overflowed handshake input" {
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    var oversized: [16385]u8 = undefined;
+    @memset(&oversized, 0);
+
+    server.provideData(&oversized);
     try std.testing.expectError(error.DecodeError, server.step());
 }
 
