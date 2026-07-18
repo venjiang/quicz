@@ -37,11 +37,11 @@ const OutBucket = struct {
         return self.len - self.offset;
     }
 
-    fn append(self: *OutBucket, data: []const u8) void {
+    fn append(self: *OutBucket, data: []const u8) tls13.HandshakeError!void {
         const room = self.buf.len - self.len;
-        const n = @min(data.len, room);
-        @memcpy(self.buf[self.len..][0..n], data[0..n]);
-        self.len += n;
+        if (data.len > room) return error.DecodeError;
+        @memcpy(self.buf[self.len..][0..data.len], data);
+        self.len += data.len;
     }
 
     /// Copy as many pending bytes as fit in `out`, advancing the offset.
@@ -349,7 +349,7 @@ pub const Tls13Backend = struct {
     pub fn retryReceived(self: *Tls13Backend) void {
         self.out_initial = .{};
         if (self.cached_client_hello_len > 0) {
-            self.out_initial.append(self.cached_client_hello[0..self.cached_client_hello_len]);
+            self.out_initial.append(self.cached_client_hello[0..self.cached_client_hello_len]) catch unreachable;
         }
     }
 
@@ -379,6 +379,7 @@ pub const Tls13Backend = struct {
             const action = try self.hs.step();
             switch (action) {
                 .send_data => |sd| {
+                    try self.bucketForLevel(sd.level).append(sd.data);
                     if (!self.client_hello_built and sd.level == .initial) {
                         self.client_hello_built = true;
                         // 缓存首份 ClientHello 字节用于 Retry 后重发。ClientHello
@@ -387,7 +388,6 @@ pub const Tls13Backend = struct {
                         @memcpy(self.cached_client_hello[0..n], sd.data[0..n]);
                         self.cached_client_hello_len = n;
                     }
-                    self.bucketForLevel(sd.level).append(sd.data);
                 },
                 .install_keys => {},
                 .wait_for_data => return,
@@ -403,7 +403,7 @@ pub const Tls13Backend = struct {
                         self.nst_emitted = true;
                         const nst = try self.hs.serverBuildNewSessionTicket();
                         if (nst == .send_data) {
-                            self.bucketForLevel(nst.send_data.level).append(nst.send_data.data);
+                            try self.bucketForLevel(nst.send_data.level).append(nst.send_data.data);
                         }
                     }
                     return;
@@ -707,6 +707,22 @@ test "Tls13Backend set_local_transport_parameters rejects oversized bytes" {
     try testing.expectError(error.CryptoError, cb.setLocalTransportParameters(&oversized));
     try testing.expectEqual(@as(usize, 0), backend.hs.tp_encoded_len);
     try testing.expect(!backend.client_hello_built);
+}
+
+test "Tls13Backend pull rejects outbound CRYPTO bucket overflow without truncating" {
+    var backend = Tls13Backend.initClient(.{
+        .server_name = "example.com",
+    });
+    var cb = backend.cryptoBackend();
+    backend.out_initial.len = max_out - 1;
+    backend.out_initial.offset = max_out - 1;
+
+    var scratch: [4096]u8 = undefined;
+    try testing.expectError(error.CryptoError, cb.pull(cb.context, .initial, &scratch));
+    try testing.expectEqual(max_out - 1, backend.out_initial.len);
+    try testing.expectEqual(max_out - 1, backend.out_initial.offset);
+    try testing.expect(!backend.client_hello_built);
+    try testing.expectEqual(@as(usize, 0), backend.cached_client_hello_len);
 }
 
 test "Tls13Backend pull_peer_transport_parameters rejects undersized output buffer without consuming" {
