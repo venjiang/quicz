@@ -2187,7 +2187,7 @@ test "Tls13ClientEndpoint closes with committed route output" {
     try std.testing.expect(client.closeDeadlineMillis() != null);
 }
 
-test "Tls13ClientEndpoint close with route path fails before closing when route is missing" {
+test "Tls13ClientEndpoint route-bound controls fail before mutating when route is missing" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98 };
     const alpn = [_][]const u8{"hq-interop"};
@@ -2206,8 +2206,16 @@ test "Tls13ClientEndpoint close with route path fails before closing when route 
         client_scid,
     );
     defer client.deinit();
+    const reset_stream_id = try client.openUniStream();
+    try std.testing.expectEqual(@as(u64, 2), reset_stream_id);
+    const stop_stream_id = try client.openStream();
+    try std.testing.expectEqual(@as(u64, 0), stop_stream_id);
 
     _ = client.lifecycle.retireConnection(client.connection_id);
+    try std.testing.expectError(error.UnknownConnectionId, client.resetStreamWithRoutePath(reset_stream_id, 41, 1));
+    try std.testing.expectEqual(@as(usize, 0), client.transport.connection.pending_reset_streams.items.len);
+    try std.testing.expectError(error.UnknownConnectionId, client.stopSendingWithRoutePath(stop_stream_id, 42, 1));
+    try std.testing.expectEqual(@as(usize, 0), client.transport.connection.pending_stop_sending.items.len);
     try std.testing.expectError(error.UnknownConnectionId, client.closeWithRoutePath(0, 0, "missing route", 1));
     try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
     var close_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;

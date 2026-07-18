@@ -2367,6 +2367,14 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         ),
     );
     try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
+    const server_unidirectional_stream = try endpoint_owner.openUniStream(record_handle);
+    try std.testing.expectEqual(@as(u64, 3), server_unidirectional_stream);
+    const server_bidirectional_stream = try endpoint_owner.openStream(record_handle);
+    try std.testing.expectEqual(@as(u64, 1), server_bidirectional_stream);
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.resetStreamWithRoutePath(record_handle, server_unidirectional_stream, 41, 1));
+    try std.testing.expectEqual(@as(usize, 0), record.connection.pending_reset_streams.items.len);
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.stopSendingWithRoutePath(record_handle, server_bidirectional_stream, 42, 1));
+    try std.testing.expectEqual(@as(usize, 0), record.connection.pending_stop_sending.items.len);
     const record_path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5443),
@@ -2385,10 +2393,6 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectEqual(record_handle, single_active_ids[0]);
     var no_active_ids: [0]u64 = .{};
     try std.testing.expectError(error.BufferTooSmall, endpoint_owner.activeConnectionIds(&no_active_ids));
-    const server_unidirectional_stream = try endpoint_owner.openUniStream(record_handle);
-    try std.testing.expectEqual(@as(u64, 3), server_unidirectional_stream);
-    const server_bidirectional_stream = try endpoint_owner.openStream(record_handle);
-    try std.testing.expectEqual(@as(u64, 1), server_bidirectional_stream);
     const stream_datagram = (try endpoint_owner.sendStreamWithRoutePath(
         record_handle,
         server_bidirectional_stream,

@@ -241,7 +241,8 @@ record 的 route。
 data 会通过 endpoint-owned route 发出。
 client 与 server endpoint 现在也暴露 route-bound RESET_STREAM 和 STOP_SENDING
 polling helper。聚焦 endpoint 测试证明取消控制 datagram 会绑定到已提交 route，
-调用方不需要分两步先 queue control 再 poll output。
+调用方不需要分两步先 queue control 再 poll output。同一组测试现在也覆盖缺失
+route 时不会先 queue pending RESET_STREAM 或 STOP_SENDING 状态。
 client 和 server endpoint 的 route-bound close helper 现在也会先解析 route，再
 queue CONNECTION_CLOSE。聚焦测试证明缺失 route 返回 `UnknownConnectionId`，且选中
 connection 仍保持 active。
