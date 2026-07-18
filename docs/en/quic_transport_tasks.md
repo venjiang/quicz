@@ -219,6 +219,10 @@ Server route-bound routed long-packet helpers now apply the same preflight
 before processing protected Initial, coalesced Initial/Handshake, or Handshake
 CRYPTO input. Missing routes do not deliver CRYPTO bytes to the TLS backend or
 pull backend output.
+Server Retry follow-up route-bound processing now preflights the follow-up
+Initial DCID route before token validation. Missing routes return
+`UnknownConnectionId` without consuming the one-time Retry token, marking the
+record retry-validated, or driving backend output.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a

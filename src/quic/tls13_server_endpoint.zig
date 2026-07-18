@@ -1741,6 +1741,9 @@ pub fn Tls13ServerEndpoint(
             initial_out: []root.EndpointPolledDatagramResult,
             handshake_out: []root.EndpointPolledDatagramResult,
         ) (root.EndpointRetryProtectedInitialError || root.Error || endpoint.RouteError)!RetryInitialProcessPathResult {
+            const info = protection.peekProtectedLongPacketInfo(datagram) catch return error.InvalidPacket;
+            if (info.packet_type != .initial) return error.InvalidPacket;
+            _ = try self.lifecycle.currentRoutePath(info.dcid);
             const retry = try self.validateRetryInitial(
                 policy,
                 connection_id,
@@ -3982,6 +3985,154 @@ test "Tls13ServerEndpoint validates Retry Initial and returns route-bound TLS ou
     try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
     try std.testing.expect((try endpoint_owner.lifecycle.currentRoutePath(&retry_scid)).eql(path));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.lifecycle.currentRoutePath(&original_dcid));
+}
+
+test "Tls13ServerEndpoint validates Retry Initial route before consuming token state" {
+    const original_dcid = [_]u8{ 0x86, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x45, 0x46, 0x47, 0x48 };
+    const retry_scid = [_]u8{ 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68 };
+    const supported_versions = [_]quic_packet.Version{.v1};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 192, 0, 2, 30 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 198, 51, 100, 28 }, 50_001),
+    };
+
+    const RetryBackend = struct {
+        received_initial: bool = false,
+        pulled_initial: bool = false,
+
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(context: *anyopaque, space: root.PacketNumberSpace, _: []const u8) root.Error!void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space == .initial) self.received_initial = true;
+        }
+
+        fn pull(context: *anyopaque, space: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (space == .initial) self.pulled_initial = true;
+            return null;
+        }
+    };
+
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend_value: root.CryptoBackend,
+        retry_validated: bool = false,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend_value;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return &client_scid;
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return if (self.retry_validated) &retry_scid else &original_dcid;
+        }
+
+        fn initialDestinationConnectionId(self: *const @This()) []const u8 {
+            return if (self.retry_validated) &retry_scid else &original_dcid;
+        }
+
+        fn markRetryValidated(self: *@This()) void {
+            self.retry_validated = true;
+        }
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = TestEndpoint.init(std.testing.allocator);
+    defer endpoint_owner.deinit();
+
+    const secret: address_validation_token.Secret = [_]u8{0xf2} ** address_validation_token.secret_len;
+    const nonce: address_validation_token.Nonce = [_]u8{0x2d} ** address_validation_token.nonce_len;
+    var policy = endpoint.AddressValidationPolicy.init(std.testing.allocator, secret, .{
+        .max_previous_secrets = 1,
+        .max_replay_entries = 4,
+    });
+    defer policy.deinit();
+    const token = try policy.issueTokenForPath(std.testing.allocator, .retry, 1_000, 60_000, path, nonce);
+    defer std.testing.allocator.free(token);
+
+    var backend = RetryBackend{};
+    const record = try std.testing.allocator.create(TestRecord);
+    record.* = .{
+        .handle = 32,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend_value = backend.backend(),
+    };
+    try record.connection.issueRetryToken(token);
+    const record_handle = record.handle;
+    _ = try endpoint_owner.adoptRetryRecordAndSwitchInitialRoute(
+        record_handle,
+        record,
+        &original_dcid,
+        &retry_scid,
+        path,
+        .{ .active_migration_disabled = true },
+    );
+
+    const retry_secrets = try protection.deriveInitialSecrets(.v1, &retry_scid);
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    try client.sendCryptoInSpace(.initial, "retry should wait for route");
+    const followup_initial = (try client.pollInitialProtectedDatagram(
+        1_010,
+        &retry_scid,
+        &client_scid,
+        token,
+        retry_secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(followup_initial);
+
+    try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(&retry_scid, path));
+    var scratch: [8192]u8 = undefined;
+    var initial_outputs: [1]root.EndpointPolledDatagramResult = undefined;
+    var handshake_outputs: [1]root.EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.validateRetryInitialWithRoutePath(
+        &policy,
+        record_handle,
+        1_020,
+        path,
+        followup_initial,
+        &supported_versions,
+        &scratch,
+        &initial_outputs,
+        &handshake_outputs,
+    ));
+
+    try std.testing.expect(!record.retry_validated);
+    try std.testing.expect(!record.connection.peerAddressValidated());
+    try std.testing.expectEqual(@as(usize, 1), record.connection.pendingRetryTokenCount());
+    try std.testing.expectEqual(@as(usize, 0), policy.replayFilterEntryCount());
+    try std.testing.expect(!backend.received_initial);
+    try std.testing.expect(!backend.pulled_initial);
 }
 
 test "Tls13ServerEndpoint feeds installed-key short datagram without receive-view allocation" {
