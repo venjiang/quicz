@@ -186,6 +186,9 @@ route 恢复后的下一轮处理。
 Server 的 route-bound backend drive helper 现在会在 Initial 或 Handshake 空间拉取
 TLS backend output 前先解析 record 的已提交 route。缺失 route 会返回
 `UnknownConnectionId`，不会消费 backend CRYPTO output。
+Server 的 route-bound routed long-packet helper 现在也会在处理 protected Initial、
+coalesced Initial/Handshake 或 Handshake CRYPTO input 前执行同样的预检。缺失 route
+不会把 CRYPTO bytes 交给 TLS backend，也不会拉取 backend output。
 
 Client endpoint 的错误路径不会再把无关待发送应用包误当作 close-on-error 输出：
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入

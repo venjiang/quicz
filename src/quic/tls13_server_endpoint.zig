@@ -1817,6 +1817,7 @@ pub fn Tls13ServerEndpoint(
             out: []root.EndpointPolledDatagramResult,
         ) (root.EndpointProtectedInitialError || root.Error || endpoint.RouteError)!RoutedBackendDatagramDrainPathResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const output_path = try self.currentRecordRoutePath(record);
             const processed = try self.processInitialWithHandshakeKeys(
                 connection_id,
                 path,
@@ -1829,7 +1830,7 @@ pub fn Tls13ServerEndpoint(
                 .route = processed.route,
                 .backend = .{
                     .backend = processed.backend,
-                    .path = try self.currentRecordRoutePath(record),
+                    .path = output_path,
                 },
             };
         }
@@ -1912,6 +1913,7 @@ pub fn Tls13ServerEndpoint(
             handshake_out: []root.EndpointPolledDatagramResult,
         ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!InitialProcessPathResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const output_path = try self.currentRecordRoutePath(record);
             const processed = try self.processInitial(
                 connection_id,
                 path,
@@ -1922,7 +1924,6 @@ pub fn Tls13ServerEndpoint(
                 initial_out,
                 handshake_out,
             );
-            const output_path = try self.currentRecordRoutePath(record);
             return .{
                 .initial = .{
                     .route = processed.initial.route,
@@ -1974,6 +1975,7 @@ pub fn Tls13ServerEndpoint(
             out: []root.EndpointPolledDatagramResult,
         ) (root.EndpointProtectedDatagramError || endpoint.RouteError)!RoutedBackendDatagramDrainPathResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const output_path = try self.currentRecordRoutePath(record);
             const processed = try self.processHandshake(
                 connection_id,
                 path,
@@ -1986,7 +1988,7 @@ pub fn Tls13ServerEndpoint(
                 .route = processed.route,
                 .backend = .{
                     .backend = processed.backend,
-                    .path = try self.currentRecordRoutePath(record),
+                    .path = output_path,
                 },
             };
         }
@@ -3600,6 +3602,195 @@ test "Tls13ServerEndpoint dispatches coalesced long datagrams with installed Han
         else => return error.TestUnexpectedResult,
     }
     try std.testing.expect(record.backend.received_handshake);
+}
+
+test "Tls13ServerEndpoint routed long route path fails before delivering CRYPTO to backend when route is missing" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: Backend,
+        peer_cid: [4]u8,
+        local_cid: [4]u8,
+        original_cid: [8]u8,
+
+        const Backend = struct {
+            initial_receives: usize = 0,
+            handshake_receives: usize = 0,
+            pulls: usize = 0,
+
+            fn backend(self: *@This()) root.CryptoBackend {
+                return .{
+                    .context = self,
+                    .receive = receive,
+                    .pull = pull,
+                };
+            }
+
+            fn receive(context: *anyopaque, space: root.PacketNumberSpace, _: []const u8) root.Error!void {
+                const self: *@This() = @ptrCast(@alignCast(context));
+                switch (space) {
+                    .initial => self.initial_receives += 1,
+                    .handshake => self.handshake_receives += 1,
+                    .application => {},
+                }
+            }
+
+            fn pull(context: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+                const self: *@This() = @ptrCast(@alignCast(context));
+                self.pulls += 1;
+                return null;
+            }
+        };
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend.backend();
+        }
+
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return &self.peer_cid;
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return &self.local_cid;
+        }
+
+        fn initialDestinationConnectionId(self: *const @This()) []const u8 {
+            return &self.original_cid;
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = TestEndpoint.init(std.testing.allocator);
+    defer endpoint_owner.deinit();
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5443),
+    };
+    const original_cid = [_]u8{ 0x85, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_cid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    const server_cid = [_]u8{ 0xd1, 0xd2, 0xd3, 0xd4 };
+
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer {
+        if (record_owned) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = 94,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = .{},
+        .peer_cid = client_cid,
+        .local_cid = server_cid,
+        .original_cid = original_cid,
+    };
+    record_initialized = true;
+    try endpoint_owner.lifecycle.registerConnectionId(record.handle, &original_cid, path, .{});
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(record.handle);
+    try endpoint_owner.lifecycle.registerConnectionId(record.handle, &server_cid, path, .{});
+    try endpoint_owner.records.adopt(record.handle, record);
+    record_owned = false;
+
+    var client = try Connection.init(std.testing.allocator, .client, .{});
+    defer client.deinit();
+    const initial_secrets = try protection.deriveInitialSecrets(.v1, &original_cid);
+    try client.sendCryptoInSpace(.initial, "missing route initial");
+    const initial_datagram = (try client.pollInitialProtectedDatagram(
+        1,
+        &original_cid,
+        &client_cid,
+        &[_]u8{},
+        initial_secrets.client,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(initial_datagram);
+
+    const client_hs = [_]u8{0x71} ** protection.traffic_secret_len;
+    const server_hs = [_]u8{0x72} ** protection.traffic_secret_len;
+    try client.installHandshakeTrafficSecrets(.{
+        .local = client_hs,
+        .peer = server_hs,
+    });
+    try record.connection.installHandshakeTrafficSecrets(.{
+        .local = server_hs,
+        .peer = client_hs,
+    });
+    try client.sendCryptoInSpace(.handshake, "missing route handshake");
+    const handshake_datagram = (try client.pollProtectedHandshakeDatagramWithInstalledKeys(
+        2,
+        &server_cid,
+        &client_cid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(handshake_datagram);
+
+    const coalesced = try std.testing.allocator.alloc(u8, initial_datagram.len + handshake_datagram.len);
+    defer std.testing.allocator.free(coalesced);
+    @memcpy(coalesced[0..initial_datagram.len], initial_datagram);
+    @memcpy(coalesced[initial_datagram.len..], handshake_datagram);
+
+    try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(&server_cid, path));
+    var scratch: [256]u8 = undefined;
+    var initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.processInitialWithRoutePath(
+        record.handle,
+        path,
+        3,
+        initial_datagram,
+        &scratch,
+        &[_]u8{},
+        &initial_out,
+        &handshake_out,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), record.backend.initial_receives);
+    try std.testing.expectEqual(@as(usize, 0), record.backend.handshake_receives);
+    try std.testing.expectEqual(@as(usize, 0), record.backend.pulls);
+
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.processInitialWithHandshakeKeysWithRoutePath(
+        record.handle,
+        path,
+        4,
+        coalesced,
+        &scratch,
+        &handshake_out,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), record.backend.initial_receives);
+    try std.testing.expectEqual(@as(usize, 0), record.backend.handshake_receives);
+    try std.testing.expectEqual(@as(usize, 0), record.backend.pulls);
+
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.processHandshakeWithRoutePath(
+        record.handle,
+        path,
+        5,
+        handshake_datagram,
+        &scratch,
+        &handshake_out,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), record.backend.initial_receives);
+    try std.testing.expectEqual(@as(usize, 0), record.backend.handshake_receives);
+    try std.testing.expectEqual(@as(usize, 0), record.backend.pulls);
 }
 
 test "Tls13ServerEndpoint validates Retry Initial and returns route-bound TLS output" {

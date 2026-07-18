@@ -215,6 +215,10 @@ deadline for a later pass after route restoration.
 Server route-bound backend drive helpers now resolve the committed record
 route before pulling TLS backend output in Initial or Handshake space. Missing
 routes return `UnknownConnectionId` without consuming backend CRYPTO output.
+Server route-bound routed long-packet helpers now apply the same preflight
+before processing protected Initial, coalesced Initial/Handshake, or Handshake
+CRYPTO input. Missing routes do not deliver CRYPTO bytes to the TLS backend or
+pull backend output.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
