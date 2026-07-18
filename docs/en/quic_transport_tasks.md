@@ -72,7 +72,9 @@ duplicate local ALPN protocol names before encoding the ALPN extension, and
 server-side ClientHello processing now rejects empty, oversized, or duplicate
 local ALPN protocol names before ALPN selection. Server-side ClientHello
 processing now also rejects empty or locally unmatchable oversized configured
-SNI names before peer SNI matching.
+SNI names before peer SNI matching. When the certificate path is required,
+server-side ClientHello processing now rejects missing or invalid configured
+private keys before emitting ServerHello.
 
 Endpoint Version Negotiation response generation now enforces the QUIC fixed
 bit before emitting a response. Unsupported-version long-header datagrams with

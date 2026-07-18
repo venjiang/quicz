@@ -1801,6 +1801,19 @@ fn certificateVerifySignatureSchemeSupported(scheme: u16) bool {
         scheme == sig_ed25519;
 }
 
+fn validateServerCertificatePrivateKey(config: TlsConfig) HandshakeError!void {
+    const private_key = config.private_key_bytes orelse return error.BadCertificate;
+    if (private_key.len != 32) return error.BadCertificate;
+    switch (config.private_key_algorithm) {
+        .ecdsa_p256_sha256 => {
+            _ = EcdsaP256Sha256.SecretKey.fromBytes(private_key[0..32].*) catch return error.BadCertificate;
+        },
+        .ed25519 => {
+            _ = Ed25519.KeyPair.generateDeterministic(private_key[0..32].*) catch return error.BadCertificate;
+        },
+    }
+}
+
 fn clientHelloKnownExtensionBit(ext_type: u16) ?u4 {
     return switch (ext_type) {
         @intFromEnum(ExtType.server_name) => 0,
@@ -3404,6 +3417,7 @@ pub const Tls13Handshake = struct {
         if (!self.psk_selected) {
             if (self.config.cert_chain_der.len > 0 and !have_signature_algorithms) return error.MissingExtension;
             if (have_signature_algorithms and !client_supports_server_sig) return error.UnsupportedSignatureAlgorithm;
+            if (self.config.cert_chain_der.len > 0) try validateServerCertificatePrivateKey(self.config);
         }
         self.state = .server_send_server_hello;
         return ._continue;
@@ -3521,7 +3535,8 @@ pub const Tls13Handshake = struct {
     /// Build CertificateVerify, signing the transcript hash up to the
     /// Certificate with the configured private key (RFC 8446 §4.4.3).
     fn serverBuildCertificateVerify(self: *Tls13Handshake) HandshakeError!Action {
-        const private_key = self.config.private_key_bytes orelse return error.BadCertificate;
+        try validateServerCertificatePrivateKey(self.config);
+        const private_key = self.config.private_key_bytes.?;
         const th = self.transcript.current();
 
         // Signed content: 0x20 × 64 + context string + 0x00 + transcript hash.
@@ -3536,7 +3551,6 @@ pub const Tls13Handshake = struct {
         var sig_len: usize = 0;
         const sig_scheme: u16 = switch (self.config.private_key_algorithm) {
             .ecdsa_p256_sha256 => blk: {
-                if (private_key.len != 32) return error.InternalError;
                 var der_buf: [EcdsaP256Sha256.Signature.der_encoded_length_max]u8 = undefined;
                 const sk = EcdsaP256Sha256.SecretKey.fromBytes(private_key[0..32].*) catch return error.InternalError;
                 const kp = EcdsaP256Sha256.KeyPair.fromSecretKey(sk) catch return error.InternalError;
@@ -3547,7 +3561,6 @@ pub const Tls13Handshake = struct {
                 break :blk sig_ecdsa_secp256r1_sha256;
             },
             .ed25519 => blk: {
-                if (private_key.len != 32) return error.InternalError;
                 const kp = Ed25519.KeyPair.generateDeterministic(private_key[0..32].*) catch return error.InternalError;
                 const sig = kp.sign(&sign_content, null) catch return error.InternalError;
                 const bytes = sig.toBytes();
@@ -5769,6 +5782,34 @@ test "Tls13Handshake server rejects missing signature_algorithms when sending a 
     }, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.MissingExtension, server.step());
+}
+
+test "Tls13Handshake server rejects missing certificate private key before ServerHello" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const cert_der = [_]u8{ 0x30, 0x03, 0x01 };
+    var server = Tls13Handshake.initServer(.{
+        .cert_chain_der = &.{&cert_der},
+    }, &[_]u8{});
+
+    server.provideData(hello);
+    try std.testing.expectError(error.BadCertificate, server.step());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
+}
+
+test "Tls13Handshake server rejects invalid certificate private key before ServerHello" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const cert_der = [_]u8{ 0x30, 0x03, 0x01 };
+    const short_private_key = [_]u8{0xaa};
+    var server = Tls13Handshake.initServer(.{
+        .cert_chain_der = &.{&cert_der},
+        .private_key_bytes = &short_private_key,
+    }, &[_]u8{});
+
+    server.provideData(hello);
+    try std.testing.expectError(error.BadCertificate, server.step());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
 test "Tls13Handshake server accepts selected PSK without ClientHello signature_algorithms" {
