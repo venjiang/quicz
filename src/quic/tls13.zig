@@ -1795,6 +1795,12 @@ fn signatureSchemeForPrivateKeyAlgorithm(algorithm: PrivateKeyAlgorithm) u16 {
     };
 }
 
+fn certificateVerifySignatureSchemeSupported(scheme: u16) bool {
+    return scheme == sig_ecdsa_secp256r1_sha256 or
+        scheme == sig_rsa_pss_rsae_sha256 or
+        scheme == sig_ed25519;
+}
+
 fn clientHelloKnownExtensionBit(ext_type: u16) ?u4 {
     return switch (ext_type) {
         @intFromEnum(ExtType.server_name) => 0,
@@ -2885,6 +2891,7 @@ pub const Tls13Handshake = struct {
         if (pos + 2 > msg.len) return error.DecodeError;
         self.cert_verify_scheme = readU16(msg[pos..]);
         pos += 2;
+        if (!certificateVerifySignatureSchemeSupported(self.cert_verify_scheme)) return error.UnsupportedSignatureAlgorithm;
         // signature (2-byte length + data)
         if (pos + 2 > msg.len) return error.DecodeError;
         const sig_len = readU16(msg[pos..]);
@@ -4974,6 +4981,17 @@ test "Tls13Handshake client rejects empty CertificateVerify signature" {
     handshake.provideData(cv_buf[0..cv_len]);
 
     try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificateVerify());
+}
+
+test "Tls13Handshake client rejects unsupported CertificateVerify signature scheme" {
+    var cv_buf: [64]u8 = undefined;
+    const cv_len = buildCertificateVerify(&cv_buf, 0x0000, &[_]u8{0xaa});
+
+    var handshake = Tls13Handshake.initClient(.{ .skip_cert_verify = true }, &[_]u8{});
+    handshake.state = .client_wait_certificate_verify;
+    handshake.provideData(cv_buf[0..cv_len]);
+
+    try std.testing.expectError(error.UnsupportedSignatureAlgorithm, handshake.clientProcessCertificateVerify());
 }
 
 test "Tls13Handshake client rejects oversized CertificateVerify signature" {
