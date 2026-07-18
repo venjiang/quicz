@@ -1053,21 +1053,24 @@ pub fn Tls13ServerEndpoint(
             now_millis: i64,
             space: root.EndpointInstalledKeyDatagramSpace,
         ) (root.Error || endpoint.RouteError)!?DatagramPathResult {
-            const polled = (try self.records.pollDatagramAcrossConnections(
-                &self.lifecycle,
+            if (self.records.poll_view_scratch) |views| {
+                return self.pollDatagramAcrossRecordViewsWithRoutePath(
+                    try self.records.fillPollViews(views, destination_connection_id_of, source_connection_id_of),
+                    now_millis,
+                    space,
+                );
+            }
+            const views = try self.records.pollViews(
                 allocator,
-                now_millis,
-                space,
                 destination_connection_id_of,
                 source_connection_id_of,
-            )) orelse return null;
-            const record = self.records.get(polled.connection_id) orelse return error.Internal;
-            errdefer connection_of(record).allocator.free(polled.datagram);
-            return .{
-                .connection_id = polled.connection_id,
-                .datagram = polled.datagram,
-                .path = try self.currentRecordRoutePath(record),
-            };
+            );
+            defer allocator.free(views);
+            return self.pollDatagramAcrossRecordViewsWithRoutePath(
+                views,
+                now_millis,
+                space,
+            );
         }
 
         /// Drain installed-key datagrams across active endpoint-owned records.
@@ -1084,35 +1087,72 @@ pub fn Tls13ServerEndpoint(
         ) DatagramPathDrainResult {
             var result = DatagramPathDrainResult{};
             while (result.datagrams_written < out.len) {
-                const polled = self.records.pollDatagramAcrossConnections(
-                    &self.lifecycle,
+                const datagram = self.pollDatagramWithRoutePath(
                     allocator,
                     now_millis,
                     space,
-                    destination_connection_id_of,
-                    source_connection_id_of,
                 ) catch |err| {
-                    result.first_error = err;
+                    switch (err) {
+                        error.InvalidConnectionIdLength,
+                        error.InvalidConnectionIdSequence,
+                        error.InvalidDatagram,
+                        error.InvalidVersionList,
+                        error.InvalidResetSize,
+                        error.DuplicateConnectionId,
+                        error.RouteCapacityReached,
+                        error.StatelessResetTokenCapacityReached,
+                        error.UnknownConnectionId,
+                        error.AmbiguousConnectionId,
+                        error.ActiveMigrationDisabled,
+                        error.PathMismatch,
+                        => result.first_route_error = @errorCast(err),
+                        else => result.first_error = @errorCast(err),
+                    }
                     return result;
                 };
-                const datagram = polled orelse return result;
-                const record = self.records.get(datagram.connection_id) orelse {
-                    result.first_error = error.Internal;
-                    return result;
-                };
-                const path = self.currentRecordRoutePath(record) catch |err| {
-                    connection_of(record).allocator.free(datagram.datagram);
-                    result.first_route_error = err;
-                    return result;
-                };
-                out[result.datagrams_written] = .{
-                    .connection_id = datagram.connection_id,
-                    .datagram = datagram.datagram,
-                    .path = path,
-                };
+                out[result.datagrams_written] = datagram orelse return result;
                 result.datagrams_written += 1;
             }
             return result;
+        }
+
+        fn pollDatagramAcrossRecordViewsWithRoutePath(
+            self: *Self,
+            views: []const root.EndpointConnectionPollView,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+        ) (root.Error || endpoint.RouteError)!?DatagramPathResult {
+            if (views.len == 0) {
+                self.records.next_poll_index = 0;
+                return null;
+            }
+            const start = self.records.next_poll_index % views.len;
+            var offset: usize = 0;
+            while (offset < views.len) : (offset += 1) {
+                const index = (start + offset) % views.len;
+                const view = views[index];
+                const path = try self.lifecycle.currentRoutePath(view.source_connection_id);
+                const datagram = try self.lifecycle.pollDatagram(
+                    view.connection_id,
+                    view.connection,
+                    now_millis,
+                    .{
+                        .space = space,
+                        .destination_connection_id = view.destination_connection_id,
+                        .source_connection_id = view.source_connection_id,
+                    },
+                );
+                if (datagram) |bytes| {
+                    self.records.next_poll_index = (index + 1) % views.len;
+                    return .{
+                        .connection_id = view.connection_id,
+                        .datagram = bytes,
+                        .path = path,
+                    };
+                }
+            }
+            self.records.next_poll_index = start;
+            return null;
         }
 
         /// Read received bytes from one endpoint-owned server stream.
@@ -4302,9 +4342,57 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expectEqual(@as(?endpoint.RouteError, null), empty_drain.first_route_error);
 
     try second_record.connection.sendPing();
+    _ = endpoint_owner.lifecycle.retireConnection(second_record.handle);
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        endpoint_owner.pollDatagramWithRoutePath(
+            no_allocation_allocator.allocator(),
+            16,
+            .application,
+        ),
+    );
+    try endpoint_owner.lifecycle.registerConnectionId(second_record.handle, second_record.local_id, second_path, .{});
+    const preserved_poll = (try endpoint_owner.pollDatagramWithRoutePath(
+        no_allocation_allocator.allocator(),
+        17,
+        .application,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(preserved_poll.datagram);
+    try std.testing.expectEqual(second_record.handle, preserved_poll.connection_id);
+    try std.testing.expect(preserved_poll.path.eql(second_path));
+    try std.testing.expect(preserved_poll.datagram.len != 0);
+
+    try second_record.connection.sendPing();
+    _ = endpoint_owner.lifecycle.retireConnection(second_record.handle);
+    const missing_route_drain = endpoint_owner.drainDatagramsAcrossRecordsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        18,
+        .application,
+        &drain_out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), missing_route_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), missing_route_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_drain.first_route_error);
+    try endpoint_owner.lifecycle.registerConnectionId(second_record.handle, second_record.local_id, second_path, .{});
+    var preserved_drain_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const preserved_drain = endpoint_owner.drainDatagramsAcrossRecordsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        19,
+        .application,
+        &preserved_drain_out,
+    );
+    try std.testing.expectEqual(@as(usize, 1), preserved_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), preserved_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), preserved_drain.first_route_error);
+    defer std.testing.allocator.free(preserved_drain_out[0].datagram);
+    try std.testing.expectEqual(second_record.handle, preserved_drain_out[0].connection_id);
+    try std.testing.expect(preserved_drain_out[0].path.eql(second_path));
+    try std.testing.expect(preserved_drain_out[0].datagram.len != 0);
+
+    try second_record.connection.sendPing();
     const recovery_first = (try endpoint_owner.pollDatagramWithRoutePath(
         no_allocation_allocator.allocator(),
-        16,
+        20,
         .application,
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(recovery_first.datagram);

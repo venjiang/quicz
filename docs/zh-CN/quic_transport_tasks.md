@@ -170,6 +170,8 @@ packetize ClientHello output。聚焦测试证明缺失 route 会返回
 `UnknownConnectionId`，且不会 queue Initial CRYPTO 或 arm recovery timer。
 Client 的 route-bound application output poll/drain 现在也证明同样的 route-first
 边界：缺失 route 不会消费已 queue 的 1-RTT packet，route 恢复后这些 output 仍可发送。
+Server 的 route-bound 跨 record output poll/drain 现在也会先解析选中 record 的已提交
+route，再 poll protected output，因此缺失 route 不会再消费已 queue 的 server 1-RTT packet。
 
 Client endpoint 的错误路径不会再把无关待发送应用包误当作 close-on-error 输出：
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入
