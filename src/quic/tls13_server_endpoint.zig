@@ -1166,6 +1166,33 @@ pub fn Tls13ServerEndpoint(
             try connection_of(record).sendOnStream(stream_id, data, fin);
         }
 
+        /// Queue stream bytes and poll one datagram with the committed route.
+        ///
+        /// The route is resolved before mutating stream state, so a missing
+        /// endpoint route does not leave application data queued on the record.
+        pub fn sendStreamWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            stream_id: u64,
+            data: []const u8,
+            fin: bool,
+            now_millis: i64,
+        ) (root.Error || endpoint.RouteError)!?OneRttDatagramPathResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
+            try connection_of(record).sendOnStream(stream_id, data, fin);
+            const datagram = (try self.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                connection_id,
+                connection_of(record),
+                now_millis,
+                destination_connection_id_of(record),
+            )) orelse return null;
+            return .{
+                .datagram = datagram,
+                .path = path,
+            };
+        }
+
         /// Abort a locally writable stream and queue a RESET_STREAM frame.
         pub fn resetStream(
             self: *Self,
@@ -2264,10 +2291,19 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         .local = secrets.server.secret,
         .peer = secrets.client.secret,
     });
-    try record.connection.sendPing();
     const record_handle = record.handle;
     try endpoint_owner.records.adopt(record_handle, record);
     record_owned = false;
+    const record_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5443),
+    };
+    try endpoint_owner.lifecycle.registerConnectionId(
+        record_handle,
+        TestRecord.sourceConnectionId(record),
+        record_path,
+        .{ .active_migration_disabled = false },
+    );
     try std.testing.expect(endpoint_owner.records.hasCapacity());
     try std.testing.expect(endpoint_owner.hasConnectionCapacity());
     try std.testing.expectEqual(@as(usize, 1), endpoint_owner.activeConnectionCount());
@@ -2278,23 +2314,33 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectError(error.BufferTooSmall, endpoint_owner.activeConnectionIds(&no_active_ids));
     const server_unidirectional_stream = try endpoint_owner.openUniStream(record_handle);
     try std.testing.expectEqual(@as(u64, 3), server_unidirectional_stream);
-    try endpoint_owner.resetStream(record_handle, server_unidirectional_stream, 41);
-    try std.testing.expectEqual(@as(usize, 1), record.connection.pending_reset_streams.items.len);
     const server_bidirectional_stream = try endpoint_owner.openStream(record_handle);
     try std.testing.expectEqual(@as(u64, 1), server_bidirectional_stream);
-    try endpoint_owner.sendStream(record_handle, server_bidirectional_stream, "server", false);
+    const stream_datagram = (try endpoint_owner.sendStreamWithRoutePath(
+        record_handle,
+        server_bidirectional_stream,
+        "server",
+        false,
+        1,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(stream_datagram.datagram);
+    try std.testing.expect(stream_datagram.datagram.len != 0);
+    try std.testing.expect(stream_datagram.path.eql(record_path));
+    try endpoint_owner.resetStream(record_handle, server_unidirectional_stream, 41);
+    try std.testing.expectEqual(@as(usize, 1), record.connection.pending_reset_streams.items.len);
     try endpoint_owner.stopSending(record_handle, server_bidirectional_stream, 42);
     try std.testing.expectEqual(@as(usize, 1), record.connection.pending_stop_sending.items.len);
     var stream_read_buffer: [8]u8 = undefined;
     try std.testing.expectEqual(@as(?usize, null), try endpoint_owner.recvStream(record_handle, server_bidirectional_stream, &stream_read_buffer));
     try std.testing.expect(!try endpoint_owner.streamFinished(record_handle, server_bidirectional_stream));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.openUniStream(99));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.sendStreamWithRoutePath(99, server_bidirectional_stream, "server", false, 1));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.resetStream(99, server_unidirectional_stream, 41));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.stopSending(99, server_bidirectional_stream, 42));
     const one_rtt = (try endpoint_owner.pollOneRttDatagram(record_handle, 1)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(one_rtt);
     try std.testing.expect(one_rtt.len != 0);
-    try endpoint_owner.records.remove(record_handle);
+    _ = try endpoint_owner.retireRecord(record_handle);
     try std.testing.expect(endpoint_owner.records.hasCapacity());
     try std.testing.expect(endpoint_owner.hasConnectionCapacity());
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.activeConnectionCount());
