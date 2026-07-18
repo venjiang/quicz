@@ -266,6 +266,26 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        fn preflightDueRecoveryRoutes(
+            self: *const Self,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+        ) endpoint.RouteError!void {
+            const recovery_space = packetNumberSpace(space);
+            var iterator = self.records.records.iterator();
+            while (iterator.next()) |entry| {
+                const connection_id = entry.key_ptr.*;
+                const record = entry.value_ptr.*;
+                const connection = connection_of(record);
+                const deadline = self.lifecycle.nextDeadline(connection_id, connection) orelse continue;
+                if (deadline.deadline_millis > now_millis) continue;
+                if (deadline.kind != .recovery) continue;
+                const recovery = deadline.recovery orelse continue;
+                if (recovery.space != recovery_space) continue;
+                _ = try self.currentRecordRoutePath(record);
+            }
+        }
+
         fn currentRecordRoutePath(self: *const Self, record: *const Record) endpoint.RouteError!endpoint.Udp4Tuple {
             return self.lifecycle.currentRoutePath(source_connection_id_of(record));
         }
@@ -437,6 +457,13 @@ pub fn Tls13ServerEndpoint(
             space: root.EndpointInstalledKeyDatagramSpace,
             out: []DatagramPathResult,
         ) root.Error!PendingWorkDatagramPathDrainResult {
+            self.preflightDueRecoveryRoutes(now_millis, space) catch |err| {
+                return .{
+                    .pending_work = .{},
+                    .drain = .{ .first_route_error = err },
+                    .next_deadline = try self.nextDeadline(allocator),
+                };
+            };
             const pending_work = try self.records.processPendingWork(
                 &self.lifecycle,
                 allocator,
@@ -4419,6 +4446,27 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expectEqual(root.PacketNumberSpace.application, deadline.recovery.?.space);
 
     var pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const recovery_local_id = if (deadline.connection_id == first_record.handle) first_record.local_id else second_record.local_id;
+    const recovery_path = if (deadline.connection_id == first_record.handle) first_path else second_path;
+    try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(recovery_local_id, recovery_path));
+    const missing_route_pending = try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        deadline.deadline_millis,
+        .application,
+        &pending_out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), missing_route_pending.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_pending.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_pending.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_pending.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), missing_route_pending.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_pending.drain.first_route_error);
+    const preserved_deadline = missing_route_pending.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, preserved_deadline.kind);
+    try std.testing.expectEqual(deadline.connection_id, preserved_deadline.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.application, preserved_deadline.recovery.?.space);
+    try endpoint_owner.lifecycle.registerConnectionId(deadline.connection_id, recovery_local_id, recovery_path, .{});
+
     const pending_drain = try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePath(
         no_allocation_allocator.allocator(),
         deadline.deadline_millis,

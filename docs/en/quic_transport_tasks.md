@@ -207,6 +207,10 @@ Server route-bound due-recovery draining now resolves the selected record's
 committed route before servicing Application or Initial recovery timers.
 Missing routes return `UnknownConnectionId` without advancing recovery state,
 and the due recovery remains serviceable after route restoration.
+Server route-bound pending-work draining now preflights due recovery routes
+before sweeping endpoint-owned records. Missing routes are reported through
+`drain.first_route_error` without servicing recovery, preserving the pending
+deadline for a later pass after route restoration.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
