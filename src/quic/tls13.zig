@@ -1814,6 +1814,21 @@ fn validateServerCertificatePrivateKey(config: TlsConfig) HandshakeError!void {
     }
 }
 
+fn validateServerCertificateChain(cert_chain_der: []const []const u8, output_limit: usize) HandshakeError!void {
+    if (cert_chain_der.len == 0 or output_limit < 8) return error.BadCertificate;
+    var encoded_len: usize = 8;
+    for (cert_chain_der) |cert_der| {
+        if (cert_der.len == 0 or cert_der.len > 0xFF_FF_FF) return error.BadCertificate;
+        const entry_len = std.math.add(usize, cert_der.len, 5) catch return error.BadCertificate;
+        encoded_len = std.math.add(usize, encoded_len, entry_len) catch return error.BadCertificate;
+        if (encoded_len > output_limit) return error.BadCertificate;
+    }
+    const list_len = encoded_len - 8;
+    if (list_len > 0xFF_FF_FF) return error.BadCertificate;
+    const message_len = encoded_len - 4;
+    if (message_len > 0xFF_FF_FF) return error.BadCertificate;
+}
+
 fn clientHelloKnownExtensionBit(ext_type: u16) ?u4 {
     return switch (ext_type) {
         @intFromEnum(ExtType.server_name) => 0,
@@ -3417,7 +3432,10 @@ pub const Tls13Handshake = struct {
         if (!self.psk_selected) {
             if (self.config.cert_chain_der.len > 0 and !have_signature_algorithms) return error.MissingExtension;
             if (have_signature_algorithms and !client_supports_server_sig) return error.UnsupportedSignatureAlgorithm;
-            if (self.config.cert_chain_der.len > 0) try validateServerCertificatePrivateKey(self.config);
+            if (self.config.cert_chain_der.len > 0) {
+                try validateServerCertificateChain(self.config.cert_chain_der, self.out_buf.len);
+                try validateServerCertificatePrivateKey(self.config);
+            }
         }
         self.state = .server_send_server_hello;
         return ._continue;
@@ -5805,6 +5823,38 @@ test "Tls13Handshake server rejects invalid certificate private key before Serve
     var server = Tls13Handshake.initServer(.{
         .cert_chain_der = &.{&cert_der},
         .private_key_bytes = &short_private_key,
+    }, &[_]u8{});
+
+    server.provideData(hello);
+    try std.testing.expectError(error.BadCertificate, server.step());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
+}
+
+test "Tls13Handshake server rejects empty certificate entry before ServerHello" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const empty_cert = [_]u8{};
+    const private_key = [_]u8{0x55} ** 32;
+    var server = Tls13Handshake.initServer(.{
+        .cert_chain_der = &.{&empty_cert},
+        .private_key_bytes = &private_key,
+        .private_key_algorithm = .ed25519,
+    }, &[_]u8{});
+
+    server.provideData(hello);
+    try std.testing.expectError(error.BadCertificate, server.step());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
+}
+
+test "Tls13Handshake server rejects oversized certificate flight before ServerHello" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const oversized_cert = [_]u8{0xaa} ** 16372;
+    const private_key = [_]u8{0x55} ** 32;
+    var server = Tls13Handshake.initServer(.{
+        .cert_chain_der = &.{&oversized_cert},
+        .private_key_bytes = &private_key,
+        .private_key_algorithm = .ed25519,
     }, &[_]u8{});
 
     server.provideData(hello);
