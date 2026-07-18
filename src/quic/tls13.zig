@@ -3304,8 +3304,6 @@ pub const Tls13Handshake = struct {
         if (!have_supported_groups) return error.MissingExtension;
         if (!have_quic_transport_parameters) return error.MissingExtension;
         if (have_supported_groups and !client_supports_x25519) return error.NoKeyShare;
-        if (self.config.cert_chain_der.len > 0 and !have_signature_algorithms) return error.MissingExtension;
-        if (have_signature_algorithms and !client_supports_server_sig) return error.UnsupportedSignatureAlgorithm;
         if (self.config.alpn.len > 0 and self.negotiated_alpn_len == 0) return error.NoApplicationProtocol;
         if (self.config.server_name != null and !have_server_name) return error.UnrecognizedName;
         if (self.peer_offered_early_data and !self.peer_offered_psk) return error.DecodeError;
@@ -3363,6 +3361,10 @@ pub const Tls13Handshake = struct {
         }
         if (!self.psk_selected and self.server_psk != null) {
             self.key_schedule = KeySchedule.init();
+        }
+        if (!self.psk_selected) {
+            if (self.config.cert_chain_der.len > 0 and !have_signature_algorithms) return error.MissingExtension;
+            if (have_signature_algorithms and !client_supports_server_sig) return error.UnsupportedSignatureAlgorithm;
         }
         self.state = .server_send_server_hello;
         return ._continue;
@@ -5124,6 +5126,26 @@ fn clientHelloPskBytes(config: TlsConfig, psk: [secret_len]u8, out: []u8) ![]u8 
     return out[0..action.send_data.data.len];
 }
 
+fn refreshClientHelloPskBinder(hello: []u8, psk: [secret_len]u8) !void {
+    const psk_ext = try clientHelloExtension(hello, @intFromEnum(ExtType.pre_shared_key));
+    if (psk_ext.body_len < 2) return error.TestUnexpectedResult;
+    const identities_len = readU16(hello[psk_ext.body_offset..]);
+    const binders_len_offset = psk_ext.body_offset + 2 + identities_len;
+    if (binders_len_offset + 3 > psk_ext.body_offset + psk_ext.body_len) return error.TestUnexpectedResult;
+    const binder_len_offset = binders_len_offset + 2;
+    const binder_len = hello[binder_len_offset];
+    if (binder_len != secret_len) return error.TestUnexpectedResult;
+    const binder_offset = binder_len_offset + 1;
+    if (binder_offset + binder_len > psk_ext.body_offset + psk_ext.body_len) return error.TestUnexpectedResult;
+
+    var transcript = TranscriptHash.init();
+    transcript.update(hello[0..binder_offset]);
+    const key_schedule = KeySchedule.initWithPsk(psk);
+    const binder_key = key_schedule.deriveBinderKey();
+    const binder = KeySchedule.computeFinishedVerifyData(binder_key, transcript.current());
+    @memcpy(hello[binder_offset..][0..binder_len], &binder);
+}
+
 fn setClientHelloBodyLen(buf: []u8, new_body_len: usize) !void {
     if (new_body_len > 0xFF_FF_FF) return error.TestUnexpectedResult;
     buf[1] = @as(u8, @intCast(new_body_len >> 16));
@@ -5660,6 +5682,24 @@ test "Tls13Handshake server rejects missing signature_algorithms when sending a 
     }, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.MissingExtension, server.step());
+}
+
+test "Tls13Handshake server accepts selected PSK without ClientHello signature_algorithms" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const sig_algs = try clientHelloExtension(hello, @intFromEnum(ExtType.signature_algorithms));
+    writeU16(hello[sig_algs.header_offset..][0..2], 0xaaaa);
+    try refreshClientHelloPskBinder(hello, psk);
+
+    const cert_der = [_]u8{ 0x30, 0x03, 0x01 };
+    var server = Tls13Handshake.initServerWithPsk(.{
+        .cert_chain_der = &.{&cert_der},
+    }, &[_]u8{}, psk);
+    server.provideData(hello);
+    try std.testing.expectEqual(std.meta.Tag(Action)._continue, std.meta.activeTag(try server.step()));
+    try std.testing.expect(server.psk_selected);
+    try std.testing.expect(server.peer_psk_binder_valid);
 }
 
 test "Tls13Handshake server rejects unsupported CertificateVerify signature scheme" {

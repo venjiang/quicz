@@ -131,6 +131,9 @@ while ordinary PSK resumption without early_data remains reusable. The replay
 filter now exports and restores fixed snapshots so callers can persist or
 distribute retained identity fingerprints. Production/distributed 0-RTT replay
 policy remains pending.
+Selected-PSK handshakes no longer require ClientHello `signature_algorithms`
+even when the server is configured with a certificate chain; signature
+algorithm validation now applies only to the fallback certificate path.
 The TLS-owned 0-RTT acceptance signal is now bound to connection policy:
 servers emit EncryptedExtensions `early_data` only when the connection accepts
 installed peer 0-RTT keys, and clients discard local 0-RTT send keys as soon as
@@ -1531,6 +1534,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   TLS server now has focused evidence that an undersized ClientHello
   `pre_shared_key` binders vector is rejected as `DecodeError` before binder
   verification or PSK ticket selection can proceed.
+
+- 2026-07-18: Fixed selected-PSK ClientHello validation so a certificate-configured
+  pure-Zig TLS server does not require `signature_algorithms` before the PSK
+  binder is verified and selected. The focused test refreshes the binder after
+  removing that extension and proves the server selects PSK without entering
+  the certificate path.
 
 - 2026-07-17: Tightened pure-Zig TLS ClientHello supported_groups validation.
   The server now rejects duplicate NamedGroup entries in `supported_groups`
