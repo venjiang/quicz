@@ -198,9 +198,9 @@ pub const Tls13Backend = struct {
         // Idempotent: once the ClientHello is built the transport parameters
         // are fixed in the transcript.
         if (self.client_hello_built) return;
-        const n = @min(data.len, self.hs.tp_encoded.len);
-        @memcpy(self.hs.tp_encoded[0..n], data[0..n]);
-        self.hs.tp_encoded_len = n;
+        if (data.len > self.hs.tp_encoded.len) return error.CryptoError;
+        @memcpy(self.hs.tp_encoded[0..data.len], data);
+        self.hs.tp_encoded_len = data.len;
     }
 
     fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
@@ -695,6 +695,18 @@ test "Tls13Backend set_local_transport_parameters is ignored after ClientHello i
     _ = try cb.setLocalTransportParameters(&second_tp);
     try testing.expectEqual(@as(usize, 2), backend.hs.tp_encoded_len);
     try testing.expectEqual(@as(u8, 0xAA), backend.hs.tp_encoded[0]);
+}
+
+test "Tls13Backend set_local_transport_parameters rejects oversized bytes" {
+    var backend = Tls13Backend.initClient(.{});
+    var cb = backend.cryptoBackend();
+
+    var oversized: [1025]u8 = undefined;
+    @memset(&oversized, 0xA5);
+
+    try testing.expectError(error.CryptoError, cb.setLocalTransportParameters(&oversized));
+    try testing.expectEqual(@as(usize, 0), backend.hs.tp_encoded_len);
+    try testing.expect(!backend.client_hello_built);
 }
 
 test "Tls13Backend.retryReceived re-emits cached ClientHello" {

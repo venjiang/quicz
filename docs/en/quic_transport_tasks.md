@@ -79,7 +79,9 @@ emitting ServerHello. Pure-Zig TLS input buffering now reports `DecodeError`
 after oversized handshake or post-handshake input instead of silently
 truncating CRYPTO bytes and waiting on a partial message; it also rejects
 handshake message headers whose declared length cannot fit in the fixed input
-buffer.
+buffer. The pure-Zig TLS backend adapter now rejects oversized local
+transport-parameter extension bytes instead of silently truncating the bytes
+that enter the TLS transcript.
 
 Endpoint Version Negotiation response generation now enforces the QUIC fixed
 bit before emitting a response. Unsupported-version long-header datagrams with
@@ -1225,6 +1227,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   idle timeout, initial data limits, and active connection ID limit values
   that cannot be encoded as valid RFC 9000 transport parameters, before
   TLS extension export can fail later.
+
+- 2026-07-19: Tightened pure-Zig TLS backend local transport-parameter
+  handoff. `Tls13Backend.set_local_transport_parameters` now returns
+  `CryptoError` when encoded bytes exceed the TLS handshake's fixed local
+  transport-parameter buffer instead of truncating extension bytes before
+  ClientHello or EncryptedExtensions transcript construction.
 
 - 2026-07-17: Aligned RFC 9002 ACK processing with the no-newly-acked
   boundary. Duplicate or stale ACK frames that acknowledge no currently
