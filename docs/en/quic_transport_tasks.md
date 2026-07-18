@@ -77,9 +77,11 @@ server-side ClientHello processing now rejects empty or oversized configured
 certificate chains plus missing or invalid configured private keys before
 emitting ServerHello. Pure-Zig TLS input buffering now reports `DecodeError`
 after oversized handshake or post-handshake input instead of silently
-truncating CRYPTO bytes and waiting on a partial message; it also rejects
-handshake message headers whose declared length cannot fit in the fixed input
-buffer. The pure-Zig TLS backend adapter now rejects oversized local
+truncating CRYPTO bytes and waiting on a partial message; after compaction, it
+also rejects input that cannot fit in the remaining fixed buffer without
+copying a partial CRYPTO fragment. It also rejects handshake message headers
+whose declared length cannot fit in the fixed input buffer. The pure-Zig TLS
+backend adapter now rejects oversized local
 transport-parameter extension bytes instead of silently truncating the bytes
 that enter the TLS transcript, and its peer transport-parameter / ALPN pull
 hooks now reject undersized caller output buffers without consuming their

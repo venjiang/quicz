@@ -884,6 +884,23 @@ test "Tls13Handshake clientProcessPostHandshake rejects overflowed input" {
     try std.testing.expectError(error.DecodeError, hs.clientProcessPostHandshake());
 }
 
+test "Tls13Handshake provideData rejects overflow without partial copy" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    hs.state = .connected;
+    hs.in_len = hs.in_buf.len;
+    hs.in_offset = 1;
+    @memset(&hs.in_buf, 0xcc);
+
+    const overflow = [_]u8{ 0xaa, 0xbb };
+    hs.provideData(&overflow);
+
+    try std.testing.expect(hs.input_overflow);
+    try std.testing.expectEqual(hs.in_buf.len - 1, hs.in_len);
+    try std.testing.expectEqual(@as(usize, 0), hs.in_offset);
+    try std.testing.expectEqual(@as(u8, 0xcc), hs.in_buf[hs.in_buf.len - 1]);
+    try std.testing.expectError(error.DecodeError, hs.clientProcessPostHandshake());
+}
+
 fn fillOversizedHandshakeMessage(buf: []u8, handshake_type: HandshakeType) void {
     @memset(buf, 0);
     buf[0] = @intFromEnum(handshake_type);
@@ -2298,7 +2315,7 @@ pub const Tls13Handshake = struct {
 
     pub fn provideData(self: *Tls13Handshake, data: []const u8) void {
         if (self.input_overflow) return;
-        if (self.in_offset > 0 and self.in_len - self.in_offset + data.len > self.in_buf.len) {
+        if (self.in_offset > 0) {
             const remaining = self.in_len - self.in_offset;
             if (remaining > 0) {
                 std.mem.copyForwards(u8, self.in_buf[0..remaining], self.in_buf[self.in_offset..self.in_len]);
@@ -2307,10 +2324,12 @@ pub const Tls13Handshake = struct {
             self.in_offset = 0;
         }
         const available = self.in_buf.len - self.in_len;
-        const copy_len = @min(data.len, available);
-        @memcpy(self.in_buf[self.in_len..][0..copy_len], data[0..copy_len]);
-        self.in_len += copy_len;
-        if (copy_len != data.len) self.input_overflow = true;
+        if (data.len > available) {
+            self.input_overflow = true;
+            return;
+        }
+        @memcpy(self.in_buf[self.in_len..][0..data.len], data);
+        self.in_len += data.len;
     }
 
     /// Read one handshake message from the input buffer.
