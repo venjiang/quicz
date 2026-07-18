@@ -64,7 +64,8 @@ packet/key/token and RFC 9368 version-information primitives:
 
 Pure-Zig TLS client Certificate parsing now accepts and skips well-formed
 CertificateEntry per-entry extensions after validating their length, while
-still rejecting truncated extension vectors and empty certificate entries.
+still rejecting malformed extension vectors, duplicate extension types, and
+empty certificate entries.
 
 Endpoint Version Negotiation response generation now enforces the QUIC fixed
 bit before emitting a response. Unsupported-version long-header datagrams with

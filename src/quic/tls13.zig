@@ -1843,6 +1843,20 @@ fn extensionTypeSeenBefore(extensions: []const u8, current_header_offset: usize,
     return false;
 }
 
+fn validateExtensionVector(extensions: []const u8) HandshakeError!void {
+    var pos: usize = 0;
+    while (pos < extensions.len) {
+        if (pos + 4 > extensions.len) return error.DecodeError;
+        const header_offset = pos;
+        const ext_type = readU16(extensions[pos..]);
+        const ext_len = readU16(extensions[pos + 2 ..]);
+        pos += 4;
+        if (pos + ext_len > extensions.len) return error.DecodeError;
+        if (extensionTypeSeenBefore(extensions, header_offset, ext_type)) return error.DecodeError;
+        pos += ext_len;
+    }
+}
+
 fn keyShareGroupSeenBefore(key_shares: []const u8, current_entry_offset: usize, group: u16) bool {
     var pos: usize = 0;
     while (pos < current_entry_offset) {
@@ -2854,6 +2868,7 @@ pub const Tls13Handshake = struct {
         const extensions_len = readU16(certificate_message[pos.*..]);
         pos.* += 2;
         if (extensions_len > list_end - pos.*) return error.DecodeError;
+        try validateExtensionVector(certificate_message[pos.* .. pos.* + extensions_len]);
         pos.* += extensions_len;
         return cert_der;
     }
@@ -4511,11 +4526,23 @@ test "nextCertificateEntry rejects empty certificate entries" {
 }
 
 test "nextCertificateEntry skips per-entry extensions" {
-    const certificate_entry = [_]u8{ 0, 0, 1, 0xaa, 0, 1, 0xbb };
+    const certificate_entry = [_]u8{ 0, 0, 1, 0xaa, 0, 5, 0x12, 0x34, 0, 1, 0xbb };
     var pos: usize = 0;
     const cert_der = try Tls13Handshake.nextCertificateEntry(&certificate_entry, &pos, certificate_entry.len);
     try std.testing.expectEqualSlices(u8, &[_]u8{0xaa}, cert_der);
     try std.testing.expectEqual(certificate_entry.len, pos);
+}
+
+test "nextCertificateEntry rejects malformed per-entry extension vectors" {
+    const malformed = [_]u8{ 0, 0, 1, 0xaa, 0, 3, 0x12, 0x34, 0 };
+    var pos: usize = 0;
+    try std.testing.expectError(error.DecodeError, Tls13Handshake.nextCertificateEntry(&malformed, &pos, malformed.len));
+}
+
+test "nextCertificateEntry rejects duplicate per-entry extension types" {
+    const malformed = [_]u8{ 0, 0, 1, 0xaa, 0, 8, 0xaa, 0xaa, 0, 0, 0xaa, 0xaa, 0, 0 };
+    var pos: usize = 0;
+    try std.testing.expectError(error.DecodeError, Tls13Handshake.nextCertificateEntry(&malformed, &pos, malformed.len));
 }
 
 test "Tls13Handshake rejects malformed certificate chains when verification is skipped" {
@@ -4544,9 +4571,10 @@ test "Tls13Handshake rejects empty leaf certificate when verification is skipped
 
 test "Tls13Handshake skips CertificateEntry extensions when verification is skipped" {
     const certificate_message = [_]u8{
-        @intFromEnum(HandshakeType.certificate), 0, 0,    11,
-        0,                                       0, 0,    7,
+        @intFromEnum(HandshakeType.certificate), 0, 0,    15,
+        0,                                       0, 0,    11,
         0,                                       0, 1,    0xaa,
+        0,                                       5, 0x12, 0x34,
         0,                                       1, 0xbb,
     };
     var handshake = Tls13Handshake.initClient(.{}, &.{});
