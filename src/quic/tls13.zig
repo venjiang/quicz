@@ -2854,7 +2854,6 @@ pub const Tls13Handshake = struct {
         const extensions_len = readU16(certificate_message[pos.*..]);
         pos.* += 2;
         if (extensions_len > list_end - pos.*) return error.DecodeError;
-        if (extensions_len != 0) return error.DecodeError;
         pos.* += extensions_len;
         return cert_der;
     }
@@ -4511,10 +4510,12 @@ test "nextCertificateEntry rejects empty certificate entries" {
     try std.testing.expectError(error.DecodeError, Tls13Handshake.nextCertificateEntry(&malformed, &pos, malformed.len));
 }
 
-test "nextCertificateEntry rejects unrequested per-entry extensions" {
-    const malformed = [_]u8{ 0, 0, 1, 0xaa, 0, 1, 0xbb };
+test "nextCertificateEntry skips per-entry extensions" {
+    const certificate_entry = [_]u8{ 0, 0, 1, 0xaa, 0, 1, 0xbb };
     var pos: usize = 0;
-    try std.testing.expectError(error.DecodeError, Tls13Handshake.nextCertificateEntry(&malformed, &pos, malformed.len));
+    const cert_der = try Tls13Handshake.nextCertificateEntry(&certificate_entry, &pos, certificate_entry.len);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0xaa}, cert_der);
+    try std.testing.expectEqual(certificate_entry.len, pos);
 }
 
 test "Tls13Handshake rejects malformed certificate chains when verification is skipped" {
@@ -4541,16 +4542,18 @@ test "Tls13Handshake rejects empty leaf certificate when verification is skipped
     try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificate());
 }
 
-test "Tls13Handshake rejects CertificateEntry extensions when verification is skipped" {
-    const malformed = [_]u8{
+test "Tls13Handshake skips CertificateEntry extensions when verification is skipped" {
+    const certificate_message = [_]u8{
         @intFromEnum(HandshakeType.certificate), 0, 0,    11,
         0,                                       0, 0,    7,
         0,                                       0, 1,    0xaa,
         0,                                       1, 0xbb,
     };
     var handshake = Tls13Handshake.initClient(.{}, &.{});
-    handshake.provideData(&malformed);
-    try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificate());
+    handshake.provideData(&certificate_message);
+    try std.testing.expectEqual(Action._continue, try handshake.clientProcessCertificate());
+    try std.testing.expectEqual(HandshakeState.client_wait_certificate_verify, handshake.state);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0xaa}, handshake.server_cert[0..handshake.server_cert_len]);
 }
 
 test "Tls13Handshake rejects non-empty server Certificate request context" {
