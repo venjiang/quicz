@@ -566,6 +566,27 @@ pub const Tls13ClientEndpoint = struct {
         try self.transport.sendStream(stream_id, data, fin);
     }
 
+    /// Queue stream bytes and poll one datagram with the committed route.
+    ///
+    /// The route is resolved before mutating stream state, so a missing
+    /// endpoint route does not leave application data queued on the transport.
+    pub fn sendStreamWithRoutePath(
+        self: *Tls13ClientEndpoint,
+        stream_id: u64,
+        data: []const u8,
+        fin: bool,
+        now_millis: i64,
+    ) !?ApplicationDatagramPathResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        try self.transport.sendStream(stream_id, data, fin);
+        const datagram = (try self.pollApplicationDatagram(now_millis)) orelse return null;
+        return .{
+            .datagram = datagram,
+            .path = path,
+        };
+    }
+
     /// Abort a locally writable stream and queue a RESET_STREAM frame.
     pub fn resetStream(
         self: *Tls13ClientEndpoint,
@@ -895,10 +916,11 @@ test "Tls13ClientEndpoint polls application output with committed route path" {
         .stateless_reset_token = reset_token,
     } });
     try client.transport.connection.processDatagram(0, writer.getWritten());
-    try client.transport.connection.sendPing();
     _ = try client.updatePath(new_path);
 
-    const polled = (try client.pollApplicationDatagramWithRoutePath(1)) orelse return error.TestUnexpectedResult;
+    const stream_id = try client.openStream();
+    try std.testing.expectEqual(@as(u64, 0), stream_id);
+    const polled = (try client.sendStreamWithRoutePath(stream_id, "client", false, 1)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(polled.datagram);
     try std.testing.expect(polled.path.eql(new_path));
     try std.testing.expect(polled.datagram.len != 0);
