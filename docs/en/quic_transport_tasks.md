@@ -191,6 +191,10 @@ Client endpoint route-bound Initial begin now resolves the committed route
 before building or packetizing ClientHello output. A focused test proves a
 missing route returns `UnknownConnectionId` without queuing Initial CRYPTO or
 arming recovery timers.
+Client route-bound application output polling and draining now prove the same
+route-first boundary for already queued 1-RTT output: missing routes do not
+consume queued packets, and the output remains sendable after the route is
+restored.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a

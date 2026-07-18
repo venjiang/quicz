@@ -1026,6 +1026,66 @@ test "Tls13ClientEndpoint polls application output with committed route path" {
     try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), empty_drain.first_error);
 }
 
+test "Tls13ClientEndpoint route-bound application poll fails before consuming output when route is missing" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        17,
+        path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const traffic_secret = [_]u8{0x49} ** 32;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0x4a, 0x4b, 0x4c, 0x4d };
+    const reset_token = [_]u8{0x4e} ** 16;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+
+    try client.transport.connection.sendPing();
+    _ = client.lifecycle.retireConnection(client.connection_id);
+    try std.testing.expectError(error.UnknownConnectionId, client.pollApplicationDatagramWithRoutePath(1));
+    try client.lifecycle.registerConnectionId(client.connection_id, &client_scid, path, .{ .active_migration_disabled = false });
+    const polled = (try client.pollApplicationDatagramWithRoutePath(2)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expect(polled.path.eql(path));
+    try std.testing.expect(polled.datagram.len != 0);
+
+    try client.transport.connection.sendPing();
+    _ = client.lifecycle.retireConnection(client.connection_id);
+    var drain_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    try std.testing.expectError(error.UnknownConnectionId, client.drainApplicationDatagramsWithRoutePath(3, &drain_out));
+    try client.lifecycle.registerConnectionId(client.connection_id, &client_scid, path, .{ .active_migration_disabled = false });
+    const drain = try client.drainApplicationDatagramsWithRoutePath(4, &drain_out);
+    try std.testing.expectEqual(@as(usize, 1), drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), drain.first_error);
+    defer std.testing.allocator.free(drain_out[0].datagram);
+    try std.testing.expect(drain_out[0].path.eql(path));
+    try std.testing.expect(drain_out[0].datagram.len != 0);
+}
+
 test "Tls13ClientEndpoint exposes unidirectional and stream cancellation controls" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40 };
