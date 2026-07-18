@@ -217,6 +217,9 @@ Server endpoint 的 installed-key feed 也遵循同一规则：
 `Tls13ServerEndpoint.feedInstalledKeyDatagramWithRoutePath()` 只有在选中 record 的连接进入
 `closing` 后才为 `InvalidPacket` poll route-bound 1-RTT datagram，避免解密/认证失败消耗
 无关已排队输出。
+该路径上的 protected close output 现在使用入站 routed CID 的已提交 path，而不是 record
+当前 source-CID route，因此 stale current-route 状态不会在确认 output route 前消费已认证
+frame error。
 这个 server feed/poll result 现在也会在 routed success、protected close emission、
 active stateless-reset receive 和未进入 closing 的 invalid input 后返回 feed 后下一
 endpoint deadline。

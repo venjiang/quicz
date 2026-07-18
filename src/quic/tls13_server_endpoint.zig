@@ -892,6 +892,7 @@ pub fn Tls13ServerEndpoint(
         ) root.EndpointProtectedDatagramError!InstalledKeyDatagramRoutePollResult {
             const connection = connection_of(record);
             const destination_connection_id = destination_connection_id_of(record);
+            const route_path = try self.lifecycle.currentRoutePath(route.destination_connection_id.asSlice());
             if (datagram.len != 0 and quic_packet.parseHeaderForm(datagram[0]) == .short) {
                 if (connection.processStatelessResetDatagram(now_millis, datagram)) |sequence_number| {
                     try self.lifecycle.armRecoveryTimerFromConnection(route.connection_id, connection);
@@ -911,16 +912,21 @@ pub fn Tls13ServerEndpoint(
                 options,
             ) catch |err| {
                 if (err != error.InvalidPacket) return err;
-                const close_datagram = if (connection.connectionState() == .closing)
-                    try self.pollOneRttDatagramWithRoutePath(route.connection_id, now_millis)
-                else
-                    null;
+                const close_datagram = if (connection.connectionState() == .closing) try self.lifecycle.pollDatagram(
+                    route.connection_id,
+                    connection,
+                    now_millis,
+                    .{
+                        .space = .application,
+                        .destination_connection_id = destination_connection_id,
+                    },
+                ) else null;
                 return .{
                     .feed_error = err,
                     .datagram = if (close_datagram) |value| .{
                         .connection_id = route.connection_id,
-                        .datagram = value.datagram,
-                        .path = value.path,
+                        .datagram = value,
+                        .path = route_path,
                     } else null,
                     .next_deadline = try self.nextDeadline(self.records.allocator),
                 };
@@ -932,8 +938,7 @@ pub fn Tls13ServerEndpoint(
                     .next_deadline = try self.nextDeadline(self.records.allocator),
                 },
             }
-            const output_path = feed.selected_output_path orelse
-                try self.lifecycle.currentRoutePath(route.destination_connection_id.asSlice());
+            const output_path = feed.selected_output_path orelse route_path;
             const polled = try self.lifecycle.pollDatagram(
                 route.connection_id,
                 connection,
@@ -966,6 +971,7 @@ pub fn Tls13ServerEndpoint(
         ) (root.EndpointProtectedDatagramError || endpoint.RouteError)!InstalledKeyDatagramRouteDrainResult {
             const connection = connection_of(record);
             const destination_connection_id = destination_connection_id_of(record);
+            const route_path = try self.lifecycle.currentRoutePath(route.destination_connection_id.asSlice());
             if (datagram.len != 0 and quic_packet.parseHeaderForm(datagram[0]) == .short) {
                 if (connection.processStatelessResetDatagram(now_millis, datagram)) |sequence_number| {
                     try self.lifecycle.armRecoveryTimerFromConnection(route.connection_id, connection);
@@ -998,7 +1004,7 @@ pub fn Tls13ServerEndpoint(
                             .space = .application,
                             .destination_connection_id = destination_connection_id,
                         },
-                        try self.currentRecordRoutePath(record),
+                        route_path,
                         out,
                     );
                     result.next_deadline = try self.nextDeadline(self.records.allocator);
@@ -1012,8 +1018,7 @@ pub fn Tls13ServerEndpoint(
                     .next_deadline = try self.nextDeadline(self.records.allocator),
                 },
             }
-            const output_path = feed.selected_output_path orelse
-                try self.lifecycle.currentRoutePath(route.destination_connection_id.asSlice());
+            const output_path = feed.selected_output_path orelse route_path;
             const drain = self.drainDatagramsWithRoutePath(
                 route.connection_id,
                 connection,
@@ -6637,6 +6642,200 @@ test "Tls13ServerEndpoint pairs path-update feed output with selected tuple" {
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.close_timeout, close_next_deadline.kind);
     try client.processProtectedShortDatagramWithInstalledKeys(12, client_dcid.len, close_output.datagram);
     try std.testing.expectEqual(connection_module.ConnectionState.draining, client.connectionState());
+}
+
+test "Tls13ServerEndpoint installed-key close output uses routed CID path when current route is missing" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: root.CryptoBackend,
+        local_id: []const u8,
+        routed_id: []const u8,
+        peer_id: []const u8,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return self.peer_id;
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return self.local_id;
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "initial";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+    const IllegalHandshakeDone = struct {
+        fn protect(allocator: std.mem.Allocator, dcid: []const u8, packet_number: u64, secret: protection.Aes128PacketProtectionKeys) ![]u8 {
+            const illegal_plaintext = [_]u8{@intFromEnum(frame.FrameType.handshake_done)} ++ ([_]u8{0} ** 31);
+            return protection.protectShortPacketAes128(allocator, .{
+                .dcid = dcid,
+                .spin_bit = false,
+                .key_phase = false,
+                .packet_number = packet_number,
+            }, try quic_packet.encodePacketNumberForHeader(packet_number, null), secret, &illegal_plaintext);
+        }
+    };
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 2, .{
+        .max_routes = 4,
+        .max_stateless_reset_tokens = 4,
+    });
+    defer endpoint_owner.deinit();
+    const first_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_010),
+    };
+    const second_path = endpoint.Udp4Tuple{
+        .local = first_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_011),
+    };
+    const secrets = try protection.deriveInitialSecrets(.v1, "close-route");
+    var empty_backend = EmptyBackend{};
+
+    const poll_record = try std.testing.allocator.create(TestRecord);
+    poll_record.* = .{
+        .handle = 101,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+        .local_id = "loc-a",
+        .routed_id = "alt-a",
+        .peer_id = "peer-a",
+    };
+    try poll_record.connection.validatePeerAddress();
+    try poll_record.connection.confirmHandshake();
+    try poll_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try endpoint_owner.lifecycle.registerConnectionId(poll_record.handle, poll_record.local_id, first_path, .{});
+    try endpoint_owner.lifecycle.registerConnectionId(poll_record.handle, poll_record.routed_id, first_path, .{});
+    try endpoint_owner.records.adopt(poll_record.handle, poll_record);
+    try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(poll_record.local_id, first_path));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.lifecycle.currentRoutePath(poll_record.local_id));
+    const poll_illegal = try IllegalHandshakeDone.protect(
+        std.testing.allocator,
+        poll_record.routed_id,
+        poll_record.connection.nextPeerPacketNumber(.application),
+        secrets.client,
+    );
+    defer std.testing.allocator.free(poll_illegal);
+    var route_out: [64]u8 = undefined;
+    const options = root.EndpointFeedInstalledKeyDatagramOptions{
+        .space = .application,
+        .out = &route_out,
+        .unpredictable_prefix = &[_]u8{},
+        .supported_versions = &[_]quic_packet.Version{.v1},
+    };
+    const poll_result = try endpoint_owner.feedInstalledKeyDatagramWithRoutePath(
+        first_path,
+        1,
+        poll_illegal,
+        options,
+    );
+    try std.testing.expectEqual(@as(?root.EndpointProtectedDatagramError, error.InvalidPacket), poll_result.feed_error);
+    const close_poll = poll_result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_poll.datagram);
+    try std.testing.expectEqual(poll_record.handle, close_poll.connection_id);
+    try std.testing.expect(close_poll.path.eql(first_path));
+    try std.testing.expectEqual(connection_module.ConnectionState.closing, poll_record.connection.connectionState());
+
+    const drain_record = try std.testing.allocator.create(TestRecord);
+    drain_record.* = .{
+        .handle = 102,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+        .local_id = "loc-b",
+        .routed_id = "alt-b",
+        .peer_id = "peer-b",
+    };
+    try drain_record.connection.validatePeerAddress();
+    try drain_record.connection.confirmHandshake();
+    try drain_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try endpoint_owner.lifecycle.registerConnectionId(drain_record.handle, drain_record.local_id, second_path, .{});
+    try endpoint_owner.lifecycle.registerConnectionId(drain_record.handle, drain_record.routed_id, second_path, .{});
+    try endpoint_owner.records.adopt(drain_record.handle, drain_record);
+    try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(drain_record.local_id, second_path));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.lifecycle.currentRoutePath(drain_record.local_id));
+    const drain_illegal = try IllegalHandshakeDone.protect(
+        std.testing.allocator,
+        drain_record.routed_id,
+        drain_record.connection.nextPeerPacketNumber(.application),
+        secrets.client,
+    );
+    defer std.testing.allocator.free(drain_illegal);
+    var scratch: [64]u8 = undefined;
+    var initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const drain_result = try endpoint_owner.processDatagramAndDrainWithRoutePath(
+        second_path,
+        2,
+        drain_illegal,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        options,
+        &scratch,
+        &[_]u8{},
+        &initial_out,
+        &handshake_out,
+        &installed_key_out,
+    );
+    const installed = switch (drain_result) {
+        .routed => |routed| switch (routed) {
+            .installed_key => |installed_key| installed_key,
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(?root.EndpointProtectedDatagramError, error.InvalidPacket), installed.feed_error);
+    try std.testing.expectEqual(@as(usize, 1), installed.drain.datagrams_written);
+    defer std.testing.allocator.free(installed_key_out[0].datagram);
+    try std.testing.expectEqual(drain_record.handle, installed_key_out[0].connection_id);
+    try std.testing.expect(installed_key_out[0].path.eql(second_path));
+    try std.testing.expectEqual(connection_module.ConnectionState.closing, drain_record.connection.connectionState());
 }
 
 test "Tls13ServerEndpoint bounded receive reports active stateless reset and retires record" {

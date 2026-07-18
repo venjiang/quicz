@@ -253,6 +253,10 @@ Server endpoint installed-key feed follows the same rule:
 route-bound 1-RTT datagram after `InvalidPacket` when the selected record's
 connection has entered `closing`, so decrypt/authentication failures do not
 consume unrelated queued output.
+Protected close output from that path now uses the routed inbound CID's
+committed path instead of the record's current source-CID route, so stale
+current-route state cannot consume the authenticated frame error before output
+routing is known.
 That server feed/poll result now also returns the post-feed next endpoint
 deadline after routed success, protected close emission, active stateless-reset
 receive, and non-closing invalid input.
