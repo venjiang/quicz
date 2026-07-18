@@ -81,6 +81,9 @@ protected datagram wire-length prediction 现在会在 protected packet construc
 前拒绝非法 long/short packet envelope。
 protected long-header length budget 现在会拒绝使 QUIC Length 字段超过 varint
 上限的 payload 长度。
+close-on-frame-payload-error 路径现在会把已认证但 frame payload 为空的 packet
+按 RFC 9000 `PROTOCOL_VIOLATION` 处理并排队 transport `CONNECTION_CLOSE`，不再
+只返回 `InvalidPacket`。
 
 纯 Zig TLS server 的 ClientHello 解析现在会拒绝重复的 KeyShareEntry group ID，
 即使重复的是不参与 X25519 key agreement 的 unsupported group，也符合 RFC 8446

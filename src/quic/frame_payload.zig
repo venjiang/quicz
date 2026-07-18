@@ -27,6 +27,14 @@ pub fn classifyCloseError(
     datagram: []const u8,
     allocator: std.mem.Allocator,
 ) Error!?CloseError {
+    if (datagram.len == 0) {
+        return .{
+            .code = .protocol_violation,
+            .frame_type = 0,
+            .reason_phrase = "empty payload",
+        };
+    }
+
     var offset: usize = 0;
     while (offset < datagram.len) {
         const frame_type_value = rawFrameTypeValue(datagram[offset..]);
@@ -82,4 +90,11 @@ test "classifyCloseError reports packet type violations" {
     try std.testing.expectEqual(transport_error.TransportErrorCode.protocol_violation, close.code);
     try std.testing.expectEqual(@as(u64, 0x02), close.frame_type);
     try std.testing.expectEqualStrings("packet type", close.reason_phrase);
+}
+
+test "classifyCloseError reports empty payload protocol violation" {
+    const close = (try classifyCloseError(.one_rtt, &[_]u8{}, std.testing.allocator)).?;
+    try std.testing.expectEqual(transport_error.TransportErrorCode.protocol_violation, close.code);
+    try std.testing.expectEqual(@as(u64, 0), close.frame_type);
+    try std.testing.expectEqualStrings("empty payload", close.reason_phrase);
 }

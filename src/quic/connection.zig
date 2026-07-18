@@ -6782,7 +6782,7 @@ pub const Connection = struct {
         now_millis: i64,
         datagram: []const u8,
     ) Error!void {
-        if (self.isClosingOrClosed() or datagram.len == 0 or datagram.len > self.config.max_datagram_size) {
+        if (self.isClosingOrClosed() or datagram.len > self.config.max_datagram_size) {
             return self.processDatagramForPacketType(packet_type, now_millis, datagram);
         }
 
@@ -65099,6 +65099,35 @@ test "processDatagramForPacketTypeOrClose queues frame encoding close" {
             try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
             try std.testing.expectEqual(@as(u64, 0x1f), close.frame_type);
             try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramForPacketTypeOrClose queues protocol violation close for empty payload" {
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+
+    try std.testing.expectError(
+        error.InvalidPacket,
+        server.processDatagramForPacketTypeOrClose(.one_rtt, 0, &[_]u8{}),
+    );
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
+
+    var close_buf: [64]u8 = undefined;
+    const payload = (try server.pollTx(1, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(@as(u64, 0), close.frame_type);
+            try std.testing.expectEqualStrings("empty payload", close.reason_phrase);
         },
         else => return error.InvalidPacket,
     }

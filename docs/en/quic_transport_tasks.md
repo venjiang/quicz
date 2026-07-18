@@ -93,6 +93,9 @@ Protected datagram wire-length prediction now rejects invalid long/short packet
 envelopes before protected packet construction.
 Protected long-header length budgeting now rejects payload lengths whose QUIC
 Length field would exceed the varint ceiling.
+Close-on-frame-payload-error paths now treat authenticated packets with empty
+frame payloads as RFC 9000 `PROTOCOL_VIOLATION` and queue a transport
+`CONNECTION_CLOSE` instead of only returning `InvalidPacket`.
 
 Pure-Zig TLS server ClientHello parsing now rejects repeated KeyShareEntry group
 IDs even when the duplicated group is unsupported and ignored for X25519 key
