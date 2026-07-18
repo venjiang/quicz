@@ -184,6 +184,9 @@ Client endpoint 的错误路径不会再把无关待发送应用包误当作 clo
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入
 `closing` 时才取 route-bound application datagram。route mismatch 和其他未进入 closing
 的无效输入会保留已排队 application output，等待正常 poll。
+client close-on-error poll 与 bounded-drain receive helper 现在也会先解析已提交
+route，再处理 receive；缺失 route 会返回 `UnknownConnectionId`，不会消费已认证 frame
+error，也不会把连接推进到 `closing`。
 route-bound client receive 与 close-on-error poll result 现在也会暴露 receive 后的
 下一 deadline；Retry follow-up、protected close 发送、以及未新 arm timer 的保留输出
 route mismatch 后，socket loop 不再需要单独查询 lifecycle。

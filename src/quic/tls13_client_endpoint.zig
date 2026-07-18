@@ -151,6 +151,8 @@ pub const Tls13ClientEndpoint = struct {
         scratch: []u8,
         datagram: []const u8,
     ) !ReceiveOrCloseDatagramPathResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
         const received = self.receive(now_millis, scratch, datagram) catch |err| {
             if (err != error.InvalidPacket and err != error.ConnectionClosed) return err;
             return .{
@@ -166,8 +168,6 @@ pub const Tls13ClientEndpoint = struct {
                 .next_deadline = self.nextDeadline(),
             };
         };
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
         return .{
             .receive = received,
             .outbound_initial = if (received.transport.outbound_initial) |bytes| .{
@@ -198,6 +198,8 @@ pub const Tls13ClientEndpoint = struct {
         datagram: []const u8,
         out: []ApplicationDatagramPathResult,
     ) !ReceiveOrCloseDatagramPathDrainResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
         const received = self.receive(now_millis, scratch, datagram) catch |err| {
             if (err != error.InvalidPacket and err != error.ConnectionClosed) return err;
             var result = ReceiveOrCloseDatagramPathDrainResult{
@@ -214,8 +216,6 @@ pub const Tls13ClientEndpoint = struct {
             }
             return result;
         };
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
         var result = ReceiveOrCloseDatagramPathDrainResult{
             .receive = received,
             .outbound_initial = if (received.transport.outbound_initial) |bytes| .{
@@ -1183,6 +1183,11 @@ test "Tls13ClientEndpoint receive returns route-bound close on frame error" {
     defer std.testing.allocator.free(invalid_datagram);
 
     var scratch: [128]u8 = undefined;
+    try std.testing.expect(try client.lifecycle.retireConnectionIdOnPath(&client_scid, new_path));
+    try std.testing.expectError(error.UnknownConnectionId, client.receiveWithRoutePathOrClose(10, &scratch, invalid_datagram));
+    try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
+    try client.lifecycle.registerConnectionId(client.connection_id, &client_scid, new_path, .{ .active_migration_disabled = false });
+
     const received = try client.receiveWithRoutePathOrClose(10, &scratch, invalid_datagram);
     try std.testing.expect(received.receive == null);
     try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), received.receive_error);
@@ -1251,6 +1256,11 @@ test "Tls13ClientEndpoint receive drains route-bound close on frame error" {
 
     var scratch: [128]u8 = undefined;
     var drain_out: [2]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    try std.testing.expect(try client.lifecycle.retireConnectionIdOnPath(&client_scid, new_path));
+    try std.testing.expectError(error.UnknownConnectionId, client.receiveWithRoutePathOrCloseAndDrainDatagrams(10, &scratch, invalid_datagram, &drain_out));
+    try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
+    try client.lifecycle.registerConnectionId(client.connection_id, &client_scid, new_path, .{ .active_migration_disabled = false });
+
     const received = try client.receiveWithRoutePathOrCloseAndDrainDatagrams(10, &scratch, invalid_datagram, &drain_out);
     try std.testing.expect(received.receive == null);
     try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), received.receive_error);
