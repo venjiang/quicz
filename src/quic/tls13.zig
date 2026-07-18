@@ -3027,6 +3027,9 @@ pub const Tls13Handshake = struct {
     /// peer QUIC transport parameters, and update the transcript
     /// (RFC 8446 §4.1.2 + RFC 9001 §8).
     fn serverProcessClientHello(self: *Tls13Handshake) HandshakeError!Action {
+        if (self.config.server_name) |expected_name| {
+            if (expected_name.len == 0 or expected_name.len > self.client_sni.len) return error.DecodeError;
+        }
         for (self.config.alpn, 0..) |proto, index| {
             if (proto.len == 0 or proto.len > std.math.maxInt(u8)) return error.DecodeError;
             if (localAlpnProtocolSeenBefore(self.config.alpn, index, proto)) return error.DecodeError;
@@ -5991,6 +5994,33 @@ test "Tls13Handshake server rejects duplicate local ALPN protocol names" {
     const hello = try clientHelloBytes(.{ .alpn = &client_alpn }, &hello_buf);
 
     var server = Tls13Handshake.initServer(.{ .alpn = &server_alpn }, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects empty local SNI" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{
+        .server_name = "example.com",
+    }, &hello_buf);
+
+    var server = Tls13Handshake.initServer(.{
+        .server_name = "",
+    }, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects oversized local SNI" {
+    const long_name = "a" ** 257;
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{
+        .server_name = "example.com",
+    }, &hello_buf);
+
+    var server = Tls13Handshake.initServer(.{
+        .server_name = long_name,
+    }, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
 }
