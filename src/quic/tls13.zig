@@ -884,6 +884,26 @@ test "Tls13Handshake clientProcessPostHandshake rejects overflowed input" {
     try std.testing.expectError(error.DecodeError, hs.clientProcessPostHandshake());
 }
 
+fn fillOversizedHandshakeMessage(buf: []u8, handshake_type: HandshakeType) void {
+    @memset(buf, 0);
+    buf[0] = @intFromEnum(handshake_type);
+    // Body length 0x004000 makes the full handshake message 16388 bytes,
+    // which cannot fit in this implementation's fixed 16 KiB input buffer.
+    buf[1] = 0x00;
+    buf[2] = 0x40;
+    buf[3] = 0x00;
+}
+
+test "Tls13Handshake clientProcessPostHandshake rejects oversized TLS handshake message length" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    hs.state = .connected;
+    var oversized: [16384]u8 = undefined;
+    fillOversizedHandshakeMessage(&oversized, .new_session_ticket);
+
+    hs.provideData(&oversized);
+    try std.testing.expectError(error.DecodeError, hs.clientProcessPostHandshake());
+}
+
 test "resumption PSK round-trips through initWithPsk" {
     var ks = KeySchedule.init();
     const shared_secret = [_]u8{0x01} ** 32;
@@ -2295,13 +2315,14 @@ pub const Tls13Handshake = struct {
 
     /// Read one handshake message from the input buffer.
     /// Returns null if not enough data is available.
-    fn readHandshakeMsg(self: *Tls13Handshake) ?[]const u8 {
+    fn readHandshakeMsg(self: *Tls13Handshake) HandshakeError!?[]const u8 {
         const available = self.in_len - self.in_offset;
         if (available < 4) return null;
         const msg_len = (@as(usize, self.in_buf[self.in_offset + 1]) << 16) |
             (@as(usize, self.in_buf[self.in_offset + 2]) << 8) |
             @as(usize, self.in_buf[self.in_offset + 3]);
         const total = 4 + msg_len;
+        if (total > self.in_buf.len) return error.DecodeError;
         if (available < total) return null;
         const msg = self.in_buf[self.in_offset..][0..total];
         self.in_offset += total;
@@ -2408,7 +2429,7 @@ pub const Tls13Handshake = struct {
         if (self.is_server) return;
         if (self.state != .connected) return;
         if (self.input_overflow) return error.DecodeError;
-        while (self.readHandshakeMsg()) |msg| {
+        while (try self.readHandshakeMsg()) |msg| {
             if (msg.len > 0 and msg[0] == @intFromEnum(HandshakeType.new_session_ticket)) {
                 try self.clientProcessNewSessionTicket(msg);
             } else {
@@ -2638,7 +2659,7 @@ pub const Tls13Handshake = struct {
     /// Parse a ServerHello, complete the X25519 key exchange, and derive
     /// handshake traffic secrets (RFC 8446 §4.1.3 + §7.1).
     fn clientProcessServerHello(self: *Tls13Handshake) HandshakeError!Action {
-        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        const msg = (try self.readHandshakeMsg()) orelse return .wait_for_data;
         if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.server_hello)) return error.UnexpectedMessage;
 
         var pos: usize = 4;
@@ -2736,7 +2757,7 @@ pub const Tls13Handshake = struct {
     /// Parse EncryptedExtensions and capture the negotiated ALPN and peer
     /// QUIC transport parameters (RFC 8446 §4.3.1 + RFC 9001 §8).
     fn clientProcessEncryptedExtensions(self: *Tls13Handshake) HandshakeError!Action {
-        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        const msg = (try self.readHandshakeMsg()) orelse return .wait_for_data;
         if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.encrypted_extensions)) return error.UnexpectedMessage;
 
         var pos: usize = 4;
@@ -2816,7 +2837,7 @@ pub const Tls13Handshake = struct {
     /// Parse the server Certificate message and retain its leaf certificate
     /// for CertificateVerify (RFC 8446 §4.4.2).
     fn clientProcessCertificate(self: *Tls13Handshake) HandshakeError!Action {
-        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        const msg = (try self.readHandshakeMsg()) orelse return .wait_for_data;
         if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.certificate)) return error.UnexpectedMessage;
 
         var pos: usize = 4;
@@ -2938,7 +2959,7 @@ pub const Tls13Handshake = struct {
     /// verification is enabled) verify it against the server certificate's
     /// public key (RFC 8446 §4.4.3).
     fn clientProcessCertificateVerify(self: *Tls13Handshake) HandshakeError!Action {
-        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        const msg = (try self.readHandshakeMsg()) orelse return .wait_for_data;
         if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.certificate_verify)) return error.UnexpectedMessage;
 
         var pos: usize = 4;
@@ -3001,7 +3022,7 @@ pub const Tls13Handshake = struct {
     /// Verify the server Finished message against the transcript hash and
     /// server handshake traffic secret (RFC 8446 §4.4.4).
     fn clientProcessServerFinished(self: *Tls13Handshake) HandshakeError!Action {
-        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        const msg = (try self.readHandshakeMsg()) orelse return .wait_for_data;
         if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.finished)) return error.UnexpectedMessage;
 
         const verify_data = msg[4..];
@@ -3081,7 +3102,7 @@ pub const Tls13Handshake = struct {
             if (localAlpnProtocolSeenBefore(self.config.alpn, index, proto)) return error.DecodeError;
         }
 
-        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        const msg = (try self.readHandshakeMsg()) orelse return .wait_for_data;
         if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.client_hello)) return error.UnexpectedMessage;
 
         const body = msg[4..];
@@ -3652,7 +3673,7 @@ pub const Tls13Handshake = struct {
     /// Verify the client Finished message against the transcript hash and
     /// client handshake traffic secret (RFC 8446 §4.4.4).
     fn serverProcessClientFinished(self: *Tls13Handshake) HandshakeError!Action {
-        const msg = self.readHandshakeMsg() orelse return .wait_for_data;
+        const msg = (try self.readHandshakeMsg()) orelse return .wait_for_data;
         if (msg.len < 4 or msg[0] != @intFromEnum(HandshakeType.finished)) return error.UnexpectedMessage;
 
         const verify_data = msg[4..];
@@ -3790,6 +3811,16 @@ test "Tls13Handshake client step rejects overflowed handshake input" {
     _ = try hs.step();
     var oversized: [16385]u8 = undefined;
     @memset(&oversized, 0);
+
+    hs.provideData(&oversized);
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects oversized TLS handshake message length" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+    var oversized: [16384]u8 = undefined;
+    fillOversizedHandshakeMessage(&oversized, .server_hello);
 
     hs.provideData(&oversized);
     try std.testing.expectError(error.DecodeError, hs.step());
@@ -5448,6 +5479,15 @@ test "Tls13Handshake server rejects overflowed handshake input" {
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     var oversized: [16385]u8 = undefined;
     @memset(&oversized, 0);
+
+    server.provideData(&oversized);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects oversized TLS handshake message length" {
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    var oversized: [16384]u8 = undefined;
+    fillOversizedHandshakeMessage(&oversized, .client_hello);
 
     server.provideData(&oversized);
     try std.testing.expectError(error.DecodeError, server.step());

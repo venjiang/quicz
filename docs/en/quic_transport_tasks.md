@@ -77,7 +77,9 @@ server-side ClientHello processing now rejects empty or oversized configured
 certificate chains plus missing or invalid configured private keys before
 emitting ServerHello. Pure-Zig TLS input buffering now reports `DecodeError`
 after oversized handshake or post-handshake input instead of silently
-truncating CRYPTO bytes and waiting on a partial message.
+truncating CRYPTO bytes and waiting on a partial message; it also rejects
+handshake message headers whose declared length cannot fit in the fixed input
+buffer.
 
 Endpoint Version Negotiation response generation now enforces the QUIC fixed
 bit before emitting a response. Unsupported-version long-header datagrams with
