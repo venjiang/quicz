@@ -2891,6 +2891,7 @@ pub const Tls13Handshake = struct {
         pos += 2;
         if (pos + sig_len > msg.len) return error.DecodeError;
         if (pos + sig_len != msg.len) return error.DecodeError;
+        if (sig_len == 0) return error.DecodeError;
         if (sig_len > self.cert_verify_sig.len) return error.DecodeError;
         self.cert_verify_sig_len = sig_len;
         @memcpy(self.cert_verify_sig[0..self.cert_verify_sig_len], msg[pos .. pos + sig_len]);
@@ -4960,6 +4961,17 @@ test "Tls13Handshake client rejects CertificateVerify with trailing bytes" {
     var handshake = Tls13Handshake.initClient(.{ .skip_cert_verify = true }, &[_]u8{});
     handshake.state = .client_wait_certificate_verify;
     handshake.provideData(cv_buf[0 .. base_len + 1]);
+
+    try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificateVerify());
+}
+
+test "Tls13Handshake client rejects empty CertificateVerify signature" {
+    var cv_buf: [64]u8 = undefined;
+    const cv_len = buildCertificateVerify(&cv_buf, 0x0807, &[_]u8{});
+
+    var handshake = Tls13Handshake.initClient(.{ .skip_cert_verify = true }, &[_]u8{});
+    handshake.state = .client_wait_certificate_verify;
+    handshake.provideData(cv_buf[0..cv_len]);
 
     try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificateVerify());
 }
