@@ -59,7 +59,8 @@ version-information 原语）：
 纯 Zig TLS client 的 Certificate 解析现在会在校验长度后接受并跳过格式正确的
 CertificateEntry per-entry extensions，同时继续拒绝畸形 extension vector、重复
 extension type 和空证书条目。CertificateVerify 解析现在也会在可选证书链校验策略前
-拒绝空 signature vector 和不支持的 signature scheme。
+拒绝空 signature vector 和不支持的 signature scheme。ClientHello 构建现在也会在
+编码 ALPN extension 前拒绝重复的本地 ALPN protocol name。
 
 endpoint Version Negotiation response 生成现在会先校验 QUIC fixed bit。
 fixed bit 为 0 的 unsupported-version long-header datagram 会被忽略，不再生成

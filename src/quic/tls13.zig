@@ -1899,6 +1899,14 @@ fn alpnProtocolSeenBefore(protocols: []const u8, current_entry_offset: usize, pr
     return false;
 }
 
+fn localAlpnProtocolSeenBefore(protocols: []const []const u8, current_index: usize, protocol: []const u8) bool {
+    var index: usize = 0;
+    while (index < current_index) : (index += 1) {
+        if (std.mem.eql(u8, protocols[index], protocol)) return true;
+    }
+    return false;
+}
+
 fn clientHelloSupportedGroupsContains(extensions: []const u8, group: u16) ?bool {
     var pos: usize = 0;
     while (pos < extensions.len) {
@@ -2457,8 +2465,9 @@ pub const Tls13Handshake = struct {
         // ALPN
         if (self.config.alpn.len > 0) {
             var alpn_total: usize = 0;
-            for (self.config.alpn) |proto| {
+            for (self.config.alpn, 0..) |proto, index| {
                 if (proto.len == 0 or proto.len > std.math.maxInt(u8)) return error.DecodeError;
+                if (localAlpnProtocolSeenBefore(self.config.alpn, index, proto)) return error.DecodeError;
                 alpn_total = std.math.add(usize, alpn_total, 1 + proto.len) catch return error.DecodeError;
                 if (alpn_total > std.math.maxInt(u16) - 2) return error.DecodeError;
             }
@@ -3776,6 +3785,15 @@ test "Tls13Handshake client rejects oversized local ALPN protocol name" {
 
 test "Tls13Handshake client rejects empty local ALPN protocol name" {
     const alpn = [_][]const u8{""};
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+    }, &[_]u8{});
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects duplicate local ALPN protocol names" {
+    const alpn = [_][]const u8{ "hq-interop", "hq-interop" };
     var hs = Tls13Handshake.initClient(.{
         .alpn = &alpn,
     }, &[_]u8{});
