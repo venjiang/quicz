@@ -1115,6 +1115,79 @@ pub fn Tls13ServerEndpoint(
             return result;
         }
 
+        /// Read received bytes from one endpoint-owned server stream.
+        pub fn recvStream(
+            self: *Self,
+            connection_id: u64,
+            stream_id: u64,
+            out: []u8,
+        ) (root.Error || error{UnknownConnectionId})!?usize {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            return connection_of(record).recvOnStream(stream_id, out);
+        }
+
+        /// Return whether one endpoint-owned server stream has received FIN.
+        pub fn streamFinished(
+            self: *const Self,
+            connection_id: u64,
+            stream_id: u64,
+        ) (root.Error || error{UnknownConnectionId})!bool {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            return connection_of(record).recvStreamFinished(stream_id);
+        }
+
+        /// Open a server-initiated bidirectional stream on one owned record.
+        pub fn openStream(
+            self: *Self,
+            connection_id: u64,
+        ) (root.Error || error{UnknownConnectionId})!u64 {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            return connection_of(record).openStream();
+        }
+
+        /// Open a server-initiated unidirectional stream on one owned record.
+        pub fn openUniStream(
+            self: *Self,
+            connection_id: u64,
+        ) (root.Error || error{UnknownConnectionId})!u64 {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            return connection_of(record).openUniStream();
+        }
+
+        /// Queue FIN-terminated or open stream bytes on one owned record.
+        pub fn sendStream(
+            self: *Self,
+            connection_id: u64,
+            stream_id: u64,
+            data: []const u8,
+            fin: bool,
+        ) (root.Error || error{UnknownConnectionId})!void {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            try connection_of(record).sendOnStream(stream_id, data, fin);
+        }
+
+        /// Abort a locally writable stream and queue a RESET_STREAM frame.
+        pub fn resetStream(
+            self: *Self,
+            connection_id: u64,
+            stream_id: u64,
+            application_error_code: u64,
+        ) (root.Error || error{UnknownConnectionId})!void {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            try connection_of(record).resetStream(stream_id, application_error_code);
+        }
+
+        /// Ask the peer to stop sending on a receive-capable stream.
+        pub fn stopSending(
+            self: *Self,
+            connection_id: u64,
+            stream_id: u64,
+            application_error_code: u64,
+        ) (root.Error || error{UnknownConnectionId})!void {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            try connection_of(record).stopSending(stream_id, application_error_code);
+        }
+
         /// Queue a transport CONNECTION_CLOSE and return it with the route.
         pub fn closeWithRoutePath(
             self: *Self,
@@ -2203,6 +2276,21 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectEqual(record_handle, single_active_ids[0]);
     var no_active_ids: [0]u64 = .{};
     try std.testing.expectError(error.BufferTooSmall, endpoint_owner.activeConnectionIds(&no_active_ids));
+    const server_unidirectional_stream = try endpoint_owner.openUniStream(record_handle);
+    try std.testing.expectEqual(@as(u64, 3), server_unidirectional_stream);
+    try endpoint_owner.resetStream(record_handle, server_unidirectional_stream, 41);
+    try std.testing.expectEqual(@as(usize, 1), record.connection.pending_reset_streams.items.len);
+    const server_bidirectional_stream = try endpoint_owner.openStream(record_handle);
+    try std.testing.expectEqual(@as(u64, 1), server_bidirectional_stream);
+    try endpoint_owner.sendStream(record_handle, server_bidirectional_stream, "server", false);
+    try endpoint_owner.stopSending(record_handle, server_bidirectional_stream, 42);
+    try std.testing.expectEqual(@as(usize, 1), record.connection.pending_stop_sending.items.len);
+    var stream_read_buffer: [8]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, null), try endpoint_owner.recvStream(record_handle, server_bidirectional_stream, &stream_read_buffer));
+    try std.testing.expect(!try endpoint_owner.streamFinished(record_handle, server_bidirectional_stream));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.openUniStream(99));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.resetStream(99, server_unidirectional_stream, 41));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.stopSending(99, server_bidirectional_stream, 42));
     const one_rtt = (try endpoint_owner.pollOneRttDatagram(record_handle, 1)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(one_rtt);
     try std.testing.expect(one_rtt.len != 0);
