@@ -206,10 +206,10 @@ pub const Tls13Backend = struct {
     fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
         if (self.peer_tp_sent or self.hs.peer_tp_len == 0) return null;
-        const n = @min(self.hs.peer_tp_len, out_buf.len);
-        @memcpy(out_buf[0..n], self.hs.peer_tp[0..n]);
+        if (out_buf.len < self.hs.peer_tp_len) return error.BufferTooSmall;
+        @memcpy(out_buf[0..self.hs.peer_tp_len], self.hs.peer_tp[0..self.hs.peer_tp_len]);
         self.peer_tp_sent = true;
-        return out_buf[0..n];
+        return out_buf[0..self.hs.peer_tp_len];
     }
 
     fn pullHandshakeTrafficSecrets(context: *anyopaque) Error!?HandshakeTrafficSecrets {
@@ -248,10 +248,10 @@ pub const Tls13Backend = struct {
     fn pullNegotiatedAlpn(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
         if (self.alpn_sent or self.hs.negotiated_alpn_len == 0) return null;
-        const n = @min(self.hs.negotiated_alpn_len, out_buf.len);
-        @memcpy(out_buf[0..n], self.hs.negotiated_alpn[0..n]);
+        if (out_buf.len < self.hs.negotiated_alpn_len) return error.BufferTooSmall;
+        @memcpy(out_buf[0..self.hs.negotiated_alpn_len], self.hs.negotiated_alpn[0..self.hs.negotiated_alpn_len]);
         self.alpn_sent = true;
-        return out_buf[0..n];
+        return out_buf[0..self.hs.negotiated_alpn_len];
     }
 
     fn handshakeConfirmed(context: *anyopaque) bool {
@@ -707,6 +707,42 @@ test "Tls13Backend set_local_transport_parameters rejects oversized bytes" {
     try testing.expectError(error.CryptoError, cb.setLocalTransportParameters(&oversized));
     try testing.expectEqual(@as(usize, 0), backend.hs.tp_encoded_len);
     try testing.expect(!backend.client_hello_built);
+}
+
+test "Tls13Backend pull_peer_transport_parameters rejects undersized output buffer without consuming" {
+    var backend = Tls13Backend.initClient(.{});
+    var cb = backend.cryptoBackend();
+    const peer_tp = [_]u8{ 0x01, 0x02, 0x03 };
+    @memcpy(backend.hs.peer_tp[0..peer_tp.len], &peer_tp);
+    backend.hs.peer_tp_len = peer_tp.len;
+
+    var too_small: [2]u8 = undefined;
+    try testing.expectError(error.BufferTooSmall, cb.pullPeerTransportParameters(&too_small));
+    try testing.expect(!backend.peer_tp_sent);
+
+    var out: [peer_tp.len]u8 = undefined;
+    const pulled = (try cb.pullPeerTransportParameters(&out)) orelse return error.TestExpectedPeerTp;
+    try testing.expectEqualSlices(u8, &peer_tp, pulled);
+    try testing.expect(backend.peer_tp_sent);
+    try testing.expect((try cb.pullPeerTransportParameters(&out)) == null);
+}
+
+test "Tls13Backend pull_negotiated_alpn rejects undersized output buffer without consuming" {
+    var backend = Tls13Backend.initClient(.{});
+    var cb = backend.cryptoBackend();
+    const alpn = "hq-interop";
+    @memcpy(backend.hs.negotiated_alpn[0..alpn.len], alpn);
+    backend.hs.negotiated_alpn_len = alpn.len;
+
+    var too_small: [2]u8 = undefined;
+    try testing.expectError(error.BufferTooSmall, cb.pullNegotiatedAlpn(&too_small));
+    try testing.expect(!backend.alpn_sent);
+
+    var out: [alpn.len]u8 = undefined;
+    const pulled = (try cb.pullNegotiatedAlpn(&out)) orelse return error.TestExpectedAlpn;
+    try testing.expectEqualStrings(alpn, pulled);
+    try testing.expect(backend.alpn_sent);
+    try testing.expect((try cb.pullNegotiatedAlpn(&out)) == null);
 }
 
 test "Tls13Backend.retryReceived re-emits cached ClientHello" {

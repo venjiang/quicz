@@ -81,7 +81,9 @@ truncating CRYPTO bytes and waiting on a partial message; it also rejects
 handshake message headers whose declared length cannot fit in the fixed input
 buffer. The pure-Zig TLS backend adapter now rejects oversized local
 transport-parameter extension bytes instead of silently truncating the bytes
-that enter the TLS transcript.
+that enter the TLS transcript, and its peer transport-parameter / ALPN pull
+hooks now reject undersized caller output buffers without consuming their
+one-shot results.
 
 Endpoint Version Negotiation response generation now enforces the QUIC fixed
 bit before emitting a response. Unsupported-version long-header datagrams with
@@ -1233,6 +1235,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   `CryptoError` when encoded bytes exceed the TLS handshake's fixed local
   transport-parameter buffer instead of truncating extension bytes before
   ClientHello or EncryptedExtensions transcript construction.
+
+- 2026-07-19: Tightened pure-Zig TLS backend pull hooks. Peer
+  transport-parameter and negotiated-ALPN callbacks now return
+  `BufferTooSmall` when the caller scratch buffer cannot hold the complete
+  value, and they leave the one-shot sent flags unchanged so a later larger
+  buffer can still pull the exact TLS result.
 
 - 2026-07-17: Aligned RFC 9002 ACK processing with the no-newly-acked
   boundary. Duplicate or stale ACK frames that acknowledge no currently
