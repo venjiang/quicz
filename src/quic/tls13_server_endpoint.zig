@@ -1632,9 +1632,10 @@ pub fn Tls13ServerEndpoint(
             out: []root.EndpointPolledDatagramResult,
         ) (root.Error || endpoint.RouteError)!CryptoBackendDatagramDrainPathResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
             return .{
                 .backend = try self.driveBackend(connection_id, space, scratch, now_millis, out),
-                .path = try self.currentRecordRoutePath(record),
+                .path = path,
             };
         }
 
@@ -1684,6 +1685,7 @@ pub fn Tls13ServerEndpoint(
             out: []root.EndpointPolledDatagramResult,
         ) (root.Error || endpoint.RouteError)!ProtectedLongBackendDatagramDrainPathResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
             return .{
                 .backend = try self.driveInitialBackend(
                     connection_id,
@@ -1693,7 +1695,7 @@ pub fn Tls13ServerEndpoint(
                     version,
                     out,
                 ),
-                .path = try self.currentRecordRoutePath(record),
+                .path = path,
             };
         }
 
@@ -2847,6 +2849,118 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectEqual(@as(usize, 0), (try dynamic_endpoint.activeConnectionIds(&active_ids)).len);
     try std.testing.expectEqual(@as(usize, 0), dynamic_endpoint.lifecycle.routeCount());
     try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), try dynamic_endpoint.nextDeadline(std.testing.allocator));
+}
+
+test "Tls13ServerEndpoint drive backend route path resolves route before pulling backend output" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: root.CryptoBackend,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local";
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "initial";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const PullingBackend = struct {
+        pull_calls: usize = 0,
+
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(context: *anyopaque, _: root.PacketNumberSpace, out: []u8) root.Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.pull_calls += 1;
+            if (out.len < 3) return error.BufferTooSmall;
+            @memcpy(out[0..3], "tls");
+            return out[0..3];
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 1,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer endpoint_owner.deinit();
+    var pulling_backend = PullingBackend{};
+    const record = try std.testing.allocator.create(TestRecord);
+    record.* = .{
+        .handle = 7,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = pulling_backend.backend(),
+    };
+    const record_handle = record.handle;
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5443),
+    };
+    try endpoint_owner.lifecycle.registerConnectionId(record_handle, TestRecord.sourceConnectionId(record), path, .{});
+    try endpoint_owner.records.adopt(record_handle, record);
+    try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(TestRecord.sourceConnectionId(record), path));
+
+    var scratch: [16]u8 = undefined;
+    var output: [1]root.EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        endpoint_owner.driveBackendWithRoutePath(
+            record_handle,
+            .handshake,
+            &scratch,
+            1,
+            &output,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), pulling_backend.pull_calls);
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        endpoint_owner.driveInitialBackendWithRoutePath(
+            record_handle,
+            &scratch,
+            1,
+            &[_]u8{},
+            .v1,
+            &output,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), pulling_backend.pull_calls);
 }
 
 test "Tls13ServerEndpoint pairs stateless endpoint responses with receive path" {

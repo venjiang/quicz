@@ -183,6 +183,9 @@ Server 的 route-bound pending-work drain 现在会在 sweep endpoint-owned reco
 所有 due recovery route，不受调用方请求的 output drain space 限制。缺失 route 会通过
 `drain.first_route_error` 上报，不会 service recovery，并保留该 pending deadline，等待
 route 恢复后的下一轮处理。
+Server 的 route-bound backend drive helper 现在会在 Initial 或 Handshake 空间拉取
+TLS backend output 前先解析 record 的已提交 route。缺失 route 会返回
+`UnknownConnectionId`，不会消费 backend CRYPTO output。
 
 Client endpoint 的错误路径不会再把无关待发送应用包误当作 close-on-error 输出：
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入

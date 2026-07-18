@@ -212,6 +212,9 @@ before sweeping endpoint-owned records, regardless of the caller's requested
 output drain space. Missing routes are reported through
 `drain.first_route_error` without servicing recovery, preserving the pending
 deadline for a later pass after route restoration.
+Server route-bound backend drive helpers now resolve the committed record
+route before pulling TLS backend output in Initial or Handshake space. Missing
+routes return `UnknownConnectionId` without consuming backend CRYPTO output.
 
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
