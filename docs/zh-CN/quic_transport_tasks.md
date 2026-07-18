@@ -170,6 +170,9 @@ packetize ClientHello output。聚焦测试证明缺失 route 会返回
 `UnknownConnectionId`，且不会 queue Initial CRYPTO 或 arm recovery timer。
 Client 的 route-bound application output poll/drain 现在也证明同样的 route-first
 边界：缺失 route 不会消费已 queue 的 1-RTT packet，route 恢复后这些 output 仍可发送。
+Client 的 route-bound due-recovery poll/drain 现在也会在 service PTO/recovery timer
+前执行相同的 route-first 边界。缺失已提交 route 会返回 `UnknownConnectionId`，不会推进
+recovery 状态；route 恢复后该 due recovery 仍可继续 service。
 Server 的 route-bound 跨 record output poll/drain 现在也会先解析选中 record 的已提交
 route，再 poll protected output，因此缺失 route 不会再消费已 queue 的 server 1-RTT packet。
 

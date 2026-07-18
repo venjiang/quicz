@@ -385,6 +385,12 @@ pub const Tls13ClientEndpoint = struct {
         self: *Tls13ClientEndpoint,
         now_millis: i64,
     ) !?DueDeadlineDatagramPathResult {
+        const deadline = self.nextDeadline() orelse return null;
+        if (deadline.deadlineMillis() > now_millis) return null;
+        if (deadline == .recovery) {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        }
         const serviced = (try self.serviceDueDeadline(now_millis)) orelse return null;
         const datagram = switch (serviced) {
             .recovery => |recovery| try self.pollRecoveryDatagramWithRoutePath(recovery, now_millis),
@@ -406,6 +412,12 @@ pub const Tls13ClientEndpoint = struct {
         now_millis: i64,
         out: []ApplicationDatagramPathResult,
     ) !?DueDeadlineDatagramPathDrainResult {
+        const deadline = self.nextDeadline() orelse return null;
+        if (deadline.deadlineMillis() > now_millis) return null;
+        if (deadline == .recovery) {
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+            _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        }
         const serviced = (try self.serviceDueDeadline(now_millis)) orelse return null;
         if (serviced != .recovery) {
             return .{
@@ -1569,6 +1581,13 @@ test "Tls13ClientEndpoint services due recovery with committed route output" {
     const before_deadline = try client.serviceDueDeadlineAndPollDatagramWithRoutePath(deadline.deadlineMillis() - 1);
     try std.testing.expect(before_deadline == null);
 
+    try std.testing.expect(try client.lifecycle.retireConnectionIdOnPath(&client_scid, new_path));
+    try std.testing.expectError(error.UnknownConnectionId, client.serviceDueDeadlineAndPollDatagramWithRoutePath(deadline.deadlineMillis()));
+    const preserved_deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(preserved_deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, preserved_deadline.recovery.space);
+    try client.lifecycle.registerConnectionId(client.connection_id, &client_scid, new_path, .{ .active_migration_disabled = false });
+
     const serviced = (try client.serviceDueDeadlineAndPollDatagramWithRoutePath(deadline.deadlineMillis())) orelse return error.TestUnexpectedResult;
     try std.testing.expect(serviced.deadline == .recovery);
     const output = serviced.datagram orelse return error.TestUnexpectedResult;
@@ -1633,6 +1652,13 @@ test "Tls13ClientEndpoint drains due recovery with committed route output" {
     var out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
     const before_deadline = try client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(deadline.deadlineMillis() - 1, &out);
     try std.testing.expect(before_deadline == null);
+
+    try std.testing.expect(try client.lifecycle.retireConnectionIdOnPath(&client_scid, new_path));
+    try std.testing.expectError(error.UnknownConnectionId, client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(deadline.deadlineMillis(), &out));
+    const preserved_deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(preserved_deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, preserved_deadline.recovery.space);
+    try client.lifecycle.registerConnectionId(client.connection_id, &client_scid, new_path, .{ .active_migration_disabled = false });
 
     const serviced = (try client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(deadline.deadlineMillis(), &out)) orelse return error.TestUnexpectedResult;
     try std.testing.expect(serviced.deadline == .recovery);

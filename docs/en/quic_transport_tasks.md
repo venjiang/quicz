@@ -195,6 +195,10 @@ Client route-bound application output polling and draining now prove the same
 route-first boundary for already queued 1-RTT output: missing routes do not
 consume queued packets, and the output remains sendable after the route is
 restored.
+Client route-bound due-recovery polling and draining now apply the same
+route-first boundary before servicing PTO/recovery timers. A missing committed
+route returns `UnknownConnectionId` without advancing recovery state, and the
+due recovery remains serviceable after the route is restored.
 Server route-bound cross-record output polling and draining now follow the
 same invariant by resolving each selected record's committed route before
 polling protected output, so missing routes no longer consume queued server
