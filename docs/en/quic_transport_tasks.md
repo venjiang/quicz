@@ -187,6 +187,11 @@ The single-connection due-deadline/backend poll result now exposes the same
 post-step deadline for ordinary, explicit-output, and ordered cross-space
 success paths, matching bounded-drain scheduling.
 
+Client endpoint route-bound Initial begin now resolves the committed route
+before building or packetizing ClientHello output. A focused test proves a
+missing route returns `UnknownConnectionId` without queuing Initial CRYPTO or
+arming recovery timers.
+
 Client endpoint close-on-error output is isolated from unrelated receive
 errors: `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` only drains a
 route-bound application datagram after `InvalidPacket` if the connection has

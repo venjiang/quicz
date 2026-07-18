@@ -879,6 +879,34 @@ test "Tls13ClientEndpoint begins with committed route path" {
     try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) != null);
 }
 
+test "Tls13ClientEndpoint begin with route path fails before queuing Initial when route is missing" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        16,
+        path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    _ = client.lifecycle.retireConnection(client.connection_id);
+    var scratch: [8192]u8 = undefined;
+    try std.testing.expectError(error.UnknownConnectionId, client.beginWithRoutePath(1, &scratch));
+    try std.testing.expectEqual(@as(usize, 0), client.transport.connection.initial_packet_space.crypto_send_queue.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.lifecycle.recoveryTimerCount());
+    try std.testing.expect(client.lifecycle.nextDeadline(client.connection_id, &client.transport.connection) == null);
+}
+
 test "Tls13ClientEndpoint reports fixed-bit-clear datagrams as receive errors" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31 };

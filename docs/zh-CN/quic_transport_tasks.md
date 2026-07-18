@@ -165,6 +165,10 @@ Initial/Handshake protected CRYPTO socket loop 的 output 后 deadline。
 single-connection due-deadline/backend poll result 现在也会在普通、显式 output
 和有序 cross-space 成功路径后暴露步骤后的下一 deadline，与 bounded-drain 调度一致。
 
+Client endpoint 的 route-bound Initial begin 现在会先解析已提交 route，再构建或
+packetize ClientHello output。聚焦测试证明缺失 route 会返回
+`UnknownConnectionId`，且不会 queue Initial CRYPTO 或 arm recovery timer。
+
 Client endpoint 的错误路径不会再把无关待发送应用包误当作 close-on-error 输出：
 `Tls13ClientEndpoint.receiveWithRoutePathOrClose()` 只有在 `InvalidPacket` 已让连接进入
 `closing` 时才取 route-bound application datagram。route mismatch 和其他未进入 closing
