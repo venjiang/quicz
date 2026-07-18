@@ -269,9 +269,7 @@ pub fn Tls13ServerEndpoint(
         fn preflightDueRecoveryRoutes(
             self: *const Self,
             now_millis: i64,
-            space: root.EndpointInstalledKeyDatagramSpace,
         ) endpoint.RouteError!void {
-            const recovery_space = packetNumberSpace(space);
             var iterator = self.records.records.iterator();
             while (iterator.next()) |entry| {
                 const connection_id = entry.key_ptr.*;
@@ -280,8 +278,7 @@ pub fn Tls13ServerEndpoint(
                 const deadline = self.lifecycle.nextDeadline(connection_id, connection) orelse continue;
                 if (deadline.deadline_millis > now_millis) continue;
                 if (deadline.kind != .recovery) continue;
-                const recovery = deadline.recovery orelse continue;
-                if (recovery.space != recovery_space) continue;
+                if (deadline.recovery == null) continue;
                 _ = try self.currentRecordRoutePath(record);
             }
         }
@@ -457,7 +454,7 @@ pub fn Tls13ServerEndpoint(
             space: root.EndpointInstalledKeyDatagramSpace,
             out: []DatagramPathResult,
         ) root.Error!PendingWorkDatagramPathDrainResult {
-            self.preflightDueRecoveryRoutes(now_millis, space) catch |err| {
+            self.preflightDueRecoveryRoutes(now_millis) catch |err| {
                 return .{
                     .pending_work = .{},
                     .drain = .{ .first_route_error = err },
@@ -4449,6 +4446,21 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     const recovery_local_id = if (deadline.connection_id == first_record.handle) first_record.local_id else second_record.local_id;
     const recovery_path = if (deadline.connection_id == first_record.handle) first_path else second_path;
     try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(recovery_local_id, recovery_path));
+    const mismatched_space_pending = try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        deadline.deadline_millis,
+        .handshake,
+        &pending_out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), mismatched_space_pending.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), mismatched_space_pending.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), mismatched_space_pending.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), mismatched_space_pending.drain.first_route_error);
+    const mismatched_preserved_deadline = mismatched_space_pending.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, mismatched_preserved_deadline.kind);
+    try std.testing.expectEqual(deadline.connection_id, mismatched_preserved_deadline.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.application, mismatched_preserved_deadline.recovery.?.space);
+
     const missing_route_pending = try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePath(
         no_allocation_allocator.allocator(),
         deadline.deadline_millis,
