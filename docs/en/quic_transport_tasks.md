@@ -150,7 +150,9 @@ needs to be sent.
 The pure-Zig TLS backend now rejects inbound CRYPTO delivered from a packet
 number space that does not match the current TLS receive state, keeping
 ClientHello/ServerHello on Initial, later handshake messages on Handshake, and
-post-handshake CRYPTO on Application.
+post-handshake CRYPTO on Application. It also advances pending local send
+states before applying that gate, so early-arriving peer CRYPTO cannot bypass
+the packet-number-space check while local TLS output is still buffered.
 
 Endpoint Version Negotiation response generation now enforces the QUIC fixed
 bit before emitting a response. Unsupported-version long-header datagrams with

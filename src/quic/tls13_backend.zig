@@ -174,6 +174,12 @@ pub const Tls13Backend = struct {
 
     fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
+        if (self.expectedInboundSpace() == null) {
+            self.pump() catch {
+                self.drive_errors += 1;
+                return error.CryptoError;
+            };
+        }
         if (self.expectedInboundSpace()) |expected_space| {
             if (space != expected_space) return error.CryptoError;
         }
@@ -458,10 +464,9 @@ pub const Tls13Backend = struct {
 
             .connected => .application,
 
-            // Send states are advanced by `pump()` before more peer input is
-            // consumed. Keep the gate neutral there so early-arriving peer
-            // bytes remain buffered behind local output in the existing state
-            // machine order.
+            // `receive()` pumps send states before applying this gate, so
+            // these neutral states only appear when the state machine cannot
+            // yet name a peer input space.
             .client_start,
             .client_send_finished,
             .server_send_server_hello,
@@ -667,6 +672,40 @@ test "Tls13Backend rejects ServerHello outside Initial space without buffering i
     const server_hello = server_hello_buf[0..server_hello_len];
 
     try std.testing.expectError(error.CryptoError, client_cb.receive(client_cb.context, .handshake, server_hello));
+    try std.testing.expectEqual(@as(usize, 0), client.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 0), client.drive_errors);
+    try std.testing.expect(client.hs.state == .client_wait_server_hello);
+    try std.testing.expect(!client.hs.key_schedule.handshake_secret_derived);
+
+    try client_cb.receive(client_cb.context, .initial, server_hello);
+    try std.testing.expect(client.inbound_bytes > 0);
+    try std.testing.expect(client.hs.state == .client_wait_encrypted_extensions);
+    try std.testing.expect(client.hs.key_schedule.handshake_secret_derived);
+}
+
+test "Tls13Backend pumps local send state before rejecting early peer input space" {
+    var client = Tls13Backend.initClient(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    });
+    var client_cb = client.cryptoBackend();
+
+    var server_secret: [32]u8 = undefined;
+    tls13.secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var server_hello_buf: [128]u8 = undefined;
+    const server_hello_len = tls13.buildServerHello(
+        &server_hello_buf,
+        server_public,
+        0x1301,
+        true,
+        true,
+    );
+    const server_hello = server_hello_buf[0..server_hello_len];
+
+    try std.testing.expectError(error.CryptoError, client_cb.receive(client_cb.context, .handshake, server_hello));
+    try std.testing.expect(client.client_hello_built);
+    try std.testing.expect(client.out_initial.pending() > 0);
     try std.testing.expectEqual(@as(usize, 0), client.inbound_bytes);
     try std.testing.expectEqual(@as(usize, 0), client.drive_errors);
     try std.testing.expect(client.hs.state == .client_wait_server_hello);

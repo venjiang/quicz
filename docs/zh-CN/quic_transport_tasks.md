@@ -122,7 +122,9 @@ Application space、没有待发送 Handshake CRYPTO 时丢弃 Handshake packet-
 state；如果仍有 late Handshake CRYPTO 排队，则继续保留该空间。
 纯 Zig TLS backend 现在会拒绝与当前 TLS receive state 不匹配的 packet-number-space
 输入：ClientHello/ServerHello 只能走 Initial，后续 handshake message 只能走
-Handshake，post-handshake CRYPTO 才能走 Application。
+Handshake，post-handshake CRYPTO 才能走 Application。执行该 gate 前会先推进本端
+待发送 TLS state，因此本端 TLS output 仍在缓冲时提前到达的 peer CRYPTO 也不能绕过
+packet-number-space 校验。
 
 endpoint Version Negotiation response 生成现在会先校验 QUIC fixed bit。
 fixed bit 为 0 的 unsupported-version long-header datagram 会被忽略，不再生成
