@@ -418,10 +418,7 @@ pub fn Tls13ServerEndpoint(
             self: *Self,
             connection_id: u64,
         ) error{ Internal, UnknownConnectionId }!root.EndpointConnectionRetireResult {
-            if (self.records.get(connection_id) == null) return error.UnknownConnectionId;
-            const retired = self.lifecycle.retireConnection(connection_id);
-            self.records.remove(connection_id) catch return error.Internal;
-            return retired;
+            return self.records.retire(&self.lifecycle, connection_id);
         }
 
         /// Select the earliest deadline across all endpoint-owned records.
@@ -2584,6 +2581,12 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         .routed => |route| try std.testing.expectEqual(retry_record.handle, route.connection_id),
         else => return error.TestUnexpectedResult,
     }
+    try retry_record.connection.validatePeerAddress();
+    try retry_record.connection.confirmHandshake();
+    try retry_record.connection.recordPeerAddressBytesReceived(1);
+    _ = try retry_record.connection.recordPacketSentInSpace(.application, 10, 100);
+    try endpoint_owner.lifecycle.armRecoveryTimerFromConnection(retry_record.handle, &retry_record.connection);
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.recoveryTimerCount());
     var backend_scratch: [1]u8 = undefined;
     var backend_output: [1]root.EndpointPolledDatagramResult = undefined;
     const backend_progress = try endpoint_owner.driveBackend(
@@ -2807,8 +2810,10 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
 
     const retired_record = try endpoint_owner.retireRecord(retry_record_handle);
     try std.testing.expectEqual(@as(usize, 1), retired_record.routes_retired);
+    try std.testing.expect(retired_record.recovery_timer_disarmed);
     try std.testing.expect(endpoint_owner.records.get(retry_record_handle) == null);
     try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.recoveryTimerCount());
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.retireRecord(retry_record_handle));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.routeDatagram(retry_path, &routed_short));
     try std.testing.expectEqual(@as(usize, 0), (try endpoint_owner.activeConnectionIds(&active_ids)).len);

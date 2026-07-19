@@ -1619,6 +1619,10 @@ close 和 route cleanup 事件。
   通过 lifecycle 边界退役一个 `EndpointConnectionRegistry` handle，使 route、
   recovery timer、ECN path state 和 record storage 一起清理。
 
+- 2026-07-19：`Tls13ServerEndpoint.retireRecord()` 现在走 registry-owned
+  retirement。显式 server record retirement 复用同一套 route、recovery timer、
+  ECN path state 和 record storage 清理边界。
+
 - 2026-07-16：`Tls13ServerEndpoint` 新增 routed datagram dispatcher。socket
   loop 可先分类一次，再由 endpoint owner 分发 routed long-header Initial/Handshake
   CRYPTO packet 或 installed-key short packet，复用现有 route-bound 处理路径。endpoint

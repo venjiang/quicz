@@ -1847,6 +1847,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   lifecycle boundary so routes, recovery timers, ECN path state, and record
   storage are cleaned up together.
 
+- 2026-07-19: Routed `Tls13ServerEndpoint.retireRecord()` through
+  registry-owned retirement. Explicit server record retirement now reuses the
+  same route, recovery-timer, ECN path-state, and record-storage cleanup
+  boundary as the production connection registry.
+
 - 2026-07-16: Added a routed datagram dispatcher to `Tls13ServerEndpoint`.
   A socket loop can classify once, then let the endpoint owner dispatch routed
   long-header Initial/Handshake CRYPTO packets or installed-key short packets
