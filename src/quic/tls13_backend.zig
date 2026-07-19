@@ -8,6 +8,9 @@
 //! `Tls13Handshake.step()` state machine, buffering `send_data` actions per
 //! packet number space and exposing traffic secrets directly from the key
 //! schedule (the connection derives packet-protection keys from the secret).
+//! Inbound CRYPTO is accepted only from the packet-number space that matches
+//! the current TLS receive state, preserving RFC 9001 encryption-level
+//! separation at the adapter boundary.
 
 const std = @import("std");
 const tls13 = @import("tls13.zig");
@@ -170,8 +173,10 @@ pub const Tls13Backend = struct {
     // ─── Callbacks ───────────────────────────────────────────────────
 
     fn receive(context: *anyopaque, space: PacketNumberSpace, data: []const u8) Error!void {
-        _ = space; // Tls13Handshake parses by message type; QUIC orders across spaces.
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
+        if (self.expectedInboundSpace()) |expected_space| {
+            if (space != expected_space) return error.CryptoError;
+        }
         self.inbound_bytes += data.len;
         self.hs.provideData(data);
         self.pump() catch {
@@ -437,6 +442,36 @@ pub const Tls13Backend = struct {
             .application => &self.out_app,
         };
     }
+
+    fn expectedInboundSpace(self: *const Tls13Backend) ?PacketNumberSpace {
+        return switch (self.hs.state) {
+            .server_wait_client_hello,
+            .client_wait_server_hello,
+            => .initial,
+
+            .server_wait_client_finished,
+            .client_wait_encrypted_extensions,
+            .client_wait_certificate,
+            .client_wait_certificate_verify,
+            .client_wait_finished,
+            => .handshake,
+
+            .connected => .application,
+
+            // Send states are advanced by `pump()` before more peer input is
+            // consumed. Keep the gate neutral there so early-arriving peer
+            // bytes remain buffered behind local output in the existing state
+            // machine order.
+            .client_start,
+            .client_send_finished,
+            .server_send_server_hello,
+            .server_send_encrypted_extensions,
+            .server_send_certificate,
+            .server_send_certificate_verify,
+            .server_send_finished,
+            => null,
+        };
+    }
 };
 
 // ─── Tests ───────────────────────────────────────────────────────────
@@ -586,6 +621,61 @@ test "Tls13Backend zero rtt hook builds ClientHello only with early data ticket"
     try std.testing.expect(backend.client_hello_built);
     try std.testing.expect(backend.out_initial.len > 0);
     try std.testing.expect(try cb.pullZeroRttTrafficSecrets() == null);
+}
+
+test "Tls13Backend rejects ClientHello outside Initial space" {
+    var client = Tls13Backend.initClient(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    });
+    var client_cb = client.cryptoBackend();
+    var client_out: [4096]u8 = undefined;
+    const client_hello = (try client_cb.pull(client_cb.context, .initial, &client_out)) orelse return error.TestUnexpectedResult;
+
+    var server = Tls13Backend.initServer(.{
+        .alpn = &.{},
+    });
+    var server_cb = server.cryptoBackend();
+
+    try std.testing.expectError(error.CryptoError, server_cb.receive(server_cb.context, .handshake, client_hello));
+    try std.testing.expectEqual(@as(usize, 0), server.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 0), server.drive_errors);
+    try std.testing.expect(server.hs.state == .server_wait_client_hello);
+    try std.testing.expect(!server.hs.peer_tp_available);
+}
+
+test "Tls13Backend rejects ServerHello outside Initial space without buffering input" {
+    var client = Tls13Backend.initClient(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    });
+    var client_cb = client.cryptoBackend();
+    var scratch: [4096]u8 = undefined;
+    _ = (try client_cb.pull(client_cb.context, .initial, &scratch)) orelse return error.TestUnexpectedResult;
+
+    var server_secret: [32]u8 = undefined;
+    tls13.secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var server_hello_buf: [128]u8 = undefined;
+    const server_hello_len = tls13.buildServerHello(
+        &server_hello_buf,
+        server_public,
+        0x1301,
+        true,
+        true,
+    );
+    const server_hello = server_hello_buf[0..server_hello_len];
+
+    try std.testing.expectError(error.CryptoError, client_cb.receive(client_cb.context, .handshake, server_hello));
+    try std.testing.expectEqual(@as(usize, 0), client.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 0), client.drive_errors);
+    try std.testing.expect(client.hs.state == .client_wait_server_hello);
+    try std.testing.expect(!client.hs.key_schedule.handshake_secret_derived);
+
+    try client_cb.receive(client_cb.context, .initial, server_hello);
+    try std.testing.expect(client.inbound_bytes > 0);
+    try std.testing.expect(client.hs.state == .client_wait_encrypted_extensions);
+    try std.testing.expect(client.hs.key_schedule.handshake_secret_derived);
 }
 
 test "Tls13Backend drives a full client handshake through CryptoBackend hooks" {
