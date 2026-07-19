@@ -2712,6 +2712,7 @@ pub const Tls13Handshake = struct {
         const ext_total = readU16(msg[pos..]);
         pos += 2;
         if (pos + ext_total != msg.len) return error.DecodeError;
+        const ext_start = pos;
         const ext_end = pos + ext_total;
 
         var have_version = false;
@@ -2719,12 +2720,16 @@ pub const Tls13Handshake = struct {
         var seen_known_extensions: u16 = 0;
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
+            const header_offset = pos;
             const et = readU16(msg[pos..]);
             const el = readU16(msg[pos + 2 ..]);
             pos += 4;
             if (pos + el > ext_end) return error.DecodeError;
             const ext = msg[pos .. pos + el];
             pos += el;
+            if (extensionTypeSeenBefore(msg[ext_start..ext_end], header_offset - ext_start, et)) {
+                return error.DecodeError;
+            }
             if (serverHelloKnownExtensionBit(et)) |bit| {
                 const mask = @as(u16, 1) << bit;
                 if (seen_known_extensions & mask != 0) return error.DecodeError;
@@ -2754,7 +2759,7 @@ pub const Tls13Handshake = struct {
                     if (readU16(ext[0..2]) != 0) return error.DecodeError;
                     self.psk_selected = true;
                 },
-                else => return error.DecodeError,
+                else => {},
             }
         }
 
@@ -2784,6 +2789,7 @@ pub const Tls13Handshake = struct {
         const ext_total = readU16(msg[pos..]);
         pos += 2;
         if (pos + ext_total != msg.len) return error.DecodeError;
+        const ext_start = pos;
         const ext_end = pos + ext_total;
 
         var have_alpn = false;
@@ -2791,12 +2797,16 @@ pub const Tls13Handshake = struct {
         var seen_known_extensions: u16 = 0;
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
+            const header_offset = pos;
             const et = readU16(msg[pos..]);
             const el = readU16(msg[pos + 2 ..]);
             pos += 4;
             if (pos + el > ext_end) return error.DecodeError;
             const ext = msg[pos .. pos + el];
             pos += el;
+            if (extensionTypeSeenBefore(msg[ext_start..ext_end], header_offset - ext_start, et)) {
+                return error.DecodeError;
+            }
             if (encryptedExtensionsKnownExtensionBit(et)) |bit| {
                 const mask = @as(u16, 1) << bit;
                 if (seen_known_extensions & mask != 0) return error.DecodeError;
@@ -2840,7 +2850,7 @@ pub const Tls13Handshake = struct {
                     }
                     self.server_accepted_early_data = true;
                 },
-                else => return error.DecodeError,
+                else => {},
             }
         }
 
@@ -4239,7 +4249,7 @@ test "Tls13Handshake client rejects duplicate known ServerHello extensions" {
     try std.testing.expectError(error.DecodeError, hs.step());
 }
 
-test "Tls13Handshake client rejects unrequested ServerHello extension" {
+test "Tls13Handshake client ignores unknown ServerHello extension" {
     var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
     _ = try hs.step();
 
@@ -4250,6 +4260,23 @@ test "Tls13Handshake client rejects unrequested ServerHello extension" {
     var sh_buf: [160]u8 = undefined;
     const base_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
     const server_hello = try appendServerHelloRawExtension(&sh_buf, base_len, 0xaaaa, &[_]u8{});
+    hs.provideData(server_hello);
+
+    try std.testing.expect(std.meta.activeTag(try hs.step()) == ._continue);
+}
+
+test "Tls13Handshake client rejects duplicate unknown ServerHello extensions" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [192]u8 = undefined;
+    const base_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    const with_unknown = try appendServerHelloRawExtension(&sh_buf, base_len, 0xaaaa, &[_]u8{});
+    const server_hello = try appendServerHelloRawExtension(&sh_buf, with_unknown.len, 0xaaaa, &[_]u8{});
     hs.provideData(server_hello);
 
     try std.testing.expectError(error.DecodeError, hs.step());
@@ -4997,7 +5024,7 @@ test "Tls13Handshake client rejects duplicate known EncryptedExtensions extensio
     try std.testing.expectError(error.DecodeError, hs.step());
 }
 
-test "Tls13Handshake client rejects unrequested EncryptedExtensions extension" {
+test "Tls13Handshake client ignores unknown EncryptedExtensions extension" {
     var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
     _ = try hs.step();
 
@@ -5013,6 +5040,29 @@ test "Tls13Handshake client rejects unrequested EncryptedExtensions extension" {
     const base_len = buildEncryptedExtensions(&ee_buf, "", &[_]u8{});
     const encrypted_extensions = try appendEncryptedExtensionsRawExtension(&ee_buf, base_len, 0xaaaa, &[_]u8{});
     hs.provideData(encrypted_extensions);
+
+    try std.testing.expect(std.meta.activeTag(try hs.step()) == ._continue);
+    try std.testing.expectEqual(@as(usize, 0), hs.peer_tp_len);
+}
+
+test "Tls13Handshake client rejects duplicate unknown EncryptedExtensions extensions" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var sh_buf: [128]u8 = undefined;
+    hs.provideData(sh_buf[0..buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true)]);
+    _ = try hs.step();
+    _ = try hs.step();
+
+    var ee_buf: [256]u8 = undefined;
+    const base_len = buildEncryptedExtensions(&ee_buf, "", &[_]u8{});
+    const with_unknown = try appendEncryptedExtensionsRawExtension(&ee_buf, base_len, 0xaaaa, &[_]u8{});
+    const encrypted_extensions = try appendEncryptedExtensionsRawExtension(&ee_buf, with_unknown.len, 0xaaaa, &[_]u8{});
+    hs.provideData(encrypted_extensions);
+
     try std.testing.expectError(error.DecodeError, hs.step());
 }
 
