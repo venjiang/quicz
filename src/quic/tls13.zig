@@ -3282,6 +3282,8 @@ pub const Tls13Handshake = struct {
         var have_signature_algorithms = false;
         var have_psk_key_exchange_modes = false;
         var have_quic_transport_parameters = false;
+        var offered_early_data = false;
+        var offered_psk = false;
         var client_supports_x25519 = false;
         var client_supports_server_sig = false;
         var client_supports_psk_dhe_ke = false;
@@ -3471,14 +3473,14 @@ pub const Tls13Handshake = struct {
                     // 0-RTT intent. The server only records the offer here;
                     // acceptance is gated on a matching PSK and policy.
                     if (el != 0) return error.DecodeError;
-                    self.peer_offered_early_data = true;
+                    offered_early_data = true;
                 },
                 @intFromEnum(ExtType.pre_shared_key) => {
                     // RFC 8446 §4.2.11. Must be the last extension; parse the
                     // first offered identity + binder. identities<7..2^16-1>
                     // then binders<33..2^16-1>.
                     if (pos != ext_end) return error.DecodeError;
-                    self.peer_offered_psk = true;
+                    offered_psk = true;
                     var pp: usize = 0;
                     if (pp + 2 > el) return error.DecodeError;
                     const identities_len = readU16(ext[pp..]);
@@ -3542,14 +3544,14 @@ pub const Tls13Handshake = struct {
         if (have_supported_groups and !client_supports_x25519) return error.NoKeyShare;
         if (self.config.alpn.len > 0 and selected_alpn_len == 0) return error.NoApplicationProtocol;
         if (self.config.server_name != null and !have_server_name) return error.UnrecognizedName;
-        if (self.peer_offered_early_data and !self.peer_offered_psk) return error.DecodeError;
-        if (self.peer_offered_psk and !have_psk_key_exchange_modes) return error.MissingExtension;
-        if (self.peer_offered_psk and !client_supports_psk_dhe_ke) return error.UnsupportedPskKeyExchangeMode;
+        if (offered_early_data and !offered_psk) return error.DecodeError;
+        if (offered_psk and !have_psk_key_exchange_modes) return error.MissingExtension;
+        if (offered_psk and !client_supports_psk_dhe_ke) return error.UnsupportedPskKeyExchangeMode;
 
         // Update the transcript. When the client offered a PSK, split the
         // update at the binder so the truncated transcript hash can be used
         // to verify the binder (RFC 8446 §4.2.11).
-        if (self.peer_offered_psk) {
+        if (offered_psk) {
             const binder_offset = self.peer_psk_binder_msg_offset;
             self.transcript.update(msg[0..binder_offset]);
             const truncated_hash = self.transcript.current();
@@ -3582,12 +3584,12 @@ pub const Tls13Handshake = struct {
                     self.peer_psk_binder,
                 );
                 if (!self.peer_psk_binder_valid) return error.BadFinished;
-                const replay_allowed = if (self.peer_offered_early_data) replay: {
+                const replay_allowed = if (offered_early_data) replay: {
                     const filter = self.config.server_psk_replay_filter orelse break :replay true;
                     break :replay filter.consume(self.peer_psk_identity[0..self.peer_psk_identity_len]);
                 } else true;
                 self.psk_selected = replay_allowed;
-                if (replay_allowed and self.peer_offered_early_data) {
+                if (replay_allowed and offered_early_data) {
                     self.server_early_traffic_secret = self.key_schedule.deriveEarlyTrafficSecret(self.transcript.current());
                     self.server_early_traffic_secret_derived = true;
                 }
@@ -3617,6 +3619,8 @@ pub const Tls13Handshake = struct {
         if (have_key_share) {
             self.peer_x25519_public = parsed_peer_x25519_public;
         }
+        self.peer_offered_early_data = offered_early_data;
+        self.peer_offered_psk = offered_psk;
         self.peer_tp_len = parsed_peer_tp_len;
         if (parsed_peer_tp_len > 0) {
             @memcpy(self.peer_tp[0..parsed_peer_tp_len], parsed_peer_tp[0..parsed_peer_tp_len]);
@@ -5818,6 +5822,27 @@ test "Tls13Handshake server rejects non-empty ClientHello early_data extension" 
     var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects ClientHello early_data without PSK without committing offer flags" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const hello = try appendClientHelloRawExtension(
+        &hello_buf,
+        base_hello.len,
+        @intFromEnum(ExtType.early_data),
+        &[_]u8{},
+    );
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    const transcript_before = server.transcript.current();
+    server.provideData(hello);
+
+    try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expect(!server.peer_offered_early_data);
+    try std.testing.expect(!server.peer_offered_psk);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
 test "Tls13Handshake server rejects ClientHello pre_shared_key before trailing extension" {
