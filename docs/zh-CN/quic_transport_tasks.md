@@ -100,8 +100,8 @@ ClientHello 成功后提交；backend keylog 输出现在也会等待 ClientHell
 binder verification result、PSK selection 与 ClientHello transcript update
 同样只会在服务端准备推进状态后提交。
 需要证书路径时，服务端 ClientHello 处理现在还会在发出
-ServerHello 或提交已解析 peer 状态前拒绝缺失的 `signature_algorithms`、空或过大的
-本地证书链，以及缺失或非法的本地私钥配置。
+ServerHello、排队 ServerHello 输出或提交已解析 peer 状态前拒绝缺失的
+`signature_algorithms`、空或过大的本地证书链，以及缺失或非法的本地私钥配置。
 纯 Zig TLS client-side ServerHello 解析现在还会拒绝重复 ClientHello random 的
 ServerHello random，且不会提交 peer random、transcript 或 handshake secret。
 ServerHello 和 EncryptedExtensions 解析现在会拒绝 unsolicited extension type，同时继续拒绝重复 extension type；EncryptedExtensions

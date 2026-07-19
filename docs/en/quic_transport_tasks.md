@@ -119,7 +119,7 @@ selection, and the ClientHello transcript update are likewise committed only
 after the server is ready to advance. When the certificate path is required,
 server-side ClientHello processing now rejects missing `signature_algorithms`,
 empty or oversized configured certificate chains, plus missing or invalid
-configured private keys before committing parsed peer state or emitting
+configured private keys before committing parsed peer state or queuing/emitting
 ServerHello. Pure-Zig TLS client-side ServerHello parsing now also
 rejects a ServerHello random that repeats the ClientHello random without
 committing peer random, transcript, or handshake secrets. ServerHello and
