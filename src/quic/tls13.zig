@@ -2848,6 +2848,11 @@ pub const Tls13Handshake = struct {
 
         var have_alpn = false;
         var have_quic_transport_parameters = false;
+        var selected_alpn: [256]u8 = undefined;
+        var selected_alpn_len: usize = 0;
+        var parsed_peer_tp: [1024]u8 = undefined;
+        var parsed_peer_tp_len: usize = 0;
+        var accepted_early_data = false;
         var seen_known_extensions: u16 = 0;
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
@@ -2883,14 +2888,14 @@ pub const Tls13Handshake = struct {
                         }
                     }
                     if (!offered) return error.NoApplicationProtocol;
-                    self.negotiated_alpn_len = @min(proto_len, self.negotiated_alpn.len);
-                    @memcpy(self.negotiated_alpn[0..self.negotiated_alpn_len], proto[0..self.negotiated_alpn_len]);
+                    selected_alpn_len = @min(proto_len, selected_alpn.len);
+                    @memcpy(selected_alpn[0..selected_alpn_len], proto[0..selected_alpn_len]);
                     have_alpn = true;
                 },
                 @intFromEnum(ExtType.quic_transport_parameters) => {
-                    if (el > self.peer_tp.len) return error.DecodeError;
-                    self.peer_tp_len = el;
-                    @memcpy(self.peer_tp[0..self.peer_tp_len], ext);
+                    if (el > parsed_peer_tp.len) return error.DecodeError;
+                    parsed_peer_tp_len = el;
+                    @memcpy(parsed_peer_tp[0..parsed_peer_tp_len], ext);
                     have_quic_transport_parameters = true;
                 },
                 @intFromEnum(ExtType.early_data) => {
@@ -2902,7 +2907,7 @@ pub const Tls13Handshake = struct {
                     {
                         return error.DecodeError;
                     }
-                    self.server_accepted_early_data = true;
+                    accepted_early_data = true;
                 },
                 else => return error.DecodeError,
             }
@@ -2911,6 +2916,13 @@ pub const Tls13Handshake = struct {
         if (!have_quic_transport_parameters) return error.MissingExtension;
         if (self.config.alpn.len > 0 and !have_alpn) return error.NoApplicationProtocol;
 
+        self.negotiated_alpn_len = selected_alpn_len;
+        if (selected_alpn_len > 0) {
+            @memcpy(self.negotiated_alpn[0..selected_alpn_len], selected_alpn[0..selected_alpn_len]);
+        }
+        self.peer_tp_len = parsed_peer_tp_len;
+        @memcpy(self.peer_tp[0..parsed_peer_tp_len], parsed_peer_tp[0..parsed_peer_tp_len]);
+        self.server_accepted_early_data = accepted_early_data;
         self.server_encrypted_extensions_processed = true;
         self.transcript.update(msg);
         self.state = if (self.psk_selected) .client_wait_finished else .client_wait_certificate;
@@ -5132,6 +5144,38 @@ test "Tls13Handshake client rejects unrequested EncryptedExtensions extension" {
     hs.provideData(encrypted_extensions);
 
     try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects EncryptedExtensions extension without committing parsed state" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const psk = [_]u8{0xab} ** secret_len;
+    var hs = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &[_]u8{}, psk);
+    hs.state = .client_wait_encrypted_extensions;
+    hs.psk_selected = true;
+    hs.session_ticket_len = 4;
+    hs.session_ticket_allows_early_data = true;
+    @memcpy(hs.negotiated_alpn[0..3], "old");
+    hs.negotiated_alpn_len = 3;
+    hs.peer_tp[0] = 0xde;
+    hs.peer_tp[1] = 0xad;
+    hs.peer_tp_len = 2;
+    const transcript_before = hs.transcript.current();
+
+    var ee_buf: [256]u8 = undefined;
+    const base_len = buildEncryptedExtensionsWithEarlyData(&ee_buf, "hq-interop", &[_]u8{ 0x01, 0x02, 0x03 }, true);
+    const encrypted_extensions = try appendEncryptedExtensionsRawExtension(&ee_buf, base_len, 0xaaaa, &[_]u8{});
+    hs.provideData(encrypted_extensions);
+
+    try std.testing.expectError(error.DecodeError, hs.clientProcessEncryptedExtensions());
+    try std.testing.expectEqualStrings("old", hs.negotiated_alpn[0..hs.negotiated_alpn_len]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, hs.peer_tp[0..hs.peer_tp_len]);
+    try std.testing.expect(!hs.server_accepted_early_data);
+    try std.testing.expect(!hs.server_encrypted_extensions_processed);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
+    try std.testing.expectEqual(HandshakeState.client_wait_encrypted_extensions, hs.state);
 }
 
 test "Tls13Handshake client rejects oversized EncryptedExtensions transport parameters" {

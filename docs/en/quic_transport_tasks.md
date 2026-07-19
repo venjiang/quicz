@@ -77,9 +77,12 @@ server-side ClientHello processing now rejects empty or oversized configured
 certificate chains plus missing or invalid configured private keys before
 emitting ServerHello. Pure-Zig TLS client-side ServerHello and
 EncryptedExtensions parsing now rejects unsolicited extension types while still
-rejecting duplicate extension types; ServerHello `pre_shared_key` selection no
-longer has to be the final extension, so later allowed extensions such as
-`key_share` can still be parsed. Client and server key exchange now reject
+rejecting duplicate extension types; EncryptedExtensions parsing keeps ALPN,
+peer transport parameters, early-data acceptance, transcript state, and client
+handshake state unchanged when a later extension fails. ServerHello
+`pre_shared_key` selection no longer has to be the final extension, so later
+allowed extensions such as `key_share` can still be parsed. Client and server
+key exchange now reject
 invalid peer X25519 public keys as `DecodeError` before deriving handshake
 traffic secrets; the client PSK-selection path and server ServerHello path keep
 transcript state and pending Handshake key installation unchanged on that
