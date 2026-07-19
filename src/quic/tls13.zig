@@ -2770,6 +2770,7 @@ pub const Tls13Handshake = struct {
         var have_version = false;
         var have_key_share = false;
         var selected_psk = false;
+        var parsed_peer_x25519_public: [32]u8 = undefined;
         var seen_known_extensions: u16 = 0;
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
@@ -2800,7 +2801,7 @@ pub const Tls13Handshake = struct {
                     if (readU16(ext[0..2]) != group_x25519) return error.NoKeyShare;
                     const klen = readU16(ext[2..4]);
                     if (klen != 32 or el != 4 + 32) return error.DecodeError;
-                    @memcpy(&self.peer_x25519_public, ext[4..36]);
+                    @memcpy(&parsed_peer_x25519_public, ext[4..36]);
                     have_key_share = true;
                 },
                 @intFromEnum(ExtType.pre_shared_key) => {
@@ -2819,8 +2820,9 @@ pub const Tls13Handshake = struct {
         if (!have_key_share) return error.NoKeyShare;
 
         // ECDHE shared secret: client secret × server public.
-        const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.DecodeError;
+        const shared = X25519.scalarmult(self.x25519_secret, parsed_peer_x25519_public) catch return error.DecodeError;
 
+        self.peer_x25519_public = parsed_peer_x25519_public;
         self.psk_selected = selected_psk;
 
         // The transcript includes ServerHello before deriving handshake secrets.
@@ -4602,6 +4604,24 @@ test "Tls13Handshake client rejects invalid ServerHello X25519 public key" {
     hs.provideData(sh_buf[0..sh_len]);
 
     try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects invalid ServerHello X25519 public key without committing peer key" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    const ch = try hs.step();
+    try std.testing.expect(std.meta.activeTag(ch) == .send_data);
+    const old_peer_key = [_]u8{0x42} ** 32;
+    hs.peer_x25519_public = old_peer_key;
+    const transcript_before = hs.transcript.current();
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, [_]u8{0} ** 32, cipher_aes_128_gcm_sha256, true, true);
+    hs.provideData(sh_buf[0..sh_len]);
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+    try std.testing.expectEqualSlices(u8, &old_peer_key, &hs.peer_x25519_public);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
+    try std.testing.expectEqual(HandshakeState.client_wait_server_hello, hs.state);
 }
 
 // ─── Tests for client handshake completion ───────────────────────────

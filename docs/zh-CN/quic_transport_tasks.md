@@ -85,8 +85,9 @@ acceptance、transcript state 和 client handshake state 不变。ServerHello
 `pre_shared_key` selection 不再要求必须位于最后，后续允许的已知 extension
 （如 `key_share`）仍可解析。Client 和 server key exchange 现在会在派生
 handshake traffic secret 前把非法 peer X25519 public key 拒绝为 `DecodeError`；
-client PSK-selection 路径和 server ServerHello 路径在该失败中都不会提交
-transcript state 或 pending Handshake key installation。
+client ServerHello 路径在该失败中会保持旧 peer public key、transcript state
+和 pending Handshake key installation 不变；client PSK-selection 路径和 server
+ServerHello 路径也不会提交 transcript state 或 pending Handshake key installation。
 纯 Zig TLS input buffer 现在会在 handshake 或 post-handshake 输入过大时返回
 `DecodeError`，不再静默截断 CRYPTO bytes 并继续等待半截 message；它也会拒绝
 压缩已消费 bytes 后仍放不下的新输入，且不会拷贝半截 CRYPTO fragment；同时拒绝
