@@ -6884,7 +6884,7 @@ test "Tls13Handshake server rejects invalid certificate private key without comm
     try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
-test "Tls13Handshake server rejects empty certificate entry before ServerHello" {
+test "Tls13Handshake server rejects empty certificate entry without committing parsed state" {
     var hello_buf: [1024]u8 = undefined;
     const hello = try clientHelloBytes(.{}, &hello_buf);
     const empty_cert = [_]u8{};
@@ -6894,9 +6894,26 @@ test "Tls13Handshake server rejects empty certificate entry before ServerHello" 
         .private_key_bytes = &private_key,
         .private_key_algorithm = .ed25519,
     }, &[_]u8{});
+    server.peer_tp[0] = 0xde;
+    server.peer_tp[1] = 0xad;
+    server.peer_tp_len = 2;
+    server.peer_tp_available = true;
+    const old_peer_key_share = [_]u8{0x24} ** 32;
+    server.peer_x25519_public = old_peer_key_share;
+    const old_client_random = [_]u8{0x42} ** 32;
+    server.client_random = old_client_random;
+    server.client_random_available = true;
+    const transcript_before = server.transcript.current();
 
     server.provideData(hello);
     try std.testing.expectError(error.BadCertificate, server.step());
+    try std.testing.expectEqual(@as(usize, 0), server.out_len);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, server.peer_tp[0..server.peer_tp_len]);
+    try std.testing.expect(server.peer_tp_available);
+    try std.testing.expectEqualSlices(u8, &old_peer_key_share, &server.peer_x25519_public);
+    try std.testing.expectEqualSlices(u8, &old_client_random, &server.client_random);
+    try std.testing.expect(server.client_random_available);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
     try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
