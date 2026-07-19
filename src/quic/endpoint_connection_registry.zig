@@ -139,6 +139,22 @@ pub fn EndpointConnectionRegistry(
             self.allocator.destroy(removed.value);
         }
 
+        /// Retire lifecycle state and destroy one active endpoint-owned record.
+        ///
+        /// Production endpoint owners should use this when explicitly closing or
+        /// evicting a connection handle so routes, recovery timers, ECN path
+        /// state, and record storage are retired as one operation.
+        pub fn retire(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            connection_id: u64,
+        ) error{ Internal, UnknownConnectionId }!root.EndpointConnectionRetireResult {
+            if (self.records.get(connection_id) == null) return error.UnknownConnectionId;
+            const retired = lifecycle.retireConnection(connection_id);
+            self.remove(connection_id) catch return error.Internal;
+            return retired;
+        }
+
         /// Build caller-owned lifecycle deadline views for all active records.
         pub fn deadlineViews(self: *Self, allocator: std.mem.Allocator) ![]root.EndpointConnectionView {
             const views = try allocator.alloc(root.EndpointConnectionView, self.count());
@@ -830,6 +846,84 @@ test "EndpointConnectionRegistry removes record after due idle retirement" {
     try std.testing.expectEqual(@as(usize, 0), registry.count());
     try std.testing.expect(registry.hasCapacity());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+}
+
+test "EndpointConnectionRegistry retire removes lifecycle state and record together" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: root.Connection,
+
+        fn connectionRef(self: *@This()) *root.Connection {
+            return &self.connection;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer-retire";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "local-retire";
+        }
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const Registry = EndpointConnectionRegistry(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.deinit,
+    );
+
+    var registry = try Registry.initWithCapacity(std.testing.allocator, 1);
+    defer registry.deinit();
+    var lifecycle = root.EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const record_handle: u64 = 51;
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer if (record_owned) {
+        if (record_initialized) record.deinit();
+        std.testing.allocator.destroy(record);
+    };
+    record.* = .{
+        .handle = record_handle,
+        .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
+    };
+    record_initialized = true;
+    try record.connection.validatePeerAddress();
+    try record.connection.confirmHandshake();
+    try record.connection.recordPeerAddressBytesReceived(1);
+
+    const path = root.endpoint.Udp4Tuple{
+        .local = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
+    };
+    try lifecycle.registerConnectionId(record_handle, TestRecord.sourceConnectionId(record), path, .{ .sequence_number = 0 });
+    var lifecycle_registered = true;
+    errdefer if (lifecycle_registered) {
+        _ = lifecycle.retireConnection(record_handle);
+    };
+    _ = try record.connection.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(record_handle, &record.connection);
+    try registry.adopt(record_handle, record);
+    record_owned = false;
+
+    try std.testing.expectEqual(@as(usize, 1), registry.count());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    const retired = try registry.retire(&lifecycle, record_handle);
+    lifecycle_registered = false;
+    try std.testing.expectEqual(@as(usize, 1), retired.routes_retired);
+    try std.testing.expect(retired.recovery_timer_disarmed);
+    try std.testing.expectEqual(@as(usize, 0), registry.count());
+    try std.testing.expect(registry.hasCapacity());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+    try std.testing.expectError(error.UnknownConnectionId, registry.retire(&lifecycle, record_handle));
 }
 
 test "EndpointConnectionRegistry rotates cross-record output polling" {

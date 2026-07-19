@@ -637,6 +637,8 @@ endpoint-owned connection map 和 event loop，同时保持已验证的纯 Zig T
 active connection 由 lifecycle 统一完成 receive/send/timer/close routing、超出固定测试数量
 后的有界资源与 route retirement，以及更广泛可复现的多连接 smoke test。这是生产 ownership
 边界，不得削弱既有证据。
+`EndpointConnectionRegistry` 现在提供显式 connection retirement，会先按同一 handle
+退役 lifecycle route、recovery timer 和 ECN path state，再销毁 endpoint-owned record。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、
@@ -1612,6 +1614,10 @@ close 和 route cleanup 事件。
 - 2026-07-19：收紧 server ServerHello 输出边界覆盖。非法 peer X25519 key material
   会在 server 写入 ServerHello output bytes、修改 output length、提交 server
   random、更新 transcript、派生 Handshake secret 或安装 Handshake key 前被拒绝。
+
+- 2026-07-19：新增 registry-owned connection retirement。生产 endpoint owner 现在可以
+  通过 lifecycle 边界退役一个 `EndpointConnectionRegistry` handle，使 route、
+  recovery timer、ECN path state 和 record storage 一起清理。
 
 - 2026-07-16：`Tls13ServerEndpoint` 新增 routed datagram dispatcher。socket
   loop 可先分类一次，再由 endpoint owner 分发 routed long-header Initial/Handshake

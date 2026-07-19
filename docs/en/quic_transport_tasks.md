@@ -805,6 +805,9 @@ receive/send/timer/close routing for all active connections beyond the bounded
 test map, bounded resources and route retirement beyond a fixed test count,
 and a reproducible broader multi-connection smoke test. This is a production
 ownership boundary and must not weaken the established evidence.
+`EndpointConnectionRegistry` now exposes explicit connection retirement that
+destroys the endpoint-owned record only after retiring lifecycle routes,
+recovery timers, and ECN path state for the same handle.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first
@@ -1838,6 +1841,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   peer X25519 key material is rejected before the server writes ServerHello
   output bytes, mutates output length, commits a server random, updates the
   transcript, derives Handshake secrets, or arms Handshake key installation.
+
+- 2026-07-19: Added registry-owned connection retirement. Production endpoint
+  owners can now retire one `EndpointConnectionRegistry` handle through the
+  lifecycle boundary so routes, recovery timers, ECN path state, and record
+  storage are cleaned up together.
 
 - 2026-07-16: Added a routed datagram dispatcher to `Tls13ServerEndpoint`.
   A socket loop can classify once, then let the endpoint owner dispatch routed
