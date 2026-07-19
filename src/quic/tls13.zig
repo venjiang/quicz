@@ -3914,6 +3914,11 @@ pub const Tls13Handshake = struct {
     /// Build a ServerHello, complete the X25519 key exchange, and derive
     /// handshake traffic secrets (RFC 8446 §4.1.3 + §7.1).
     fn serverBuildServerHello(self: *Tls13Handshake) HandshakeError!Action {
+        // The peer key is authenticated input to the ServerHello flight. Reject
+        // invalid X25519 material before writing any outbound bytes or
+        // committing the fresh server random to observable handshake state.
+        const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.DecodeError;
+
         var server_random: [32]u8 = undefined;
         secureRandomBytes(&server_random);
 
@@ -3962,9 +3967,6 @@ pub const Tls13Handshake = struct {
         buf[1] = @intCast((msg_len >> 16) & 0xFF);
         buf[2] = @intCast((msg_len >> 8) & 0xFF);
         buf[3] = @intCast(msg_len & 0xFF);
-
-        // ECDHE shared secret: server secret × client public.
-        const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.DecodeError;
 
         self.server_random = server_random;
         self.server_random_available = true;
@@ -6779,6 +6781,8 @@ test "Tls13Handshake server rejects invalid ClientHello X25519 public key withou
     const old_server_random = [_]u8{0x42} ** 32;
     server.server_random = old_server_random;
     server.server_random_available = true;
+    server.out_len = 7;
+    @memset(server.out_buf[0..7], 0xa5);
     server.provideData(hello);
     try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
     const transcript_before = server.transcript.current();
@@ -6786,6 +6790,8 @@ test "Tls13Handshake server rejects invalid ClientHello X25519 public key withou
     try std.testing.expectError(error.DecodeError, server.step());
     try std.testing.expectEqualSlices(u8, &old_server_random, &server.server_random);
     try std.testing.expect(server.server_random_available);
+    try std.testing.expectEqual(@as(usize, 7), server.out_len);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0xa5} ** 7), server.out_buf[0..7]);
     try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
     try std.testing.expect(!server.key_schedule.handshake_secret_derived);
     try std.testing.expect(!server.pending_install_handshake);

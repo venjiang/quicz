@@ -145,9 +145,10 @@ traffic secrets; the client ServerHello path keeps the previous peer public
 key, peer ServerHello random, transcript state, and pending Handshake key
 installation unchanged on that failure, while successful client-side
 ServerHello parsing records the peer random. The client PSK-selection path and
-server ServerHello path also keep server random, transcript state, and pending
-Handshake key installation unchanged on failure; successful server-side
-ServerHello generation marks the emitted random available. Server-side
+server ServerHello path also keep outbound bytes, output length, server random,
+transcript state, and pending Handshake key installation unchanged on failure;
+successful server-side ServerHello generation marks the emitted random
+available. Server-side
 EncryptedExtensions construction rejects oversized local QUIC transport
 parameters before committing transcript bytes, output length, or server state.
 Pure-Zig TLS input
@@ -1832,6 +1833,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   Invalid configured private keys are rejected before the server writes
   CertificateVerify output bytes, mutates output length, updates the
   transcript, or advances handshake state.
+
+- 2026-07-19: Tightened server ServerHello output-boundary coverage. Invalid
+  peer X25519 key material is rejected before the server writes ServerHello
+  output bytes, mutates output length, commits a server random, updates the
+  transcript, derives Handshake secrets, or arms Handshake key installation.
 
 - 2026-07-16: Added a routed datagram dispatcher to `Tls13ServerEndpoint`.
   A socket loop can classify once, then let the endpoint owner dispatch routed

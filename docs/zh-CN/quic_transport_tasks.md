@@ -121,9 +121,10 @@ handshake traffic secret 前把非法 peer X25519 public key 拒绝为 `DecodeEr
 client ServerHello 路径在该失败中会保持旧 peer public key、peer ServerHello
 random、transcript state 和 pending Handshake key installation 不变；成功的
 client-side ServerHello 解析会记录 peer random。client PSK-selection 路径和
-server ServerHello 路径失败时也不会提交 server random、transcript state 或
-pending Handshake key installation；成功的 server-side ServerHello 生成会把已
-发出的 random 标记为可用。Server-side EncryptedExtensions 构建会在提交
+server ServerHello 路径失败时也不会提交 outbound bytes、output length、
+server random、transcript state 或 pending Handshake key installation；成功的
+server-side ServerHello 生成会把已发出的 random 标记为可用。Server-side
+EncryptedExtensions 构建会在提交
 transcript bytes、output length 或推进 server state 前拒绝过大的本地 QUIC
 transport parameters。
 纯 Zig TLS input buffer 现在会在 handshake 或 post-handshake 输入过大时返回
@@ -1607,6 +1608,10 @@ close 和 route cleanup 事件。
 - 2026-07-19：收紧 server CertificateVerify 输出边界覆盖。非法的配置私钥会在
   server 写入 CertificateVerify output bytes、修改 output length、更新 transcript
   或推进 handshake state 前被拒绝。
+
+- 2026-07-19：收紧 server ServerHello 输出边界覆盖。非法 peer X25519 key material
+  会在 server 写入 ServerHello output bytes、修改 output length、提交 server
+  random、更新 transcript、派生 Handshake secret 或安装 Handshake key 前被拒绝。
 
 - 2026-07-16：`Tls13ServerEndpoint` 新增 routed datagram dispatcher。socket
   loop 可先分类一次，再由 endpoint owner 分发 routed long-header Initial/Handshake
