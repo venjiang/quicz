@@ -180,6 +180,7 @@ pub const Tls13Backend = struct {
                 return error.CryptoError;
             };
         }
+        if (self.hs.is_server and self.hs.isComplete()) return error.CryptoError;
         if (self.expectedInboundSpace()) |expected_space| {
             if (space != expected_space) return error.CryptoError;
         }
@@ -715,6 +716,26 @@ test "Tls13Backend pumps local send state before rejecting early peer input spac
     try std.testing.expect(client.inbound_bytes > 0);
     try std.testing.expect(client.hs.state == .client_wait_encrypted_extensions);
     try std.testing.expect(client.hs.key_schedule.handshake_secret_derived);
+}
+
+test "Tls13Backend server rejects post-handshake peer CRYPTO without side effects" {
+    var server = Tls13Backend.initServer(.{
+        .alpn = &.{},
+    });
+    server.hs.state = .connected;
+    var server_cb = server.cryptoBackend();
+
+    const peer_post_handshake = [_]u8{
+        0x04, 0x00, 0x00, 0x00, // NewSessionTicket handshake header with empty body.
+    };
+
+    try std.testing.expectError(error.CryptoError, server_cb.receive(server_cb.context, .application, &peer_post_handshake));
+    try std.testing.expectEqual(@as(usize, 0), server.inbound_bytes);
+    try std.testing.expectEqual(@as(usize, 0), server.drive_errors);
+    try std.testing.expectEqual(@as(usize, 0), server.out_app.pending());
+    try std.testing.expect(!server.nst_emitted);
+    try std.testing.expect(!server.hs.nst_sent);
+    try std.testing.expect(server.hs.isComplete());
 }
 
 test "Tls13Backend drives a full client handshake through CryptoBackend hooks" {
