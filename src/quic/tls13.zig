@@ -2139,6 +2139,7 @@ pub const Tls13Handshake = struct {
     client_random_available: bool = false,
     // Server random (server side only; written into ServerHello)
     server_random: [32]u8 = undefined,
+    server_random_available: bool = false,
 
     // Negotiated ALPN
     negotiated_alpn: [256]u8 = undefined,
@@ -2244,6 +2245,7 @@ pub const Tls13Handshake = struct {
         self.pending_install_handshake = false;
         self.pending_install_app = false;
         self.client_random_available = false;
+        self.server_random_available = false;
         self.negotiated_alpn_len = 0;
         self.client_sni_len = 0;
         self.peer_tp_len = 0;
@@ -2312,6 +2314,7 @@ pub const Tls13Handshake = struct {
         self.pending_install_handshake = false;
         self.pending_install_app = false;
         self.client_random_available = false;
+        self.server_random_available = false;
         self.negotiated_alpn_len = 0;
         self.client_sni_len = 0;
         self.peer_tp_len = 0;
@@ -2768,7 +2771,8 @@ pub const Tls13Handshake = struct {
         // fixed random sentinel; this minimal QUIC TLS path has no HRR state
         // machine yet, so reject before transcript/key-schedule progress.
         if (pos + 32 > msg.len) return error.DecodeError;
-        if (std.mem.eql(u8, msg[pos..][0..32], &hello_retry_request_random)) return error.DecodeError;
+        const parsed_server_random = msg[pos..][0..32].*;
+        if (std.mem.eql(u8, &parsed_server_random, &hello_retry_request_random)) return error.DecodeError;
         pos += 32;
         // legacy_session_id_echo
         if (pos + 1 > msg.len) return error.DecodeError;
@@ -2849,6 +2853,8 @@ pub const Tls13Handshake = struct {
         const shared = X25519.scalarmult(self.x25519_secret, parsed_peer_x25519_public) catch return error.DecodeError;
 
         self.peer_x25519_public = parsed_peer_x25519_public;
+        self.server_random = parsed_server_random;
+        self.server_random_available = true;
         self.psk_selected = selected_psk;
 
         // The transcript includes ServerHello before deriving handshake secrets.
@@ -3750,6 +3756,7 @@ pub const Tls13Handshake = struct {
         const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.DecodeError;
 
         self.server_random = server_random;
+        self.server_random_available = true;
         self.transcript.update(buf[0..pos]);
         self.key_schedule.deriveHandshakeSecrets(&shared, self.transcript.current());
 
@@ -4430,6 +4437,8 @@ test "Tls13Handshake client processes ServerHello and installs handshake keys" {
     // First step parses ServerHello and derives handshake secrets.
     const cont = try hs.step();
     try std.testing.expect(std.meta.activeTag(cont) == ._continue);
+    try std.testing.expect(hs.server_random_available);
+    try std.testing.expectEqualSlices(u8, server_hello[6..38], &hs.server_random);
 
     // Next step emits the pending install_keys(handshake) action.
     const install = try hs.step();
@@ -4662,7 +4671,10 @@ test "Tls13Handshake client rejects invalid ServerHello X25519 public key withou
     const ch = try hs.step();
     try std.testing.expect(std.meta.activeTag(ch) == .send_data);
     const old_peer_key = [_]u8{0x42} ** 32;
+    const old_server_random = [_]u8{0x24} ** 32;
     hs.peer_x25519_public = old_peer_key;
+    hs.server_random = old_server_random;
+    hs.server_random_available = true;
     const transcript_before = hs.transcript.current();
 
     var sh_buf: [128]u8 = undefined;
@@ -4671,6 +4683,8 @@ test "Tls13Handshake client rejects invalid ServerHello X25519 public key withou
 
     try std.testing.expectError(error.DecodeError, hs.step());
     try std.testing.expectEqualSlices(u8, &old_peer_key, &hs.peer_x25519_public);
+    try std.testing.expectEqualSlices(u8, &old_server_random, &hs.server_random);
+    try std.testing.expect(hs.server_random_available);
     try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
     try std.testing.expectEqual(HandshakeState.client_wait_server_hello, hs.state);
 }
@@ -6302,6 +6316,21 @@ test "Tls13Handshake server rejects invalid ClientHello X25519 public key" {
     try std.testing.expectEqual(HandshakeState.server_send_server_hello, server.state);
 }
 
+test "Tls13Handshake server records generated ServerHello random after successful build" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
+
+    const server_hello_action = try server.step();
+    try std.testing.expect(std.meta.activeTag(server_hello_action) == .send_data);
+    const server_hello = server_hello_action.send_data.data;
+    try std.testing.expect(server.server_random_available);
+    try std.testing.expectEqualSlices(u8, server_hello[6..38], &server.server_random);
+}
+
 test "Tls13Handshake server rejects invalid ClientHello X25519 public key without committing server random" {
     var hello_buf: [1024]u8 = undefined;
     const hello = try clientHelloBytes(.{}, &hello_buf);
@@ -6312,12 +6341,14 @@ test "Tls13Handshake server rejects invalid ClientHello X25519 public key withou
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     const old_server_random = [_]u8{0x42} ** 32;
     server.server_random = old_server_random;
+    server.server_random_available = true;
     server.provideData(hello);
     try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
     const transcript_before = server.transcript.current();
 
     try std.testing.expectError(error.DecodeError, server.step());
     try std.testing.expectEqualSlices(u8, &old_server_random, &server.server_random);
+    try std.testing.expect(server.server_random_available);
     try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
     try std.testing.expect(!server.key_schedule.handshake_secret_derived);
     try std.testing.expect(!server.pending_install_handshake);

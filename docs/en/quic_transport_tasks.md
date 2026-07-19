@@ -103,10 +103,12 @@ allowed extensions such as `key_share` can still be parsed. Client and server
 key exchange now reject
 invalid peer X25519 public keys as `DecodeError` before deriving handshake
 traffic secrets; the client ServerHello path keeps the previous peer public
-key, transcript state, and pending Handshake key installation unchanged on that
-failure, while the client PSK-selection path and server ServerHello path also
-keep server random, transcript state, and pending Handshake key installation
-unchanged. Pure-Zig TLS input
+key, peer ServerHello random, transcript state, and pending Handshake key
+installation unchanged on that failure, while successful client-side
+ServerHello parsing records the peer random. The client PSK-selection path and
+server ServerHello path also keep server random, transcript state, and pending
+Handshake key installation unchanged on failure; successful server-side
+ServerHello generation marks the emitted random available. Pure-Zig TLS input
 buffering now reports
 `DecodeError`
 after oversized handshake or post-handshake input instead of silently
