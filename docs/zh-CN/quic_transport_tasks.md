@@ -1174,7 +1174,7 @@ close 和 route cleanup 事件。
 - 2026-07-17：按 packet number space 对齐 RFC 9002 persistent congestion
   duration。Initial 和 Handshake 的 persistent-congestion 判定现在使用不含
   `max_ack_delay` 的 PTO base；Application 仍保留 peer `max_ack_delay` 项。
-  可控时钟测试覆盖 long-packet-space 阈值。
+  可控时钟测试现在覆盖 Initial 和 Handshake 两个 long-packet-space 阈值。
 
 - 2026-07-17：收紧 RFC 9000 STREAM final data 后的重复数据处理。late
   STREAM frame 重复已经接收的相同字节仍会被丢弃；如果改写已有 stream offset

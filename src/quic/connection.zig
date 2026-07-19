@@ -16556,6 +16556,43 @@ test "Initial persistent congestion duration excludes max_ack_delay" {
     try std.testing.expectEqual(@as(usize, 6000), conn.initial_packet_space.recovery_state.ssthresh);
 }
 
+test "Handshake persistent congestion duration excludes max_ack_delay" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+
+    try std.testing.expectEqual(@as(usize, 12000), conn.congestionWindow(.handshake));
+    try std.testing.expectEqual(@as(u64, 900), conn.handshake_packet_space.recovery_state.persistentCongestionDurationMsWithoutMaxAckDelay());
+    try std.testing.expectEqual(@as(u64, 975), conn.handshake_packet_space.recovery_state.persistentCongestionDurationMs());
+
+    _ = try conn.recordPacketSentInSpace(.handshake, 10, 100);
+    try conn.receiveAckInSpace(.handshake, 110, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(?i64, 10), conn.handshake_packet_space.first_rtt_sample_sent_time_millis);
+
+    _ = try conn.recordPacketSentInSpace(.handshake, 200, 100);
+    _ = try conn.recordPacketSentInSpace(.handshake, 1100, 100);
+    _ = try conn.recordPacketSentInSpace(.handshake, 1101, 100);
+    _ = try conn.recordPacketSentInSpace(.handshake, 1102, 100);
+    _ = try conn.recordPacketSentInSpace(.handshake, 1103, 100);
+
+    try conn.receiveAckInSpace(.handshake, 1200, .{
+        .largest_acknowledged = 5,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), conn.sentPacketCount(.handshake));
+    try std.testing.expectEqual(@as(usize, 200), conn.bytesInFlight(.handshake));
+    try std.testing.expectEqual(recovery.minimumCongestionWindow(1200), conn.congestionWindow(.handshake));
+    try std.testing.expectEqual(@as(usize, 6000), conn.handshake_packet_space.recovery_state.ssthresh);
+}
+
 test "EndpointConnectionLifecycle retires routes with recovery timer" {
     var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
     defer lifecycle.deinit();

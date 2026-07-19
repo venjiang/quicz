@@ -1349,8 +1349,8 @@ QUIC unless the gap is named and the verification evidence is added here.
 - 2026-07-17: Aligned RFC 9002 persistent congestion duration with packet
   number spaces. Initial and Handshake persistent-congestion checks now use the
   zero-`max_ack_delay` PTO base, while Application keeps the peer
-  `max_ack_delay` term; controlled-clock tests cover the long-packet-space
-  threshold.
+  `max_ack_delay` term; controlled-clock tests now cover both Initial and
+  Handshake long-packet-space thresholds.
 
 - 2026-07-17: Tightened RFC 9000 STREAM duplicate-data handling after final
   data. Late STREAM frames that repeat already received bytes are still
