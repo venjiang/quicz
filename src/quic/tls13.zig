@@ -6952,6 +6952,29 @@ test "Tls13Handshake server rejects malformed ClientHello ALPN length" {
     try std.testing.expectError(error.DecodeError, server.step());
 }
 
+test "Tls13Handshake server rejects empty ClientHello ALPN protocol without committing selection" {
+    const alpn = [_][]const u8{"hq-interop"};
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{ .alpn = &alpn }, &hello_buf);
+    const alpn_ext = try clientHelloExtension(hello, @intFromEnum(ExtType.alpn));
+    try std.testing.expect(alpn_ext.body_len >= 3);
+    hello_buf[alpn_ext.body_offset + 2] = 0;
+
+    var server = Tls13Handshake.initServer(.{ .alpn = &alpn }, &[_]u8{});
+    @memcpy(server.negotiated_alpn[0..3], "old");
+    server.negotiated_alpn_len = 3;
+    const old_client_random = [_]u8{0x42} ** 32;
+    server.client_random = old_client_random;
+    const transcript_before = server.transcript.current();
+    server.provideData(hello);
+
+    try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expectEqualStrings("old", server.negotiated_alpn[0..server.negotiated_alpn_len]);
+    try std.testing.expectEqualSlices(u8, &old_client_random, &server.client_random);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
+}
+
 test "Tls13Handshake server rejects duplicate ClientHello ALPN protocols" {
     const protocol = "hq-interop";
     const alpn = [_][]const u8{protocol};
