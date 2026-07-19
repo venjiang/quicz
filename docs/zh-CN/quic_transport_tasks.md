@@ -73,7 +73,8 @@ server-side ALPN selection 只会在完整 ClientHello 成功后提交。
 配置 SNI 名称；parsed SNI 只会在完整 ClientHello 成功后提交。
 服务端 peer X25519 key_share、peer QUIC transport parameters、用于 keylog 证据的
 peer ClientHello random，以及 early_data / pre_shared_key presence flags 也只会在完整
-ClientHello 成功后提交。
+ClientHello 成功后提交；backend keylog 输出现在也会等待 ClientHello random
+确实已生成或解析完成。
 解析出的 PSK identity、obfuscated ticket age、binder bytes、binder offset、
 binder verification result、PSK selection 与 ClientHello transcript update
 同样只会在服务端准备推进状态后提交。

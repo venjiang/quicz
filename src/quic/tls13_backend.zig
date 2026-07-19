@@ -364,6 +364,7 @@ pub const Tls13Backend = struct {
     /// secrets.
     pub fn writeKeylog(self: *Tls13Backend, writer: *std.Io.Writer) !void {
         const hs = &self.hs;
+        if (!hs.client_random_available) return;
         const cr = &hs.client_random;
         if (hs.key_schedule.handshake_secret_derived) {
             try writer.print("SERVER_HANDSHAKE_TRAFFIC_SECRET {x} {x}\n", .{ cr.*, hs.key_schedule.server_handshake_traffic_secret });
@@ -469,6 +470,25 @@ test "Tls13Backend setServerPskIdentity configures underlying TLS handshake" {
     );
 
     try std.testing.expectError(error.DecodeError, backend.setServerPskIdentity(&[_]u8{}));
+}
+
+test "Tls13Backend writeKeylog waits for ClientHello random" {
+    var backend = Tls13Backend.initClient(.{});
+    backend.hs.key_schedule.handshake_secret_derived = true;
+    backend.hs.key_schedule.server_handshake_traffic_secret = [_]u8{0x11} ** tls13.secret_len;
+    backend.hs.key_schedule.client_handshake_traffic_secret = [_]u8{0x22} ** tls13.secret_len;
+
+    var keylog = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer keylog.deinit();
+
+    try backend.writeKeylog(&keylog.writer);
+    try testing.expectEqual(@as(usize, 0), keylog.written().len);
+
+    backend.hs.client_random = [_]u8{0x33} ** 32;
+    backend.hs.client_random_available = true;
+    try backend.writeKeylog(&keylog.writer);
+    try testing.expect(std.mem.indexOf(u8, keylog.written(), "SERVER_HANDSHAKE_TRAFFIC_SECRET") != null);
+    try testing.expect(std.mem.indexOf(u8, keylog.written(), "CLIENT_HANDSHAKE_TRAFFIC_SECRET") != null);
 }
 
 test "Tls13Backend pullEarlyTrafficSecret returns 0-RTT secret after ClientHello" {

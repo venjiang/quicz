@@ -85,7 +85,9 @@ SNI names before peer SNI matching; parsed SNI is only committed after the full
 ClientHello succeeds. Server-side peer X25519 key_share and peer QUIC transport
 parameters, the peer ClientHello random used for keylog evidence, plus
 early_data / pre_shared_key presence flags, are also only
-committed after the full ClientHello succeeds. Parsed PSK identity, obfuscated
+committed after the full ClientHello succeeds; backend keylog emission now
+waits until a ClientHello random has actually been generated or parsed. Parsed
+PSK identity, obfuscated
 ticket age, binder bytes, binder offset, binder verification result, PSK
 selection, and the ClientHello transcript update are likewise committed only
 after the server is ready to advance. When the certificate path is required,

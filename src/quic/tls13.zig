@@ -2136,6 +2136,7 @@ pub const Tls13Handshake = struct {
 
     // Client random (for SSLKEYLOGFILE and ServerHello matching)
     client_random: [32]u8 = undefined,
+    client_random_available: bool = false,
     // Server random (server side only; written into ServerHello)
     server_random: [32]u8 = undefined,
 
@@ -2242,6 +2243,7 @@ pub const Tls13Handshake = struct {
         self.input_overflow = false;
         self.pending_install_handshake = false;
         self.pending_install_app = false;
+        self.client_random_available = false;
         self.negotiated_alpn_len = 0;
         self.client_sni_len = 0;
         self.peer_tp_len = 0;
@@ -2309,6 +2311,7 @@ pub const Tls13Handshake = struct {
         self.input_overflow = false;
         self.pending_install_handshake = false;
         self.pending_install_app = false;
+        self.client_random_available = false;
         self.negotiated_alpn_len = 0;
         self.client_sni_len = 0;
         self.peer_tp_len = 0;
@@ -2719,6 +2722,7 @@ pub const Tls13Handshake = struct {
             self.transcript.update(buf[binder_offset..][0..binder_len]);
 
             self.client_random = staged_client_random;
+            self.client_random_available = true;
             self.state = .client_wait_server_hello;
             return Action{ .send_data = .{
                 .level = .initial,
@@ -2740,6 +2744,7 @@ pub const Tls13Handshake = struct {
         self.out_len = pos;
         self.transcript.update(buf[0..pos]);
         self.client_random = staged_client_random;
+        self.client_random_available = true;
         self.state = .client_wait_server_hello;
 
         return Action{ .send_data = .{
@@ -3648,6 +3653,7 @@ pub const Tls13Handshake = struct {
         self.key_schedule = next_key_schedule;
         self.psk_selected = next_psk_selected;
         self.client_random = parsed_client_random;
+        self.client_random_available = true;
         self.negotiated_alpn_len = selected_alpn_len;
         if (selected_alpn_len > 0) {
             @memcpy(self.negotiated_alpn[0..selected_alpn_len], selected_alpn[0..selected_alpn_len]);
@@ -4115,6 +4121,7 @@ test "Tls13Handshake client rejects local ALPN error without committing client r
     try std.testing.expectError(error.DecodeError, hs.step());
     const new_transcript = hs.transcript.current();
     try std.testing.expectEqualSlices(u8, &old_client_random, &hs.client_random);
+    try std.testing.expect(!hs.client_random_available);
     try std.testing.expectEqualSlices(u8, &old_transcript, &new_transcript);
     try std.testing.expectEqual(@as(usize, 0), hs.out_len);
     try std.testing.expectEqual(HandshakeState.client_start, hs.state);
@@ -6777,6 +6784,7 @@ test "Tls13Handshake server records ClientHello random after successful parse" {
     server.provideData(client_hello);
     try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
     try std.testing.expectEqualSlices(u8, client_hello[6..38], &server.client_random);
+    try std.testing.expect(server.client_random_available);
 }
 
 test "Tls13Handshake server rejects oversized ClientHello SNI host_name" {
