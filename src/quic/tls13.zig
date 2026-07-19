@@ -2953,8 +2953,6 @@ pub const Tls13Handshake = struct {
         if (list_end != msg.len) return error.DecodeError;
         const leaf_der = try nextCertificateEntry(msg, &pos, list_end);
         if (leaf_der.len > self.server_cert.len) return error.BadCertificate;
-        self.server_cert_len = leaf_der.len;
-        @memcpy(self.server_cert[0..self.server_cert_len], leaf_der);
 
         const chain_start = pos;
         while (pos < list_end) {
@@ -2964,9 +2962,11 @@ pub const Tls13Handshake = struct {
         // CertificateVerify uses the retained leaf. Chain validation consumes
         // the remaining leaf-to-issuer entries while their message bytes live.
         if (!self.config.skip_cert_verify) {
-            try self.verifyServerCertificateChain(msg, chain_start, list_end);
+            try self.verifyServerCertificateChainWithLeaf(leaf_der, msg, chain_start, list_end);
         }
 
+        self.server_cert_len = leaf_der.len;
+        @memcpy(self.server_cert[0..self.server_cert_len], leaf_der);
         self.transcript.update(msg);
         self.state = .client_wait_certificate_verify;
         return ._continue;
@@ -2976,9 +2976,9 @@ pub const Tls13Handshake = struct {
     ///
     /// This preserves the public direct-anchor check for callers that provide
     /// a leaf out of band. Handshake processing uses the complete received
-    /// certificate_list through `verifyServerCertificateChain` instead.
+    /// certificate_list through `verifyServerCertificateChainWithLeaf` instead.
     pub fn verifyServerCertificate(self: *Tls13Handshake) HandshakeError!void {
-        return self.verifyServerCertificateChain(&.{}, 0, 0);
+        return self.verifyServerCertificateChainWithLeaf(self.server_cert[0..self.server_cert_len], &.{}, 0, 0);
     }
 
     /// Verify the retained leaf, peer-supplied issuers, and configured trust
@@ -2986,14 +2986,16 @@ pub const Tls13Handshake = struct {
     /// signature; the final supplied certificate is then verified by the
     /// bundle. Without a bundle, preserve hostname-only and optional leaf-time
     /// verification for existing callers.
-    fn verifyServerCertificateChain(
+    fn verifyServerCertificateChainWithLeaf(
         self: *Tls13Handshake,
+        leaf_der: []const u8,
         certificate_message: []const u8,
         chain_pos: usize,
         chain_end: usize,
     ) HandshakeError!void {
+        if (!certificateDerEnvelopeLooksParseable(leaf_der)) return error.BadCertificate;
         const cert: Certificate = .{
-            .buffer = self.server_cert[0..self.server_cert_len],
+            .buffer = leaf_der,
             .index = 0,
         };
         const parsed = cert.parse() catch return error.BadCertificate;
@@ -3092,6 +3094,7 @@ pub const Tls13Handshake = struct {
     /// Certificate message (RFC 8446 §4.4.3).
     fn verifyCertificateVerify(self: *Tls13Handshake, transcript_hash: [32]u8, scheme: u16, sig: []const u8) HandshakeError!void {
         if (self.server_cert_len == 0) return error.BadCertificate;
+        if (!certificateDerEnvelopeLooksParseable(self.server_cert[0..self.server_cert_len])) return error.BadCertificate;
         const cert: Certificate = .{
             .buffer = self.server_cert[0..self.server_cert_len],
             .index = 0,
@@ -3115,6 +3118,10 @@ pub const Tls13Handshake = struct {
             sig,
             &signed,
         );
+    }
+
+    fn certificateDerEnvelopeLooksParseable(cert_der: []const u8) bool {
+        return cert_der.len >= 2 and cert_der[0] == 0x30;
     }
 
     /// Verify the server Finished message against the transcript hash and
@@ -4842,6 +4849,25 @@ test "Tls13Handshake rejects empty leaf certificate when verification is skipped
     var handshake = Tls13Handshake.initClient(.{}, &.{});
     handshake.provideData(&malformed);
     try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificate());
+}
+
+test "Tls13Handshake rejects invalid certificate without committing parsed leaf state" {
+    const invalid_der = [_]u8{0xaa};
+    var certificate_message: [64]u8 = undefined;
+    const certificate_len = buildCertificate(&certificate_message, &invalid_der);
+
+    var handshake = Tls13Handshake.initClient(.{ .skip_cert_verify = false }, &.{});
+    handshake.state = .client_wait_certificate;
+    handshake.server_cert[0] = 0xde;
+    handshake.server_cert[1] = 0xad;
+    handshake.server_cert_len = 2;
+    const transcript_before = handshake.transcript.current();
+    handshake.provideData(certificate_message[0..certificate_len]);
+
+    try std.testing.expectError(error.BadCertificate, handshake.clientProcessCertificate());
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, handshake.server_cert[0..handshake.server_cert_len]);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &handshake.transcript.current());
+    try std.testing.expectEqual(HandshakeState.client_wait_certificate, handshake.state);
 }
 
 test "Tls13Handshake skips CertificateEntry extensions when verification is skipped" {

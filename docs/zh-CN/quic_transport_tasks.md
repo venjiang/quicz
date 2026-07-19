@@ -58,7 +58,10 @@ version-information 原语）：
 
 纯 Zig TLS client 的 Certificate 解析现在会在校验长度后接受并跳过格式正确的
 CertificateEntry per-entry extensions，同时继续拒绝畸形 extension vector、重复
-extension type 和空证书条目。CertificateVerify 解析现在也会在可选证书链校验策略前
+extension type 和空证书条目；certificate validation 失败时会保持已保留的 leaf
+certificate、transcript state 和 client handshake state 不变；过短或非 SEQUENCE
+DER 输入会在进入 certificate parser 前被拒绝。CertificateVerify
+解析现在也会在可选证书链校验策略前
 拒绝空 signature vector 和不支持的 signature scheme；signature validation 失败时
 会保持已解析的 CertificateVerify scheme、signature bytes、transcript state 和
 client handshake state 不变，缺少可用于验证的 Certificate 时也会返回
