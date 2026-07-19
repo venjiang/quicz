@@ -1627,6 +1627,35 @@ test "Tls13Handshake client accepts ServerHello PSK selection before key_share" 
     try std.testing.expect(client.psk_selected);
 }
 
+test "Tls13Handshake client rejects ServerHello PSK selection not offered by current ClientHello" {
+    const psk = [_]u8{0xab} ** secret_len;
+
+    var client = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try client.step();
+    try std.testing.expect(!client.client_offered_psk);
+    const transcript_before = client.transcript.current();
+
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    client.has_psk = true;
+    client.key_schedule = KeySchedule.initWithPsk(psk);
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var server_hello_buf: [160]u8 = undefined;
+    const server_hello_len = buildServerHelloWithPskBeforeKeyShare(&server_hello_buf, server_public);
+
+    client.provideData(server_hello_buf[0..server_hello_len]);
+    try std.testing.expectError(error.DecodeError, client.step());
+    try std.testing.expect(!client.psk_selected);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &client.transcript.current());
+    try std.testing.expect(!client.key_schedule.handshake_secret_derived);
+    try std.testing.expect(!client.pending_install_handshake);
+    try std.testing.expectEqual(HandshakeState.client_wait_server_hello, client.state);
+}
+
 test "Tls13Handshake client rejects invalid ServerHello X25519 key share without selecting PSK" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -2323,8 +2352,9 @@ pub const Tls13Handshake = struct {
     // for this connection (one-shot, so pump does not regenerate it).
     nst_sent: bool = false,
 
-    // Client-side: whether EncryptedExtensions carried the server's 0-RTT
-    // acceptance decision and whether it accepted the offered 0-RTT.
+    // Client-side: whether the current ClientHello offered PSK, and whether
+    // EncryptedExtensions carried the server's 0-RTT acceptance decision.
+    client_offered_psk: bool = false,
     client_offered_early_data: bool = false,
     server_encrypted_extensions_processed: bool = false,
     server_accepted_early_data: bool = false,
@@ -2370,6 +2400,7 @@ pub const Tls13Handshake = struct {
         self.server_accepts_early_data = false;
         self.peer_psk_binder_valid = false;
         self.nst_sent = false;
+        self.client_offered_psk = false;
         self.client_offered_early_data = false;
         self.server_encrypted_extensions_processed = false;
         self.server_accepted_early_data = false;
@@ -2441,6 +2472,7 @@ pub const Tls13Handshake = struct {
         self.server_accepts_early_data = false;
         self.peer_psk_binder_valid = false;
         self.nst_sent = false;
+        self.client_offered_psk = false;
         self.client_offered_early_data = false;
         self.server_encrypted_extensions_processed = false;
         self.server_accepted_early_data = false;
@@ -2830,6 +2862,7 @@ pub const Tls13Handshake = struct {
 
             self.client_random = staged_client_random;
             self.client_random_available = true;
+            self.client_offered_psk = true;
             self.client_offered_early_data = offer_early_data;
             self.state = .client_wait_server_hello;
             return Action{ .send_data = .{
@@ -2853,6 +2886,7 @@ pub const Tls13Handshake = struct {
         self.transcript.update(buf[0..pos]);
         self.client_random = staged_client_random;
         self.client_random_available = true;
+        self.client_offered_psk = false;
         self.client_offered_early_data = false;
         self.state = .client_wait_server_hello;
 
@@ -2946,7 +2980,9 @@ pub const Tls13Handshake = struct {
                 @intFromEnum(ExtType.pre_shared_key) => {
                     // ServerHello pre_shared_key selects one offered identity
                     // by index. This implementation offers one identity only.
-                    if (!self.has_psk or self.session_ticket_len == 0) return error.DecodeError;
+                    if (!self.client_offered_psk or !self.has_psk or self.session_ticket_len == 0) {
+                        return error.DecodeError;
+                    }
                     if (el != 2) return error.DecodeError;
                     if (readU16(ext[0..2]) != 0) return error.DecodeError;
                     selected_psk = true;
