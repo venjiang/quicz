@@ -3982,6 +3982,8 @@ pub const Tls13Handshake = struct {
     /// Build EncryptedExtensions carrying the negotiated ALPN and the server's
     /// QUIC transport parameters (RFC 8446 §4.3.1 + RFC 9001 §8).
     fn serverBuildEncryptedExtensions(self: *Tls13Handshake) HandshakeError!Action {
+        // Local transport parameters are transcript material. Reject oversized
+        // bytes before writing EncryptedExtensions or advancing server state.
         if (self.local_tp_too_large) return error.DecodeError;
         const alpn = self.negotiated_alpn[0..self.negotiated_alpn_len];
         const tp = self.tp_encoded[0..self.tp_encoded_len];
@@ -5773,12 +5775,18 @@ test "Tls13Handshake client rejects oversized EncryptedExtensions transport para
     try std.testing.expectEqual(HandshakeState.client_wait_encrypted_extensions, hs.state);
 }
 
-test "Tls13Handshake server rejects oversized local transport parameters" {
+test "Tls13Handshake server rejects oversized local transport parameters without committing EncryptedExtensions" {
     var tp: [1025]u8 = undefined;
     @memset(&tp, 0xaa);
     var hs = Tls13Handshake.initServer(.{}, &tp);
+    hs.state = .server_send_encrypted_extensions;
+    hs.out_len = 7;
+    const transcript_before = hs.transcript.current();
 
     try std.testing.expectError(error.DecodeError, hs.serverBuildEncryptedExtensions());
+    try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
+    try std.testing.expectEqual(@as(usize, 7), hs.out_len);
+    try std.testing.expectEqual(HandshakeState.server_send_encrypted_extensions, hs.state);
 }
 
 test "Tls13Handshake server rejects oversized EncryptedExtensions ALPN output" {

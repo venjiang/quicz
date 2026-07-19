@@ -121,7 +121,9 @@ random、transcript state 和 pending Handshake key installation 不变；成功
 client-side ServerHello 解析会记录 peer random。client PSK-selection 路径和
 server ServerHello 路径失败时也不会提交 server random、transcript state 或
 pending Handshake key installation；成功的 server-side ServerHello 生成会把已
-发出的 random 标记为可用。
+发出的 random 标记为可用。Server-side EncryptedExtensions 构建会在提交
+transcript bytes、output length 或推进 server state 前拒绝过大的本地 QUIC
+transport parameters。
 纯 Zig TLS input buffer 现在会在 handshake 或 post-handshake 输入过大时返回
 `DecodeError`，不再静默截断 CRYPTO bytes 并继续等待半截 message；它也会拒绝
 压缩已消费 bytes 后仍放不下的新输入，且不会拷贝半截 CRYPTO fragment；同时拒绝
@@ -1595,6 +1597,10 @@ close 和 route cleanup 事件。
   `supported_versions` 或 `key_share` 现在有直接测试证明不会提交 peer key、
   peer random、PSK selection、transcript、pending Handshake key installation
   或 client state。
+
+- 2026-07-19：收紧 server EncryptedExtensions 输出边界覆盖。过大的本地 QUIC
+  transport parameters 会在 transcript update、output-length mutation 或 server
+  state advancement 前被拒绝。
 
 - 2026-07-16：`Tls13ServerEndpoint` 新增 routed datagram dispatcher。socket
   loop 可先分类一次，再由 endpoint owner 分发 routed long-header Initial/Handshake

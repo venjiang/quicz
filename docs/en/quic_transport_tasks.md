@@ -145,7 +145,10 @@ installation unchanged on that failure, while successful client-side
 ServerHello parsing records the peer random. The client PSK-selection path and
 server ServerHello path also keep server random, transcript state, and pending
 Handshake key installation unchanged on failure; successful server-side
-ServerHello generation marks the emitted random available. Pure-Zig TLS input
+ServerHello generation marks the emitted random available. Server-side
+EncryptedExtensions construction rejects oversized local QUIC transport
+parameters before committing transcript bytes, output length, or server state.
+Pure-Zig TLS input
 buffering now reports
 `DecodeError`
 after oversized handshake or post-handshake input instead of silently
@@ -1818,6 +1821,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   `supported_versions` or `key_share` now has direct test coverage proving no
   peer key, peer random, PSK selection, transcript, pending Handshake key
   installation, or client state is committed.
+
+- 2026-07-19: Tightened server EncryptedExtensions output-boundary coverage.
+  Oversized local QUIC transport parameters are rejected before transcript
+  update, output-length mutation, or server state advancement.
 
 - 2026-07-16: Added a routed datagram dispatcher to `Tls13ServerEndpoint`.
   A socket loop can classify once, then let the endpoint owner dispatch routed
