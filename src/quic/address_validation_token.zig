@@ -91,8 +91,11 @@ pub const ReplayFilter = struct {
 
     /// Create a replay filter from an externally persisted snapshot.
     ///
-    /// If the snapshot is larger than `max_entries`, the newest fingerprints at
-    /// the end of the snapshot are retained so eviction order remains stable.
+    /// If the snapshot is larger than `max_entries`, the newest unique
+    /// fingerprints at the end of the snapshot are retained so eviction order
+    /// remains stable. Duplicate fingerprints can appear when workers merge
+    /// persisted replay state; restoring them as separate entries would waste
+    /// bounded replay capacity.
     pub fn initWithSnapshot(
         allocator: std.mem.Allocator,
         max_entries: usize,
@@ -101,8 +104,7 @@ pub const ReplayFilter = struct {
         var filter = ReplayFilter.init(allocator, max_entries);
         errdefer filter.deinit();
 
-        const retained = retainedSnapshotFingerprints(snapshot.fingerprints, max_entries);
-        filter.fingerprints.appendSlice(allocator, retained) catch return error.OutOfMemory;
+        try filter.appendSnapshotFingerprints(snapshot.fingerprints);
         return filter;
     }
 
@@ -152,13 +154,33 @@ pub const ReplayFilter = struct {
         }
         return false;
     }
+
+    fn appendSnapshotFingerprints(self: *ReplayFilter, fingerprints: []const Fingerprint) Error!void {
+        var retained_reversed: std.ArrayList(Fingerprint) = .empty;
+        defer retained_reversed.deinit(self.allocator);
+
+        var index = fingerprints.len;
+        while (index > 0 and retained_reversed.items.len < self.max_entries) {
+            index -= 1;
+            const token_fingerprint = fingerprints[index];
+            if (containsFingerprintSlice(retained_reversed.items, token_fingerprint)) continue;
+            retained_reversed.append(self.allocator, token_fingerprint) catch return error.OutOfMemory;
+        }
+
+        self.fingerprints.ensureUnusedCapacity(self.allocator, retained_reversed.items.len) catch return error.OutOfMemory;
+        var retained_index = retained_reversed.items.len;
+        while (retained_index > 0) {
+            retained_index -= 1;
+            self.fingerprints.appendAssumeCapacity(retained_reversed.items[retained_index]);
+        }
+    }
 };
 
-fn retainedSnapshotFingerprints(fingerprints: []const Fingerprint, max_entries: usize) []const Fingerprint {
-    if (fingerprints.len > max_entries) {
-        return fingerprints[fingerprints.len - max_entries ..];
+fn containsFingerprintSlice(fingerprints: []const Fingerprint, token_fingerprint: Fingerprint) bool {
+    for (fingerprints) |existing| {
+        if (std.crypto.timing_safe.eql(Fingerprint, existing, token_fingerprint)) return true;
     }
-    return fingerprints;
+    return false;
 }
 
 /// Encode a server-authenticated token bound to `peer_address`.
@@ -701,4 +723,65 @@ test "address validation replay filter exports and restores fingerprint snapshot
     try std.testing.expectEqual(@as(usize, 1), trimmed.entryCount());
     try std.testing.expect(!try trimmed.contains(token_a));
     try std.testing.expect(try trimmed.contains(token_b));
+}
+
+test "address validation replay filter restores newest unique snapshot fingerprints" {
+    const secret: Secret = [_]u8{0x82} ** secret_len;
+    const peer_address = "198.51.100.82:4433";
+    const nonce_a: Nonce = [_]u8{0x1a} ** nonce_len;
+    const nonce_b: Nonce = [_]u8{0x1b} ** nonce_len;
+    const nonce_c: Nonce = [_]u8{0x1c} ** nonce_len;
+
+    const token_a = try encode(std.testing.allocator, secret, .{
+        .kind = .new_token,
+        .issued_millis = 1,
+        .lifetime_millis = 1_000,
+        .peer_address = peer_address,
+        .nonce = nonce_a,
+    });
+    defer std.testing.allocator.free(token_a);
+    const token_b = try encode(std.testing.allocator, secret, .{
+        .kind = .new_token,
+        .issued_millis = 2,
+        .lifetime_millis = 1_000,
+        .peer_address = peer_address,
+        .nonce = nonce_b,
+    });
+    defer std.testing.allocator.free(token_b);
+    const token_c = try encode(std.testing.allocator, secret, .{
+        .kind = .new_token,
+        .issued_millis = 3,
+        .lifetime_millis = 1_000,
+        .peer_address = peer_address,
+        .nonce = nonce_c,
+    });
+    defer std.testing.allocator.free(token_c);
+
+    const fingerprint_a = try fingerprint(token_a);
+    const fingerprint_b = try fingerprint(token_b);
+    const fingerprint_c = try fingerprint(token_c);
+    const snapshot_fingerprints = try std.testing.allocator.alloc(Fingerprint, 4);
+    defer std.testing.allocator.free(snapshot_fingerprints);
+    snapshot_fingerprints[0] = fingerprint_a;
+    snapshot_fingerprints[1] = fingerprint_b;
+    snapshot_fingerprints[2] = fingerprint_a;
+    snapshot_fingerprints[3] = fingerprint_c;
+    const snapshot: ReplayFilterSnapshot = .{ .fingerprints = snapshot_fingerprints };
+
+    var restored = try ReplayFilter.initWithSnapshot(std.testing.allocator, 3, snapshot);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 3), restored.entryCount());
+    try std.testing.expect(try restored.contains(token_a));
+    try std.testing.expect(try restored.contains(token_b));
+    try std.testing.expect(try restored.contains(token_c));
+    try std.testing.expectEqualSlices(u8, &fingerprint_b, &restored.fingerprints.items[0]);
+    try std.testing.expectEqualSlices(u8, &fingerprint_a, &restored.fingerprints.items[1]);
+    try std.testing.expectEqualSlices(u8, &fingerprint_c, &restored.fingerprints.items[2]);
+
+    var trimmed = try ReplayFilter.initWithSnapshot(std.testing.allocator, 2, snapshot);
+    defer trimmed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), trimmed.entryCount());
+    try std.testing.expect(try trimmed.contains(token_a));
+    try std.testing.expect(!try trimmed.contains(token_b));
+    try std.testing.expect(try trimmed.contains(token_c));
 }
