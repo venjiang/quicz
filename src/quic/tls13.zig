@@ -7162,6 +7162,31 @@ test "Tls13Handshake server rejects malformed ClientHello SNI list length" {
     try std.testing.expectError(error.DecodeError, server.step());
 }
 
+test "Tls13Handshake server rejects empty ClientHello SNI host_name without committing parsed name" {
+    var hello_buf: [2048]u8 = undefined;
+    const hello = try clientHelloBytes(.{
+        .server_name = "example.com",
+    }, &hello_buf);
+    const ext = try clientHelloExtension(hello, @intFromEnum(ExtType.server_name));
+    try std.testing.expect(ext.body_len >= 5);
+    try std.testing.expectEqual(@as(u8, 0), hello_buf[ext.body_offset + 2]);
+    writeU16(hello_buf[ext.body_offset + 3 ..][0..2], 0);
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    @memcpy(server.client_sni[0..3], "old");
+    server.client_sni_len = 3;
+    const old_client_random = [_]u8{0x42} ** 32;
+    server.client_random = old_client_random;
+    const transcript_before = server.transcript.current();
+
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expectEqualStrings("old", server.client_sni[0..server.client_sni_len]);
+    try std.testing.expectEqualSlices(u8, &old_client_random, &server.client_random);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
+}
+
 test "Tls13Handshake server rejects missing ClientHello SNI when configured" {
     var client = Tls13Handshake.initClient(.{}, &[_]u8{});
     var server = Tls13Handshake.initServer(.{
