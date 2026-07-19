@@ -71991,6 +71991,96 @@ test "Tls13Backend server drives a Connection to install handshake keys" {
     try std.testing.expect(server_progress.handshake_keys_installed);
 }
 
+test "Tls13Backend client Connection withholds unauthenticated server parameters on certificate failure" {
+    const X25519 = std.crypto.dh.X25519;
+    const alpn_proto = "hq-interop";
+    const alpn = [_][]const u8{alpn_proto};
+
+    var client = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 8192,
+    });
+    defer client.deinit();
+
+    var client_backend = tls13_backend.Tls13Backend.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = false,
+    });
+
+    var scratch: [8192]u8 = undefined;
+    const client_hello_progress = try client.driveCryptoBackendInSpace(
+        .initial,
+        client_backend.cryptoBackend(),
+        &scratch,
+    );
+    try std.testing.expect(client_hello_progress.outbound_bytes > 0);
+    try std.testing.expect(!client_hello_progress.peer_transport_parameters_applied);
+    try std.testing.expect(!client_hello_progress.handshake_confirmed);
+
+    var server_secret: [32]u8 = undefined;
+    tls13.secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var server_hello_buf: [128]u8 = undefined;
+    const server_hello_len = tls13.buildServerHello(&server_hello_buf, server_public, 0x1301, true, true);
+
+    var initial_datagram: [256]u8 = undefined;
+    var initial_out = buffer.fixedWriter(&initial_datagram);
+    try frame.encodeFrame(initial_out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = server_hello_buf[0..server_hello_len],
+    } });
+    try client.processDatagramInSpace(.initial, 10, initial_out.getWritten());
+
+    const initial_progress = try client.driveCryptoBackendInSpace(
+        .initial,
+        client_backend.cryptoBackend(),
+        &scratch,
+    );
+    try std.testing.expect(initial_progress.handshake_keys_installed);
+    try std.testing.expect(!initial_progress.peer_transport_parameters_applied);
+    try std.testing.expect(!initial_progress.handshake_confirmed);
+
+    var peer_tp_buf: [160]u8 = undefined;
+    var peer_tp_out = buffer.fixedWriter(&peer_tp_buf);
+    try transport_parameters.encode(peer_tp_out.writer(), .{
+        .initial_max_data = 4321,
+        .max_udp_payload_size = 1400,
+    });
+    const peer_tp = peer_tp_out.getWritten();
+
+    var ee_buf: [256]u8 = undefined;
+    const ee_len = tls13.buildEncryptedExtensions(&ee_buf, alpn_proto, peer_tp);
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+    var cert_buf: [512]u8 = undefined;
+    const cert_len = tls13.buildCertificate(&cert_buf, &cert_der);
+
+    var flight: [1024]u8 = undefined;
+    var flight_len: usize = 0;
+    @memcpy(flight[flight_len..][0..ee_len], ee_buf[0..ee_len]);
+    flight_len += ee_len;
+    @memcpy(flight[flight_len..][0..cert_len], cert_buf[0..cert_len]);
+    flight_len += cert_len;
+
+    var handshake_datagram: [1200]u8 = undefined;
+    var handshake_out = buffer.fixedWriter(&handshake_datagram);
+    try frame.encodeFrame(handshake_out.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = flight[0..flight_len],
+    } });
+    try client.processDatagramInSpace(.handshake, 20, handshake_out.getWritten());
+
+    try std.testing.expectError(error.CryptoError, client.driveCryptoBackendInSpace(
+        .handshake,
+        client_backend.cryptoBackend(),
+        &scratch,
+    ));
+    try std.testing.expect(client_backend.hs.peer_tp_available);
+    try std.testing.expect(client_backend.hs.negotiated_alpn_len != 0);
+    try std.testing.expectEqual(@as(u64, 65_536), client.peer_max_data);
+    try std.testing.expect(!client.hasOneRttProtectionKeys());
+    try std.testing.expect(!client.handshakeConfirmed());
+}
+
 test "Tls13Backend + Connection: PTO probe fires after ACK loss on TLS-owned path" {
     const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 
