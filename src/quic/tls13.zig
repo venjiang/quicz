@@ -6940,6 +6940,24 @@ test "Tls13Handshake server rejects invalid certificate private key without comm
     try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
+test "Tls13Handshake server rejects CertificateVerify invalid private key without committing output state" {
+    const short_private_key = [_]u8{0xaa};
+    var server = Tls13Handshake.initServer(.{
+        .private_key_bytes = &short_private_key,
+        .private_key_algorithm = .ed25519,
+    }, &[_]u8{});
+    server.state = .server_send_certificate_verify;
+    server.out_len = 9;
+    @memset(server.out_buf[0..9], 0x5a);
+    const transcript_before = server.transcript.current();
+
+    try std.testing.expectError(error.BadCertificate, server.serverBuildCertificateVerify());
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(@as(usize, 9), server.out_len);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0x5a} ** 9), server.out_buf[0..9]);
+    try std.testing.expectEqual(HandshakeState.server_send_certificate_verify, server.state);
+}
+
 test "Tls13Handshake server rejects empty certificate entry without committing parsed state" {
     var hello_buf: [1024]u8 = undefined;
     const hello = try clientHelloBytes(.{}, &hello_buf);

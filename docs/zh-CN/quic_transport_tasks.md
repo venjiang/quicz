@@ -86,7 +86,9 @@ certificate、transcript state 和 client handshake state 不变；tag 或 lengt
 拒绝空 signature vector 和不支持的 signature scheme；signature validation 失败时
 会保持已解析的 CertificateVerify scheme、signature bytes、transcript state 和
 client handshake state 不变，缺少可用于验证的 Certificate 时也会返回
-`BadCertificate` 而不是进入 parser panic。ClientHello 构建现在也会在
+`BadCertificate` 而不是进入 parser panic。服务端 CertificateVerify 生成也会在
+修改 output bytes、output length、transcript 或 server state 前拒绝非法的配置私钥。
+ClientHello 构建现在也会在
 编码 ALPN extension 或提交生成的 client random 前拒绝重复的本地 ALPN protocol name；服务端 ClientHello
 处理现在也会在 ALPN selection 前拒绝空、超长或重复的本地 ALPN protocol name；
 server-side ALPN selection 只会在完整 ClientHello 成功后提交。
@@ -1601,6 +1603,10 @@ close 和 route cleanup 事件。
 - 2026-07-19：收紧 server EncryptedExtensions 输出边界覆盖。过大的本地 QUIC
   transport parameters 会在 transcript update、output-length mutation 或 server
   state advancement 前被拒绝。
+
+- 2026-07-19：收紧 server CertificateVerify 输出边界覆盖。非法的配置私钥会在
+  server 写入 CertificateVerify output bytes、修改 output length、更新 transcript
+  或推进 handshake state 前被拒绝。
 
 - 2026-07-16：`Tls13ServerEndpoint` 新增 routed datagram dispatcher。socket
   loop 可先分类一次，再由 endpoint owner 分发 routed long-header Initial/Handshake

@@ -100,7 +100,9 @@ signature vectors and unsupported signature schemes before any optional
 certificate-chain verification policy, and it keeps the parsed
 CertificateVerify scheme, signature bytes, transcript state, and client
 handshake state unchanged when signature validation fails or no Certificate is
-available to verify. ClientHello construction now rejects
+available to verify. Server-side CertificateVerify generation also rejects an
+invalid configured private key before mutating output bytes, output length,
+transcript, or server state. ClientHello construction now rejects
 duplicate local ALPN protocol names before encoding the ALPN extension or
 committing the generated client random, and
 server-side ClientHello processing now rejects empty, oversized, or duplicate
@@ -1825,6 +1827,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 - 2026-07-19: Tightened server EncryptedExtensions output-boundary coverage.
   Oversized local QUIC transport parameters are rejected before transcript
   update, output-length mutation, or server state advancement.
+
+- 2026-07-19: Tightened server CertificateVerify output-boundary coverage.
+  Invalid configured private keys are rejected before the server writes
+  CertificateVerify output bytes, mutates output length, updates the
+  transcript, or advances handshake state.
 
 - 2026-07-16: Added a routed datagram dispatcher to `Tls13ServerEndpoint`.
   A socket loop can classify once, then let the endpoint owner dispatch routed
