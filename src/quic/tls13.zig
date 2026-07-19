@@ -1261,6 +1261,9 @@ test "Tls13Handshake server parses client pre_shared_key and early_data extensio
     // Server receives the ClientHello and parses its extensions.
     var server = Tls13Handshake.initServer(.{
         .alpn = &alpn,
+        .cert_chain_der = &.{&[_]u8{ 0x30, 0x03, 0x01 }},
+        .private_key_bytes = &([_]u8{0x55} ** 32),
+        .private_key_algorithm = .ed25519,
     }, &tp);
     server.provideData(client_hello);
     _ = try server.step();
@@ -1370,6 +1373,9 @@ test "Tls13Handshake server applies PSK ticket age policy" {
 
     var stale_server = Tls13Handshake.initServerWithPsk(.{
         .alpn = &alpn,
+        .cert_chain_der = &.{&[_]u8{ 0x30, 0x03, 0x01 }},
+        .private_key_bytes = &([_]u8{0x55} ** 32),
+        .private_key_algorithm = .ed25519,
     }, &tp, psk);
     try stale_server.setServerPskTicketAgePolicy(ticket_age_add, 1000);
     stale_server.provideData(stale_hello);
@@ -1419,6 +1425,9 @@ test "Tls13Handshake server consumes PSK identity through replay filter" {
 
     var replay_server = Tls13Handshake.initServerWithPsk(.{
         .alpn = &alpn,
+        .cert_chain_der = &.{&[_]u8{ 0x30, 0x03, 0x01 }},
+        .private_key_bytes = &([_]u8{0x55} ** 32),
+        .private_key_algorithm = .ed25519,
         .server_psk_replay_filter = &replay_filter,
     }, &tp, psk);
     replay_server.provideData(replay_hello);
@@ -1672,6 +1681,9 @@ test "Tls13Handshake server selects PSK only for matching ticket identity" {
 
     var mismatched = Tls13Handshake.initServerWithPsk(.{
         .alpn = &alpn,
+        .cert_chain_der = &.{&[_]u8{ 0x30, 0x03, 0x01 }},
+        .private_key_bytes = &([_]u8{0x55} ** 32),
+        .private_key_algorithm = .ed25519,
     }, &tp, psk);
     const other_ticket = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
     try mismatched.setServerPskIdentity(&other_ticket);
@@ -3696,6 +3708,7 @@ pub const Tls13Handshake = struct {
             next_key_schedule = KeySchedule.init();
         }
         if (!next_psk_selected) {
+            if (offered_psk and self.config.cert_chain_der.len == 0) return error.BadCertificate;
             if (self.config.cert_chain_der.len > 0 and !have_signature_algorithms) return error.MissingExtension;
             if (have_signature_algorithms and !client_supports_server_sig) return error.UnsupportedSignatureAlgorithm;
             if (self.config.cert_chain_der.len > 0) {
@@ -6145,6 +6158,26 @@ test "Tls13Handshake server rejects oversized ClientHello PSK identity" {
     var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects unselected PSK without certificate fallback" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const other_ticket = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+
+    var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
+    try server.setServerPskIdentity(&other_ticket);
+    const transcript_before = server.transcript.current();
+    server.provideData(hello);
+
+    try std.testing.expectError(error.BadCertificate, server.step());
+    try std.testing.expect(!server.peer_offered_psk);
+    try std.testing.expect(!server.psk_selected);
+    try std.testing.expect(!server.peer_psk_binder_valid);
+    try std.testing.expect(!server.server_early_traffic_secret_derived);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
 test "Tls13Handshake server rejects mismatched PSK identity and binder counts" {

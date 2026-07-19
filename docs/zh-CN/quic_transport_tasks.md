@@ -184,6 +184,8 @@ builder 与 backend pump 的 one-shot `nst_sent` 边界一致。
 selected-PSK handshake 现在不再要求 ClientHello `signature_algorithms`，
 即使 server 配置了证书链；signature algorithm 校验只应用于最终回退到证书认证的路径，
 并且 PSK identity 不匹配时仍会拒绝缺失的 `signature_algorithms`。
+如果 ClientHello offer 了 PSK，但 server 最终未选择 PSK 且没有配置证书回退路径，
+server 现在会在提交 peer PSK state、transcript state 或派生 0-RTT secret 前拒绝握手。
 TLS-owned 0-RTT acceptance signal 现在绑定到连接策略：server 只有在
 connection 接受已安装 peer 0-RTT key 时才发送 EncryptedExtensions
 `early_data`；client 一旦从 EncryptedExtensions 确认 server 拒绝 early data，
@@ -1504,6 +1506,11 @@ close 和 route cleanup 事件。
   server 不再在 PSK binder 验证并选中前强制要求 `signature_algorithms`；聚焦测试会在
   移除该 extension 后刷新 binder，并证明 server 选择 PSK 且不进入证书路径；匹配的
   fallback 测试证明 identity 不匹配时仍要求 `signature_algorithms` 才能走证书认证。
+
+- 2026-07-19：收紧 PSK 到证书认证的 fallback 边界。ClientHello offer 了
+  PSK 但 server 保持 PSK unselected 且没有配置证书链时，纯 Zig TLS 现在会以
+  `BadCertificate` 失败，并且不会提交 peer PSK state、transcript state 或
+  0-RTT secret state。
 
 - 2026-07-17：收紧纯 Zig TLS ClientHello supported_groups 校验。server 现在会在
   选择 X25519 或推进 handshake 前拒绝 `supported_groups` 里的重复 NamedGroup entry。
