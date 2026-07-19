@@ -1575,7 +1575,7 @@ test "Tls13Handshake server selects valid PSK in ServerHello" {
     try std.testing.expect(client.psk_selected);
 }
 
-test "Tls13Handshake client accepts unknown extension after ServerHello PSK selection" {
+test "Tls13Handshake client accepts ServerHello PSK selection before key_share" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
     const psk = [_]u8{0xab} ** secret_len;
@@ -1587,25 +1587,15 @@ test "Tls13Handshake client accepts unknown extension after ServerHello PSK sele
     const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
     @memcpy(client.session_ticket[0..ticket.len], &ticket);
     client.session_ticket_len = ticket.len;
-    const client_hello = (try client.step()).send_data.data;
+    _ = try client.step();
 
-    var server = Tls13Handshake.initServerWithPsk(.{
-        .alpn = &alpn,
-    }, &tp, psk);
-    server.provideData(client_hello);
-    try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
-    const server_hello_action = try server.step();
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var server_hello_buf: [160]u8 = undefined;
+    const server_hello_len = buildServerHelloWithPskBeforeKeyShare(&server_hello_buf, server_public);
 
-    var server_hello_buf: [256]u8 = undefined;
-    @memcpy(server_hello_buf[0..server_hello_action.send_data.data.len], server_hello_action.send_data.data);
-    const server_hello = try appendServerHelloRawExtension(
-        &server_hello_buf,
-        server_hello_action.send_data.data.len,
-        0xaaaa,
-        &[_]u8{},
-    );
-
-    client.provideData(server_hello);
+    client.provideData(server_hello_buf[0..server_hello_len]);
     try std.testing.expect(std.meta.activeTag(try client.step()) == ._continue);
     try std.testing.expect(client.psk_selected);
 }
@@ -2793,7 +2783,7 @@ pub const Tls13Handshake = struct {
                     if (readU16(ext[0..2]) != 0) return error.DecodeError;
                     self.psk_selected = true;
                 },
-                else => {},
+                else => return error.DecodeError,
             }
         }
 
@@ -2884,7 +2874,7 @@ pub const Tls13Handshake = struct {
                     }
                     self.server_accepted_early_data = true;
                 },
-                else => {},
+                else => return error.DecodeError,
             }
         }
 
@@ -4035,6 +4025,48 @@ pub fn buildServerHello(
     return p;
 }
 
+fn buildServerHelloWithPskBeforeKeyShare(buf: []u8, server_public: [32]u8) usize {
+    var p: usize = 0;
+    buf[p] = @intFromEnum(HandshakeType.server_hello);
+    p += 1;
+    p += 3; // length placeholder
+    buf[p] = 0x03;
+    buf[p + 1] = 0x03;
+    p += 2;
+    @memset(buf[p..][0..32], 0xAA);
+    p += 32;
+    buf[p] = 0;
+    p += 1;
+    writeU16(buf[p..], cipher_aes_128_gcm_sha256);
+    p += 2;
+    buf[p] = 0;
+    p += 1;
+
+    const ext_start = p;
+    p += 2;
+    p = writeExtHeader(buf, p, @intFromEnum(ExtType.supported_versions), 2);
+    writeU16(buf[p..], version_tls_1_3);
+    p += 2;
+    p = writeExtHeader(buf, p, @intFromEnum(ExtType.pre_shared_key), 2);
+    writeU16(buf[p..], 0);
+    p += 2;
+    p = writeExtHeader(buf, p, @intFromEnum(ExtType.key_share), 2 + 2 + 32);
+    writeU16(buf[p..], group_x25519);
+    p += 2;
+    writeU16(buf[p..], 32);
+    p += 2;
+    @memcpy(buf[p..][0..32], &server_public);
+    p += 32;
+
+    const ext_len = p - ext_start - 2;
+    writeU16(buf[ext_start..], @intCast(ext_len));
+    const msg_len = p - 4;
+    buf[1] = @intCast((msg_len >> 16) & 0xFF);
+    buf[2] = @intCast((msg_len >> 8) & 0xFF);
+    buf[3] = @intCast(msg_len & 0xFF);
+    return p;
+}
+
 fn appendDuplicateServerHelloExtension(buf: []u8, msg_len: usize, ext_type: u16) ![]u8 {
     if (msg_len < 4 + 2 + 32 + 1 + 2 + 1 + 2) return error.TestUnexpectedResult;
     var pos: usize = 4 + 2 + 32;
@@ -4283,7 +4315,7 @@ test "Tls13Handshake client rejects duplicate known ServerHello extensions" {
     try std.testing.expectError(error.DecodeError, hs.step());
 }
 
-test "Tls13Handshake client ignores unknown ServerHello extension" {
+test "Tls13Handshake client rejects unrequested ServerHello extension" {
     var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
     _ = try hs.step();
 
@@ -4294,23 +4326,6 @@ test "Tls13Handshake client ignores unknown ServerHello extension" {
     var sh_buf: [160]u8 = undefined;
     const base_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
     const server_hello = try appendServerHelloRawExtension(&sh_buf, base_len, 0xaaaa, &[_]u8{});
-    hs.provideData(server_hello);
-
-    try std.testing.expect(std.meta.activeTag(try hs.step()) == ._continue);
-}
-
-test "Tls13Handshake client rejects duplicate unknown ServerHello extensions" {
-    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
-    _ = try hs.step();
-
-    var server_secret: [32]u8 = undefined;
-    secureRandomBytes(&server_secret);
-    const server_public = try X25519.recoverPublicKey(server_secret);
-
-    var sh_buf: [192]u8 = undefined;
-    const base_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
-    const with_unknown = try appendServerHelloRawExtension(&sh_buf, base_len, 0xaaaa, &[_]u8{});
-    const server_hello = try appendServerHelloRawExtension(&sh_buf, with_unknown.len, 0xaaaa, &[_]u8{});
     hs.provideData(server_hello);
 
     try std.testing.expectError(error.DecodeError, hs.step());
@@ -5058,7 +5073,7 @@ test "Tls13Handshake client rejects duplicate known EncryptedExtensions extensio
     try std.testing.expectError(error.DecodeError, hs.step());
 }
 
-test "Tls13Handshake client ignores unknown EncryptedExtensions extension" {
+test "Tls13Handshake client rejects unrequested EncryptedExtensions extension" {
     var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
     _ = try hs.step();
 
@@ -5073,28 +5088,6 @@ test "Tls13Handshake client ignores unknown EncryptedExtensions extension" {
     var ee_buf: [256]u8 = undefined;
     const base_len = buildEncryptedExtensions(&ee_buf, "", &[_]u8{});
     const encrypted_extensions = try appendEncryptedExtensionsRawExtension(&ee_buf, base_len, 0xaaaa, &[_]u8{});
-    hs.provideData(encrypted_extensions);
-
-    try std.testing.expect(std.meta.activeTag(try hs.step()) == ._continue);
-    try std.testing.expectEqual(@as(usize, 0), hs.peer_tp_len);
-}
-
-test "Tls13Handshake client rejects duplicate unknown EncryptedExtensions extensions" {
-    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
-    _ = try hs.step();
-
-    var server_secret: [32]u8 = undefined;
-    secureRandomBytes(&server_secret);
-    const server_public = try X25519.recoverPublicKey(server_secret);
-    var sh_buf: [128]u8 = undefined;
-    hs.provideData(sh_buf[0..buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true)]);
-    _ = try hs.step();
-    _ = try hs.step();
-
-    var ee_buf: [256]u8 = undefined;
-    const base_len = buildEncryptedExtensions(&ee_buf, "", &[_]u8{});
-    const with_unknown = try appendEncryptedExtensionsRawExtension(&ee_buf, base_len, 0xaaaa, &[_]u8{});
-    const encrypted_extensions = try appendEncryptedExtensionsRawExtension(&ee_buf, with_unknown.len, 0xaaaa, &[_]u8{});
     hs.provideData(encrypted_extensions);
 
     try std.testing.expectError(error.DecodeError, hs.step());
