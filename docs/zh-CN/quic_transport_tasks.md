@@ -67,7 +67,8 @@ certificate、transcript state 和 client handshake state 不变；tag 或 lengt
 client handshake state 不变，缺少可用于验证的 Certificate 时也会返回
 `BadCertificate` 而不是进入 parser panic。ClientHello 构建现在也会在
 编码 ALPN extension 前拒绝重复的本地 ALPN protocol name；服务端 ClientHello
-处理现在也会在 ALPN selection 前拒绝空、超长或重复的本地 ALPN protocol name。
+处理现在也会在 ALPN selection 前拒绝空、超长或重复的本地 ALPN protocol name；
+server-side ALPN selection 只会在完整 ClientHello 成功后提交。
 服务端 ClientHello 处理现在还会在对端 SNI 匹配前拒绝空或本地无法匹配的超长
 配置 SNI 名称。需要证书路径时，服务端 ClientHello 处理现在还会在发出
 ServerHello 前拒绝空或过大的本地证书链，以及缺失或非法的本地私钥配置。

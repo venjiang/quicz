@@ -77,7 +77,8 @@ handshake state unchanged when signature validation fails or no Certificate is
 available to verify. ClientHello construction now rejects
 duplicate local ALPN protocol names before encoding the ALPN extension, and
 server-side ClientHello processing now rejects empty, oversized, or duplicate
-local ALPN protocol names before ALPN selection. Server-side ClientHello
+local ALPN protocol names before ALPN selection; server-side ALPN selection is
+only committed after the full ClientHello succeeds. Server-side ClientHello
 processing now also rejects empty or locally unmatchable oversized configured
 SNI names before peer SNI matching. When the certificate path is required,
 server-side ClientHello processing now rejects empty or oversized configured

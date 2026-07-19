@@ -3285,6 +3285,8 @@ pub const Tls13Handshake = struct {
         var client_supports_x25519 = false;
         var client_supports_server_sig = false;
         var client_supports_psk_dhe_ke = false;
+        var selected_alpn: [256]u8 = undefined;
+        var selected_alpn_len: usize = 0;
         var seen_known_extensions: u16 = 0;
         const server_sig_scheme = signatureSchemeForPrivateKeyAlgorithm(self.config.private_key_algorithm);
         while (pos < ext_end) {
@@ -3366,10 +3368,10 @@ pub const Tls13Handshake = struct {
                         }
                         for (self.config.alpn) |our| {
                             if (std.mem.eql(u8, proto, our)) {
-                                self.negotiated_alpn_len = @min(plen, self.negotiated_alpn.len);
+                                selected_alpn_len = @min(plen, selected_alpn.len);
                                 @memcpy(
-                                    self.negotiated_alpn[0..self.negotiated_alpn_len],
-                                    proto[0..self.negotiated_alpn_len],
+                                    selected_alpn[0..selected_alpn_len],
+                                    proto[0..selected_alpn_len],
                                 );
                                 break;
                             }
@@ -3533,7 +3535,7 @@ pub const Tls13Handshake = struct {
         if (!have_supported_groups) return error.MissingExtension;
         if (!have_quic_transport_parameters) return error.MissingExtension;
         if (have_supported_groups and !client_supports_x25519) return error.NoKeyShare;
-        if (self.config.alpn.len > 0 and self.negotiated_alpn_len == 0) return error.NoApplicationProtocol;
+        if (self.config.alpn.len > 0 and selected_alpn_len == 0) return error.NoApplicationProtocol;
         if (self.config.server_name != null and !have_server_name) return error.UnrecognizedName;
         if (self.peer_offered_early_data and !self.peer_offered_psk) return error.DecodeError;
         if (self.peer_offered_psk and !have_psk_key_exchange_modes) return error.MissingExtension;
@@ -3598,6 +3600,10 @@ pub const Tls13Handshake = struct {
                 try validateServerCertificateChain(self.config.cert_chain_der, self.out_buf.len);
                 try validateServerCertificatePrivateKey(self.config);
             }
+        }
+        self.negotiated_alpn_len = selected_alpn_len;
+        if (selected_alpn_len > 0) {
+            @memcpy(self.negotiated_alpn[0..selected_alpn_len], selected_alpn[0..selected_alpn_len]);
         }
         self.state = .server_send_server_hello;
         return ._continue;
@@ -6417,6 +6423,28 @@ test "Tls13Handshake server rejects duplicate ClientHello ALPN protocols" {
     var server = Tls13Handshake.initServer(.{ .alpn = &alpn }, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects later ClientHello error without committing ALPN" {
+    const alpn = [_][]const u8{"hq-interop"};
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{ .alpn = &alpn }, &hello_buf);
+    const hello = try appendDuplicateClientHelloExtension(
+        &hello_buf,
+        base_hello.len,
+        @intFromEnum(ExtType.supported_versions),
+    );
+
+    var server = Tls13Handshake.initServer(.{ .alpn = &alpn }, &[_]u8{});
+    @memcpy(server.negotiated_alpn[0..3], "old");
+    server.negotiated_alpn_len = 3;
+    const transcript_before = server.transcript.current();
+    server.provideData(hello);
+
+    try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expectEqualStrings("old", server.negotiated_alpn[0..server.negotiated_alpn_len]);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
 test "Tls13Handshake server rejects empty local ALPN protocol name" {
