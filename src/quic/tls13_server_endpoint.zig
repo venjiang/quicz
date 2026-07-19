@@ -1497,9 +1497,13 @@ pub fn Tls13ServerEndpoint(
                 _ = self.lifecycle.retireConnection(connection_id);
                 return err;
             };
-            errdefer _ = self.lifecycle.retireConnection(connection_id);
+            var record_adopted = false;
+            errdefer {
+                if (!record_adopted) _ = self.lifecycle.retireConnection(connection_id);
+            }
 
             try self.records.adopt(connection_id, record);
+            record_adopted = true;
             if (accepted.drain.first_error != null or !accepted.backend.handshake_keys_installed) {
                 return .{ .initial = accepted };
             }
@@ -1510,7 +1514,7 @@ pub fn Tls13ServerEndpoint(
                 now_millis,
                 handshake_out,
             ) catch |err| {
-                self.records.remove(connection_id) catch return error.Internal;
+                _ = self.records.retire(&self.lifecycle, connection_id) catch return error.Internal;
                 return err;
             };
             return .{
@@ -2369,6 +2373,35 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             return null;
         }
     };
+    const RejectingHandshakeBackend = struct {
+        secrets: root.HandshakeTrafficSecrets,
+        secrets_sent: bool = false,
+
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .pull_handshake_traffic_secrets = pullHandshakeTrafficSecrets,
+            };
+        }
+
+        fn receive(_: *anyopaque, space: root.PacketNumberSpace, _: []const u8) root.Error!void {
+            if (space == .handshake) return error.InvalidPacket;
+        }
+
+        fn pull(_: *anyopaque, space: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            if (space == .handshake) return error.InvalidPacket;
+            return null;
+        }
+
+        fn pullHandshakeTrafficSecrets(context: *anyopaque) root.Error!?root.HandshakeTrafficSecrets {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.secrets_sent) return null;
+            self.secrets_sent = true;
+            return self.secrets;
+        }
+    };
     const EmptyBackend = struct {
         fn backend(self: *@This()) root.CryptoBackend {
             return .{
@@ -2807,6 +2840,47 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     rejecting_record_owned = false;
     rejecting_record.deinit();
     std.testing.allocator.destroy(rejecting_record);
+
+    const handshake_rejecting_record = try std.testing.allocator.create(TestRecord);
+    var handshake_rejecting_record_initialized = false;
+    var handshake_rejecting_record_owned = true;
+    errdefer {
+        if (handshake_rejecting_record_owned) {
+            if (handshake_rejecting_record_initialized) handshake_rejecting_record.deinit();
+            std.testing.allocator.destroy(handshake_rejecting_record);
+        }
+    }
+    handshake_rejecting_record.* = .{
+        .handle = 12,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = undefined,
+    };
+    handshake_rejecting_record_initialized = true;
+    var handshake_rejecting_backend = RejectingHandshakeBackend{ .secrets = .{
+        .local = accepted_secrets.server.secret,
+        .peer = accepted_secrets.client.secret,
+    } };
+    handshake_rejecting_record.backend = handshake_rejecting_backend.backend();
+    const handshake_rejecting_handle = handshake_rejecting_record.handle;
+    try std.testing.expectError(
+        error.InvalidPacket,
+        endpoint_owner.acceptInitialRecord(
+            handshake_rejecting_handle,
+            handshake_rejecting_record,
+            2,
+            accepted_initial,
+            &accepted_server_scid,
+            initial_datagram,
+            .{ .active_migration_disabled = true },
+            &rejecting_scratch,
+            &rejecting_output,
+            &rejecting_output,
+        ),
+    );
+    handshake_rejecting_record_owned = false;
+    try std.testing.expect(endpoint_owner.records.get(handshake_rejecting_handle) == null);
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.recoveryTimerCount());
 
     const retired_record = try endpoint_owner.retireRecord(retry_record_handle);
     try std.testing.expectEqual(@as(usize, 1), retired_record.routes_retired);

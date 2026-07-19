@@ -612,6 +612,9 @@ server derives two route slots per active connection from this library-level
 limit. A capacity-exhausted accepted Initial rolls back its first route when
 the second CID cannot be installed; reset-token capacity rejects a new token
 without disturbing existing routes or retained tokens.
+Accepted-Initial record admission now also retires through the registry if the
+post-adoption Handshake backend drive fails, so the adopted record, installed
+route, and mirrored recovery timer are cleaned up as one endpoint-owned unit.
 
 The concurrent path reads the monotonic `awake` clock, waits only until
 `nextDeadlineAcrossConnections()`'s earliest lifecycle deadline, and services
