@@ -1089,6 +1089,15 @@ test "Tls13Handshake serverBuildNewSessionTicket requires server connected state
     try std.testing.expectError(error.UnexpectedMessage, client.serverBuildNewSessionTicket());
 }
 
+test "Tls13Handshake serverBuildNewSessionTicket requires application secrets" {
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.state = .connected;
+
+    try std.testing.expectError(error.UnexpectedMessage, server.serverBuildNewSessionTicket());
+    try std.testing.expect(!server.nst_sent);
+    try std.testing.expectEqual(@as(usize, 0), server.out_len);
+}
+
 test "Tls13Handshake serverBuildNewSessionTicket emits ticket age add" {
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     const shared_secret = [_]u8{0x01} ** 32;
@@ -4083,6 +4092,7 @@ pub const Tls13Handshake = struct {
     pub fn serverBuildNewSessionTicket(self: *Tls13Handshake) HandshakeError!Action {
         if (!self.is_server) return error.UnexpectedMessage;
         if (self.state != .connected) return error.UnexpectedMessage;
+        if (!self.key_schedule.app_secret_derived) return error.UnexpectedMessage;
         if (self.nst_sent) return error.UnexpectedMessage;
         const rms = self.key_schedule.deriveResumptionMasterSecret(self.transcript.current());
 
