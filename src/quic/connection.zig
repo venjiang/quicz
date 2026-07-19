@@ -16519,6 +16519,44 @@ test "persistent congestion resets congestion window to minimum under controlled
     try std.testing.expect(conn.recovery_state.wouldStartCongestionRecovery(1300));
 }
 
+test "Application persistent congestion duration includes max_ack_delay" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .max_datagram_size = 1200,
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.confirmHandshake();
+
+    try std.testing.expectEqual(@as(u64, 975), conn.recovery_state.persistentCongestionDurationMs());
+    try std.testing.expectEqual(@as(u64, 900), conn.recovery_state.persistentCongestionDurationMsWithoutMaxAckDelay());
+
+    _ = try conn.recordPacketSentInSpace(.application, 10, 100);
+    try conn.receiveAckInSpace(.application, 110, .{
+        .largest_acknowledged = 0,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(?i64, 10), conn.first_rtt_sample_sent_time_millis);
+
+    _ = try conn.recordPacketSentInSpace(.application, 200, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 1150, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 1151, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 1152, 100);
+    _ = try conn.recordPacketSentInSpace(.application, 1153, 100);
+
+    try conn.receiveAckInSpace(.application, 1250, .{
+        .largest_acknowledged = 5,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), conn.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 200), conn.bytesInFlight(.application));
+    try std.testing.expectEqual(@as(usize, 6000), conn.congestionWindow(.application));
+    try std.testing.expect(conn.congestionWindow(.application) > recovery.minimumCongestionWindow(1200));
+    try std.testing.expect(!conn.recovery_state.wouldStartCongestionRecovery(1250));
+}
+
 test "Initial persistent congestion duration excludes max_ack_delay" {
     var conn = try Connection.init(std.testing.allocator, .client, .{
         .max_datagram_size = 1200,
