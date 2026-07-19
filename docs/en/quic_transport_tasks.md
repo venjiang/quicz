@@ -81,11 +81,12 @@ local ALPN protocol names before ALPN selection; server-side ALPN selection is
 only committed after the full ClientHello succeeds. Server-side ClientHello
 processing now also rejects empty or locally unmatchable oversized configured
 SNI names before peer SNI matching; parsed SNI is only committed after the full
-ClientHello succeeds. Server-side peer QUIC transport parameters are also only
-committed after the full ClientHello succeeds. When the certificate path is
-required, server-side ClientHello processing now rejects empty or oversized
-configured certificate chains plus missing or invalid configured private keys
-before emitting ServerHello. Pure-Zig TLS client-side ServerHello and
+ClientHello succeeds. Server-side peer X25519 key_share and peer QUIC transport
+parameters are also only committed after the full ClientHello succeeds. When
+the certificate path is required, server-side ClientHello processing now
+rejects empty or oversized configured certificate chains plus missing or
+invalid configured private keys before emitting ServerHello. Pure-Zig TLS
+client-side ServerHello and
 EncryptedExtensions parsing now rejects unsolicited extension types while still
 rejecting duplicate extension types; EncryptedExtensions parsing keeps ALPN,
 peer transport parameters, early-data acceptance, transcript state, and client

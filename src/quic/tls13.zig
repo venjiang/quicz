@@ -3285,6 +3285,7 @@ pub const Tls13Handshake = struct {
         var client_supports_x25519 = false;
         var client_supports_server_sig = false;
         var client_supports_psk_dhe_ke = false;
+        var parsed_peer_x25519_public: [32]u8 = undefined;
         var selected_alpn: [256]u8 = undefined;
         var selected_alpn_len: usize = 0;
         var offered_sni: [256]u8 = undefined;
@@ -3348,7 +3349,7 @@ pub const Tls13Handshake = struct {
                         }
                         if (group == group_x25519) {
                             if (klen != 32 or sp + 32 > el) return error.DecodeError;
-                            @memcpy(&self.peer_x25519_public, ext[sp..][0..32]);
+                            @memcpy(&parsed_peer_x25519_public, ext[sp..][0..32]);
                             have_key_share = true;
                         }
                         sp += klen;
@@ -3612,6 +3613,9 @@ pub const Tls13Handshake = struct {
         self.client_sni_len = offered_sni_len;
         if (offered_sni_len > 0) {
             @memcpy(self.client_sni[0..offered_sni_len], offered_sni[0..offered_sni_len]);
+        }
+        if (have_key_share) {
+            self.peer_x25519_public = parsed_peer_x25519_public;
         }
         self.peer_tp_len = parsed_peer_tp_len;
         if (parsed_peer_tp_len > 0) {
@@ -6365,6 +6369,27 @@ test "Tls13Handshake server rejects ClientHello key_share groups absent from sup
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects later ClientHello error without committing peer key share" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const hello = try appendDuplicateClientHelloExtension(
+        &hello_buf,
+        base_hello.len,
+        @intFromEnum(ExtType.supported_versions),
+    );
+
+    const old_peer_key = [_]u8{0x42} ** 32;
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.peer_x25519_public = old_peer_key;
+    const transcript_before = server.transcript.current();
+    server.provideData(hello);
+
+    try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expectEqualSlices(u8, &old_peer_key, &server.peer_x25519_public);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
 test "Tls13Handshake server rejects empty ClientHello key_share entry" {
