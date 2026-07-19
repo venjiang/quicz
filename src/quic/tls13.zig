@@ -2791,7 +2791,7 @@ pub const Tls13Handshake = struct {
         if (!have_key_share) return error.NoKeyShare;
 
         // ECDHE shared secret: client secret × server public.
-        const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.InternalError;
+        const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.DecodeError;
 
         // The transcript includes ServerHello before deriving handshake secrets.
         self.transcript.update(msg);
@@ -3594,7 +3594,7 @@ pub const Tls13Handshake = struct {
         self.transcript.update(buf[0..pos]);
 
         // ECDHE shared secret: server secret × client public.
-        const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.InternalError;
+        const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.DecodeError;
         self.key_schedule.deriveHandshakeSecrets(&shared, self.transcript.current());
 
         self.pending_install_handshake = true;
@@ -4469,6 +4469,17 @@ test "Tls13Handshake client rejects ServerHello missing key_share" {
     hs.provideData(sh_buf[0..sh_len]);
 
     try std.testing.expectError(error.NoKeyShare, hs.step());
+}
+
+test "Tls13Handshake client rejects invalid ServerHello X25519 public key" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, [_]u8{0} ** 32, cipher_aes_128_gcm_sha256, true, true);
+    hs.provideData(sh_buf[0..sh_len]);
+
+    try std.testing.expectError(error.DecodeError, hs.step());
 }
 
 // ─── Tests for client handshake completion ───────────────────────────
@@ -5923,6 +5934,19 @@ test "Tls13Handshake server rejects ClientHello supported_groups without X25519"
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.NoKeyShare, server.step());
+}
+
+test "Tls13Handshake server rejects invalid ClientHello X25519 public key" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const share = try clientHelloExtension(hello, @intFromEnum(ExtType.key_share));
+    if (share.body_len < 2 + 2 + 2 + 32) return error.TestUnexpectedResult;
+    @memset(hello[share.body_offset + 6 ..][0..32], 0);
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
+    try std.testing.expectError(error.DecodeError, server.step());
 }
 
 test "Tls13Handshake server rejects duplicate ClientHello supported_groups entries" {
