@@ -223,6 +223,7 @@ pub const Tls13Backend = struct {
 
     fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
+        if (!self.hs.is_server and !self.hs.isComplete()) return null;
         if (self.peer_tp_sent or !self.hs.peer_tp_available) return null;
         if (out_buf.len < self.hs.peer_tp_len) return error.BufferTooSmall;
         @memcpy(out_buf[0..self.hs.peer_tp_len], self.hs.peer_tp[0..self.hs.peer_tp_len]);
@@ -265,6 +266,7 @@ pub const Tls13Backend = struct {
 
     fn pullNegotiatedAlpn(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
+        if (!self.hs.is_server and !self.hs.isComplete()) return null;
         if (self.alpn_sent or self.hs.negotiated_alpn_len == 0) return null;
         if (out_buf.len < self.hs.negotiated_alpn_len) return error.BufferTooSmall;
         @memcpy(out_buf[0..self.hs.negotiated_alpn_len], self.hs.negotiated_alpn[0..self.hs.negotiated_alpn_len]);
@@ -882,6 +884,55 @@ test "Tls13Backend drives a full client handshake through CryptoBackend hooks" {
     try testing.expect((try cb.pull(cb.context, .application, &scratch)) == null);
 }
 
+test "Tls13Backend client with certificate verification withholds unauthenticated server parameters" {
+    const alpn_proto = "hq-interop";
+    const alpn = [_][]const u8{alpn_proto};
+    const local_tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const peer_tp = [_]u8{ 0xAB, 0xCD, 0xEF };
+
+    var backend = Tls13Backend.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+        .skip_cert_verify = false,
+    });
+    var cb = backend.cryptoBackend();
+
+    _ = try cb.setLocalTransportParameters(&local_tp);
+    var scratch: [4096]u8 = undefined;
+    _ = (try cb.pull(cb.context, .initial, &scratch)) orelse return error.TestUnexpectedResult;
+
+    var server_secret: [32]u8 = undefined;
+    tls13.secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = tls13.buildServerHello(&sh_buf, server_public, 0x1301, true, true);
+    try cb.receive(cb.context, .initial, sh_buf[0..sh_len]);
+
+    var ee_buf: [256]u8 = undefined;
+    const ee_len = tls13.buildEncryptedExtensions(&ee_buf, alpn_proto, &peer_tp);
+
+    const cert_der = [_]u8{ 0x30, 0x82, 0x01, 0x00, 0xDE, 0xAD, 0xBE, 0xEF };
+    var cert_buf: [512]u8 = undefined;
+    const cert_len = tls13.buildCertificate(&cert_buf, &cert_der);
+
+    var flight: [1024]u8 = undefined;
+    var fl: usize = 0;
+    @memcpy(flight[fl..][0..ee_len], ee_buf[0..ee_len]);
+    fl += ee_len;
+    @memcpy(flight[fl..][0..cert_len], cert_buf[0..cert_len]);
+    fl += cert_len;
+
+    try testing.expectError(error.CryptoError, cb.receive(cb.context, .handshake, flight[0..fl]));
+    try testing.expectEqual(@as(usize, 1), backend.drive_errors);
+    try testing.expect(!cb.isHandshakeConfirmed());
+    try testing.expect(backend.hs.peer_tp_available);
+    try testing.expect(backend.hs.negotiated_alpn_len != 0);
+    try testing.expect((try cb.pullPeerTransportParameters(&scratch)) == null);
+    try testing.expect((try cb.pullNegotiatedAlpn(&scratch)) == null);
+    try testing.expect((try cb.pullOneRttTrafficSecrets()) == null);
+}
+
 test "Tls13Backend set_local_transport_parameters is ignored after ClientHello is built" {
     var backend = Tls13Backend.initClient(.{});
     var cb = backend.cryptoBackend();
@@ -984,6 +1035,7 @@ test "Tls13Backend pull_peer_transport_parameters rejects undersized output buff
     @memcpy(backend.hs.peer_tp[0..peer_tp.len], &peer_tp);
     backend.hs.peer_tp_len = peer_tp.len;
     backend.hs.peer_tp_available = true;
+    backend.hs.state = .connected;
 
     var too_small: [2]u8 = undefined;
     try testing.expectError(error.BufferTooSmall, cb.pullPeerTransportParameters(&too_small));
@@ -1001,6 +1053,7 @@ test "Tls13Backend pull_peer_transport_parameters exposes empty extension bytes"
     var cb = backend.cryptoBackend();
     backend.hs.peer_tp_len = 0;
     backend.hs.peer_tp_available = true;
+    backend.hs.state = .connected;
 
     var out: [0]u8 = .{};
     const pulled = (try cb.pullPeerTransportParameters(&out)) orelse return error.TestExpectedPeerTp;
@@ -1015,6 +1068,7 @@ test "Tls13Backend pull_negotiated_alpn rejects undersized output buffer without
     const alpn = "hq-interop";
     @memcpy(backend.hs.negotiated_alpn[0..alpn.len], alpn);
     backend.hs.negotiated_alpn_len = alpn.len;
+    backend.hs.state = .connected;
 
     var too_small: [2]u8 = undefined;
     try testing.expectError(error.BufferTooSmall, cb.pullNegotiatedAlpn(&too_small));
