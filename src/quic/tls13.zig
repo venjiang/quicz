@@ -7148,6 +7148,20 @@ test "Tls13Handshake server rejects duplicate ClientHello SNI name types" {
     try std.testing.expectError(error.DecodeError, server.step());
 }
 
+test "Tls13Handshake server rejects malformed ClientHello SNI list length" {
+    var hello_buf: [2048]u8 = undefined;
+    const hello = try clientHelloBytes(.{
+        .server_name = "example.com",
+    }, &hello_buf);
+    const ext = try clientHelloExtension(hello, @intFromEnum(ExtType.server_name));
+    try std.testing.expect(ext.body_len >= 2);
+    writeU16(hello_buf[ext.body_offset..][0..2], @as(u16, @intCast(ext.body_len - 1)));
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.provideData(hello);
+    try std.testing.expectError(error.DecodeError, server.step());
+}
+
 test "Tls13Handshake server rejects missing ClientHello SNI when configured" {
     var client = Tls13Handshake.initClient(.{}, &[_]u8{});
     var server = Tls13Handshake.initServer(.{
