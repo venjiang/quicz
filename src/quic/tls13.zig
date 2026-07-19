@@ -5523,6 +5523,37 @@ test "Tls13Handshake client rejects missing ALPN selection when offered" {
     try std.testing.expectError(error.NoApplicationProtocol, hs.step());
 }
 
+test "Tls13Handshake client rejects empty EncryptedExtensions ALPN without committing parsed state" {
+    const alpn = [_][]const u8{"hq-interop"};
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &[_]u8{});
+    hs.state = .client_wait_encrypted_extensions;
+    @memcpy(hs.negotiated_alpn[0..3], "old");
+    hs.negotiated_alpn_len = 3;
+    hs.peer_tp[0] = 0xde;
+    hs.peer_tp[1] = 0xad;
+    hs.peer_tp_len = 2;
+    hs.peer_tp_available = true;
+    const transcript_before = hs.transcript.current();
+
+    var ee_buf: [256]u8 = undefined;
+    const ee_len = buildEncryptedExtensions(&ee_buf, "hq-interop", &[_]u8{ 0x01, 0x02, 0x03 });
+    const alpn_ext = try encryptedExtensionsExtension(ee_buf[0..ee_len], @intFromEnum(ExtType.alpn));
+    try std.testing.expect(alpn_ext.body_len >= 3);
+    ee_buf[alpn_ext.body_offset + 2] = 0;
+    hs.provideData(ee_buf[0..ee_len]);
+
+    try std.testing.expectError(error.DecodeError, hs.clientProcessEncryptedExtensions());
+    try std.testing.expectEqualStrings("old", hs.negotiated_alpn[0..hs.negotiated_alpn_len]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, hs.peer_tp[0..hs.peer_tp_len]);
+    try std.testing.expect(hs.peer_tp_available);
+    try std.testing.expect(!hs.server_encrypted_extensions_processed);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
+    try std.testing.expectEqual(HandshakeState.client_wait_encrypted_extensions, hs.state);
+}
+
 test "Tls13Handshake client rejects EncryptedExtensions without transport parameters" {
     var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
 
