@@ -3667,7 +3667,8 @@ pub const Tls13Handshake = struct {
     /// Build a ServerHello, complete the X25519 key exchange, and derive
     /// handshake traffic secrets (RFC 8446 §4.1.3 + §7.1).
     fn serverBuildServerHello(self: *Tls13Handshake) HandshakeError!Action {
-        secureRandomBytes(&self.server_random);
+        var server_random: [32]u8 = undefined;
+        secureRandomBytes(&server_random);
 
         const buf = &self.out_buf;
         var pos: usize = 4;
@@ -3676,7 +3677,7 @@ pub const Tls13Handshake = struct {
         buf[pos + 1] = 0x03;
         pos += 2;
         // random
-        @memcpy(buf[pos..][0..32], &self.server_random);
+        @memcpy(buf[pos..][0..32], &server_random);
         pos += 32;
         // legacy_session_id echo: empty (QUIC)
         buf[pos] = 0;
@@ -3718,6 +3719,7 @@ pub const Tls13Handshake = struct {
         // ECDHE shared secret: server secret × client public.
         const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.DecodeError;
 
+        self.server_random = server_random;
         self.transcript.update(buf[0..pos]);
         self.key_schedule.deriveHandshakeSecrets(&shared, self.transcript.current());
 
@@ -6245,6 +6247,28 @@ test "Tls13Handshake server rejects invalid ClientHello X25519 public key" {
     try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
     const transcript_before = server.transcript.current();
     try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expect(!server.key_schedule.handshake_secret_derived);
+    try std.testing.expect(!server.pending_install_handshake);
+    try std.testing.expectEqual(HandshakeState.server_send_server_hello, server.state);
+}
+
+test "Tls13Handshake server rejects invalid ClientHello X25519 public key without committing server random" {
+    var hello_buf: [1024]u8 = undefined;
+    const hello = try clientHelloBytes(.{}, &hello_buf);
+    const share = try clientHelloExtension(hello, @intFromEnum(ExtType.key_share));
+    if (share.body_len < 2 + 2 + 2 + 32) return error.TestUnexpectedResult;
+    @memset(hello[share.body_offset + 6 ..][0..32], 0);
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    const old_server_random = [_]u8{0x42} ** 32;
+    server.server_random = old_server_random;
+    server.provideData(hello);
+    try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
+    const transcript_before = server.transcript.current();
+
+    try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expectEqualSlices(u8, &old_server_random, &server.server_random);
     try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
     try std.testing.expect(!server.key_schedule.handshake_secret_derived);
     try std.testing.expect(!server.pending_install_handshake);
