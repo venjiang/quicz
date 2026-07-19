@@ -1788,6 +1788,7 @@ test "Tls13Handshake client accepts EncryptedExtensions early data only when off
     allowed.session_ticket_len = ticket.len;
     allowed.session_ticket_allows_early_data = true;
     allowed.psk_selected = true;
+    allowed.client_offered_early_data = true;
     var allowed_ee: [256]u8 = undefined;
     allowed.provideData(allowed_ee[0..buildEncryptedExtensionsWithEarlyData(&allowed_ee, "", &[_]u8{0x01}, true)]);
     try std.testing.expect(std.meta.activeTag(try allowed.clientProcessEncryptedExtensions()) == ._continue);
@@ -2228,6 +2229,7 @@ pub const Tls13Handshake = struct {
 
     // Client-side: whether EncryptedExtensions carried the server's 0-RTT
     // acceptance decision and whether it accepted the offered 0-RTT.
+    client_offered_early_data: bool = false,
     server_encrypted_extensions_processed: bool = false,
     server_accepted_early_data: bool = false,
 
@@ -2272,6 +2274,7 @@ pub const Tls13Handshake = struct {
         self.server_accepts_early_data = false;
         self.peer_psk_binder_valid = false;
         self.nst_sent = false;
+        self.client_offered_early_data = false;
         self.server_encrypted_extensions_processed = false;
         self.server_accepted_early_data = false;
 
@@ -2342,6 +2345,7 @@ pub const Tls13Handshake = struct {
         self.server_accepts_early_data = false;
         self.peer_psk_binder_valid = false;
         self.nst_sent = false;
+        self.client_offered_early_data = false;
         self.server_encrypted_extensions_processed = false;
         self.server_accepted_early_data = false;
 
@@ -2666,7 +2670,8 @@ pub const Tls13Handshake = struct {
 
         // early_data (RFC 8446 §4.2.10) -- empty extension signals 0-RTT
         // intent. Must precede pre_shared_key.
-        if (self.has_psk and self.session_ticket_len > 0 and self.session_ticket_allows_early_data) {
+        const offer_early_data = self.has_psk and self.session_ticket_len > 0 and self.session_ticket_allows_early_data;
+        if (offer_early_data) {
             if (pos + 4 > buf.len) return error.DecodeError;
             pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.early_data), 0);
         }
@@ -2729,6 +2734,7 @@ pub const Tls13Handshake = struct {
 
             self.client_random = staged_client_random;
             self.client_random_available = true;
+            self.client_offered_early_data = offer_early_data;
             self.state = .client_wait_server_hello;
             return Action{ .send_data = .{
                 .level = .initial,
@@ -2751,6 +2757,7 @@ pub const Tls13Handshake = struct {
         self.transcript.update(buf[0..pos]);
         self.client_random = staged_client_random;
         self.client_random_available = true;
+        self.client_offered_early_data = false;
         self.state = .client_wait_server_hello;
 
         return Action{ .send_data = .{
@@ -2940,7 +2947,8 @@ pub const Tls13Handshake = struct {
                     if (!self.psk_selected or
                         !self.has_psk or
                         self.session_ticket_len == 0 or
-                        !self.session_ticket_allows_early_data)
+                        !self.session_ticket_allows_early_data or
+                        !self.client_offered_early_data)
                     {
                         return error.DecodeError;
                     }
@@ -5354,6 +5362,26 @@ test "Tls13Handshake client rejects unrequested EncryptedExtensions extension" {
     try std.testing.expectError(error.DecodeError, hs.step());
 }
 
+test "Tls13Handshake client rejects EncryptedExtensions early_data without a matching ClientHello offer" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hs = Tls13Handshake.initClientWithPsk(.{}, &[_]u8{}, psk);
+    hs.state = .client_wait_encrypted_extensions;
+    hs.psk_selected = true;
+    hs.session_ticket_len = 4;
+    hs.session_ticket_allows_early_data = true;
+    hs.client_offered_early_data = false;
+
+    var ee_buf: [256]u8 = undefined;
+    const ee_len = buildEncryptedExtensionsWithEarlyData(&ee_buf, "", &[_]u8{ 0x01, 0x02, 0x03 }, true);
+    hs.provideData(ee_buf[0..ee_len]);
+
+    try std.testing.expectError(error.DecodeError, hs.clientProcessEncryptedExtensions());
+    try std.testing.expect(!hs.server_accepted_early_data);
+    try std.testing.expect(!hs.server_encrypted_extensions_processed);
+    try std.testing.expect(!hs.peer_tp_available);
+    try std.testing.expectEqual(HandshakeState.client_wait_encrypted_extensions, hs.state);
+}
+
 test "Tls13Handshake client rejects EncryptedExtensions extension without committing parsed state" {
     const alpn = [_][]const u8{"hq-interop"};
     const psk = [_]u8{0xab} ** secret_len;
@@ -5365,6 +5393,7 @@ test "Tls13Handshake client rejects EncryptedExtensions extension without commit
     hs.psk_selected = true;
     hs.session_ticket_len = 4;
     hs.session_ticket_allows_early_data = true;
+    hs.client_offered_early_data = true;
     @memcpy(hs.negotiated_alpn[0..3], "old");
     hs.negotiated_alpn_len = 3;
     hs.peer_tp[0] = 0xde;
