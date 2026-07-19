@@ -3287,6 +3287,8 @@ pub const Tls13Handshake = struct {
         var client_supports_psk_dhe_ke = false;
         var selected_alpn: [256]u8 = undefined;
         var selected_alpn_len: usize = 0;
+        var offered_sni: [256]u8 = undefined;
+        var offered_sni_len: usize = 0;
         var seen_known_extensions: u16 = 0;
         const server_sig_scheme = signatureSchemeForPrivateKeyAlgorithm(self.config.private_key_algorithm);
         while (pos < ext_end) {
@@ -3432,9 +3434,9 @@ pub const Tls13Handshake = struct {
                             if (saw_host_name) return error.DecodeError;
                             saw_host_name = true;
                             have_server_name = true;
-                            if (offered_name.len > self.client_sni.len) return error.DecodeError;
-                            @memcpy(self.client_sni[0..offered_name.len], offered_name);
-                            self.client_sni_len = offered_name.len;
+                            if (offered_name.len > offered_sni.len) return error.DecodeError;
+                            @memcpy(offered_sni[0..offered_name.len], offered_name);
+                            offered_sni_len = offered_name.len;
                             if (self.config.server_name) |expected_name| {
                                 if (!std.ascii.eqlIgnoreCase(offered_name, expected_name)) {
                                     return error.UnrecognizedName;
@@ -3604,6 +3606,10 @@ pub const Tls13Handshake = struct {
         self.negotiated_alpn_len = selected_alpn_len;
         if (selected_alpn_len > 0) {
             @memcpy(self.negotiated_alpn[0..selected_alpn_len], selected_alpn[0..selected_alpn_len]);
+        }
+        self.client_sni_len = offered_sni_len;
+        if (offered_sni_len > 0) {
+            @memcpy(self.client_sni[0..offered_sni_len], offered_sni[0..offered_sni_len]);
         }
         self.state = .server_send_server_hello;
         return ._continue;
@@ -6576,6 +6582,27 @@ test "Tls13Handshake server rejects mismatched ClientHello SNI when configured" 
 
     server.provideData(client_hello_action.send_data.data);
     try std.testing.expectError(error.UnrecognizedName, server.step());
+}
+
+test "Tls13Handshake server rejects mismatched ClientHello SNI without committing parsed name" {
+    var client = Tls13Handshake.initClient(.{
+        .server_name = "other.example",
+    }, &[_]u8{});
+    var server = Tls13Handshake.initServer(.{
+        .server_name = "example.com",
+    }, &[_]u8{});
+    @memcpy(server.client_sni[0..3], "old");
+    server.client_sni_len = 3;
+    const transcript_before = server.transcript.current();
+
+    const client_hello_action = try client.step();
+    try std.testing.expect(std.meta.activeTag(client_hello_action) == .send_data);
+
+    server.provideData(client_hello_action.send_data.data);
+    try std.testing.expectError(error.UnrecognizedName, server.step());
+    try std.testing.expectEqualStrings("old", server.client_sni[0..server.client_sni_len]);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
 test "Tls13Handshake client↔server loopback completes with matching secrets" {
