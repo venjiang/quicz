@@ -2523,7 +2523,8 @@ pub const Connection = struct {
     /// Source Connection ID when known, server Original Destination Connection
     /// ID / Retry Source Connection ID when known, RFC 9368 version
     /// information, and optional server stateless reset token into typed
-    /// parameters.
+    /// parameters. Stateless reset tokens are advertised only when the server's
+    /// Initial Source Connection ID is known and non-empty.
     pub fn localTransportParameters(self: *const Connection) transport_parameters.TransportParameters {
         var params = transport_parameters.TransportParameters{
             .max_idle_timeout = self.config.max_idle_timeout_ms,
@@ -2546,7 +2547,11 @@ pub const Connection = struct {
             },
         };
         if (self.side == .server) {
-            params.stateless_reset_token = self.config.stateless_reset_token;
+            if (self.localInitialSourceConnectionId()) |initial_scid| {
+                if (initial_scid.len != 0) {
+                    params.stateless_reset_token = self.config.stateless_reset_token;
+                }
+            }
             if (self.config.preferred_address) |*preferred| {
                 params.preferred_address = preferred.asTransportParameter();
             }
@@ -11873,6 +11878,7 @@ test "localTransportParameters keeps local ACK policy separate from peer recover
 
 test "localTransportParameters advertises server stateless reset token only" {
     const reset_token = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    const server_scid = [_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 };
 
     var client = try Connection.init(std.testing.allocator, .client, .{
         .stateless_reset_token = reset_token,
@@ -11884,7 +11890,12 @@ test "localTransportParameters advertises server stateless reset token only" {
         .stateless_reset_token = reset_token,
     });
     defer server.deinit();
+    try std.testing.expect(server.localTransportParameters().stateless_reset_token == null);
 
+    try server.setLocalInitialSourceConnectionId(&[_]u8{});
+    try std.testing.expect(server.localTransportParameters().stateless_reset_token == null);
+
+    try server.setLocalInitialSourceConnectionId(&server_scid);
     const params = server.localTransportParameters();
     const advertised = params.stateless_reset_token orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualSlices(u8, &reset_token, &advertised);
@@ -11941,6 +11952,7 @@ test "transport parameter TLS extension bytes roundtrip through connection API" 
         .initial_max_streams_uni = 2,
     });
     defer server.deinit();
+    try server.setLocalInitialSourceConnectionId(&[_]u8{ 0xa0, 0xa1, 0xa2, 0xa3 });
 
     var extension_bytes_buf: [256]u8 = undefined;
     const extension_bytes = try server.encodeLocalTransportParameters(&extension_bytes_buf);
