@@ -67,7 +67,10 @@ CertificateEntry per-entry extensions after validating their length, while
 still rejecting malformed extension vectors, duplicate extension types, and
 empty certificate entries. CertificateVerify parsing now also rejects empty
 signature vectors and unsupported signature schemes before any optional
-certificate-chain verification policy. ClientHello construction now rejects
+certificate-chain verification policy, and it keeps the parsed
+CertificateVerify scheme, signature bytes, transcript state, and client
+handshake state unchanged when signature validation fails or no Certificate is
+available to verify. ClientHello construction now rejects
 duplicate local ALPN protocol names before encoding the ALPN extension, and
 server-side ClientHello processing now rejects empty, oversized, or duplicate
 local ALPN protocol names before ALPN selection. Server-side ClientHello

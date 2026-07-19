@@ -3060,9 +3060,9 @@ pub const Tls13Handshake = struct {
         var pos: usize = 4;
         // signature_scheme (2 bytes)
         if (pos + 2 > msg.len) return error.DecodeError;
-        self.cert_verify_scheme = readU16(msg[pos..]);
+        const cert_verify_scheme = readU16(msg[pos..]);
         pos += 2;
-        if (!certificateVerifySignatureSchemeSupported(self.cert_verify_scheme)) return error.UnsupportedSignatureAlgorithm;
+        if (!certificateVerifySignatureSchemeSupported(cert_verify_scheme)) return error.UnsupportedSignatureAlgorithm;
         // signature (2-byte length + data)
         if (pos + 2 > msg.len) return error.DecodeError;
         const sig_len = readU16(msg[pos..]);
@@ -3071,15 +3071,17 @@ pub const Tls13Handshake = struct {
         if (pos + sig_len != msg.len) return error.DecodeError;
         if (sig_len == 0) return error.DecodeError;
         if (sig_len > self.cert_verify_sig.len) return error.DecodeError;
-        self.cert_verify_sig_len = sig_len;
-        @memcpy(self.cert_verify_sig[0..self.cert_verify_sig_len], msg[pos .. pos + sig_len]);
+        const cert_verify_sig = msg[pos .. pos + sig_len];
 
         // The signature covers the transcript up to (not including) this
         // message, so snapshot before updating the transcript.
         if (!self.config.skip_cert_verify) {
-            try self.verifyCertificateVerify(self.transcript.current());
+            try self.verifyCertificateVerify(self.transcript.current(), cert_verify_scheme, cert_verify_sig);
         }
 
+        self.cert_verify_scheme = cert_verify_scheme;
+        self.cert_verify_sig_len = sig_len;
+        @memcpy(self.cert_verify_sig[0..self.cert_verify_sig_len], cert_verify_sig);
         self.transcript.update(msg);
         self.state = .client_wait_finished;
         return ._continue;
@@ -3088,7 +3090,8 @@ pub const Tls13Handshake = struct {
     /// Verify the stored CertificateVerify signature against the server
     /// certificate's public key, using the transcript hash up to the
     /// Certificate message (RFC 8446 §4.4.3).
-    fn verifyCertificateVerify(self: *Tls13Handshake, transcript_hash: [32]u8) HandshakeError!void {
+    fn verifyCertificateVerify(self: *Tls13Handshake, transcript_hash: [32]u8, scheme: u16, sig: []const u8) HandshakeError!void {
+        if (self.server_cert_len == 0) return error.BadCertificate;
         const cert: Certificate = .{
             .buffer = self.server_cert[0..self.server_cert_len],
             .index = 0,
@@ -3108,8 +3111,8 @@ pub const Tls13Handshake = struct {
         try verifyCertificateVerifySignature(
             pub_key,
             pub_key_algo,
-            self.cert_verify_scheme,
-            self.cert_verify_sig[0..self.cert_verify_sig_len],
+            scheme,
+            sig,
             &signed,
         );
     }
@@ -5301,6 +5304,27 @@ test "Tls13Handshake client rejects oversized CertificateVerify signature" {
     handshake.provideData(cv_buf[0..cv_len]);
 
     try std.testing.expectError(error.DecodeError, handshake.clientProcessCertificateVerify());
+}
+
+test "Tls13Handshake client rejects CertificateVerify without committing parsed signature state" {
+    const sig = [_]u8{0xaa} ** Ed25519.Signature.encoded_length;
+    var cv_buf: [128]u8 = undefined;
+    const cv_len = buildCertificateVerify(&cv_buf, 0x0807, &sig);
+
+    var handshake = Tls13Handshake.initClient(.{ .skip_cert_verify = false }, &[_]u8{});
+    handshake.state = .client_wait_certificate_verify;
+    handshake.cert_verify_scheme = 0x0403;
+    handshake.cert_verify_sig[0] = 0xde;
+    handshake.cert_verify_sig[1] = 0xad;
+    handshake.cert_verify_sig_len = 2;
+    const transcript_before = handshake.transcript.current();
+    handshake.provideData(cv_buf[0..cv_len]);
+
+    try std.testing.expectError(error.BadCertificate, handshake.clientProcessCertificateVerify());
+    try std.testing.expectEqual(@as(u16, 0x0403), handshake.cert_verify_scheme);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, handshake.cert_verify_sig[0..handshake.cert_verify_sig_len]);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &handshake.transcript.current());
+    try std.testing.expectEqual(HandshakeState.client_wait_certificate_verify, handshake.state);
 }
 
 // ─── Tests for CertificateVerify signature verification ─────────────
