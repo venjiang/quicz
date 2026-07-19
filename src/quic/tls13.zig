@@ -3289,6 +3289,8 @@ pub const Tls13Handshake = struct {
         var selected_alpn_len: usize = 0;
         var offered_sni: [256]u8 = undefined;
         var offered_sni_len: usize = 0;
+        var parsed_peer_tp: [1024]u8 = undefined;
+        var parsed_peer_tp_len: usize = 0;
         var seen_known_extensions: u16 = 0;
         const server_sig_scheme = signatureSchemeForPrivateKeyAlgorithm(self.config.private_key_algorithm);
         while (pos < ext_end) {
@@ -3446,9 +3448,9 @@ pub const Tls13Handshake = struct {
                     }
                 },
                 @intFromEnum(ExtType.quic_transport_parameters) => {
-                    if (el > self.peer_tp.len) return error.DecodeError;
-                    self.peer_tp_len = el;
-                    @memcpy(self.peer_tp[0..self.peer_tp_len], ext);
+                    if (el > parsed_peer_tp.len) return error.DecodeError;
+                    parsed_peer_tp_len = el;
+                    @memcpy(parsed_peer_tp[0..parsed_peer_tp_len], ext);
                     have_quic_transport_parameters = true;
                 },
                 @intFromEnum(ExtType.psk_key_exchange_modes) => {
@@ -3610,6 +3612,10 @@ pub const Tls13Handshake = struct {
         self.client_sni_len = offered_sni_len;
         if (offered_sni_len > 0) {
             @memcpy(self.client_sni[0..offered_sni_len], offered_sni[0..offered_sni_len]);
+        }
+        self.peer_tp_len = parsed_peer_tp_len;
+        if (parsed_peer_tp_len > 0) {
+            @memcpy(self.peer_tp[0..parsed_peer_tp_len], parsed_peer_tp[0..parsed_peer_tp_len]);
         }
         self.state = .server_send_server_hello;
         return ._continue;
@@ -6449,6 +6455,28 @@ test "Tls13Handshake server rejects later ClientHello error without committing A
 
     try std.testing.expectError(error.DecodeError, server.step());
     try std.testing.expectEqualStrings("old", server.negotiated_alpn[0..server.negotiated_alpn_len]);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
+}
+
+test "Tls13Handshake server rejects later ClientHello error without committing peer transport parameters" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const hello = try appendDuplicateClientHelloExtension(
+        &hello_buf,
+        base_hello.len,
+        @intFromEnum(ExtType.supported_versions),
+    );
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.peer_tp[0] = 0xde;
+    server.peer_tp[1] = 0xad;
+    server.peer_tp_len = 2;
+    const transcript_before = server.transcript.current();
+    server.provideData(hello);
+
+    try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, server.peer_tp[0..server.peer_tp_len]);
     try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
     try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
