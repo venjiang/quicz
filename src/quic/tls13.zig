@@ -2810,6 +2810,9 @@ pub const Tls13Handshake = struct {
         if (pos + 32 > msg.len) return error.DecodeError;
         const parsed_server_random = msg[pos..][0..32].*;
         if (std.mem.eql(u8, &parsed_server_random, &hello_retry_request_random)) return error.DecodeError;
+        if (self.client_random_available and std.mem.eql(u8, &parsed_server_random, &self.client_random)) {
+            return error.DecodeError;
+        }
         pos += 32;
         // legacy_session_id_echo
         if (pos + 1 > msg.len) return error.DecodeError;
@@ -4596,6 +4599,29 @@ test "Tls13Handshake client rejects unsupported HelloRetryRequest sentinel" {
     hs.provideData(sh_buf[0..sh_len]);
 
     try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects ServerHello that repeats ClientHello random" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    _ = try hs.step();
+    try std.testing.expect(hs.client_random_available);
+    const transcript_before = hs.transcript.current();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    @memcpy(sh_buf[4 + 2 ..][0..32], &hs.client_random);
+    hs.provideData(sh_buf[0..sh_len]);
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+    try std.testing.expect(!hs.server_random_available);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
+    try std.testing.expect(!hs.key_schedule.handshake_secret_derived);
+    try std.testing.expect(!hs.pending_install_handshake);
+    try std.testing.expectEqual(HandshakeState.client_wait_server_hello, hs.state);
 }
 
 test "Tls13Handshake client rejects trailing bytes after ServerHello extensions" {

@@ -85,8 +85,9 @@ binder verification result、PSK selection 与 ClientHello transcript update
 同样只会在服务端准备推进状态后提交。
 需要证书路径时，服务端 ClientHello 处理现在还会在发出
 ServerHello 前拒绝空或过大的本地证书链，以及缺失或非法的本地私钥配置。
-纯 Zig TLS client-side ServerHello 和 EncryptedExtensions 解析现在会拒绝
-unsolicited extension type，同时继续拒绝重复 extension type；EncryptedExtensions
+纯 Zig TLS client-side ServerHello 解析现在还会拒绝重复 ClientHello random 的
+ServerHello random，且不会提交 peer random、transcript 或 handshake secret。
+ServerHello 和 EncryptedExtensions 解析现在会拒绝 unsolicited extension type，同时继续拒绝重复 extension type；EncryptedExtensions
 解析在后续 extension 失败时会保持 ALPN、peer transport parameters、early-data
 acceptance、transcript state 和 client handshake state 不变；backend 拉取 peer
 transport parameters 时现在会区分“存在但为空”的 extension 与缺失参数。ServerHello

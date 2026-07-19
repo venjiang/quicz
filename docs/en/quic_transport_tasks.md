@@ -99,8 +99,10 @@ selection, and the ClientHello transcript update are likewise committed only
 after the server is ready to advance. When the certificate path is required,
 server-side ClientHello processing now rejects empty or oversized configured
 certificate chains plus missing or invalid configured private keys before
-emitting ServerHello. Pure-Zig TLS client-side ServerHello and
-EncryptedExtensions parsing now rejects unsolicited extension types while still
+emitting ServerHello. Pure-Zig TLS client-side ServerHello parsing now also
+rejects a ServerHello random that repeats the ClientHello random without
+committing peer random, transcript, or handshake secrets. ServerHello and
+EncryptedExtensions parsing now reject unsolicited extension types while still
 rejecting duplicate extension types; EncryptedExtensions parsing keeps ALPN,
 peer transport parameters, early-data acceptance, transcript state, and client
 handshake state unchanged when a later extension fails, and backend peer
