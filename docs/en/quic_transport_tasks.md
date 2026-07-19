@@ -478,7 +478,9 @@ missing-route failures before STREAM data, pending RESET_STREAM, or
 STOP_SENDING state is queued.
 Client and server endpoint route-bound close helpers now also resolve the route
 before queuing CONNECTION_CLOSE. Focused tests prove missing routes return
-`UnknownConnectionId` while the selected connection stays active.
+`UnknownConnectionId` while the selected connection stays active. Server
+explicit close draining now drains only the selected record's close output, so
+other active records' pending output remains queued for their own poll step.
 
 ### Packet-number reordering evidence
 

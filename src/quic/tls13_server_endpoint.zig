@@ -1368,15 +1368,25 @@ pub fn Tls13ServerEndpoint(
             out: []DatagramPathResult,
         ) (root.Error || endpoint.RouteError)!CloseDatagramPathDrainResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
-            _ = try self.currentRecordRoutePath(record);
-            try connection_of(record).closeConnection(error_code, frame_type, reason_phrase);
+            const path = try self.currentRecordRoutePath(record);
+            const connection = connection_of(record);
+            try connection.closeConnection(error_code, frame_type, reason_phrase);
+            const drain = self.drainDatagramsWithRoutePath(
+                connection_id,
+                connection,
+                now_millis,
+                .{
+                    .space = .application,
+                    .destination_connection_id = destination_connection_id_of(record),
+                },
+                path,
+                out,
+            );
             return .{
-                .drain = self.drainDatagramsAcrossRecordsWithRoutePath(
-                    allocator,
-                    now_millis,
-                    .application,
-                    out,
-                ),
+                .drain = .{
+                    .datagrams_written = drain.datagrams_written,
+                    .first_error = drain.first_error,
+                },
                 .next_deadline = try self.nextDeadline(allocator),
             };
         }
@@ -6519,6 +6529,9 @@ test "Tls13ServerEndpoint drains close output with route and deadline" {
         handle: u64,
         connection: Connection,
         backend: root.CryptoBackend,
+        destination_connection_id: []const u8,
+        source_connection_id: []const u8,
+        initial_destination_connection_id: []const u8,
 
         fn connectionRef(self: *@This()) *Connection {
             return &self.connection;
@@ -6528,16 +6541,16 @@ test "Tls13ServerEndpoint drains close output with route and deadline" {
             return self.backend;
         }
 
-        fn destinationConnectionId(_: *const @This()) []const u8 {
-            return "peer";
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return self.destination_connection_id;
         }
 
-        fn sourceConnectionId(_: *const @This()) []const u8 {
-            return "local";
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return self.source_connection_id;
         }
 
-        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
-            return "initial";
+        fn initialDestinationConnectionId(self: *const @This()) []const u8 {
+            return self.initial_destination_connection_id;
         }
 
         fn markRetryValidated(_: *@This()) void {}
@@ -6572,9 +6585,9 @@ test "Tls13ServerEndpoint drains close output with route and deadline" {
         TestRecord.deinit,
     );
 
-    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
-        .max_routes = 1,
-        .max_stateless_reset_tokens = 1,
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 2, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 2,
     });
     defer endpoint_owner.deinit();
 
@@ -6586,9 +6599,48 @@ test "Tls13ServerEndpoint drains close output with route and deadline" {
         .local = old_path.local,
         .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_444),
     };
-    const server_dcid = "local";
+    const other_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_445),
+    };
+    const other_secrets = try protection.deriveInitialSecrets(.v1, "close-other");
     const secrets = try protection.deriveInitialSecrets(.v1, "server-close-drain");
     var empty_backend = EmptyBackend{};
+
+    const other_record = try std.testing.allocator.create(TestRecord);
+    var other_record_initialized = false;
+    var other_record_owned = true;
+    errdefer {
+        if (other_record_owned) {
+            if (other_record_initialized) other_record.deinit();
+            std.testing.allocator.destroy(other_record);
+        }
+    }
+    other_record.* = .{
+        .handle = 84,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+        .destination_connection_id = "peer-other",
+        .source_connection_id = "local-other",
+        .initial_destination_connection_id = "initial-other",
+    };
+    other_record_initialized = true;
+    try other_record.connection.validatePeerAddress();
+    try other_record.connection.confirmHandshake();
+    try other_record.connection.installOneRttTrafficSecrets(.{
+        .local = other_secrets.server.secret,
+        .peer = other_secrets.client.secret,
+    });
+    try other_record.connection.sendPing();
+    try endpoint_owner.lifecycle.registerConnectionId(
+        other_record.handle,
+        TestRecord.sourceConnectionId(other_record),
+        other_path,
+        .{},
+    );
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(other_record.handle);
+    try endpoint_owner.records.adopt(other_record.handle, other_record);
+    other_record_owned = false;
 
     const record = try std.testing.allocator.create(TestRecord);
     var record_initialized = false;
@@ -6603,6 +6655,9 @@ test "Tls13ServerEndpoint drains close output with route and deadline" {
         .handle = 85,
         .connection = try Connection.init(std.testing.allocator, .server, .{}),
         .backend = empty_backend.backend(),
+        .destination_connection_id = "peer",
+        .source_connection_id = "local",
+        .initial_destination_connection_id = "initial",
     };
     record_initialized = true;
     try record.connection.validatePeerAddress();
@@ -6611,17 +6666,34 @@ test "Tls13ServerEndpoint drains close output with route and deadline" {
         .local = secrets.server.secret,
         .peer = secrets.client.secret,
     });
-    try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, old_path, .{});
+    try endpoint_owner.lifecycle.registerConnectionId(
+        record.handle,
+        TestRecord.sourceConnectionId(record),
+        old_path,
+        .{},
+    );
     errdefer _ = endpoint_owner.lifecycle.retireConnection(record.handle);
     try endpoint_owner.records.adopt(record.handle, record);
     record_owned = false;
     const record_handle = record.handle;
 
     _ = try endpoint_owner.lifecycle.updateRoutePathFromValidatedDatagramAndResetSpinBit(
-        server_dcid,
+        TestRecord.sourceConnectionId(record),
         new_path,
         &record.connection,
     );
+    var poll_views: [2]root.EndpointConnectionPollView = undefined;
+    const views = try endpoint_owner.records.fillPollViews(
+        &poll_views,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    );
+    for (views, 0..) |view, index| {
+        if (view.connection_id == other_record.handle) {
+            endpoint_owner.records.next_poll_index = index;
+            break;
+        }
+    }
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
     var out: [2]TestEndpoint.DatagramPathResult = undefined;
@@ -6643,6 +6715,10 @@ test "Tls13ServerEndpoint drains close output with route and deadline" {
         try std.testing.expect(drained.path.eql(new_path));
         try std.testing.expect(drained.datagram.len != 0);
     }
+    const other_datagram = (try endpoint_owner.pollOneRttDatagramWithRoutePath(other_record.handle, 11)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(other_datagram.datagram);
+    try std.testing.expect(other_datagram.path.eql(other_path));
+    try std.testing.expect(other_datagram.datagram.len != 0);
     const next_deadline = closed.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.close_timeout, next_deadline.kind);
     try std.testing.expectEqual(record_handle, next_deadline.connection_id);
