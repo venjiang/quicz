@@ -193,6 +193,9 @@ while ordinary PSK resumption without early_data remains reusable. The replay
 filter now exports and restores fixed snapshots so callers can persist or
 distribute retained identity fingerprints. Production/distributed 0-RTT replay
 policy remains pending.
+Server-side NewSessionTicket emission now rejects duplicate calls after the
+first successful ticket, matching the backend pump's one-shot `nst_sent`
+boundary.
 Selected-PSK handshakes no longer require ClientHello `signature_algorithms`
 even when the server is configured with a certificate chain; signature
 algorithm validation now applies only to the fallback certificate path, which

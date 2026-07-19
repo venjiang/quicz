@@ -1104,6 +1104,24 @@ test "Tls13Handshake serverBuildNewSessionTicket emits ticket age add" {
     try std.testing.expect(nst.allows_quic_0rtt);
 }
 
+test "Tls13Handshake serverBuildNewSessionTicket rejects duplicate emission" {
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    const shared_secret = [_]u8{0x01} ** 32;
+    server.key_schedule.deriveHandshakeSecrets(&shared_secret, server.transcript.current());
+    server.key_schedule.deriveAppSecrets(server.transcript.current());
+    server.state = .connected;
+
+    const action = try server.serverBuildNewSessionTicket();
+    const first_out_len = server.out_len;
+    try std.testing.expectEqual(EncryptionLevel.application, action.send_data.level);
+    try std.testing.expect(server.nst_sent);
+
+    try std.testing.expectError(error.UnexpectedMessage, server.serverBuildNewSessionTicket());
+    try std.testing.expect(server.nst_sent);
+    try std.testing.expectEqual(first_out_len, server.out_len);
+    try std.testing.expectEqual(HandshakeState.connected, server.state);
+}
+
 test "PSK binder computes via computeFinishedVerifyData over binder key" {
     const psk = [_]u8{0xab} ** secret_len;
     const ks = KeySchedule.initWithPsk(psk);
@@ -3884,6 +3902,7 @@ pub const Tls13Handshake = struct {
     pub fn serverBuildNewSessionTicket(self: *Tls13Handshake) HandshakeError!Action {
         if (!self.is_server) return error.UnexpectedMessage;
         if (self.state != .connected) return error.UnexpectedMessage;
+        if (self.nst_sent) return error.UnexpectedMessage;
         const rms = self.key_schedule.deriveResumptionMasterSecret(self.transcript.current());
 
         // 16-byte ticket nonce; the PSK derived from it is available to the

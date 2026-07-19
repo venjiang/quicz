@@ -162,6 +162,8 @@ identity 只有在 offer early_data 时才会保持 PSK unselected 且不派生 
 secret；没有 early_data 的普通 PSK resumption 仍可重复使用。replay filter 现在可
 导出/恢复 fixed snapshot，调用方可持久化或分发已保留的 identity fingerprint。
 生产/分布式 0-RTT replay policy 仍待实现。
+Server-side NewSessionTicket emission 现在会在首次成功签发后拒绝重复调用，使公开
+builder 与 backend pump 的 one-shot `nst_sent` 边界一致。
 selected-PSK handshake 现在不再要求 ClientHello `signature_algorithms`，
 即使 server 配置了证书链；signature algorithm 校验只应用于最终回退到证书认证的路径，
 并且 PSK identity 不匹配时仍会拒绝缺失的 `signature_algorithms`。
