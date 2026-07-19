@@ -196,6 +196,7 @@ pub const Tls13Backend = struct {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
         const bucket = self.bucketForSpace(space);
         if (bucket.pending() == 0) {
+            if (self.hs.is_server and self.hs.isComplete() and space != .application) return null;
             // Nothing buffered: advance the state machine, which may produce
             // data for this or another space.
             self.pump() catch {
@@ -736,6 +737,32 @@ test "Tls13Backend server rejects post-handshake peer CRYPTO without side effect
     try std.testing.expect(!server.nst_emitted);
     try std.testing.expect(!server.hs.nst_sent);
     try std.testing.expect(server.hs.isComplete());
+}
+
+test "Tls13Backend server emits NewSessionTicket only from Application pull" {
+    var server = Tls13Backend.initServer(.{
+        .alpn = &.{},
+    });
+    const shared_secret = [_]u8{0x01} ** 32;
+    server.hs.key_schedule.deriveHandshakeSecrets(&shared_secret, server.hs.transcript.current());
+    server.hs.key_schedule.deriveAppSecrets(server.hs.transcript.current());
+    server.hs.state = .connected;
+    var server_cb = server.cryptoBackend();
+    var scratch: [512]u8 = undefined;
+
+    try std.testing.expect((try server_cb.pull(server_cb.context, .handshake, &scratch)) == null);
+    try std.testing.expectEqual(@as(usize, 0), server.outbound_bytes);
+    try std.testing.expectEqual(@as(usize, 0), server.out_app.pending());
+    try std.testing.expect(!server.nst_emitted);
+    try std.testing.expect(!server.hs.nst_sent);
+
+    const ticket = (try server_cb.pull(server_cb.context, .application, &scratch)) orelse return error.TestUnexpectedResult;
+    const parsed = try tls13.parseNewSessionTicket(ticket);
+    try std.testing.expect(parsed.allows_quic_0rtt);
+    try std.testing.expect(server.nst_emitted);
+    try std.testing.expect(server.hs.nst_sent);
+    try std.testing.expectEqual(ticket.len, server.outbound_bytes);
+    try std.testing.expectEqual(@as(usize, 0), server.out_app.pending());
 }
 
 test "Tls13Backend drives a full client handshake through CryptoBackend hooks" {
