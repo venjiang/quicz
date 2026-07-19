@@ -83,7 +83,8 @@ only committed after the full ClientHello succeeds. Server-side ClientHello
 processing now also rejects empty or locally unmatchable oversized configured
 SNI names before peer SNI matching; parsed SNI is only committed after the full
 ClientHello succeeds. Server-side peer X25519 key_share and peer QUIC transport
-parameters, plus early_data / pre_shared_key presence flags, are also only
+parameters, the peer ClientHello random used for keylog evidence, plus
+early_data / pre_shared_key presence flags, are also only
 committed after the full ClientHello succeeds. Parsed PSK identity, obfuscated
 ticket age, binder bytes, binder offset, binder verification result, PSK
 selection, and the ClientHello transcript update are likewise committed only

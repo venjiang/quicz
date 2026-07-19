@@ -3256,6 +3256,8 @@ pub const Tls13Handshake = struct {
         var pos: usize = 0;
         if (readU16(body[pos..]) != legacy_version_tls_1_2) return error.UnsupportedVersion;
         pos += 2; // legacy_version
+        var parsed_client_random: [32]u8 = undefined;
+        @memcpy(&parsed_client_random, body[pos..][0..32]);
         pos += 32; // random
         // legacy_session_id (QUIC does not use TLS compatibility mode)
         if (pos >= body.len) return error.DecodeError;
@@ -3645,6 +3647,7 @@ pub const Tls13Handshake = struct {
         self.transcript = next_transcript;
         self.key_schedule = next_key_schedule;
         self.psk_selected = next_psk_selected;
+        self.client_random = parsed_client_random;
         self.negotiated_alpn_len = selected_alpn_len;
         if (selected_alpn_len > 0) {
             @memcpy(self.negotiated_alpn[0..selected_alpn_len], selected_alpn[0..selected_alpn_len]);
@@ -6759,6 +6762,23 @@ test "Tls13Handshake server accepts matching ClientHello SNI" {
     try std.testing.expectEqualStrings("Example.COM", server.client_sni[0..server.client_sni_len]);
 }
 
+test "Tls13Handshake server records ClientHello random after successful parse" {
+    var client = Tls13Handshake.initClient(.{
+        .server_name = "example.com",
+    }, &[_]u8{});
+    var server = Tls13Handshake.initServer(.{
+        .server_name = "example.com",
+    }, &[_]u8{});
+
+    const client_hello_action = try client.step();
+    try std.testing.expect(std.meta.activeTag(client_hello_action) == .send_data);
+    const client_hello = client_hello_action.send_data.data;
+
+    server.provideData(client_hello);
+    try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
+    try std.testing.expectEqualSlices(u8, client_hello[6..38], &server.client_random);
+}
+
 test "Tls13Handshake server rejects oversized ClientHello SNI host_name" {
     const long_name = "a" ** 257;
     var client = Tls13Handshake.initClient(.{
@@ -6823,6 +6843,8 @@ test "Tls13Handshake server rejects mismatched ClientHello SNI without committin
     }, &[_]u8{});
     @memcpy(server.client_sni[0..3], "old");
     server.client_sni_len = 3;
+    const old_client_random = [_]u8{0x24} ** 32;
+    server.client_random = old_client_random;
     const transcript_before = server.transcript.current();
 
     const client_hello_action = try client.step();
@@ -6831,6 +6853,7 @@ test "Tls13Handshake server rejects mismatched ClientHello SNI without committin
     server.provideData(client_hello_action.send_data.data);
     try std.testing.expectError(error.UnrecognizedName, server.step());
     try std.testing.expectEqualStrings("old", server.client_sni[0..server.client_sni_len]);
+    try std.testing.expectEqualSlices(u8, &old_client_random, &server.client_random);
     try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
     try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
