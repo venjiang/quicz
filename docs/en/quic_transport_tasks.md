@@ -97,7 +97,9 @@ emitting ServerHello. Pure-Zig TLS client-side ServerHello and
 EncryptedExtensions parsing now rejects unsolicited extension types while still
 rejecting duplicate extension types; EncryptedExtensions parsing keeps ALPN,
 peer transport parameters, early-data acceptance, transcript state, and client
-handshake state unchanged when a later extension fails. ServerHello
+handshake state unchanged when a later extension fails, and backend peer
+transport-parameter polling now distinguishes a present empty extension from
+missing peer parameters. ServerHello
 `pre_shared_key` selection no longer has to be the final extension, so later
 allowed extensions such as `key_share` can still be parsed. Client and server
 key exchange now reject

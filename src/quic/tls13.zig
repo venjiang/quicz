@@ -2161,6 +2161,7 @@ pub const Tls13Handshake = struct {
     // Peer QUIC transport parameters (parsed from EncryptedExtensions)
     peer_tp: [1024]u8 = undefined,
     peer_tp_len: usize = 0,
+    peer_tp_available: bool = false,
 
     // Server certificate (first in chain, DER) — verified via verifyServerCertificate
     server_cert: [4096]u8 = undefined,
@@ -2249,6 +2250,7 @@ pub const Tls13Handshake = struct {
         self.negotiated_alpn_len = 0;
         self.client_sni_len = 0;
         self.peer_tp_len = 0;
+        self.peer_tp_available = false;
         self.server_cert_len = 0;
         self.cert_verify_scheme = 0;
         self.cert_verify_sig_len = 0;
@@ -2318,6 +2320,7 @@ pub const Tls13Handshake = struct {
         self.negotiated_alpn_len = 0;
         self.client_sni_len = 0;
         self.peer_tp_len = 0;
+        self.peer_tp_available = false;
         self.server_cert_len = 0;
         self.cert_verify_scheme = 0;
         self.cert_verify_sig_len = 0;
@@ -2955,6 +2958,7 @@ pub const Tls13Handshake = struct {
             @memcpy(self.negotiated_alpn[0..selected_alpn_len], selected_alpn[0..selected_alpn_len]);
         }
         self.peer_tp_len = parsed_peer_tp_len;
+        self.peer_tp_available = true;
         @memcpy(self.peer_tp[0..parsed_peer_tp_len], parsed_peer_tp[0..parsed_peer_tp_len]);
         self.server_accepted_early_data = accepted_early_data;
         self.server_encrypted_extensions_processed = true;
@@ -3686,6 +3690,7 @@ pub const Tls13Handshake = struct {
             self.server_early_traffic_secret_derived = true;
         }
         self.peer_tp_len = parsed_peer_tp_len;
+        self.peer_tp_available = true;
         if (parsed_peer_tp_len > 0) {
             @memcpy(self.peer_tp[0..parsed_peer_tp_len], parsed_peer_tp[0..parsed_peer_tp_len]);
         }
@@ -5365,6 +5370,7 @@ test "Tls13Handshake client rejects EncryptedExtensions extension without commit
     hs.peer_tp[0] = 0xde;
     hs.peer_tp[1] = 0xad;
     hs.peer_tp_len = 2;
+    hs.peer_tp_available = true;
     const transcript_before = hs.transcript.current();
 
     var ee_buf: [256]u8 = undefined;
@@ -5375,6 +5381,7 @@ test "Tls13Handshake client rejects EncryptedExtensions extension without commit
     try std.testing.expectError(error.DecodeError, hs.clientProcessEncryptedExtensions());
     try std.testing.expectEqualStrings("old", hs.negotiated_alpn[0..hs.negotiated_alpn_len]);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, hs.peer_tp[0..hs.peer_tp_len]);
+    try std.testing.expect(hs.peer_tp_available);
     try std.testing.expect(!hs.server_accepted_early_data);
     try std.testing.expect(!hs.server_encrypted_extensions_processed);
     try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
@@ -6715,11 +6722,13 @@ test "Tls13Handshake server rejects later ClientHello error without committing p
     server.peer_tp[0] = 0xde;
     server.peer_tp[1] = 0xad;
     server.peer_tp_len = 2;
+    server.peer_tp_available = true;
     const transcript_before = server.transcript.current();
     server.provideData(hello);
 
     try std.testing.expectError(error.DecodeError, server.step());
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, server.peer_tp[0..server.peer_tp_len]);
+    try std.testing.expect(server.peer_tp_available);
     try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
     try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }

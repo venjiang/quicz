@@ -210,7 +210,7 @@ pub const Tls13Backend = struct {
 
     fn pullPeerTransportParameters(context: *anyopaque, out_buf: []u8) Error!?[]const u8 {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
-        if (self.peer_tp_sent or self.hs.peer_tp_len == 0) return null;
+        if (self.peer_tp_sent or !self.hs.peer_tp_available) return null;
         if (out_buf.len < self.hs.peer_tp_len) return error.BufferTooSmall;
         @memcpy(out_buf[0..self.hs.peer_tp_len], self.hs.peer_tp[0..self.hs.peer_tp_len]);
         self.peer_tp_sent = true;
@@ -806,6 +806,7 @@ test "Tls13Backend pull_peer_transport_parameters rejects undersized output buff
     const peer_tp = [_]u8{ 0x01, 0x02, 0x03 };
     @memcpy(backend.hs.peer_tp[0..peer_tp.len], &peer_tp);
     backend.hs.peer_tp_len = peer_tp.len;
+    backend.hs.peer_tp_available = true;
 
     var too_small: [2]u8 = undefined;
     try testing.expectError(error.BufferTooSmall, cb.pullPeerTransportParameters(&too_small));
@@ -814,6 +815,19 @@ test "Tls13Backend pull_peer_transport_parameters rejects undersized output buff
     var out: [peer_tp.len]u8 = undefined;
     const pulled = (try cb.pullPeerTransportParameters(&out)) orelse return error.TestExpectedPeerTp;
     try testing.expectEqualSlices(u8, &peer_tp, pulled);
+    try testing.expect(backend.peer_tp_sent);
+    try testing.expect((try cb.pullPeerTransportParameters(&out)) == null);
+}
+
+test "Tls13Backend pull_peer_transport_parameters exposes empty extension bytes" {
+    var backend = Tls13Backend.initClient(.{});
+    var cb = backend.cryptoBackend();
+    backend.hs.peer_tp_len = 0;
+    backend.hs.peer_tp_available = true;
+
+    var out: [0]u8 = .{};
+    const pulled = (try cb.pullPeerTransportParameters(&out)) orelse return error.TestExpectedPeerTp;
+    try testing.expectEqual(@as(usize, 0), pulled.len);
     try testing.expect(backend.peer_tp_sent);
     try testing.expect((try cb.pullPeerTransportParameters(&out)) == null);
 }
