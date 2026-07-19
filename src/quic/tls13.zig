@@ -2531,7 +2531,8 @@ pub const Tls13Handshake = struct {
     /// transport parameters extensions (RFC 8446 §4.1.2 + RFC 9001 §8).
     fn clientBuildHello(self: *Tls13Handshake) HandshakeError!Action {
         if (self.local_tp_too_large) return error.DecodeError;
-        secureRandomBytes(&self.client_random);
+        var staged_client_random: [32]u8 = undefined;
+        secureRandomBytes(&staged_client_random);
 
         const buf = &self.out_buf;
         var pos: usize = 4; // reserve type + 3-byte length
@@ -2542,7 +2543,7 @@ pub const Tls13Handshake = struct {
         pos += 2;
 
         // random
-        @memcpy(buf[pos..][0..32], &self.client_random);
+        @memcpy(buf[pos..][0..32], &staged_client_random);
         pos += 32;
 
         // session_id: empty (RFC 9001 §4.1 — QUIC uses empty session ID)
@@ -2717,6 +2718,7 @@ pub const Tls13Handshake = struct {
             @memcpy(buf[binder_offset..][0..binder_len], &binder);
             self.transcript.update(buf[binder_offset..][0..binder_len]);
 
+            self.client_random = staged_client_random;
             self.state = .client_wait_server_hello;
             return Action{ .send_data = .{
                 .level = .initial,
@@ -2737,6 +2739,7 @@ pub const Tls13Handshake = struct {
 
         self.out_len = pos;
         self.transcript.update(buf[0..pos]);
+        self.client_random = staged_client_random;
         self.state = .client_wait_server_hello;
 
         return Action{ .send_data = .{
@@ -4095,6 +4098,23 @@ test "Tls13Handshake client rejects duplicate local ALPN protocol names" {
     }, &[_]u8{});
 
     try std.testing.expectError(error.DecodeError, hs.step());
+}
+
+test "Tls13Handshake client rejects local ALPN error without committing client random" {
+    const alpn = [_][]const u8{ "hq-interop", "hq-interop" };
+    var hs = Tls13Handshake.initClient(.{
+        .alpn = &alpn,
+    }, &[_]u8{});
+    const old_client_random = [_]u8{0x42} ** 32;
+    hs.client_random = old_client_random;
+    const old_transcript = hs.transcript.current();
+
+    try std.testing.expectError(error.DecodeError, hs.step());
+    const new_transcript = hs.transcript.current();
+    try std.testing.expectEqualSlices(u8, &old_client_random, &hs.client_random);
+    try std.testing.expectEqualSlices(u8, &old_transcript, &new_transcript);
+    try std.testing.expectEqual(@as(usize, 0), hs.out_len);
+    try std.testing.expectEqual(HandshakeState.client_start, hs.state);
 }
 
 test "Tls13Handshake client rejects oversized local transport parameters" {

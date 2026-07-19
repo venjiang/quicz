@@ -75,7 +75,8 @@ certificate-chain verification policy, and it keeps the parsed
 CertificateVerify scheme, signature bytes, transcript state, and client
 handshake state unchanged when signature validation fails or no Certificate is
 available to verify. ClientHello construction now rejects
-duplicate local ALPN protocol names before encoding the ALPN extension, and
+duplicate local ALPN protocol names before encoding the ALPN extension or
+committing the generated client random, and
 server-side ClientHello processing now rejects empty, oversized, or duplicate
 local ALPN protocol names before ALPN selection; server-side ALPN selection is
 only committed after the full ClientHello succeeds. Server-side ClientHello
