@@ -126,6 +126,8 @@ rejects a ServerHello random that repeats the ClientHello random without
 committing peer random, transcript, or handshake secrets, and a wrong
 ServerHello cipher suite likewise leaves the staged peer key, peer random, PSK
 selection, transcript, pending key installation, and client state unchanged.
+Missing required ServerHello `supported_versions` or `key_share` extensions are
+covered by the same rollback invariant.
 ServerHello and
 EncryptedExtensions parsing now reject unsolicited extension types while still
 rejecting duplicate extension types; EncryptedExtensions parsing keeps ALPN,
@@ -1811,6 +1813,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   A ServerHello with a wrong cipher suite is rejected before committing staged
   peer key material, peer random, PSK selection, transcript updates, pending
   Handshake key installation, or client handshake state.
+
+- 2026-07-19: Added required ServerHello extension rollback evidence. Missing
+  `supported_versions` or `key_share` now has direct test coverage proving no
+  peer key, peer random, PSK selection, transcript, pending Handshake key
+  installation, or client state is committed.
 
 - 2026-07-16: Added a routed datagram dispatcher to `Tls13ServerEndpoint`.
   A socket loop can classify once, then let the endpoint owner dispatch routed

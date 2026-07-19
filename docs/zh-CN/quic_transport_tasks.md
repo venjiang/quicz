@@ -107,6 +107,8 @@ flight，以及缺失、过短或其它非法的本地私钥配置。
 ServerHello random，且不会提交 peer random、transcript 或 handshake secret；
 ServerHello cipher suite 错误时同样会保持 staged peer key、peer random、PSK
 selection、transcript、pending key installation 和 client state 不变。
+缺失 required ServerHello `supported_versions` 或 `key_share` extension
+时也覆盖同一 rollback 不变量。
 ServerHello 和 EncryptedExtensions 解析现在会拒绝 unsolicited extension type，同时继续拒绝重复 extension type；EncryptedExtensions
 解析在后续 extension 失败时会保持 ALPN、peer transport parameters、early-data
 acceptance、transcript state 和 client handshake state 不变；backend 拉取 peer
@@ -1588,6 +1590,11 @@ close 和 route cleanup 事件。
   cipher suite 错误的 ServerHello 会在提交 staged peer key material、peer random、
   PSK selection、transcript update、pending Handshake key installation 或 client
   handshake state 前被拒绝。
+
+- 2026-07-19：新增 required ServerHello extension rollback 证据。缺失
+  `supported_versions` 或 `key_share` 现在有直接测试证明不会提交 peer key、
+  peer random、PSK selection、transcript、pending Handshake key installation
+  或 client state。
 
 - 2026-07-16：`Tls13ServerEndpoint` 新增 routed datagram dispatcher。socket
   loop 可先分类一次，再由 endpoint owner 分发 routed long-header Initial/Handshake

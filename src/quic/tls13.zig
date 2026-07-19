@@ -4875,9 +4875,16 @@ test "Tls13Handshake client rejects non-null ServerHello compression method" {
     try std.testing.expectError(error.DecodeError, hs.step());
 }
 
-test "Tls13Handshake client rejects ServerHello missing supported_versions" {
+test "Tls13Handshake client rejects ServerHello missing supported_versions without committing parsed state" {
     var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
     _ = try hs.step();
+    const old_peer_key = [_]u8{0x6a} ** 32;
+    const old_server_random = [_]u8{0x25} ** 32;
+    hs.peer_x25519_public = old_peer_key;
+    hs.server_random = old_server_random;
+    hs.server_random_available = true;
+    hs.psk_selected = true;
+    const transcript_before = hs.transcript.current();
 
     var server_secret: [32]u8 = undefined;
     secureRandomBytes(&server_secret);
@@ -4888,11 +4895,26 @@ test "Tls13Handshake client rejects ServerHello missing supported_versions" {
     hs.provideData(sh_buf[0..sh_len]);
 
     try std.testing.expectError(error.MissingExtension, hs.step());
+    try std.testing.expectEqualSlices(u8, &old_peer_key, &hs.peer_x25519_public);
+    try std.testing.expectEqualSlices(u8, &old_server_random, &hs.server_random);
+    try std.testing.expect(hs.server_random_available);
+    try std.testing.expect(hs.psk_selected);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
+    try std.testing.expect(!hs.key_schedule.handshake_secret_derived);
+    try std.testing.expect(!hs.pending_install_handshake);
+    try std.testing.expectEqual(HandshakeState.client_wait_server_hello, hs.state);
 }
 
-test "Tls13Handshake client rejects ServerHello missing key_share" {
+test "Tls13Handshake client rejects ServerHello missing key_share without committing parsed state" {
     var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
     _ = try hs.step();
+    const old_peer_key = [_]u8{0x7a} ** 32;
+    const old_server_random = [_]u8{0x26} ** 32;
+    hs.peer_x25519_public = old_peer_key;
+    hs.server_random = old_server_random;
+    hs.server_random_available = true;
+    hs.psk_selected = true;
+    const transcript_before = hs.transcript.current();
 
     var server_secret: [32]u8 = undefined;
     secureRandomBytes(&server_secret);
@@ -4903,6 +4925,14 @@ test "Tls13Handshake client rejects ServerHello missing key_share" {
     hs.provideData(sh_buf[0..sh_len]);
 
     try std.testing.expectError(error.NoKeyShare, hs.step());
+    try std.testing.expectEqualSlices(u8, &old_peer_key, &hs.peer_x25519_public);
+    try std.testing.expectEqualSlices(u8, &old_server_random, &hs.server_random);
+    try std.testing.expect(hs.server_random_available);
+    try std.testing.expect(hs.psk_selected);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
+    try std.testing.expect(!hs.key_schedule.handshake_secret_derived);
+    try std.testing.expect(!hs.pending_install_handshake);
+    try std.testing.expectEqual(HandshakeState.client_wait_server_hello, hs.state);
 }
 
 test "Tls13Handshake client rejects invalid ServerHello X25519 public key" {
