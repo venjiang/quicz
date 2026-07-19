@@ -6550,7 +6550,7 @@ test "Tls13Handshake server rejects trailing ClientHello PSK binder bytes" {
     try std.testing.expectError(error.DecodeError, server.step());
 }
 
-test "Tls13Handshake server rejects oversized ClientHello transport parameters" {
+test "Tls13Handshake server rejects oversized ClientHello transport parameters without committing parsed state" {
     var hello_buf: [2048]u8 = undefined;
     const base_hello = try clientHelloBytes(.{}, &hello_buf);
     var peer_tp: [1025]u8 = undefined;
@@ -6563,8 +6563,23 @@ test "Tls13Handshake server rejects oversized ClientHello transport parameters" 
     );
 
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.peer_tp[0] = 0xde;
+    server.peer_tp[1] = 0xad;
+    server.peer_tp_len = 2;
+    server.peer_tp_available = true;
+    const old_client_random = [_]u8{0x42} ** 32;
+    server.client_random = old_client_random;
+    server.client_random_available = true;
+    const transcript_before = server.transcript.current();
     server.provideData(hello);
+
     try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, server.peer_tp[0..server.peer_tp_len]);
+    try std.testing.expect(server.peer_tp_available);
+    try std.testing.expectEqualSlices(u8, &old_client_random, &server.client_random);
+    try std.testing.expect(server.client_random_available);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
 test "Tls13Handshake server rejects invalid ClientHello legacy_version" {

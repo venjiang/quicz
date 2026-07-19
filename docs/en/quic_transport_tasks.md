@@ -72,6 +72,9 @@ state.
 Pure-Zig TLS server-side ClientHello parsing now rejects empty ALPN protocol
 entries without committing ALPN selection, peer random, transcript, or
 handshake state.
+It also rejects oversized QUIC transport-parameter extension bytes without
+committing peer transport parameters, peer random, transcript, or handshake
+state.
 
 Pure-Zig TLS server-side ClientHello parsing now rejects SNI list-length
 mismatches and empty peer `host_name` entries before committing parsed peer SNI
