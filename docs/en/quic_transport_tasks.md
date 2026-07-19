@@ -227,6 +227,8 @@ still rejects missing `signature_algorithms` when PSK identity matching fails.
 If a ClientHello offers PSK but the server cannot select it and has no
 configured certificate fallback, the server now rejects the handshake before
 committing peer PSK state, transcript state, or derived 0-RTT secrets.
+On the client side, a resumed ClientHello whose ServerHello does not select PSK
+now resets to the no-PSK key schedule before deriving Handshake traffic secrets.
 The TLS-owned 0-RTT acceptance signal is now bound to connection policy:
 servers emit EncryptedExtensions `early_data` only when the connection accepts
 installed peer 0-RTT keys, and clients discard local 0-RTT send keys as soon as
@@ -1720,6 +1722,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   ClientHello offers PSK but the server leaves PSK unselected and has no
   configured certificate chain, pure-Zig TLS now fails with `BadCertificate`
   before committing peer PSK state, transcript state, or 0-RTT secret state.
+
+- 2026-07-19: Fixed client-side PSK fallback key scheduling. When a resumed
+  ClientHello is answered by a ServerHello that does not select PSK, the
+  pure-Zig TLS client now resets to the no-PSK key schedule before deriving
+  Handshake traffic secrets; focused coverage proves installed Handshake keys
+  match the no-PSK schedule rather than the offered PSK schedule.
 
 - 2026-07-17: Tightened pure-Zig TLS ClientHello supported_groups validation.
   The server now rejects duplicate NamedGroup entries in `supported_groups`

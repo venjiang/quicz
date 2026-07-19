@@ -1654,6 +1654,63 @@ test "Tls13Handshake client rejects invalid ServerHello X25519 key share without
     try std.testing.expectEqual(HandshakeState.client_wait_server_hello, client.state);
 }
 
+test "Tls13Handshake client resets key schedule when PSK is not selected" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+
+    var client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+    const client_hello = (try client.step()).send_data.data;
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var server_hello_buf: [160]u8 = undefined;
+    const server_hello_len = buildServerHello(
+        &server_hello_buf,
+        server_public,
+        cipher_aes_128_gcm_sha256,
+        true,
+        true,
+    );
+    const server_hello = server_hello_buf[0..server_hello_len];
+
+    client.provideData(server_hello);
+    try std.testing.expect(std.meta.activeTag(try client.step()) == ._continue);
+    try std.testing.expect(!client.psk_selected);
+
+    const install = try client.step();
+    try std.testing.expectEqual(EncryptionLevel.handshake, install.install_keys.level);
+
+    var transcript = TranscriptHash.init();
+    transcript.update(client_hello);
+    transcript.update(server_hello);
+    const shared = try X25519.scalarmult(client.x25519_secret, server_public);
+
+    var expected_schedule = KeySchedule.init();
+    expected_schedule.deriveHandshakeSecrets(&shared, transcript.current());
+    const expected_seal = KeySchedule.deriveQuicKeys(expected_schedule.client_handshake_traffic_secret);
+    const expected_open = KeySchedule.deriveQuicKeys(expected_schedule.server_handshake_traffic_secret);
+
+    var leaked_psk_schedule = KeySchedule.initWithPsk(psk);
+    leaked_psk_schedule.deriveHandshakeSecrets(&shared, transcript.current());
+    const leaked_psk_seal = KeySchedule.deriveQuicKeys(leaked_psk_schedule.client_handshake_traffic_secret);
+
+    try std.testing.expectEqualSlices(u8, &expected_seal.key, &install.install_keys.seal.key);
+    try std.testing.expectEqualSlices(u8, &expected_seal.iv, &install.install_keys.seal.iv);
+    try std.testing.expectEqualSlices(u8, &expected_seal.hp, &install.install_keys.seal.hp);
+    try std.testing.expectEqualSlices(u8, &expected_open.key, &install.install_keys.open.key);
+    try std.testing.expectEqualSlices(u8, &expected_open.iv, &install.install_keys.open.iv);
+    try std.testing.expectEqualSlices(u8, &expected_open.hp, &install.install_keys.open.hp);
+    try std.testing.expect(!std.mem.eql(u8, &leaked_psk_seal.key, &install.install_keys.seal.key));
+}
+
 test "Tls13Handshake server selects PSK only for matching ticket identity" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -2901,8 +2958,14 @@ pub const Tls13Handshake = struct {
         if (!have_version) return error.MissingExtension;
         if (!have_key_share) return error.NoKeyShare;
 
-        // ECDHE shared secret: client secret × server public.
+        // ECDHE shared secret: client secret × server public. If the current
+        // ClientHello offered a PSK but the server did not select it, TLS 1.3
+        // falls back to the no-PSK early secret before deriving Handshake keys.
         const shared = X25519.scalarmult(self.x25519_secret, parsed_peer_x25519_public) catch return error.DecodeError;
+        var next_key_schedule = self.key_schedule;
+        if (!selected_psk and self.has_psk) {
+            next_key_schedule = KeySchedule.init();
+        }
 
         self.peer_x25519_public = parsed_peer_x25519_public;
         self.server_random = parsed_server_random;
@@ -2911,7 +2974,8 @@ pub const Tls13Handshake = struct {
 
         // The transcript includes ServerHello before deriving handshake secrets.
         self.transcript.update(msg);
-        self.key_schedule.deriveHandshakeSecrets(&shared, self.transcript.current());
+        next_key_schedule.deriveHandshakeSecrets(&shared, self.transcript.current());
+        self.key_schedule = next_key_schedule;
 
         self.pending_install_handshake = true;
         self.state = .client_wait_encrypted_extensions;

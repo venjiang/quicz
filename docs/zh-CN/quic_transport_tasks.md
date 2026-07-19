@@ -186,6 +186,8 @@ selected-PSK handshake 现在不再要求 ClientHello `signature_algorithms`，
 并且 PSK identity 不匹配时仍会拒绝缺失的 `signature_algorithms`。
 如果 ClientHello offer 了 PSK，但 server 最终未选择 PSK 且没有配置证书回退路径，
 server 现在会在提交 peer PSK state、transcript state 或派生 0-RTT secret 前拒绝握手。
+client 侧 resumed ClientHello 收到未选择 PSK 的 ServerHello 时，现在会在派生
+Handshake traffic secret 前重置到 no-PSK key schedule。
 TLS-owned 0-RTT acceptance signal 现在绑定到连接策略：server 只有在
 connection 接受已安装 peer 0-RTT key 时才发送 EncryptedExtensions
 `early_data`；client 一旦从 EncryptedExtensions 确认 server 拒绝 early data，
@@ -1511,6 +1513,11 @@ close 和 route cleanup 事件。
   PSK 但 server 保持 PSK unselected 且没有配置证书链时，纯 Zig TLS 现在会以
   `BadCertificate` 失败，并且不会提交 peer PSK state、transcript state 或
   0-RTT secret state。
+
+- 2026-07-19：修正 client-side PSK fallback key schedule。resumed ClientHello
+  收到未选择 PSK 的 ServerHello 时，纯 Zig TLS client 现在会在派生 Handshake
+  traffic secret 前重置到 no-PSK key schedule；聚焦测试证明安装的 Handshake
+  keys 匹配 no-PSK schedule，而不是已 offer 的 PSK schedule。
 
 - 2026-07-17：收紧纯 Zig TLS ClientHello supported_groups 校验。server 现在会在
   选择 X25519 或推进 handshake 前拒绝 `supported_groups` 里的重复 NamedGroup entry。
