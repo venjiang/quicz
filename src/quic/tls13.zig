@@ -668,6 +668,22 @@ test "parseNewSessionTicket rejects duplicate unknown extensions" {
     try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&msg));
 }
 
+test "parseNewSessionTicket rejects duplicate early_data extensions" {
+    const msg = [_]u8{
+        0x04, 0x00, 0x00, 0x23, // type=new_session_ticket, length=35
+        0x00, 0x00, 0x0e, 0x10, // ticket_lifetime=3600
+        0x00, 0x00, 0x00, 0x01, // ticket_age_add=1
+        0x02, 0xaa, 0xbb, // nonce_len=2, nonce=0xaabb
+        0x00, 0x04, 0xcc, 0xdd, 0xee, 0xff, // ticket_len=4, ticket
+        0x00, 0x10, // extensions_len=16
+        0x00, 0x2a, 0x00, 0x04, // early_data extension
+        0xff, 0xff, 0xff, 0xff, // QUIC 0-RTT sentinel
+        0x00, 0x2a, 0x00, 0x04, // duplicate early_data extension
+        0xff, 0xff, 0xff, 0xff,
+    };
+    try std.testing.expectError(error.DecodeError, parseNewSessionTicket(&msg));
+}
+
 test "parseNewSessionTicket rejects wrong type and truncation" {
     const wrong_type = [_]u8{ 0x01, 0x00, 0x00, 0x00 };
     try std.testing.expectError(error.UnexpectedMessage, parseNewSessionTicket(&wrong_type));
