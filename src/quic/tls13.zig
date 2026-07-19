@@ -1600,6 +1600,33 @@ test "Tls13Handshake client accepts ServerHello PSK selection before key_share" 
     try std.testing.expect(client.psk_selected);
 }
 
+test "Tls13Handshake client rejects invalid ServerHello X25519 key share without selecting PSK" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+
+    var client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+    _ = try client.step();
+    const transcript_before = client.transcript.current();
+
+    var server_hello_buf: [160]u8 = undefined;
+    const server_hello_len = buildServerHelloWithPskBeforeKeyShare(&server_hello_buf, [_]u8{0} ** 32);
+
+    client.provideData(server_hello_buf[0..server_hello_len]);
+    try std.testing.expectError(error.DecodeError, client.step());
+    try std.testing.expect(!client.psk_selected);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &client.transcript.current());
+    try std.testing.expect(!client.key_schedule.handshake_secret_derived);
+    try std.testing.expect(!client.pending_install_handshake);
+    try std.testing.expectEqual(HandshakeState.client_wait_server_hello, client.state);
+}
+
 test "Tls13Handshake server selects PSK only for matching ticket identity" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -2742,6 +2769,7 @@ pub const Tls13Handshake = struct {
 
         var have_version = false;
         var have_key_share = false;
+        var selected_psk = false;
         var seen_known_extensions: u16 = 0;
         while (pos < ext_end) {
             if (pos + 4 > ext_end) return error.DecodeError;
@@ -2781,7 +2809,7 @@ pub const Tls13Handshake = struct {
                     if (!self.has_psk or self.session_ticket_len == 0) return error.DecodeError;
                     if (el != 2) return error.DecodeError;
                     if (readU16(ext[0..2]) != 0) return error.DecodeError;
-                    self.psk_selected = true;
+                    selected_psk = true;
                 },
                 else => return error.DecodeError,
             }
@@ -2792,6 +2820,8 @@ pub const Tls13Handshake = struct {
 
         // ECDHE shared secret: client secret × server public.
         const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.DecodeError;
+
+        self.psk_selected = selected_psk;
 
         // The transcript includes ServerHello before deriving handshake secrets.
         self.transcript.update(msg);
