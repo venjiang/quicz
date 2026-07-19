@@ -81,7 +81,9 @@ rejecting duplicate extension types; ServerHello `pre_shared_key` selection no
 longer has to be the final extension, so later allowed extensions such as
 `key_share` can still be parsed. Client and server key exchange now reject
 invalid peer X25519 public keys as `DecodeError` before deriving handshake
-traffic secrets. Pure-Zig TLS input buffering now reports
+traffic secrets; the server path keeps the ServerHello transcript and pending
+Handshake key installation unchanged on that failure. Pure-Zig TLS input
+buffering now reports
 `DecodeError`
 after oversized handshake or post-handshake input instead of silently
 truncating CRYPTO bytes and waiting on a partial message; after compaction, it

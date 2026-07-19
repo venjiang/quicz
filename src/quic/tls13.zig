@@ -3591,10 +3591,10 @@ pub const Tls13Handshake = struct {
         buf[2] = @intCast((msg_len >> 8) & 0xFF);
         buf[3] = @intCast(msg_len & 0xFF);
 
-        self.transcript.update(buf[0..pos]);
-
         // ECDHE shared secret: server secret × client public.
         const shared = X25519.scalarmult(self.x25519_secret, self.peer_x25519_public) catch return error.DecodeError;
+
+        self.transcript.update(buf[0..pos]);
         self.key_schedule.deriveHandshakeSecrets(&shared, self.transcript.current());
 
         self.pending_install_handshake = true;
@@ -5946,7 +5946,12 @@ test "Tls13Handshake server rejects invalid ClientHello X25519 public key" {
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
     try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
+    const transcript_before = server.transcript.current();
     try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expect(!server.key_schedule.handshake_secret_derived);
+    try std.testing.expect(!server.pending_install_handshake);
+    try std.testing.expectEqual(HandshakeState.server_send_server_hello, server.state);
 }
 
 test "Tls13Handshake server rejects duplicate ClientHello supported_groups entries" {
