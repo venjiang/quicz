@@ -2288,6 +2288,14 @@ pub fn Tls13ServerEndpoint(
                 handshake_out,
                 installed_key_out,
             );
+            self.preflightDueRecoveryRoutes(now_millis) catch |err| {
+                return .{
+                    .process = process,
+                    .pending_work = .{},
+                    .pending_drain = .{ .first_route_error = err },
+                    .next_deadline = try self.nextDeadline(allocator),
+                };
+            };
             const pending_work = try self.records.processPendingWork(
                 &self.lifecycle,
                 allocator,
@@ -4938,6 +4946,64 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, preserved_deadline.kind);
     try std.testing.expectEqual(deadline.connection_id, preserved_deadline.connection_id);
     try std.testing.expectEqual(root.PacketNumberSpace.application, preserved_deadline.recovery.?.space);
+
+    const unsupported_initial = [_]u8{
+        0xc0,
+        0xfa,
+        0xce,
+        0xb0,
+        0x0c,
+        0x02,
+        0xaa,
+        0xbb,
+        0x03,
+        0x11,
+        0x22,
+        0x33,
+        0x00,
+    };
+    var missing_route_step_out: [128]u8 = undefined;
+    var missing_route_scratch: [64]u8 = undefined;
+    var missing_route_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var missing_route_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var missing_route_installed_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    var missing_route_step_pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const missing_route_step = try endpoint_owner.receiveDatagramStepWithRoutePath(
+        no_allocation_allocator.allocator(),
+        first_path,
+        deadline.deadline_millis,
+        &unsupported_initial,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &missing_route_step_out,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &missing_route_scratch,
+        &[_]u8{},
+        &missing_route_initial_out,
+        &missing_route_handshake_out,
+        &missing_route_installed_out,
+        .application,
+        &missing_route_step_pending_out,
+    );
+    switch (missing_route_step.process) {
+        .version_negotiation => |response| try std.testing.expect(response.path.eql(first_path)),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), missing_route_step.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_step.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_step.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_step.pending_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), missing_route_step.pending_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_step.pending_drain.first_route_error);
+    const missing_route_step_deadline = missing_route_step.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, missing_route_step_deadline.kind);
+    try std.testing.expectEqual(deadline.connection_id, missing_route_step_deadline.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.application, missing_route_step_deadline.recovery.?.space);
+
     try endpoint_owner.lifecycle.registerConnectionId(deadline.connection_id, recovery_local_id, recovery_path, .{});
 
     const pending_drain = try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePath(
@@ -4974,21 +5040,6 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expect(step_deadline.connection_id == first_record.handle or step_deadline.connection_id == second_record.handle);
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, step_deadline.kind);
 
-    const unsupported_initial = [_]u8{
-        0xc0,
-        0xfa,
-        0xce,
-        0xb0,
-        0x0c,
-        0x02,
-        0xaa,
-        0xbb,
-        0x03,
-        0x11,
-        0x22,
-        0x33,
-        0x00,
-    };
     var route_out: [128]u8 = undefined;
     var scratch: [64]u8 = undefined;
     var initial_out: [1]root.EndpointPolledDatagramResult = undefined;

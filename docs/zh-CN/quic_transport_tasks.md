@@ -1576,6 +1576,12 @@ close 和 route cleanup 事件。
 - 2026-07-17：收紧纯 Zig TLS ClientHello ALPN 校验。server 现在会在记录协商的
   application protocol 前拒绝 ALPN protocol list 里的重复 protocol name。
 
+- 2026-07-19：强化 server endpoint receive-step 的 recovery route preflight。
+  `Tls13ServerEndpoint.receiveDatagramStepWithRoutePath()` 现在会保留可见 receive
+  result，但当 endpoint 已没有 recovery output 所需当前 route 时，不消费 due
+  recovery work。该 step 会在 pending drain result 中报告 `UnknownConnectionId`，
+  并保留 recovery deadline，等待后续 route 恢复后再 drain。
+
 - 2026-07-16：`Tls13ServerEndpoint` 新增 routed datagram dispatcher。socket
   loop 可先分类一次，再由 endpoint owner 分发 routed long-header Initial/Handshake
   CRYPTO packet 或 installed-key short packet，复用现有 route-bound 处理路径。endpoint

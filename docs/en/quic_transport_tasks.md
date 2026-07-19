@@ -1797,6 +1797,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   now rejects duplicate protocol names in the ALPN protocol list before
   recording the negotiated application protocol.
 
+- 2026-07-19: Hardened server endpoint receive-step recovery route preflight.
+  `Tls13ServerEndpoint.receiveDatagramStepWithRoutePath()` now preserves the
+  visible receive result but refuses to consume due recovery work when the
+  endpoint no longer has a current route for the recovery output. The step
+  reports `UnknownConnectionId` in its pending drain result and keeps the
+  recovery deadline armed for a later routed drain.
+
 - 2026-07-16: Added a routed datagram dispatcher to `Tls13ServerEndpoint`.
   A socket loop can classify once, then let the endpoint owner dispatch routed
   long-header Initial/Handshake CRYPTO packets or installed-key short packets
