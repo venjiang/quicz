@@ -425,6 +425,13 @@ fn saturatingAddU64(a: u64, b: u64) u64 {
     return std.math.add(u64, a, b) catch std.math.maxInt(u64);
 }
 
+fn cryptoBackendDrivePolicyClosesOnError(policy: PeerTransportParameterDrivePolicy) bool {
+    return switch (policy) {
+        .strict, .compatible => false,
+        .close_on_error, .compatible_close_on_error => true,
+    };
+}
+
 fn deinitPeerClose(close: *PeerClose, allocator: std.mem.Allocator) void {
     switch (close.*) {
         .connection => |connection| allocator.free(connection.reason_phrase),
@@ -7951,6 +7958,14 @@ pub const Connection = struct {
                 if (n == 0) return error.BufferTooSmall;
                 backend.receive(backend.context, space, scratch[0..n]) catch |err| {
                     packet_space.crypto_read_offset.* = crypto_read_offset_snapshot;
+                    if (err == error.CryptoError and cryptoBackendDrivePolicyClosesOnError(peer_transport_parameter_policy)) {
+                        try self.closeConnection(
+                            transport_error.cryptoErrorCode(80),
+                            @intFromEnum(frame.FrameType.crypto),
+                            "crypto error",
+                        );
+                        return error.InvalidPacket;
+                    }
                     return err;
                 };
                 progress.inbound_chunks += 1;
@@ -14892,6 +14907,62 @@ test "driveCryptoBackendInSpaceOrClose queues close for invalid peer transport p
             try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
             try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
             try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "driveCryptoBackendInSpaceOrClose queues crypto close for backend receive error" {
+    const FailingBackend = struct {
+        output_pulled: bool = false,
+
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {
+            return error.CryptoError;
+        }
+
+        fn pull(context: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.output_pulled = true;
+            return null;
+        }
+    };
+
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    var in_buf: [32]u8 = undefined;
+    var in = buffer.fixedWriter(&in_buf);
+    try frame.encodeFrame(in.writer(), .{ .crypto = .{
+        .offset = 0,
+        .data = "client",
+    } });
+    try conn.processDatagramInSpace(.handshake, 0, in.getWritten());
+
+    var backend = FailingBackend{};
+    var scratch: [64]u8 = undefined;
+    try std.testing.expectError(error.InvalidPacket, conn.driveCryptoBackendInSpaceOrClose(.handshake, backend.backend(), &scratch));
+    try std.testing.expect(!backend.output_pulled);
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+
+    var close_buf: [96]u8 = undefined;
+    const payload = (try conn.pollTx(1, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.cryptoErrorCode(80), close.error_code);
+            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
+            try std.testing.expectEqualStrings("crypto error", close.reason_phrase);
         },
         else => return error.InvalidPacket,
     }
