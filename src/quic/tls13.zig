@@ -1575,6 +1575,41 @@ test "Tls13Handshake server selects valid PSK in ServerHello" {
     try std.testing.expect(client.psk_selected);
 }
 
+test "Tls13Handshake client accepts unknown extension after ServerHello PSK selection" {
+    const alpn = [_][]const u8{"hq-interop"};
+    const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    const psk = [_]u8{0xab} ** secret_len;
+
+    var client = Tls13Handshake.initClientWithPsk(.{
+        .alpn = &alpn,
+        .server_name = "example.com",
+    }, &tp, psk);
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+    @memcpy(client.session_ticket[0..ticket.len], &ticket);
+    client.session_ticket_len = ticket.len;
+    const client_hello = (try client.step()).send_data.data;
+
+    var server = Tls13Handshake.initServerWithPsk(.{
+        .alpn = &alpn,
+    }, &tp, psk);
+    server.provideData(client_hello);
+    try std.testing.expect(std.meta.activeTag(try server.step()) == ._continue);
+    const server_hello_action = try server.step();
+
+    var server_hello_buf: [256]u8 = undefined;
+    @memcpy(server_hello_buf[0..server_hello_action.send_data.data.len], server_hello_action.send_data.data);
+    const server_hello = try appendServerHelloRawExtension(
+        &server_hello_buf,
+        server_hello_action.send_data.data.len,
+        0xaaaa,
+        &[_]u8{},
+    );
+
+    client.provideData(server_hello);
+    try std.testing.expect(std.meta.activeTag(try client.step()) == ._continue);
+    try std.testing.expect(client.psk_selected);
+}
+
 test "Tls13Handshake server selects PSK only for matching ticket identity" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -2753,7 +2788,6 @@ pub const Tls13Handshake = struct {
                 @intFromEnum(ExtType.pre_shared_key) => {
                     // ServerHello pre_shared_key selects one offered identity
                     // by index. This implementation offers one identity only.
-                    if (pos != ext_end) return error.DecodeError;
                     if (!self.has_psk or self.session_ticket_len == 0) return error.DecodeError;
                     if (el != 2) return error.DecodeError;
                     if (readU16(ext[0..2]) != 0) return error.DecodeError;

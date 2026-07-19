@@ -77,7 +77,9 @@ server-side ClientHello processing now rejects empty or oversized configured
 certificate chains plus missing or invalid configured private keys before
 emitting ServerHello. Pure-Zig TLS client-side ServerHello and
 EncryptedExtensions parsing now ignores unknown extension types while still
-rejecting duplicate extension types. Pure-Zig TLS input buffering now reports `DecodeError`
+rejecting duplicate extension types; ServerHello `pre_shared_key` selection no
+longer has to be the final extension, so later unknown extensions can still be
+ignored. Pure-Zig TLS input buffering now reports `DecodeError`
 after oversized handshake or post-handshake input instead of silently
 truncating CRYPTO bytes and waiting on a partial message; after compaction, it
 also rejects input that cannot fit in the remaining fixed buffer without
