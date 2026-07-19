@@ -66,6 +66,8 @@ peer transport parameters、transcript 或 handshake 状态前拒绝畸形 ALPN 
 transcript 或 handshake 状态前拒绝空 ALPN protocol entry。
 它也会在提交 peer transport parameters、peer random、transcript 或 handshake
 状态前拒绝缺失或过大的 QUIC transport-parameter extension bytes。
+缺失 `supported_groups` 时，也会在提交 peer transport parameters、peer key share、
+peer random、transcript 或 handshake 状态前拒绝。
 
 纯 Zig TLS server-side ClientHello 解析现在会在提交 peer SNI 或 handshake
 状态前拒绝 SNI list length 不一致和 peer `host_name` 为空的畸形输入。

@@ -75,6 +75,8 @@ handshake state.
 It also rejects missing or oversized QUIC transport-parameter extension bytes
 without committing peer transport parameters, peer random, transcript, or
 handshake state.
+Missing `supported_groups` is rejected without committing peer transport
+parameters, peer key share, peer random, transcript, or handshake state.
 
 Pure-Zig TLS server-side ClientHello parsing now rejects SNI list-length
 mismatches and empty peer `host_name` entries before committing parsed peer SNI
