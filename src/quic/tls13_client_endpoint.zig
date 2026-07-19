@@ -1865,6 +1865,52 @@ test "Tls13ClientEndpoint services key discard deadline without input" {
     try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
 }
 
+test "Tls13ClientEndpoint drains key discard deadline without input" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x5e, 0x5f, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        34,
+        path,
+        .{ .active_migration_disabled = false },
+        .{ .initial_rtt_ms = 100 },
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const client_secret = [_]u8{0x5e} ** protection.traffic_secret_len;
+    const server_secret = [_]u8{0x5f} ** protection.traffic_secret_len;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = client_secret,
+        .peer = server_secret,
+    });
+    client.transport.connection.last_packet_activity_millis = 10;
+    try client.transport.connection.initiateOneRttKeyUpdate();
+    try std.testing.expectEqual(@as(?u64, 1), client.transport.connection.localOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(?bool, true), client.transport.connection.localOneRttRetainsKeyGeneration(0));
+
+    const deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(deadline == .key_discard);
+    var out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    try std.testing.expect((try client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(deadline.deadlineMillis() - 1, &out)) == null);
+
+    const serviced = (try client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(deadline.deadlineMillis(), &out)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(serviced.deadline == .key_discard);
+    try std.testing.expectEqual(@as(usize, 0), serviced.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), serviced.drain.first_error);
+    try std.testing.expectEqual(@as(?bool, false), client.transport.connection.localOneRttRetainsKeyGeneration(0));
+    try std.testing.expectEqual(@as(?client_transport.ClientTransportDeadline, null), serviced.next_deadline);
+    try std.testing.expectEqual(@as(usize, 1), client.lifecycle.routeCount());
+}
+
 test "Tls13ClientEndpoint receive returns Retry output with committed route path" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_scid = [_]u8{ 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f, 0x70 };
