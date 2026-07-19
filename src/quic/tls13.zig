@@ -3121,7 +3121,25 @@ pub const Tls13Handshake = struct {
     }
 
     fn certificateDerEnvelopeLooksParseable(cert_der: []const u8) bool {
-        return cert_der.len >= 2 and cert_der[0] == 0x30;
+        if (cert_der.len < 2 or cert_der[0] != 0x30) return false;
+        const len0 = cert_der[1];
+        if (len0 < 0x80) {
+            return 2 + @as(usize, len0) == cert_der.len;
+        }
+        const len_octets = @as(usize, len0 & 0x7f);
+        if (len_octets == 0 or len_octets > @sizeOf(usize)) return false;
+        if (2 + len_octets > cert_der.len) return false;
+        if (len_octets > 1 and cert_der[2] == 0) return false;
+
+        var body_len: usize = 0;
+        for (cert_der[2..][0..len_octets]) |byte| {
+            body_len = std.math.mul(usize, body_len, 256) catch return false;
+            body_len = std.math.add(usize, body_len, @as(usize, byte)) catch return false;
+        }
+        if (body_len < 128) return false;
+        const header_len = std.math.add(usize, 2, len_octets) catch return false;
+        const envelope_len = std.math.add(usize, header_len, body_len) catch return false;
+        return envelope_len == cert_der.len;
     }
 
     /// Verify the server Finished message against the transcript hash and
@@ -4853,6 +4871,25 @@ test "Tls13Handshake rejects empty leaf certificate when verification is skipped
 
 test "Tls13Handshake rejects invalid certificate without committing parsed leaf state" {
     const invalid_der = [_]u8{0xaa};
+    var certificate_message: [64]u8 = undefined;
+    const certificate_len = buildCertificate(&certificate_message, &invalid_der);
+
+    var handshake = Tls13Handshake.initClient(.{ .skip_cert_verify = false }, &.{});
+    handshake.state = .client_wait_certificate;
+    handshake.server_cert[0] = 0xde;
+    handshake.server_cert[1] = 0xad;
+    handshake.server_cert_len = 2;
+    const transcript_before = handshake.transcript.current();
+    handshake.provideData(certificate_message[0..certificate_len]);
+
+    try std.testing.expectError(error.BadCertificate, handshake.clientProcessCertificate());
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, handshake.server_cert[0..handshake.server_cert_len]);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &handshake.transcript.current());
+    try std.testing.expectEqual(HandshakeState.client_wait_certificate, handshake.state);
+}
+
+test "Tls13Handshake rejects malformed certificate DER length without committing parsed leaf state" {
+    const invalid_der = [_]u8{ 0x30, 0x82 };
     var certificate_message: [64]u8 = undefined;
     const certificate_len = buildCertificate(&certificate_message, &invalid_der);
 
