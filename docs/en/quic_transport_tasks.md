@@ -90,10 +90,12 @@ copying a partial CRYPTO fragment. It also rejects handshake message headers
 whose declared length cannot fit in the fixed input buffer. The pure-Zig TLS
 backend adapter now rejects oversized local
 transport-parameter extension bytes instead of silently truncating the bytes
-that enter the TLS transcript, and its peer transport-parameter / ALPN pull
-hooks now reject undersized caller output buffers without consuming their
-one-shot results. Backend outbound CRYPTO buffering now also rejects TLS
-flights that cannot fit in the target packet-number-space bucket, so the
+that enter the TLS transcript, maps invalid ServerHello X25519 key shares to
+`CryptoError` without exposing handshake secrets, and its peer
+transport-parameter / ALPN pull hooks now reject undersized caller output
+buffers without consuming their one-shot results. Backend outbound CRYPTO
+buffering now also rejects TLS flights that cannot fit in the target
+packet-number-space bucket, so the
 connection sees `CryptoError` instead of draining a truncated ClientHello,
 ServerHello, or post-handshake flight.
 

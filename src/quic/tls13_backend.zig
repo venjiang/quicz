@@ -725,6 +725,21 @@ test "Tls13Backend pull rejects outbound CRYPTO bucket overflow without truncati
     try testing.expectEqual(@as(usize, 0), backend.cached_client_hello_len);
 }
 
+test "Tls13Backend receive maps invalid ServerHello X25519 key share to CryptoError" {
+    var backend = Tls13Backend.initClient(.{});
+    var cb = backend.cryptoBackend();
+
+    var scratch: [4096]u8 = undefined;
+    const client_hello = (try cb.pull(cb.context, .initial, &scratch)) orelse return error.TestUnexpectedResult;
+    try testing.expect(client_hello.len > 0);
+
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = tls13.buildServerHello(&sh_buf, [_]u8{0} ** 32, 0x1301, true, true);
+    try testing.expectError(error.CryptoError, cb.receive(cb.context, .initial, sh_buf[0..sh_len]));
+    try testing.expectEqual(@as(usize, 1), backend.drive_errors);
+    try testing.expect((try cb.pullHandshakeTrafficSecrets()) == null);
+}
+
 test "Tls13Backend pull_peer_transport_parameters rejects undersized output buffer without consuming" {
     var backend = Tls13Backend.initClient(.{});
     var cb = backend.cryptoBackend();

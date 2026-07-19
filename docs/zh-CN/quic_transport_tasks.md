@@ -75,11 +75,12 @@ handshake traffic secret 前把非法 peer X25519 public key 拒绝为 `DecodeEr
 压缩已消费 bytes 后仍放不下的新输入，且不会拷贝半截 CRYPTO fragment；同时拒绝
 声明长度无法放入固定 input buffer 的 handshake message header。纯 Zig TLS
 backend adapter 现在会拒绝过大的本地 transport-parameter extension bytes，
-不再静默截断进入 TLS transcript 的字节；peer transport-parameter 和 ALPN
-pull hook 现在也会在调用方输出 buffer 太小时拒绝，并保留 one-shot 结果。
-backend outbound CRYPTO buffering 现在也会在目标 packet-number-space bucket
-容纳不下 TLS flight 时拒绝，让 connection 收到 `CryptoError`，而不是继续 drain
-被截断的 ClientHello、ServerHello 或 post-handshake flight。
+不再静默截断进入 TLS transcript 的字节，也会把非法 ServerHello X25519 key_share
+映射为 `CryptoError` 且不暴露 handshake secret；peer transport-parameter 和
+ALPN pull hook 现在也会在调用方输出 buffer 太小时拒绝，并保留 one-shot 结果。
+backend outbound CRYPTO buffering 现在也会在目标 packet-number-space bucket 容纳不下
+TLS flight 时拒绝，让 connection 收到 `CryptoError`，而不是继续 drain 被截断的
+ClientHello、ServerHello 或 post-handshake flight。
 
 endpoint Version Negotiation response 生成现在会先校验 QUIC fixed bit。
 fixed bit 为 0 的 unsupported-version long-header datagram 会被忽略，不再生成
