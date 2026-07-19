@@ -380,7 +380,7 @@ pub const Tls13Backend = struct {
             switch (action) {
                 .send_data => |sd| {
                     try self.bucketForLevel(sd.level).append(sd.data);
-                    if (!self.client_hello_built and sd.level == .initial) {
+                    if (!self.hs.is_server and !self.client_hello_built and sd.level == .initial) {
                         self.client_hello_built = true;
                         // 缓存首份 ClientHello 字节用于 Retry 后重发。ClientHello
                         // 内容在 Retry 前后不变，重发相同字节即可（RFC 8446 §4.1.2）。
@@ -813,4 +813,34 @@ test "Tls13Backend.retryReceived re-emits cached ClientHello" {
 
     // 再次 pull(.initial) -> null（bucket 再次 drain 空）。
     try testing.expect((try cb.pull(cb.context, .initial, &scratch)) == null);
+}
+
+test "Tls13Backend server does not cache ServerHello for Retry replay" {
+    const psk = [_]u8{0xab} ** tls13.secret_len;
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+
+    var client = Tls13Backend.initClientWithPsk(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    }, psk);
+    @memcpy(client.hs.session_ticket[0..ticket.len], &ticket);
+    client.hs.session_ticket_len = ticket.len;
+    var client_cb = client.cryptoBackend();
+    var scratch: [4096]u8 = undefined;
+    const client_hello = (try client_cb.pull(client_cb.context, .initial, &scratch)) orelse return error.TestUnexpectedResult;
+
+    var server = Tls13Backend.initServerWithPsk(.{
+        .alpn = &.{},
+    }, psk);
+    var server_cb = server.cryptoBackend();
+    try server_cb.receive(server_cb.context, .initial, client_hello);
+
+    try testing.expect(!server.client_hello_built);
+    try testing.expectEqual(@as(usize, 0), server.cached_client_hello_len);
+    const server_hello = try server_cb.pull(server_cb.context, .initial, &scratch);
+    try testing.expect(server_hello != null);
+    try testing.expect((try server_cb.pull(server_cb.context, .initial, &scratch)) == null);
+
+    server.retryReceived();
+    try testing.expect((try server_cb.pull(server_cb.context, .initial, &scratch)) == null);
 }

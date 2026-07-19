@@ -121,6 +121,9 @@ buffering now also rejects TLS flights that cannot fit in the target
 packet-number-space bucket, so the
 connection sees `CryptoError` instead of draining a truncated ClientHello,
 ServerHello, or post-handshake flight.
+The pure-Zig TLS backend now caches Retry replay bytes only for client-side
+ClientHello output; server-side Initial `ServerHello` output is not stored in
+the ClientHello retry cache and `retryReceived()` cannot re-emit it.
 
 Endpoint Version Negotiation response generation now enforces the QUIC fixed
 bit before emitting a response. Unsupported-version long-header datagrams with
