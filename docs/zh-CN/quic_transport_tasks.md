@@ -3698,7 +3698,9 @@ close 和 route cleanup 事件。
   时，仍会清理 sent-packet state、bytes in flight 和 PTO backoff，但不再更新
   RTT estimate。测试覆盖 connection ACK path 和 recovery accounting helper；
   `loss_recovery` 现在打印 `old-largest ACK preserved RTT`。直接 recovery
-  测试也覆盖 RFC 9002 中 ACK delay 不得把 adjusted RTT 压低到 min RTT 以下的规则。
+  测试也覆盖 RFC 9002 中 ACK delay 不得把 adjusted RTT 压低到 min RTT 以下的规则；
+  connection-level ACK 路径现在也直接覆盖 peer ACK-delay exponent 解码和
+  `max_ack_delay` 截断之后的 Application 样本。
 - 2026-05-29：新增 connection-level ACK API path 的 RFC 9000 ACK range
   结构校验。调用方构造的 ACK/ACK_ECN frame 若 range 会计算出负 packet
   number，现在会在触碰 recovery state 前被拒绝，与现有 wire-codec

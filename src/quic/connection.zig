@@ -15737,6 +15737,39 @@ test "ACK delay is capped by peer max_ack_delay after handshake confirmation" {
     try std.testing.expectEqual(@as(u64, 103), conn.smoothedRttMillis(.application));
 }
 
+test "Application ACK delay cannot reduce adjusted RTT below min RTT" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{
+        .initial_rtt_ms = 100,
+    });
+    defer conn.deinit();
+    try conn.applyPeerTransportParameters(.{
+        .max_ack_delay = 90,
+        .ack_delay_exponent = 3,
+    });
+    try conn.confirmHandshake();
+
+    const first_packet_number = try conn.recordPacketSentInSpace(.application, 0, 100);
+    try conn.receiveAckInSpace(.application, 50, .{
+        .largest_acknowledged = first_packet_number,
+        .ack_delay = 0,
+        .first_ack_range = 0,
+    });
+    try std.testing.expectEqual(@as(?u64, 50), conn.recovery_state.min_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 50), conn.smoothedRttMillis(.application));
+
+    const second_packet_number = try conn.recordPacketSentInSpace(.application, 100, 100);
+    try conn.receiveAckInSpace(.application, 200, .{
+        .largest_acknowledged = second_packet_number,
+        .ack_delay = 10,
+        .first_ack_range = 0,
+    });
+
+    try std.testing.expectEqual(@as(?u64, 100), conn.recovery_state.latest_rtt_ms);
+    try std.testing.expectEqual(@as(?u64, 50), conn.recovery_state.min_rtt_ms);
+    try std.testing.expectEqual(@as(u64, 56), conn.smoothedRttMillis(.application));
+    try std.testing.expectEqual(@as(u64, 31), conn.recovery_state.rttvar_ms);
+}
+
 test "ACK does not sample RTT when only lower ranges are newly acknowledged" {
     var conn = try Connection.init(std.testing.allocator, .client, .{
         .initial_rtt_ms = 100,

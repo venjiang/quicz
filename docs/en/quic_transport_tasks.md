@@ -4238,7 +4238,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   connection ACK path and the recovery accounting helper; `loss_recovery` now
   prints `old-largest ACK preserved RTT`. Direct recovery tests also cover the
   RFC 9002 rule that ACK delay is not subtracted when it would pull adjusted RTT
-  below the min RTT sample.
+  below the min RTT sample. The Connection-level ACK path now has direct
+  Application coverage after peer ACK-delay exponent decoding and
+  `max_ack_delay` capping.
 - 2026-05-29: Added RFC 9000 ACK range structural validation on the
   connection-level ACK API path. Caller-constructed ACK/ACK_ECN frames now
   reject ranges that would compute negative packet numbers before recovery
