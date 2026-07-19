@@ -103,6 +103,9 @@ ClientHello、ServerHello 或 post-handshake flight。
 纯 Zig TLS backend 现在只为 client-side ClientHello output 缓存 Retry replay
 bytes；server-side Initial `ServerHello` output 不会写入 ClientHello retry cache，
 `retryReceived()` 也不能重新发出它。
+`set_local_transport_parameters` 现在会在 endpoint 把本端参数写入 TLS 后锁定：
+client 侧是 ClientHello，server 侧是 EncryptedExtensions。后续调用会被忽略，
+不会修改已固定在 transcript 中的 bytes。
 
 endpoint Version Negotiation response 生成现在会先校验 QUIC fixed bit。
 fixed bit 为 0 的 unsupported-version long-header datagram 会被忽略，不再生成

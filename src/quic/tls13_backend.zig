@@ -87,6 +87,11 @@ pub const Tls13Backend = struct {
     /// are baked into the ClientHello transcript).
     client_hello_built: bool = false,
 
+    /// Set once this endpoint's local transport parameters have been emitted
+    /// into a TLS handshake message. Client parameters are fixed by
+    /// ClientHello; server parameters are fixed by EncryptedExtensions.
+    local_transport_parameters_locked: bool = false,
+
     /// One-shot delivery flags — each pull hook returns its payload at most once.
     handshake_secrets_sent: bool = false,
     one_rtt_secrets_sent: bool = false,
@@ -195,9 +200,9 @@ pub const Tls13Backend = struct {
 
     fn setLocalTransportParameters(context: *anyopaque, data: []const u8) Error!void {
         const self: *Tls13Backend = @ptrCast(@alignCast(context));
-        // Idempotent: once the ClientHello is built the transport parameters
-        // are fixed in the transcript.
-        if (self.client_hello_built) return;
+        // Idempotent: once the local parameters are emitted they are fixed in
+        // the TLS transcript and must not be changed out-of-band.
+        if (self.local_transport_parameters_locked) return;
         if (data.len > self.hs.tp_encoded.len) return error.CryptoError;
         @memcpy(self.hs.tp_encoded[0..data.len], data);
         self.hs.tp_encoded_len = data.len;
@@ -382,11 +387,14 @@ pub const Tls13Backend = struct {
                     try self.bucketForLevel(sd.level).append(sd.data);
                     if (!self.hs.is_server and !self.client_hello_built and sd.level == .initial) {
                         self.client_hello_built = true;
+                        self.local_transport_parameters_locked = true;
                         // 缓存首份 ClientHello 字节用于 Retry 后重发。ClientHello
                         // 内容在 Retry 前后不变，重发相同字节即可（RFC 8446 §4.1.2）。
                         const n = @min(sd.data.len, self.cached_client_hello.len);
                         @memcpy(self.cached_client_hello[0..n], sd.data[0..n]);
                         self.cached_client_hello_len = n;
+                    } else if (self.hs.is_server and !self.local_transport_parameters_locked and sd.level == .handshake) {
+                        self.local_transport_parameters_locked = true;
                     }
                 },
                 .install_keys => {},
@@ -689,12 +697,44 @@ test "Tls13Backend set_local_transport_parameters is ignored after ClientHello i
     var scratch: [4096]u8 = undefined;
     _ = try cb.pull(cb.context, .initial, &scratch);
     try testing.expect(backend.client_hello_built);
+    try testing.expect(backend.local_transport_parameters_locked);
 
     // A later call must not overwrite the baked parameters.
     const second_tp = [_]u8{ 0xCC, 0xDD, 0xEE };
     _ = try cb.setLocalTransportParameters(&second_tp);
     try testing.expectEqual(@as(usize, 2), backend.hs.tp_encoded_len);
     try testing.expectEqual(@as(u8, 0xAA), backend.hs.tp_encoded[0]);
+}
+
+test "Tls13Backend set_local_transport_parameters is ignored after server EncryptedExtensions" {
+    const psk = [_]u8{0xab} ** tls13.secret_len;
+    const ticket = [_]u8{ 0xcc, 0xdd, 0xee, 0xff };
+
+    var client = Tls13Backend.initClientWithPsk(.{
+        .alpn = &.{},
+        .server_name = "example.com",
+    }, psk);
+    @memcpy(client.hs.session_ticket[0..ticket.len], &ticket);
+    client.hs.session_ticket_len = ticket.len;
+    var client_cb = client.cryptoBackend();
+    var scratch: [4096]u8 = undefined;
+    const client_hello = (try client_cb.pull(client_cb.context, .initial, &scratch)) orelse return error.TestUnexpectedResult;
+
+    var server = Tls13Backend.initServerWithPsk(.{
+        .alpn = &.{},
+    }, psk);
+    var server_cb = server.cryptoBackend();
+    const first_tp = [_]u8{ 0x11, 0x22 };
+    _ = try server_cb.setLocalTransportParameters(&first_tp);
+    try testing.expectEqual(@as(usize, 2), server.hs.tp_encoded_len);
+
+    try server_cb.receive(server_cb.context, .initial, client_hello);
+    try testing.expect(server.local_transport_parameters_locked);
+
+    const second_tp = [_]u8{ 0x33, 0x44, 0x55 };
+    _ = try server_cb.setLocalTransportParameters(&second_tp);
+    try testing.expectEqual(@as(usize, 2), server.hs.tp_encoded_len);
+    try testing.expectEqualSlices(u8, &first_tp, server.hs.tp_encoded[0..server.hs.tp_encoded_len]);
 }
 
 test "Tls13Backend set_local_transport_parameters rejects oversized bytes" {

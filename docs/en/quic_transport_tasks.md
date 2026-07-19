@@ -124,6 +124,10 @@ ServerHello, or post-handshake flight.
 The pure-Zig TLS backend now caches Retry replay bytes only for client-side
 ClientHello output; server-side Initial `ServerHello` output is not stored in
 the ClientHello retry cache and `retryReceived()` cannot re-emit it.
+`set_local_transport_parameters` now locks after the endpoint emits its local
+parameters into TLS: ClientHello on the client side and EncryptedExtensions on
+the server side. Late calls are ignored instead of mutating bytes that are
+already fixed in the transcript.
 
 Endpoint Version Negotiation response generation now enforces the QUIC fixed
 bit before emitting a response. Unsupported-version long-header datagrams with
