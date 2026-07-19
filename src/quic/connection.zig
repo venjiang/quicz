@@ -8012,10 +8012,8 @@ pub const Connection = struct {
             progress.one_rtt_keys_installed = true;
         }
 
-        var handshake_space_driven = false;
         var handshake_outbound_chunks: usize = 0;
         for (spaces) |space| {
-            if (space == .handshake) handshake_space_driven = true;
             while (try backend.pull(backend.context, space, scratch)) |outbound| {
                 if (outbound.len == 0) break;
                 try self.sendCryptoInSpace(space, outbound);
@@ -8029,7 +8027,8 @@ pub const Connection = struct {
         if (backend_confirmed and !self.handshake_confirmed) {
             try self.confirmHandshake();
         }
-        if (backend_confirmed and handshake_space_driven and handshake_outbound_chunks == 0) {
+        const handshake_no_output_pending = self.handshake_packet_space.crypto_send_queue.items.len == 0;
+        if (backend_confirmed and handshake_outbound_chunks == 0 and handshake_no_output_pending) {
             self.discardPacketNumberSpaceState(.handshake);
             progress.handshake_space_discarded = true;
         }
@@ -14228,6 +14227,96 @@ test "driveCryptoBackendAcrossSpaces pulls Initial and Handshake output in one c
         handshake_len += pending.data.len;
     }
     try std.testing.expectEqualStrings("encrypted extensions", handshake_crypto[0..handshake_len]);
+}
+
+test "driveCryptoBackendAcrossSpaces discards Handshake space after application-only confirmation" {
+    const ConfirmedApplicationBackend = struct {
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn handshakeConfirmed(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try std.testing.expect(conn.hasHandshakeProtectionKeys());
+    try std.testing.expect(!conn.packetNumberSpaceDiscarded(.handshake));
+
+    var backend = ConfirmedApplicationBackend{};
+    var scratch: [32]u8 = undefined;
+    const spaces = [_]PacketNumberSpace{.application};
+    const progress = try conn.driveCryptoBackendAcrossSpaces(&spaces, backend.backend(), &scratch);
+
+    try std.testing.expect(progress.handshake_confirmed);
+    try std.testing.expect(progress.handshake_space_discarded);
+    try std.testing.expect(conn.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(!conn.hasHandshakeProtectionKeys());
+}
+
+test "driveCryptoBackendAcrossSpaces preserves queued Handshake crypto after application-only confirmation" {
+    const ConfirmedApplicationBackend = struct {
+        fn backend(self: *@This()) CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+                .handshake_confirmed = handshakeConfirmed,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: PacketNumberSpace, _: []const u8) Error!void {}
+
+        fn pull(_: *anyopaque, _: PacketNumberSpace, _: []u8) Error!?[]const u8 {
+            return null;
+        }
+
+        fn handshakeConfirmed(_: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer conn.deinit();
+    try conn.installHandshakeTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try conn.sendCryptoInSpace(.handshake, "late handshake");
+
+    var backend = ConfirmedApplicationBackend{};
+    var scratch: [32]u8 = undefined;
+    const spaces = [_]PacketNumberSpace{.application};
+    const progress = try conn.driveCryptoBackendAcrossSpaces(&spaces, backend.backend(), &scratch);
+
+    try std.testing.expect(progress.handshake_confirmed);
+    try std.testing.expect(!progress.handshake_space_discarded);
+    try std.testing.expect(!conn.packetNumberSpaceDiscarded(.handshake));
+    try std.testing.expect(conn.hasHandshakeProtectionKeys());
+    try std.testing.expectEqual(@as(usize, 1), conn.handshake_packet_space.crypto_send_queue.items.len);
 }
 
 test "driveCryptoBackendInSpace exchanges transport parameter bytes with backend" {
