@@ -2957,6 +2957,9 @@ pub const Tls13Handshake = struct {
         // fixed random sentinel; this minimal QUIC TLS path has no HRR state
         // machine yet, so reject before transcript/key-schedule progress.
         if (pos + 32 > msg.len) return error.DecodeError;
+        // Stage the peer random until the full ServerHello validates; a later
+        // cipher-suite, compression, extension, or key-share failure must not
+        // advance transcript/key schedule state.
         const parsed_server_random = msg[pos..][0..32].*;
         if (std.mem.eql(u8, &parsed_server_random, &hello_retry_request_random)) return error.DecodeError;
         if (self.client_random_available and std.mem.eql(u8, &parsed_server_random, &self.client_random)) {
@@ -4673,9 +4676,16 @@ test "Tls13Handshake client processes ServerHello and installs handshake keys" {
     try std.testing.expectEqualSlices(u8, &expected_open.hp, &install.install_keys.open.hp);
 }
 
-test "Tls13Handshake client rejects ServerHello with wrong cipher suite" {
+test "Tls13Handshake client rejects ServerHello wrong cipher without committing parsed state" {
     var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
     _ = try hs.step();
+    const old_peer_key = [_]u8{0x5a} ** 32;
+    const old_server_random = [_]u8{0x24} ** 32;
+    hs.peer_x25519_public = old_peer_key;
+    hs.server_random = old_server_random;
+    hs.server_random_available = true;
+    hs.psk_selected = true;
+    const transcript_before = hs.transcript.current();
 
     var server_secret: [32]u8 = undefined;
     secureRandomBytes(&server_secret);
@@ -4686,6 +4696,14 @@ test "Tls13Handshake client rejects ServerHello with wrong cipher suite" {
     hs.provideData(sh_buf[0..sh_len]);
 
     try std.testing.expectError(error.DecodeError, hs.step());
+    try std.testing.expectEqualSlices(u8, &old_peer_key, &hs.peer_x25519_public);
+    try std.testing.expectEqualSlices(u8, &old_server_random, &hs.server_random);
+    try std.testing.expect(hs.server_random_available);
+    try std.testing.expect(hs.psk_selected);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
+    try std.testing.expect(!hs.key_schedule.handshake_secret_derived);
+    try std.testing.expect(!hs.pending_install_handshake);
+    try std.testing.expectEqual(HandshakeState.client_wait_server_hello, hs.state);
 }
 
 test "Tls13Handshake client rejects duplicate known ServerHello extensions" {
