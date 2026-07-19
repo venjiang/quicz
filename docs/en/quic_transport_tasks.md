@@ -65,6 +65,9 @@ packet/key/token and RFC 9368 version-information primitives:
 Pure-Zig TLS client-side EncryptedExtensions parsing now rejects malformed ALPN
 list lengths and empty protocol entries without committing negotiated ALPN,
 peer transport parameters, transcript, or handshake state.
+It also rejects oversized QUIC transport-parameter extension bytes without
+committing negotiated ALPN, peer transport parameters, transcript, or handshake
+state.
 
 Pure-Zig TLS server-side ClientHello parsing now rejects empty ALPN protocol
 entries without committing ALPN selection, peer random, transcript, or

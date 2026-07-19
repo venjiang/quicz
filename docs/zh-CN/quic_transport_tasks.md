@@ -59,6 +59,8 @@ version-information 原语）：
 纯 Zig TLS client-side EncryptedExtensions 解析现在会在提交 negotiated ALPN、
 peer transport parameters、transcript 或 handshake 状态前拒绝畸形 ALPN list length
 和空 ALPN protocol entry。
+它也会在提交 negotiated ALPN、peer transport parameters、transcript 或 handshake
+状态前拒绝过大的 QUIC transport-parameter extension bytes。
 
 纯 Zig TLS server-side ClientHello 解析现在会在提交 ALPN selection、peer random、
 transcript 或 handshake 状态前拒绝空 ALPN protocol entry。

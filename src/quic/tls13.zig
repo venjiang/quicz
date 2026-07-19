@@ -5698,17 +5698,31 @@ test "Tls13Handshake client rejects EncryptedExtensions extension without commit
     try std.testing.expectEqual(HandshakeState.client_wait_encrypted_extensions, hs.state);
 }
 
-test "Tls13Handshake client rejects oversized EncryptedExtensions transport parameters" {
-    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
-    _ = try hs.step();
+test "Tls13Handshake client rejects oversized EncryptedExtensions transport parameters without committing parsed state" {
+    const alpn = [_][]const u8{"hq-interop"};
+    var hs = Tls13Handshake.initClient(.{ .alpn = &alpn }, &[_]u8{});
+    hs.state = .client_wait_encrypted_extensions;
+    @memcpy(hs.negotiated_alpn[0..3], "old");
+    hs.negotiated_alpn_len = 3;
+    hs.peer_tp[0] = 0xde;
+    hs.peer_tp[1] = 0xad;
+    hs.peer_tp_len = 2;
+    hs.peer_tp_available = true;
+    const transcript_before = hs.transcript.current();
 
     var peer_tp: [1025]u8 = undefined;
     @memset(&peer_tp, 0xaa);
     var ee_buf: [2048]u8 = undefined;
-    const ee_len = buildEncryptedExtensions(&ee_buf, "", &peer_tp);
+    const ee_len = buildEncryptedExtensions(&ee_buf, "hq-interop", &peer_tp);
     hs.provideData(ee_buf[0..ee_len]);
 
     try std.testing.expectError(error.DecodeError, hs.clientProcessEncryptedExtensions());
+    try std.testing.expectEqualStrings("old", hs.negotiated_alpn[0..hs.negotiated_alpn_len]);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, hs.peer_tp[0..hs.peer_tp_len]);
+    try std.testing.expect(hs.peer_tp_available);
+    try std.testing.expect(!hs.server_encrypted_extensions_processed);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
+    try std.testing.expectEqual(HandshakeState.client_wait_encrypted_extensions, hs.state);
 }
 
 test "Tls13Handshake server rejects oversized local transport parameters" {
