@@ -3294,6 +3294,11 @@ pub const Tls13Handshake = struct {
         var offered_sni_len: usize = 0;
         var parsed_peer_tp: [1024]u8 = undefined;
         var parsed_peer_tp_len: usize = 0;
+        var parsed_peer_psk_identity: [4096]u8 = undefined;
+        var parsed_peer_psk_identity_len: usize = 0;
+        var parsed_peer_psk_obfuscated_ticket_age: u32 = 0;
+        var parsed_peer_psk_binder: [32]u8 = undefined;
+        var parsed_peer_psk_binder_msg_offset: usize = 0;
         var seen_known_extensions: u16 = 0;
         const server_sig_scheme = signatureSchemeForPrivateKeyAlgorithm(self.config.private_key_algorithm);
         while (pos < ext_end) {
@@ -3496,10 +3501,10 @@ pub const Tls13Handshake = struct {
                         if (identity_len == 0) return error.DecodeError;
                         if (pp + identity_len + 4 > identities_end) return error.DecodeError;
                         if (identity_count == 0) {
-                            if (identity_len > self.peer_psk_identity.len) return error.DecodeError;
-                            @memcpy(self.peer_psk_identity[0..identity_len], ext[pp..][0..identity_len]);
-                            self.peer_psk_identity_len = identity_len;
-                            self.peer_psk_obfuscated_ticket_age = readU32(ext[pp + identity_len ..]);
+                            if (identity_len > parsed_peer_psk_identity.len) return error.DecodeError;
+                            @memcpy(parsed_peer_psk_identity[0..identity_len], ext[pp..][0..identity_len]);
+                            parsed_peer_psk_identity_len = identity_len;
+                            parsed_peer_psk_obfuscated_ticket_age = readU32(ext[pp + identity_len ..]);
                         }
                         pp += identity_len;
                         pp += 4; // obfuscated_ticket_age
@@ -3521,12 +3526,12 @@ pub const Tls13Handshake = struct {
                             return error.DecodeError;
                         }
                         if (binder_count == 0) {
-                            @memcpy(&self.peer_psk_binder, ext[pp..][0..binder_len]);
+                            @memcpy(&parsed_peer_psk_binder, ext[pp..][0..binder_len]);
                             // Record the binder's offset within the ClientHello
                             // message so the truncated transcript hash can be
                             // recomputed for verification. `ext` starts at body
                             // offset (pos - el); binder starts at ext offset pp.
-                            self.peer_psk_binder_msg_offset = 4 + (pos - el) + pp;
+                            parsed_peer_psk_binder_msg_offset = 4 + (pos - el) + pp;
                         }
                         pp += binder_len;
                         binder_count += 1;
@@ -3551,19 +3556,25 @@ pub const Tls13Handshake = struct {
         // Update the transcript. When the client offered a PSK, split the
         // update at the binder so the truncated transcript hash can be used
         // to verify the binder (RFC 8446 §4.2.11).
+        var next_transcript = self.transcript;
+        var next_key_schedule = self.key_schedule;
+        var next_psk_selected = false;
+        var next_peer_psk_binder_valid = false;
+        var next_server_early_traffic_secret: [secret_len]u8 = undefined;
+        var next_server_early_traffic_secret_derived = false;
         if (offered_psk) {
-            const binder_offset = self.peer_psk_binder_msg_offset;
-            self.transcript.update(msg[0..binder_offset]);
-            const truncated_hash = self.transcript.current();
-            self.transcript.update(msg[binder_offset..]);
+            const binder_offset = parsed_peer_psk_binder_msg_offset;
+            next_transcript.update(msg[0..binder_offset]);
+            const truncated_hash = next_transcript.current();
+            next_transcript.update(msg[binder_offset..]);
             const identity_matches = self.server_psk_identity_len == 0 or
-                (self.peer_psk_identity_len == self.server_psk_identity_len and
+                (parsed_peer_psk_identity_len == self.server_psk_identity_len and
                     std.mem.eql(
                         u8,
-                        self.peer_psk_identity[0..self.peer_psk_identity_len],
+                        parsed_peer_psk_identity[0..parsed_peer_psk_identity_len],
                         self.server_psk_identity[0..self.server_psk_identity_len],
                     ));
-            const ticket_age_allowed = self.serverPskTicketAgeAllowed();
+            const ticket_age_allowed = self.serverPskTicketAgeAllowed(parsed_peer_psk_obfuscated_ticket_age);
             // If the server holds a PSK and the offered identity matches the
             // configured ticket identity and ticket-age policy, verify the
             // binder. A shared replay filter, when configured, consumes the
@@ -3576,31 +3587,31 @@ pub const Tls13Handshake = struct {
             // early-data identity leaves PSK unselected so the handshake can
             // continue on the certificate path.
             if (self.server_psk != null and identity_matches and ticket_age_allowed) {
-                const binder_key = self.key_schedule.deriveBinderKey();
+                const binder_key = next_key_schedule.deriveBinderKey();
                 const expected = KeySchedule.computeFinishedVerifyData(binder_key, truncated_hash);
-                self.peer_psk_binder_valid = std.crypto.timing_safe.eql(
+                next_peer_psk_binder_valid = std.crypto.timing_safe.eql(
                     [32]u8,
                     expected,
-                    self.peer_psk_binder,
+                    parsed_peer_psk_binder,
                 );
-                if (!self.peer_psk_binder_valid) return error.BadFinished;
+                if (!next_peer_psk_binder_valid) return error.BadFinished;
                 const replay_allowed = if (offered_early_data) replay: {
                     const filter = self.config.server_psk_replay_filter orelse break :replay true;
-                    break :replay filter.consume(self.peer_psk_identity[0..self.peer_psk_identity_len]);
+                    break :replay filter.consume(parsed_peer_psk_identity[0..parsed_peer_psk_identity_len]);
                 } else true;
-                self.psk_selected = replay_allowed;
+                next_psk_selected = replay_allowed;
                 if (replay_allowed and offered_early_data) {
-                    self.server_early_traffic_secret = self.key_schedule.deriveEarlyTrafficSecret(self.transcript.current());
-                    self.server_early_traffic_secret_derived = true;
+                    next_server_early_traffic_secret = next_key_schedule.deriveEarlyTrafficSecret(next_transcript.current());
+                    next_server_early_traffic_secret_derived = true;
                 }
             }
         } else {
-            self.transcript.update(msg);
+            next_transcript.update(msg);
         }
-        if (!self.psk_selected and self.server_psk != null) {
-            self.key_schedule = KeySchedule.init();
+        if (!next_psk_selected and self.server_psk != null) {
+            next_key_schedule = KeySchedule.init();
         }
-        if (!self.psk_selected) {
+        if (!next_psk_selected) {
             if (self.config.cert_chain_der.len > 0 and !have_signature_algorithms) return error.MissingExtension;
             if (have_signature_algorithms and !client_supports_server_sig) return error.UnsupportedSignatureAlgorithm;
             if (self.config.cert_chain_der.len > 0) {
@@ -3608,6 +3619,9 @@ pub const Tls13Handshake = struct {
                 try validateServerCertificatePrivateKey(self.config);
             }
         }
+        self.transcript = next_transcript;
+        self.key_schedule = next_key_schedule;
+        self.psk_selected = next_psk_selected;
         self.negotiated_alpn_len = selected_alpn_len;
         if (selected_alpn_len > 0) {
             @memcpy(self.negotiated_alpn[0..selected_alpn_len], selected_alpn[0..selected_alpn_len]);
@@ -3621,6 +3635,18 @@ pub const Tls13Handshake = struct {
         }
         self.peer_offered_early_data = offered_early_data;
         self.peer_offered_psk = offered_psk;
+        if (offered_psk) {
+            self.peer_psk_identity_len = parsed_peer_psk_identity_len;
+            @memcpy(self.peer_psk_identity[0..parsed_peer_psk_identity_len], parsed_peer_psk_identity[0..parsed_peer_psk_identity_len]);
+            self.peer_psk_obfuscated_ticket_age = parsed_peer_psk_obfuscated_ticket_age;
+            self.peer_psk_binder = parsed_peer_psk_binder;
+            self.peer_psk_binder_msg_offset = parsed_peer_psk_binder_msg_offset;
+        }
+        self.peer_psk_binder_valid = next_peer_psk_binder_valid;
+        if (next_server_early_traffic_secret_derived) {
+            self.server_early_traffic_secret = next_server_early_traffic_secret;
+            self.server_early_traffic_secret_derived = true;
+        }
         self.peer_tp_len = parsed_peer_tp_len;
         if (parsed_peer_tp_len > 0) {
             @memcpy(self.peer_tp[0..parsed_peer_tp_len], parsed_peer_tp[0..parsed_peer_tp_len]);
@@ -3629,10 +3655,10 @@ pub const Tls13Handshake = struct {
         return ._continue;
     }
 
-    fn serverPskTicketAgeAllowed(self: *const Tls13Handshake) bool {
+    fn serverPskTicketAgeAllowed(self: *const Tls13Handshake, peer_obfuscated_ticket_age: u32) bool {
         const ticket_age_add = self.server_psk_ticket_age_add orelse return true;
         const max_age_ms = self.server_psk_max_ticket_age_ms orelse return true;
-        const ticket_age_ms = self.peer_psk_obfuscated_ticket_age -% ticket_age_add;
+        const ticket_age_ms = peer_obfuscated_ticket_age -% ticket_age_add;
         return ticket_age_ms <= max_age_ms;
     }
 
@@ -5997,6 +6023,49 @@ test "Tls13Handshake server rejects ClientHello PSK binder with invalid length" 
     var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects malformed ClientHello PSK without committing parsed PSK state" {
+    const psk = [_]u8{0xab} ** secret_len;
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const psk_ext = try clientHelloExtension(base_hello, @intFromEnum(ExtType.pre_shared_key));
+
+    const identities_len = readU16(hello_buf[psk_ext.body_offset..]);
+    const binders_len_offset = psk_ext.body_offset + 2 + identities_len;
+    const binder_len_offset = binders_len_offset + 2;
+    const binder_end = binder_len_offset + 1 + hello_buf[binder_len_offset];
+    std.mem.copyBackwards(u8, hello_buf[binder_end + 1 .. base_hello.len + 1], hello_buf[binder_end..base_hello.len]);
+    hello_buf[binder_end] = 0xee;
+    hello_buf[binder_len_offset] += 1;
+    const binders_len = readU16(hello_buf[binders_len_offset..]);
+    writeU16(hello_buf[binders_len_offset..][0..2], @as(u16, @intCast(binders_len + 1)));
+    writeU16(hello_buf[psk_ext.header_offset + 2 ..][0..2], @as(u16, @intCast(psk_ext.body_len + 1)));
+    try setClientHelloBodyLen(&hello_buf, base_hello.len - 4 + 1);
+    const extensions_len = readU16(hello_buf[psk_ext.extensions_len_offset..]);
+    writeU16(hello_buf[psk_ext.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + 1)));
+    const hello = hello_buf[0 .. base_hello.len + 1];
+
+    var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
+    @memcpy(server.peer_psk_identity[0..3], "old");
+    server.peer_psk_identity_len = 3;
+    server.peer_psk_obfuscated_ticket_age = 0x01020304;
+    server.peer_psk_binder = [_]u8{0x42} ** 32;
+    server.peer_psk_binder_msg_offset = 7;
+    server.peer_psk_binder_valid = true;
+    server.psk_selected = true;
+    const transcript_before = server.transcript.current();
+    server.provideData(hello);
+
+    try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expectEqualStrings("old", server.peer_psk_identity[0..server.peer_psk_identity_len]);
+    try std.testing.expectEqual(@as(u32, 0x01020304), server.peer_psk_obfuscated_ticket_age);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0x42} ** 32), &server.peer_psk_binder);
+    try std.testing.expectEqual(@as(usize, 7), server.peer_psk_binder_msg_offset);
+    try std.testing.expect(server.peer_psk_binder_valid);
+    try std.testing.expect(server.psk_selected);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
 test "Tls13Handshake server rejects undersized ClientHello PSK binders vector" {

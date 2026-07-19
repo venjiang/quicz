@@ -73,6 +73,9 @@ server-side ALPN selection 只会在完整 ClientHello 成功后提交。
 配置 SNI 名称；parsed SNI 只会在完整 ClientHello 成功后提交。
 服务端 peer X25519 key_share、peer QUIC transport parameters，以及 early_data /
 pre_shared_key presence flags 也只会在完整 ClientHello 成功后提交。
+解析出的 PSK identity、obfuscated ticket age、binder bytes、binder offset、
+binder verification result、PSK selection 与 ClientHello transcript update
+同样只会在服务端准备推进状态后提交。
 需要证书路径时，服务端 ClientHello 处理现在还会在发出
 ServerHello 前拒绝空或过大的本地证书链，以及缺失或非法的本地私钥配置。
 纯 Zig TLS client-side ServerHello 和 EncryptedExtensions 解析现在会拒绝

@@ -83,10 +83,13 @@ processing now also rejects empty or locally unmatchable oversized configured
 SNI names before peer SNI matching; parsed SNI is only committed after the full
 ClientHello succeeds. Server-side peer X25519 key_share and peer QUIC transport
 parameters, plus early_data / pre_shared_key presence flags, are also only
-committed after the full ClientHello succeeds. When the certificate path is
-required, server-side ClientHello processing now rejects empty or oversized
-configured certificate chains plus missing or invalid configured private keys
-before emitting ServerHello. Pure-Zig TLS client-side ServerHello and
+committed after the full ClientHello succeeds. Parsed PSK identity, obfuscated
+ticket age, binder bytes, binder offset, binder verification result, PSK
+selection, and the ClientHello transcript update are likewise committed only
+after the server is ready to advance. When the certificate path is required,
+server-side ClientHello processing now rejects empty or oversized configured
+certificate chains plus missing or invalid configured private keys before
+emitting ServerHello. Pure-Zig TLS client-side ServerHello and
 EncryptedExtensions parsing now rejects unsolicited extension types while still
 rejecting duplicate extension types; EncryptedExtensions parsing keeps ALPN,
 peer transport parameters, early-data acceptance, transcript state, and client
