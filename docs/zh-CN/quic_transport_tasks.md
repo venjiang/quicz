@@ -1460,6 +1460,11 @@ close 和 route cleanup 事件。
   output slot 时先返回 `BufferTooSmall`，不服务 recovery deadline，让后续更大的
   drain buffer 仍可处理这次 PTO/loss wakeup。
 
+- 2026-07-20：加固 server pending-work 与 receive-step recovery drain 的零输出容量路径。
+  server endpoint 现在会在 bounded pending drain 中报告 `BufferTooSmall`，
+  同时保留本次 receive classification，并让匹配的 recovery deadline 留到后续
+  有容量的 step 处理。
+
 - 2026-07-17：加固 server endpoint routed output polling。route-bound
   installed-key output 在跨 record poll 与 route lookup 之间遇到 endpoint-owned
   record 消失时会报告内部一致性错误，不再依赖 unreachable 状态。
