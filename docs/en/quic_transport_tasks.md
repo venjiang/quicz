@@ -477,6 +477,9 @@ The compatible-version installed-key backend OrClose poll/drain helpers now
 also drain that close output when peer Version Information validation fails,
 without applying failed peer version information; the compatible-version
 no-output deadline helper follows the same non-error close-queue boundary.
+Feed, pending-work, and due-deadline no-output backend OrClose wrappers inherit
+that selector behavior while lower arm/sweep helpers keep first-error stop
+semantics for callers that need them.
 When an authenticated Application frame error queues that close but the direct
 bounded-drain caller provides no output slots, the helper now returns
 `BufferTooSmall` and leaves the close pending for a later poll instead of

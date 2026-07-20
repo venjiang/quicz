@@ -17246,7 +17246,7 @@ test "EndpointConnectionLifecycle single pending-work close backend loop step se
     try std.testing.expectEqual(@as(?[]const u8, null), try conn.pollTxInSpace(.handshake, 30, &scratch));
 }
 
-test "EndpointConnectionLifecycle single pending-work close backend stops before next deadline on peer error" {
+test "EndpointConnectionLifecycle single pending-work close backend returns current deadline on peer error" {
     const BadBackend = struct {
         peer_sent: bool = false,
         pulls: usize = 0,
@@ -17296,18 +17296,18 @@ test "EndpointConnectionLifecycle single pending-work close backend stops before
 
     var backend = BadBackend{};
     var scratch: [8]u8 = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
-            72,
-            &conn,
-            recovery_before.deadline_millis,
-            .handshake,
-            backend.backend(),
-            &scratch,
-        ),
+    const result = try lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+        72,
+        &conn,
+        recovery_before.deadline_millis,
+        .handshake,
+        backend.backend(),
+        &scratch,
     );
 
+    try std.testing.expectEqual(@as(usize, 1), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), result.backend.backend.connections_driven);
+    try std.testing.expect(result.backend.next_deadline == null);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expectEqual(@as(usize, 0), backend.pulls);
     try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
@@ -18347,7 +18347,7 @@ test "EndpointConnectionLifecycle single pending-work compatible close backend s
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 }
 
-test "EndpointConnectionLifecycle single pending-work compatible close backend stops before next deadline on version error" {
+test "EndpointConnectionLifecycle single pending-work compatible close backend returns current deadline on version error" {
     const Backend = struct {
         peer_transport_parameters: []const u8,
         peer_sent: bool = false,
@@ -18413,19 +18413,19 @@ test "EndpointConnectionLifecycle single pending-work compatible close backend s
 
     var backend = Backend{ .peer_transport_parameters = peer_params_out.getWritten() };
     var scratch: [256]u8 = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
-            77,
-            &conn,
-            recovery_before.deadline_millis,
-            .handshake,
-            backend.backend(),
-            &scratch,
-            &[_]VersionCompatibility{},
-        ),
+    const result = try lifecycle.processPendingWorkAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        77,
+        &conn,
+        recovery_before.deadline_millis,
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &[_]VersionCompatibility{},
     );
 
+    try std.testing.expectEqual(@as(usize, 1), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), result.backend.backend.connections_driven);
+    try std.testing.expect(result.backend.next_deadline == null);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expectEqual(@as(usize, 0), backend.pulls);
     try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
@@ -19550,7 +19550,7 @@ test "EndpointConnectionLifecycle pending-work cross-space backend loop step sel
     try std.testing.expect(next.deadline_millis > recovery_before.deadline_millis);
 }
 
-test "EndpointConnectionLifecycle pending-work cross-space close backend loop stops before deadline on peer error" {
+test "EndpointConnectionLifecycle pending-work cross-space close backend loop returns current deadline on peer error" {
     const BadBackend = struct {
         peer_sent: bool = false,
         pulls: usize = 0,
@@ -19609,13 +19609,17 @@ test "EndpointConnectionLifecycle pending-work cross-space close backend loop st
         .connection = &connection,
     }};
 
-    try std.testing.expectError(error.InvalidPacket, lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
+    const result = try lifecycle.processPendingWorkAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
         &pending_connections,
         10,
         &backend_spaces,
         &drive_views,
         &deadline_connections,
-    ));
+    );
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), result.backend.backend.connections_driven);
+    try std.testing.expect(result.backend.next_deadline == null);
+    try std.testing.expect(backend.peer_sent);
     try std.testing.expectEqual(@as(usize, 0), backend.pulls);
     try std.testing.expectEqual(ConnectionState.closing, connection.connectionState());
 }
@@ -23546,7 +23550,7 @@ test "EndpointConnectionLifecycle due-deadline cross-space backend loop step sel
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, next.kind);
 }
 
-test "EndpointConnectionLifecycle due-deadline cross-space close backend loop stops before deadline on peer error" {
+test "EndpointConnectionLifecycle due-deadline cross-space close backend loop returns current deadline on peer error" {
     const BadBackend = struct {
         peer_sent: bool = false,
         pulls: usize = 0,
@@ -23612,13 +23616,19 @@ test "EndpointConnectionLifecycle due-deadline cross-space close backend loop st
         .connection = &due_connection,
     }};
 
-    try std.testing.expectError(error.InvalidPacket, lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
+    const result = (try lifecycle.processDueDeadlineAcrossConnectionsAndDriveCryptoBackendsAcrossSpacesOrCloseAndSelectNextDeadline(
         &due_connections,
         due_deadline.deadline_millis,
         &backend_spaces,
         &drive_views,
         &deadline_connections,
-    ));
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 311), result.due_work.deadline.connection_id);
+    try std.testing.expect(result.due_work.pending_work.recovery_serviced != null);
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), backend_result.backend.connections_driven);
+    try std.testing.expect(backend_result.next_deadline == null);
+    try std.testing.expect(backend.peer_sent);
     try std.testing.expectEqual(@as(usize, 0), backend.pulls);
     try std.testing.expectEqual(ConnectionState.closing, due_connection.connectionState());
 }
@@ -31606,7 +31616,7 @@ test "EndpointConnectionLifecycle feed pending-work cross-space compatible backe
     try std.testing.expectEqual(EndpointConnectionDeadlineKind.idle_timeout, single_next.kind);
 }
 
-test "EndpointConnectionLifecycle compatible feed close backend deadline stops before output" {
+test "EndpointConnectionLifecycle compatible feed close backend deadline returns current state" {
     const BadBackend = struct {
         peer_transport_parameters: []const u8,
         peer_sent: bool = false,
@@ -31704,26 +31714,30 @@ test "EndpointConnectionLifecycle compatible feed close backend deadline stops b
     var feed_out: [64]u8 = undefined;
     const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
 
-    try std.testing.expectError(
-        error.InvalidPacket,
-        server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
-            176,
-            &server,
-            server_path,
-            11,
-            client_datagram,
-            .{
-                .space = .handshake,
-                .out = &feed_out,
-                .unpredictable_prefix = &reset_prefix,
-                .supported_versions = &server_versions,
-            },
-            .handshake,
-            backend.backend(),
-            &scratch,
-            &[_]VersionCompatibility{},
-        ),
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        176,
+        &server,
+        server_path,
+        11,
+        client_datagram,
+        .{
+            .space = .handshake,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &server_versions,
+        },
+        .handshake,
+        backend.backend(),
+        &scratch,
+        &[_]VersionCompatibility{},
     );
+    switch (result.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 176), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), backend_result.backend.connections_driven);
+    try std.testing.expect(backend_result.next_deadline == null);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expect(server.peerVersionInformation() == null);
@@ -32548,7 +32562,7 @@ test "EndpointConnectionLifecycle feed backend variants do not drive on dropped 
     try std.testing.expectEqual(@as(usize, 0), backend.pulls);
 }
 
-test "EndpointConnectionLifecycle feed close backend deadline step stops before output" {
+test "EndpointConnectionLifecycle feed close backend deadline step returns current state" {
     const BadBackend = struct {
         peer_sent: bool = false,
         output_pulled: bool = false,
@@ -32627,25 +32641,29 @@ test "EndpointConnectionLifecycle feed close backend deadline step stops before 
     const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
     const versions = [_]packet.Version{.v1};
 
-    try std.testing.expectError(
-        error.InvalidPacket,
-        server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
-            188,
-            &server,
-            server_path,
-            11,
-            client_datagram,
-            .{
-                .space = .handshake,
-                .out = &feed_out,
-                .unpredictable_prefix = &reset_prefix,
-                .supported_versions = &versions,
-            },
-            .handshake,
-            backend.backend(),
-            &scratch,
-        ),
+    const result = try server_lifecycle.feedDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+        188,
+        &server,
+        server_path,
+        11,
+        client_datagram,
+        .{
+            .space = .handshake,
+            .out = &feed_out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+        .handshake,
+        backend.backend(),
+        &scratch,
     );
+    switch (result.feed) {
+        .routed => |route| try std.testing.expectEqual(@as(u64, 188), route.connection_id),
+        else => return error.TestUnexpectedResult,
+    }
+    const backend_result = result.backend orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), backend_result.backend.connections_driven);
+    try std.testing.expect(backend_result.next_deadline == null);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
@@ -57542,20 +57560,19 @@ test "EndpointConnectionLifecycle drives compatible-version cross-space close sw
     try single.validatePeerAddress();
     var single_backend = VersionBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
     var single_scratch: [256]u8 = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndSelectNextDeadline(
-            169,
-            &single,
-            &spaces,
-            single_backend.backend(),
-            &single_scratch,
-            &compatibilities,
-        ),
+    const single_result = try lifecycle.driveCryptoBackendAcrossSpacesWithCompatibleVersionOrCloseAndSelectNextDeadline(
+        169,
+        &single,
+        &spaces,
+        single_backend.backend(),
+        &single_scratch,
+        &compatibilities,
     );
     try std.testing.expect(single_backend.peer_sent);
     try std.testing.expect(!single_backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, single.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), single_result.backend.connections_driven);
+    try std.testing.expect(single_result.next_deadline == null);
 }
 
 test "EndpointConnectionLifecycle refreshes installed-key Handshake OrClose error state" {

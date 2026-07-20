@@ -7779,6 +7779,14 @@ pub const EndpointConnectionLifecycle = struct {
         return count;
     }
 
+    fn closingDriveViewCount(views: []const EndpointCryptoBackendDriveView) usize {
+        var count: usize = 0;
+        for (views) |view| {
+            if (view.connection.connectionState() == .closing) count += 1;
+        }
+        return count;
+    }
+
     fn countRetainedHandshakeSpacesWithInstalledKeyOptions(
         poll_views: []const EndpointConnectionInstalledKeyPollView,
     ) usize {
@@ -8164,10 +8172,17 @@ pub const EndpointConnectionLifecycle = struct {
         drive_views: []const EndpointCryptoBackendDriveView,
         deadline_connections: []const EndpointConnectionView,
     ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
-        const backend = try self.driveCryptoBackendsAcrossSpacesOrCloseAndArmConnections(
+        const closing_before = closingDriveViewCount(drive_views);
+        const backend = self.driveCryptoBackendsAcrossSpacesOrCloseAndArmConnections(
             spaces,
             drive_views,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or closingDriveViewCount(drive_views) <= closing_before) return err;
+            return .{
+                .backend = .{},
+                .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+            };
+        };
         return .{
             .backend = backend,
             .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
@@ -8823,18 +8838,25 @@ pub const EndpointConnectionLifecycle = struct {
 
     /// Drive close-propagating crypto backends, then select the next deadline.
     ///
-    /// Peer transport-parameter errors queue CONNECTION_CLOSE and return before
-    /// deadline selection, matching the close-propagating sweep semantics.
+    /// Peer transport-parameter errors queue CONNECTION_CLOSE and return the
+    /// current deadline selection, matching the no-output close-queue boundary.
     pub fn driveCryptoBackendsInSpaceOrCloseAndSelectNextDeadline(
         self: *EndpointConnectionLifecycle,
         space: PacketNumberSpace,
         drive_views: []const EndpointCryptoBackendDriveView,
         deadline_connections: []const EndpointConnectionView,
     ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
-        const backend = try self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
+        const closing_before = closingDriveViewCount(drive_views);
+        const backend = self.driveCryptoBackendsInSpaceOrCloseAndArmConnections(
             space,
             drive_views,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or closingDriveViewCount(drive_views) <= closing_before) return err;
+            return .{
+                .backend = .{},
+                .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+            };
+        };
         return .{
             .backend = backend,
             .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
@@ -10121,11 +10143,18 @@ pub const EndpointConnectionLifecycle = struct {
         compatibilities: []const VersionCompatibility,
         deadline_connections: []const EndpointConnectionView,
     ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
-        const backend = try self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndArmConnections(
+        const closing_before = closingDriveViewCount(drive_views);
+        const backend = self.driveCryptoBackendsAcrossSpacesWithCompatibleVersionOrCloseAndArmConnections(
             spaces,
             drive_views,
             compatibilities,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or closingDriveViewCount(drive_views) <= closing_before) return err;
+            return .{
+                .backend = .{},
+                .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+            };
+        };
         return .{
             .backend = backend,
             .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
@@ -10431,8 +10460,8 @@ pub const EndpointConnectionLifecycle = struct {
 
     /// Drive compatible-version close-propagating backends, then select a deadline.
     ///
-    /// Peer Version Information errors queue CONNECTION_CLOSE and return before
-    /// deadline selection, matching the close-propagating sweep behavior.
+    /// Peer Version Information errors queue CONNECTION_CLOSE and return the
+    /// current deadline selection, matching the no-output close-queue boundary.
     pub fn driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
         self: *EndpointConnectionLifecycle,
         space: PacketNumberSpace,
@@ -10440,11 +10469,18 @@ pub const EndpointConnectionLifecycle = struct {
         compatibilities: []const VersionCompatibility,
         deadline_connections: []const EndpointConnectionView,
     ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
-        const backend = try self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections(
+        const closing_before = closingDriveViewCount(drive_views);
+        const backend = self.driveCryptoBackendsInSpaceWithCompatibleVersionOrCloseAndArmConnections(
             space,
             drive_views,
             compatibilities,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or closingDriveViewCount(drive_views) <= closing_before) return err;
+            return .{
+                .backend = .{},
+                .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
+            };
+        };
         return .{
             .backend = backend,
             .next_deadline = self.nextDeadlineAcrossConnections(deadline_connections),
