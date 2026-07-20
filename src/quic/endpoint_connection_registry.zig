@@ -87,7 +87,7 @@ pub fn EndpointConnectionRegistry(
         }
 
         /// Return the number of records that have not reached the closed state.
-        pub fn activeCount(self: *Self) usize {
+        pub fn activeCount(self: *const Self) usize {
             var active_count: usize = 0;
             var iterator = self.records.valueIterator();
             while (iterator.next()) |record| {
@@ -112,7 +112,7 @@ pub fn EndpointConnectionRegistry(
 
         /// Return whether this registry can accept a new active record after
         /// already closed records are reclaimed.
-        pub fn hasActiveCapacity(self: *Self) bool {
+        pub fn hasActiveCapacity(self: *const Self) bool {
             return self.activeCount() < self.max_records;
         }
 
@@ -128,7 +128,7 @@ pub fn EndpointConnectionRegistry(
         }
 
         /// Write non-closed endpoint connection handles into caller-owned storage.
-        pub fn fillActiveConnectionIds(self: *Self, out: []u64) root.Error![]u64 {
+        pub fn fillActiveConnectionIds(self: *const Self, out: []u64) root.Error![]u64 {
             if (out.len < self.activeCount()) return error.BufferTooSmall;
             var iterator = self.records.iterator();
             var index: usize = 0;

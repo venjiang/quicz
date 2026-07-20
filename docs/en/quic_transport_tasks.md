@@ -882,6 +882,9 @@ retire.
 Active-count, active-capacity, and active-handle signals now exclude records
 that have already reached `closed`, keeping socket-loop admission telemetry
 aligned with the reclaim-on-admission behavior.
+Those telemetry helpers remain callable through a const endpoint view, so
+read-only socket-loop policy code can inspect active capacity without taking a
+mutable endpoint reference.
 Cross-record output polling also skips closing/draining records that no longer
 have close output pending, and retires a record if polling advances it to
 `closed`, so terminal records no longer block live protected output behind
@@ -1628,6 +1631,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   `activeConnectionIds()` now ignore records that have already reached
   `closed`, so caller admission telemetry matches the endpoint's subsequent
   closed-record reclaim step.
+
+- 2026-07-20: Preserved read-only server endpoint active telemetry.
+  `activeConnectionCount()`, `hasConnectionCapacity()`, and
+  `activeConnectionIds()` remain const-callable while reporting only non-closed
+  records, so capacity policy can inspect endpoint state without requiring a
+  mutable handle.
 
 - 2026-07-20: Hardened endpoint registry output polling across terminal
   records. Cross-record polling now skips closing/draining records that return
