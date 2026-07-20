@@ -19925,14 +19925,16 @@ pub const EndpointConnectionLifecycle = struct {
         send_keys: protection.Aes128PacketProtectionKeys,
         send_key_phase: bool,
     ) Error!?EndpointPolledDatagramResult {
-        try self.processProtectedShortDatagramWithKeyUpdateOrClose(
+        self.processProtectedShortDatagramWithKeyUpdateOrClose(
             connection_id,
             connection,
             now_millis,
             receive_keys,
             dcid_len,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+        };
         const output = try self.pollProtectedShortDatagramWithKeyPhase(
             connection_id,
             connection,
@@ -20082,14 +20084,17 @@ pub const EndpointConnectionLifecycle = struct {
         send_key_phase: bool,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointDatagramDrainResult {
-        try self.processProtectedShortDatagramWithKeyUpdateOrClose(
+        self.processProtectedShortDatagramWithKeyUpdateOrClose(
             connection_id,
             connection,
             now_millis,
             receive_keys,
             dcid_len,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            if (out.len == 0) return error.BufferTooSmall;
+        };
         var result = EndpointDatagramDrainResult{};
         while (result.datagrams_written < out.len) {
             const output = self.pollProtectedShortDatagramWithKeyPhase(
@@ -20469,14 +20474,16 @@ pub const EndpointConnectionLifecycle = struct {
         dcid: []const u8,
         send_key_phase_state: *const protection.Aes128KeyPhaseState,
     ) Error!?EndpointPolledDatagramResult {
-        try self.processProtectedShortDatagramWithKeyPhaseStateOrClose(
+        self.processProtectedShortDatagramWithKeyPhaseStateOrClose(
             connection_id,
             connection,
             now_millis,
             receive_key_phase_state,
             dcid_len,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+        };
         const output = try self.pollProtectedShortDatagramWithKeyPhaseState(
             connection_id,
             connection,
@@ -20616,14 +20623,17 @@ pub const EndpointConnectionLifecycle = struct {
         send_key_phase_state: *const protection.Aes128KeyPhaseState,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointDatagramDrainResult {
-        try self.processProtectedShortDatagramWithKeyPhaseStateOrClose(
+        self.processProtectedShortDatagramWithKeyPhaseStateOrClose(
             connection_id,
             connection,
             now_millis,
             receive_key_phase_state,
             dcid_len,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            if (out.len == 0) return error.BufferTooSmall;
+        };
         var result = EndpointDatagramDrainResult{};
         while (result.datagrams_written < out.len) {
             const output = self.pollProtectedShortDatagramWithKeyPhaseState(

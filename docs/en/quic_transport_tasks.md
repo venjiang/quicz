@@ -460,6 +460,9 @@ return or drain the selected connection's protected short close output in the
 same step, while non-closing invalid packets still fail before output. The
 direct bounded-drain helper returns `BufferTooSmall` if no output slots are
 available for that queued close and leaves it pending for a later poll.
+The explicit key-update and caller-owned key-phase 1-RTT OrClose helpers now
+use the same boundary, including preserving caller-owned key-phase state when
+authenticated frame errors queue close output before key-phase advancement.
 Installed-key Handshake OrClose helpers now follow that same boundary:
 receive-side frame errors and backend peer-parameter errors return or drain the
 protected Handshake close datagram from the triggering connection, including
