@@ -1469,6 +1469,10 @@ close 和 route cleanup 事件。
   client endpoint 现在会保留 receive result，并在 due drain 中报告
   `BufferTooSmall`，不服务 recovery deadline。
 
+- 2026-07-20：加固 client frame-error close receive drain 的零输出容量路径。
+  bounded receive helper 现在会在没有 output slot 时把 `BufferTooSmall` 写入
+  close drain result，同时保留已排队 close，供后续 route-bound drain 发出。
+
 - 2026-07-17：加固 server endpoint routed output polling。route-bound
   installed-key output 在跨 record poll 与 route lookup 之间遇到 endpoint-owned
   record 消失时会报告内部一致性错误，不再依赖 unreachable 状态。

@@ -1689,6 +1689,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   capacity. The client endpoint now keeps the receive result visible and reports
   `BufferTooSmall` on the due drain without servicing the recovery deadline.
 
+- 2026-07-20: Hardened client close-on-frame-error receive drains with zero
+  output capacity. The bounded receive helper now reports `BufferTooSmall` in
+  the close drain result when no output slot is available, while preserving the
+  queued close for a later route-bound drain.
+
 - 2026-07-17: Hardened server endpoint accepted-Initial rollback. If
   Handshake-space backend driving fails after record adoption, the endpoint now
   removes the adopted record explicitly and reports cleanup inconsistency as
