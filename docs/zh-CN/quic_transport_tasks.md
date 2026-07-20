@@ -660,6 +660,9 @@ active connection 由 lifecycle 统一完成 receive/send/timer/close routing、
 pending-work sweep 现在也会清理 sweep 开始前已经 closed 的 record，并在销毁 record
 前退役其 lifecycle route 和 recovery timer，避免已关闭 record 留下陈旧 endpoint
 routing 状态。
+endpoint-owned deadline selection 和跨 record output polling 现在也会执行同样的
+pre-closed record cleanup，因此 stale closed record 不会遮挡后续 live deadline，也不会
+用 `ConnectionClosed` 中断 active record 的输出。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、
@@ -1351,6 +1354,11 @@ close 和 route cleanup 事件。
   已经 closed 的 record，并先退役对应 route 与 recovery timer。这样不会留下
   stale lifecycle state，也不会从死 record 的 idle 检查中向外暴露
   `ConnectionClosed`。
+
+- 2026-07-20：把 endpoint registry 的 pre-closed cleanup 扩展到 deadline
+  selection 与跨 record output polling。构建 deadline/poll view 前会先退役 closed
+  record，所以较早 closed 的 record 不会阻断后续 live record 的 endpoint deadline
+  和 protected output。
 
 - 2026-07-17：加固 server endpoint routed output polling。route-bound
   installed-key output 在跨 record poll 与 route lookup 之间遇到 endpoint-owned
