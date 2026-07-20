@@ -875,6 +875,10 @@ receive view construction now apply the same pre-closed record cleanup, so a
 stale closed record cannot hide later live deadlines, abort active-record output
 with `ConnectionClosed`, or keep a stale route in front of receive
 classification.
+Server endpoint Retry and accepted-Initial admission also reclaim already
+closed records before enforcing bounded active-record capacity, so a terminal
+record cannot cause capacity drops after its route/timer state is safe to
+retire.
 Cross-record output polling also skips closing/draining records that no longer
 have close output pending, and retires a record if polling advances it to
 `closed`, so terminal records no longer block live protected output behind
@@ -1609,6 +1613,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   receive views, so live records keep producing endpoint deadlines and
   protected output, and stale routes do not force receive processing through a
   record that has already reached the closed state.
+
+- 2026-07-20: Reclaimed closed server records before bounded admission.
+  `Tls13ServerEndpoint` now removes already closed records before Retry record
+  adoption or accepted-Initial admission checks active-record capacity, so
+  terminal records cannot cause `dropped_capacity` after their lifecycle routes
+  and timers can be retired.
 
 - 2026-07-20: Hardened endpoint registry output polling across terminal
   records. Cross-record polling now skips closing/draining records that return

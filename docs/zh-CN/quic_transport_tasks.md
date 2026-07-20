@@ -696,6 +696,9 @@ endpoint-owned deadline selection、跨 record output polling 和 installed-key 
 view construction 现在也会执行同样的 pre-closed record cleanup，因此 stale closed
 record 不会遮挡后续 live deadline，不会用 `ConnectionClosed` 中断 active record
 输出，也不会让 stale route 阻挡 receive classification。
+server endpoint 的 Retry record adoption 和 accepted-Initial admission 现在也会先
+回收 already-closed record，再检查有界 active-record capacity，因此终态 record
+不会在其 route/timer 已可安全退役后继续造成 capacity drop。
 跨 record output polling 现在还会跳过已经没有 close output 待发送的 closing/draining
 record；如果 polling 过程中 record 进入 `closed`，则会退役并移除该 record，避免终态
 record 阻塞后续 live protected output。
@@ -1399,6 +1402,11 @@ close 和 route cleanup 事件。
   构建 deadline、poll 或 receive view 前会先退役 closed record，所以较早 closed 的
   record 不会阻断后续 live record 的 endpoint deadline/protected output，也不会让
   stale route 把 receive processing 导向已 closed 的 record。
+
+- 2026-07-20：在有界 admission 前回收 closed server record。
+  `Tls13ServerEndpoint` 现在会在 Retry record adoption 或 accepted-Initial
+  admission 检查 active-record capacity 前移除 already-closed record，因此其
+  lifecycle route 与 timer 已可退役的终态 record 不会继续触发 `dropped_capacity`。
 
 - 2026-07-20：加固 endpoint registry 跨终态 record 的 output polling。
   cross-record polling 现在会跳过没有 pending close output 的 closing/draining

@@ -1426,7 +1426,8 @@ pub fn Tls13ServerEndpoint(
             retry_source_connection_id: []const u8,
             path: endpoint.Udp4Tuple,
             options: endpoint.RouteOptions,
-        ) (endpoint.RouteError || error{ConnectionLimitReached})!endpoint.RouteResult {
+        ) (endpoint.RouteError || root.Error || error{ConnectionLimitReached})!endpoint.RouteResult {
+            _ = try self.records.removeClosedRecords(&self.lifecycle);
             if (self.records.get(connection_id) != null) return error.DuplicateConnectionId;
             if (!self.records.hasCapacity()) return error.ConnectionLimitReached;
 
@@ -1502,6 +1503,7 @@ pub fn Tls13ServerEndpoint(
             initial_out: []root.EndpointPolledDatagramResult,
             handshake_out: []root.EndpointPolledDatagramResult,
         ) (root.EndpointProtectedInitialError || root.Error || error{ConnectionLimitReached})!InitialRecordAdmissionResult {
+            _ = try self.records.removeClosedRecords(&self.lifecycle);
             if (self.records.get(connection_id) != null) return error.DuplicateConnectionId;
             if (!self.records.hasCapacity()) return error.ConnectionLimitReached;
 
@@ -2956,6 +2958,108 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expect(full_endpoint.records.get(capacity_record.handle) == null);
     try std.testing.expectEqual(@as(usize, 0), full_endpoint.lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), full_endpoint.activeConnectionCount());
+
+    var closed_capacity_endpoint = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer closed_capacity_endpoint.deinit();
+    const stale_record = try std.testing.allocator.create(TestRecord);
+    var stale_record_initialized = false;
+    var stale_record_owned = true;
+    errdefer {
+        if (stale_record_owned) {
+            if (stale_record_initialized) stale_record.deinit();
+            std.testing.allocator.destroy(stale_record);
+        }
+    }
+    stale_record.* = .{
+        .handle = 13,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    stale_record_initialized = true;
+    try stale_record.connection.validatePeerAddress();
+    try stale_record.connection.confirmHandshake();
+    try stale_record.connection.installOneRttTrafficSecrets(.{
+        .local = accepted_secrets.server.secret,
+        .peer = accepted_secrets.client.secret,
+    });
+    const stale_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_445),
+    };
+    try closed_capacity_endpoint.lifecycle.registerConnectionId(
+        stale_record.handle,
+        TestRecord.sourceConnectionId(stale_record),
+        stale_path,
+        .{},
+    );
+    try closed_capacity_endpoint.records.adopt(stale_record.handle, stale_record);
+    stale_record_owned = false;
+    const stale_close = (try closed_capacity_endpoint.closeWithRoutePath(
+        stale_record.handle,
+        0,
+        @intFromEnum(frame.FrameType.crypto),
+        "done",
+        4,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(stale_close.datagram);
+    const stale_close_deadline = stale_record.connection.closeDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try std.testing.expectError(error.ConnectionClosed, stale_record.connection.checkCloseTimeouts(stale_close_deadline));
+    try std.testing.expectEqual(connection_module.ConnectionState.closed, stale_record.connection.connectionState());
+    try std.testing.expectEqual(@as(usize, 1), closed_capacity_endpoint.activeConnectionCount());
+    try std.testing.expect(!closed_capacity_endpoint.hasConnectionCapacity());
+    try std.testing.expectEqual(@as(usize, 1), closed_capacity_endpoint.lifecycle.routeCount());
+
+    const reclaimed_capacity_record = try std.testing.allocator.create(TestRecord);
+    var reclaimed_capacity_record_initialized = false;
+    var reclaimed_capacity_record_owned = true;
+    errdefer {
+        if (reclaimed_capacity_record_owned) {
+            if (reclaimed_capacity_record_initialized) reclaimed_capacity_record.deinit();
+            std.testing.allocator.destroy(reclaimed_capacity_record);
+        }
+    }
+    reclaimed_capacity_record.* = .{
+        .handle = 14,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    reclaimed_capacity_record_initialized = true;
+    var reclaimed_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var reclaimed_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    const reclaimed_capacity = try closed_capacity_endpoint.tryAcceptInitialRecordWithRoutePath(
+        reclaimed_capacity_record.handle,
+        reclaimed_capacity_record,
+        4,
+        accepted_initial,
+        TestRecord.sourceConnectionId(reclaimed_capacity_record),
+        initial_datagram,
+        .{ .active_migration_disabled = true },
+        &rejecting_scratch,
+        &reclaimed_initial_out,
+        &reclaimed_handshake_out,
+    );
+    switch (reclaimed_capacity) {
+        .admitted => |admitted| {
+            reclaimed_capacity_record_owned = false;
+            for (reclaimed_initial_out[0..admitted.initial.accepted.drain.datagrams_written]) |datagram| {
+                std.testing.allocator.free(datagram.datagram);
+            }
+            if (admitted.handshake) |handshake| {
+                for (reclaimed_handshake_out[0..handshake.backend.drain.datagrams_written]) |datagram| {
+                    std.testing.allocator.free(datagram.datagram);
+                }
+            }
+        },
+        .dropped_capacity => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(closed_capacity_endpoint.records.get(stale_record.handle) == null);
+    try std.testing.expect(closed_capacity_endpoint.records.get(reclaimed_capacity_record.handle) != null);
+    try std.testing.expectEqual(@as(usize, 1), closed_capacity_endpoint.activeConnectionCount());
+    try std.testing.expectEqual(@as(usize, 2), closed_capacity_endpoint.lifecycle.routeCount());
+    try std.testing.expect(!closed_capacity_endpoint.hasConnectionCapacity());
 
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
