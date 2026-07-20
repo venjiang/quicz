@@ -291,6 +291,20 @@ pub fn EndpointConnectionRegistry(
             return lifecycle.nextDeadlineAcrossConnections(views);
         }
 
+        /// Select the earliest lifecycle deadline using caller-owned view storage.
+        ///
+        /// This is the allocation-free event-loop path for endpoint owners that
+        /// already have bounded record capacity. `out` must have room for every
+        /// active record; closed records are retired before the views are built.
+        pub fn nextDeadlineWithStorage(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            out: []root.EndpointConnectionView,
+        ) root.Error!?root.EndpointConnectionDeadline {
+            _ = try self.removeClosedRecords(lifecycle);
+            return lifecycle.nextDeadlineAcrossConnections(try self.fillDeadlineViews(out));
+        }
+
         /// Retire lifecycle state and remove every record whose connection has reached the closed state.
         pub fn removeClosedRecords(
             self: *Self,
@@ -993,6 +1007,15 @@ test "EndpointConnectionRegistry removes record after due idle retirement" {
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.idle_timeout, idle_deadline.kind);
     try std.testing.expectEqual(@as(u64, 42), idle_deadline.connection_id);
     try std.testing.expectEqual(@as(i64, 20), idle_deadline.deadline_millis);
+
+    var empty_deadline_views: [0]root.EndpointConnectionView = .{};
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        registry.nextDeadlineWithStorage(&lifecycle, &empty_deadline_views),
+    );
+    var deadline_views: [1]root.EndpointConnectionView = undefined;
+    const storage_deadline = (try registry.nextDeadlineWithStorage(&lifecycle, &deadline_views)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(idle_deadline, storage_deadline);
 
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);

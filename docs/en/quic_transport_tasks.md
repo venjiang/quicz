@@ -1653,6 +1653,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   records, so capacity policy can inspect endpoint state without requiring a
   mutable handle.
 
+- 2026-07-20: Added allocation-free server endpoint deadline selection.
+  `EndpointConnectionRegistry.nextDeadlineWithStorage()` and
+  `Tls13ServerEndpoint.nextDeadlineWithStorage()` let bounded socket loops pick
+  the next endpoint-visible wakeup from caller-owned view storage instead of
+  allocating on every event-loop iteration. Tests cover undersized storage and
+  correct idle-deadline selection.
+
 - 2026-07-20: Extended endpoint registry pre-closed cleanup to due-deadline
   bounded drains. `EndpointConnectionRegistry.processDueDeadlineAndDrainDatagrams()`
   now removes already-closed records before building lifecycle poll views, so

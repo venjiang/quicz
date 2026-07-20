@@ -1436,6 +1436,12 @@ close 和 route cleanup 事件。
   `activeConnectionIds()` 在只统计非 closed record 的同时仍可通过 const endpoint
   view 调用，因此 capacity policy 不需要 mutable handle 也能检查 endpoint 状态。
 
+- 2026-07-20：新增 server endpoint 无分配 deadline 选择。
+  `EndpointConnectionRegistry.nextDeadlineWithStorage()` 与
+  `Tls13ServerEndpoint.nextDeadlineWithStorage()` 允许有界 socket loop 用调用方提供的
+  view storage 选择下一次 endpoint-visible wakeup，避免每轮 event-loop 都分配。
+  测试覆盖 storage 太小和正确 idle-deadline 选择。
+
 - 2026-07-20：把 endpoint registry pre-closed cleanup 扩展到 due-deadline
   bounded drain。`EndpointConnectionRegistry.processDueDeadlineAndDrainDatagrams()`
   现在会在构建 lifecycle poll view 前移除 already-closed record，因此终态 record

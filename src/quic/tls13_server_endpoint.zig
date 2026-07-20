@@ -469,6 +469,18 @@ pub fn Tls13ServerEndpoint(
             return self.records.nextDeadline(&self.lifecycle, allocator);
         }
 
+        /// Select the earliest deadline across endpoint-owned records without allocating.
+        ///
+        /// `out` must have room for every active server record. This is the
+        /// production socket-loop path for bounded endpoint owners that need
+        /// stable wakeup selection without per-iteration heap allocation.
+        pub fn nextDeadlineWithStorage(
+            self: *Self,
+            out: []root.EndpointConnectionView,
+        ) root.Error!?root.EndpointConnectionDeadline {
+            return self.records.nextDeadlineWithStorage(&self.lifecycle, out);
+        }
+
         /// Sweep all endpoint-owned records, retire closed records, and return
         /// the next endpoint-visible deadline.
         pub fn processPendingWorkAndSelectNextDeadline(
@@ -3233,6 +3245,38 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectEqual(@as(usize, 0), (try dynamic_endpoint.activeConnectionIds(&active_ids)).len);
     try std.testing.expectEqual(@as(usize, 0), dynamic_endpoint.lifecycle.routeCount());
     try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), try dynamic_endpoint.nextDeadline(std.testing.allocator));
+
+    var deadline_endpoint = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 1,
+        .max_stateless_reset_tokens = 0,
+    });
+    defer deadline_endpoint.deinit();
+    const deadline_record = try std.testing.allocator.create(TestRecord);
+    var deadline_record_initialized = false;
+    var deadline_record_owned = true;
+    errdefer {
+        if (deadline_record_owned) {
+            if (deadline_record_initialized) deadline_record.deinit();
+            std.testing.allocator.destroy(deadline_record);
+        }
+    }
+    deadline_record.* = .{
+        .handle = 15,
+        .connection = try Connection.init(std.testing.allocator, .server, .{ .max_idle_timeout_ms = 20 }),
+        .backend = empty_backend.backend(),
+    };
+    deadline_record_initialized = true;
+    deadline_record.connection.last_packet_activity_millis = 10;
+    try deadline_endpoint.records.adopt(deadline_record.handle, deadline_record);
+    deadline_record_owned = false;
+
+    var empty_deadline_views: [0]root.EndpointConnectionView = .{};
+    try std.testing.expectError(error.BufferTooSmall, deadline_endpoint.nextDeadlineWithStorage(&empty_deadline_views));
+    var deadline_views: [1]root.EndpointConnectionView = undefined;
+    const storage_deadline = (try deadline_endpoint.nextDeadlineWithStorage(&deadline_views)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.idle_timeout, storage_deadline.kind);
+    try std.testing.expectEqual(deadline_record.handle, storage_deadline.connection_id);
+    try std.testing.expectEqual(@as(i64, 30), storage_deadline.deadline_millis);
 }
 
 test "Tls13ServerEndpoint drive backend route path resolves route before pulling backend output" {
