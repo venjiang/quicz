@@ -1476,6 +1476,11 @@ close 和 route cleanup 事件。
   route，再报告 `BufferTooSmall`；缺失已提交 route 仍会以
   `first_route_error = UnknownConnectionId` 暴露，且不会 service recovery。
 
+- 2026-07-20：新增 server Initial record 同轮接纳。`Tls13ServerEndpoint` 的
+  receive step 现在可以在分类出 fresh Initial 后尝试接纳调用方提供的 record，
+  返回 route-bound Initial output，并继续 sweep pending work。容量满会作为数据返回，
+  保留 caller-owned record，且不会留下半安装 route。
+
 - 2026-07-20：加固 client receive-step recovery drain 的零输出容量路径。
   client endpoint 现在会保留 receive result，并在 due drain 中报告
   `BufferTooSmall`，不服务 recovery deadline。

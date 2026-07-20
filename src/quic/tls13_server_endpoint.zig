@@ -240,6 +240,26 @@ pub fn Tls13ServerEndpoint(
             next_deadline: ?root.EndpointConnectionDeadline = null,
         };
 
+        /// One server socket-loop receive step that may admit a new Initial record.
+        pub const InitialAdmissionDatagramStepPathResult = struct {
+            /// Endpoint classification plus routed datagram processing result.
+            process: DatagramProcessDrainPathResult,
+            /// Admission result when `process` classified a fresh Initial.
+            admission: ?InitialRecordAdmissionAttemptPathResult = null,
+            /// Pending work swept across endpoint-owned records after receive.
+            pending_work: root.EndpointPendingWorkSweepResult,
+            /// Bounded route-bound output after pending recovery work, if any.
+            pending_drain: DatagramPathDrainResult,
+            /// Next endpoint-visible deadline after receive, optional admission, and pending work.
+            next_deadline: ?root.EndpointConnectionDeadline = null,
+        };
+
+        const PendingStepPathResult = struct {
+            pending_work: root.EndpointPendingWorkSweepResult = .{},
+            pending_drain: DatagramPathDrainResult = .{},
+            next_deadline: ?root.EndpointConnectionDeadline = null,
+        };
+
         /// Routed installed-key backend processing with route-bound output.
         pub const RoutedBackendDatagramDrainPathResult = struct {
             route: endpoint.RouteResult,
@@ -2348,9 +2368,103 @@ pub fn Tls13ServerEndpoint(
                 handshake_out,
                 installed_key_out,
             );
+            const pending = try self.sweepPendingWorkAndDrainWithRoutePath(
+                allocator,
+                now_millis,
+                pending_space,
+                pending_out,
+            );
+            return .{
+                .process = process,
+                .pending_work = pending.pending_work,
+                .pending_drain = pending.pending_drain,
+                .next_deadline = pending.next_deadline,
+            };
+        }
+
+        /// Run one bounded server receive step, admitting a caller-supplied
+        /// record when the datagram is a fresh Initial.
+        ///
+        /// The endpoint takes ownership of `record` only when `admission` is
+        /// `.admitted`. For routed packets, Version Negotiation, stateless
+        /// reset responses, drops, and capacity drops, the caller still owns
+        /// the record.
+        pub fn receiveDatagramStepWithRoutePathAndInitialRecordAdmission(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            unpredictable_prefix: []const u8,
+            supported_versions: []const quic_packet.Version,
+            installed_key_options: root.EndpointFeedInstalledKeyDatagramOptions,
+            connection_id: u64,
+            record: *Record,
+            server_source_connection_id: []const u8,
+            options: endpoint.AcceptedInitialRouteOptions,
+            scratch: []u8,
+            initial_token: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+            installed_key_out: []DatagramPathResult,
+            pending_space: root.EndpointInstalledKeyDatagramSpace,
+            pending_out: []DatagramPathResult,
+        ) (root.EndpointProtectedDatagramError || root.EndpointProtectedInitialError || root.Error || endpoint.RouteError)!InitialAdmissionDatagramStepPathResult {
+            const process = try self.processDatagramAndDrainWithRoutePath(
+                path,
+                now_millis,
+                datagram,
+                unpredictable_prefix,
+                supported_versions,
+                installed_key_options,
+                scratch,
+                initial_token,
+                out,
+                handshake_out,
+                installed_key_out,
+            );
+            var admission: ?InitialRecordAdmissionAttemptPathResult = null;
+            switch (process) {
+                .accept_initial => |initial| {
+                    admission = try self.tryAcceptInitialRecordWithRoutePath(
+                        connection_id,
+                        record,
+                        now_millis,
+                        initial,
+                        server_source_connection_id,
+                        datagram,
+                        options,
+                        scratch,
+                        out,
+                        handshake_out,
+                    );
+                },
+                else => {},
+            }
+            const pending = try self.sweepPendingWorkAndDrainWithRoutePath(
+                allocator,
+                now_millis,
+                pending_space,
+                pending_out,
+            );
+            return .{
+                .process = process,
+                .admission = admission,
+                .pending_work = pending.pending_work,
+                .pending_drain = pending.pending_drain,
+                .next_deadline = pending.next_deadline,
+            };
+        }
+
+        fn sweepPendingWorkAndDrainWithRoutePath(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            now_millis: i64,
+            pending_space: root.EndpointInstalledKeyDatagramSpace,
+            pending_out: []DatagramPathResult,
+        ) (root.Error || endpoint.RouteError)!PendingStepPathResult {
             self.preflightDueRecoveryRoutes(now_millis) catch |err| {
                 return .{
-                    .process = process,
                     .pending_work = .{},
                     .pending_drain = .{ .first_route_error = err },
                     .next_deadline = try self.nextDeadline(allocator),
@@ -2358,7 +2472,6 @@ pub fn Tls13ServerEndpoint(
             };
             if (pending_out.len == 0 and self.hasDueRecoveryForInstalledKeySpace(now_millis, pending_space)) {
                 return .{
-                    .process = process,
                     .pending_work = .{},
                     .pending_drain = .{ .first_error = error.BufferTooSmall },
                     .next_deadline = try self.nextDeadline(allocator),
@@ -2379,7 +2492,6 @@ pub fn Tls13ServerEndpoint(
                     pending_out,
                 );
             return .{
-                .process = process,
                 .pending_work = pending_work,
                 .pending_drain = pending_drain,
                 .next_deadline = try self.nextDeadline(allocator),
@@ -4743,6 +4855,147 @@ test "Tls13ServerEndpoint pairs accepted Initial output with committed route pat
     try std.testing.expect(initial_out[0].datagram.len != 0);
     try std.testing.expectEqual(@as(?TestEndpoint.CryptoBackendDatagramDrainPathResult, null), admitted.handshake);
     try std.testing.expect((try endpoint_owner.lifecycle.currentRoutePath(server_scid)).eql(path));
+
+    var step_endpoint = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer step_endpoint.deinit();
+    var step_backend = InitialOutputBackend{};
+    const step_record = try std.testing.allocator.create(TestRecord);
+    var step_record_initialized = false;
+    var step_record_owned_by_test = true;
+    errdefer {
+        if (step_record_owned_by_test) {
+            if (step_record_initialized) step_record.deinit();
+            std.testing.allocator.destroy(step_record);
+        }
+    }
+    step_record.* = .{
+        .handle = 84,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = step_backend.backend(),
+    };
+    step_record_initialized = true;
+    var step_classification_out: [256]u8 = undefined;
+    var step_scratch: [256]u8 = undefined;
+    var step_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var step_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var step_installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    var step_pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const step = try step_endpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmission(
+        std.testing.allocator,
+        path,
+        3,
+        initial_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &step_classification_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        step_record.handle,
+        step_record,
+        server_scid,
+        .{ .active_migration_disabled = true },
+        &step_scratch,
+        &[_]u8{},
+        &step_initial_out,
+        &step_handshake_out,
+        &step_installed_key_out,
+        .application,
+        &step_pending_out,
+    );
+    switch (step.process) {
+        .accept_initial => {},
+        else => return error.TestUnexpectedResult,
+    }
+    const step_admission = step.admission orelse return error.TestUnexpectedResult;
+    switch (step_admission) {
+        .admitted => |step_admitted| {
+            step_record_owned_by_test = false;
+            try std.testing.expect(step_backend.received_initial);
+            try std.testing.expect(step_admitted.initial.path.eql(path));
+            try std.testing.expectEqual(@as(usize, 1), step_admitted.initial.accepted.drain.datagrams_written);
+            try std.testing.expectEqual(@as(?root.Error, null), step_admitted.initial.accepted.drain.first_error);
+            defer std.testing.allocator.free(step_initial_out[0].datagram);
+            try std.testing.expectEqual(step_record.handle, step_initial_out[0].connection_id);
+            try std.testing.expectEqual(@as(?TestEndpoint.CryptoBackendDatagramDrainPathResult, null), step_admitted.handshake);
+        },
+        .dropped_capacity => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(step_endpoint.records.get(step_record.handle) != null);
+    try std.testing.expect((try step_endpoint.lifecycle.currentRoutePath(server_scid)).eql(path));
+    try std.testing.expectEqual(@as(?root.Error, null), step.pending_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), step.pending_drain.first_route_error);
+
+    var full_step_endpoint = try TestEndpoint.initWithCapacity(std.testing.allocator, 0, .{
+        .max_routes = 0,
+        .max_stateless_reset_tokens = 0,
+    });
+    defer full_step_endpoint.deinit();
+    var capacity_backend = InitialOutputBackend{};
+    const capacity_record = try std.testing.allocator.create(TestRecord);
+    var capacity_record_initialized = false;
+    defer {
+        if (capacity_record_initialized) capacity_record.deinit();
+        std.testing.allocator.destroy(capacity_record);
+    }
+    capacity_record.* = .{
+        .handle = 85,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = capacity_backend.backend(),
+    };
+    capacity_record_initialized = true;
+    var capacity_classification_out: [256]u8 = undefined;
+    var capacity_scratch: [256]u8 = undefined;
+    var capacity_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var capacity_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var capacity_installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    var capacity_pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const capacity_step = try full_step_endpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmission(
+        std.testing.allocator,
+        path,
+        4,
+        initial_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &capacity_classification_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        capacity_record.handle,
+        capacity_record,
+        server_scid,
+        .{ .active_migration_disabled = true },
+        &capacity_scratch,
+        &[_]u8{},
+        &capacity_initial_out,
+        &capacity_handshake_out,
+        &capacity_installed_key_out,
+        .application,
+        &capacity_pending_out,
+    );
+    switch (capacity_step.process) {
+        .accept_initial => {},
+        else => return error.TestUnexpectedResult,
+    }
+    const capacity_admission = capacity_step.admission orelse return error.TestUnexpectedResult;
+    switch (capacity_admission) {
+        .dropped_capacity => |dropped| {
+            try std.testing.expectEqual(@as(usize, 0), dropped.active_connections);
+            try std.testing.expectEqual(@as(usize, 0), dropped.active_connection_limit);
+        },
+        .admitted => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(!capacity_backend.received_initial);
+    try std.testing.expect(full_step_endpoint.records.get(capacity_record.handle) == null);
+    try std.testing.expectEqual(@as(usize, 0), full_step_endpoint.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), full_step_endpoint.activeConnectionCount());
 }
 
 test "Tls13ServerEndpoint pairs due recovery output with committed route path" {

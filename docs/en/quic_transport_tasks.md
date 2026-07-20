@@ -1699,6 +1699,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   route still appears as `first_route_error = UnknownConnectionId` without
   servicing recovery.
 
+- 2026-07-20: Added same-step server Initial record admission. A new
+  `Tls13ServerEndpoint` receive step can classify a fresh Initial, try to admit
+  the caller-supplied record, return route-bound Initial output, and still
+  sweep pending work. Capacity drops are reported as data while preserving the
+  caller-owned record and leaving no half-installed route.
+
 - 2026-07-20: Hardened client receive-step recovery drains with zero output
   capacity. The client endpoint now keeps the receive result visible and reports
   `BufferTooSmall` on the due drain without servicing the recovery deadline.
