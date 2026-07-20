@@ -415,6 +415,7 @@ pub const Tls13ClientEndpoint = struct {
         const deadline = self.nextDeadline() orelse return null;
         if (deadline.deadlineMillis() > now_millis) return null;
         if (deadline == .recovery) {
+            if (out.len == 0) return error.BufferTooSmall;
             const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
             _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
         }
@@ -1663,6 +1664,15 @@ test "Tls13ClientEndpoint drains due recovery with committed route output" {
     var out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
     const before_deadline = try client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(deadline.deadlineMillis() - 1, &out);
     try std.testing.expect(before_deadline == null);
+
+    var zero_out: [0]Tls13ClientEndpoint.ApplicationDatagramPathResult = .{};
+    try std.testing.expectError(error.BufferTooSmall, client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(
+        deadline.deadlineMillis(),
+        &zero_out,
+    ));
+    const zero_preserved_deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(zero_preserved_deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, zero_preserved_deadline.recovery.space);
 
     try std.testing.expect(try client.lifecycle.retireConnectionIdOnPath(&client_scid, new_path));
     try std.testing.expectError(error.UnknownConnectionId, client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(deadline.deadlineMillis(), &out));

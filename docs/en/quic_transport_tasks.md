@@ -1675,6 +1675,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   available, avoiding a closing record with no emitted close frame or close
   deadline.
 
+- 2026-07-20: Hardened bounded due-recovery drains with zero output capacity.
+  Lifecycle, client endpoint, and server endpoint due-recovery drain paths now
+  return `BufferTooSmall` before servicing the recovery deadline when no output
+  slot is available, preserving the pending PTO/loss wakeup for a later drain.
+
 - 2026-07-17: Hardened server endpoint accepted-Initial rollback. If
   Handshake-space backend driving fails after record adoption, the endpoint now
   removes the adopted record explicitly and reports cleanup inconsistency as

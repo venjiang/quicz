@@ -37075,6 +37075,18 @@ test "EndpointConnectionLifecycle processDueDeadlineAcrossConnectionsAndDrainDat
     try std.testing.expectEqual(@as(usize, 1), fast.sentPacketCount(.application));
     try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
 
+    var zero_out: [0]EndpointPolledDatagramResult = .{};
+    try std.testing.expectError(error.BufferTooSmall, lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
+        &connections,
+        fast_deadline.deadline_millis,
+        &zero_out,
+    ));
+    const preserved_deadline = lifecycle.nextDeadline(83, &fast) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.recovery, preserved_deadline.kind);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, preserved_deadline.recovery.?.space);
+    try std.testing.expectEqual(@as(usize, 1), fast.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), slow.sentPacketCount(.application));
+
     var due_out: [1]EndpointPolledDatagramResult = undefined;
     const due = (try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
         &connections,

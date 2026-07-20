@@ -504,6 +504,7 @@ pub fn Tls13ServerEndpoint(
                     out,
                 )
             else if (deadline.kind == .recovery and deadline.recovery != null and deadline.recovery.?.space == .initial) pending: {
+                if (out.len == 0) return error.BufferTooSmall;
                 const pending = try self.lifecycle.processPendingWork(
                     deadline.connection_id,
                     connection,
@@ -559,10 +560,12 @@ pub fn Tls13ServerEndpoint(
             const record = self.records.get(deadline.connection_id) orelse return error.Internal;
             const connection = connection_of(record);
             const source_connection_id = source_connection_id_of(record);
-            const route_path = if (deadline.kind == .recovery and deadline.recovery != null and (deadline.installedKeyPollOptions(
+            const drains_recovery_datagram = deadline.kind == .recovery and deadline.recovery != null and (deadline.installedKeyPollOptions(
                 destination_connection_id_of(record),
                 source_connection_id,
-            ) != null or deadline.recovery.?.space == .initial))
+            ) != null or deadline.recovery.?.space == .initial);
+            if (drains_recovery_datagram and out.len == 0) return error.BufferTooSmall;
+            const route_path = if (drains_recovery_datagram)
                 try self.lifecycle.currentRoutePath(source_connection_id)
             else
                 null;
@@ -4821,6 +4824,17 @@ test "Tls13ServerEndpoint pairs due recovery output with committed route path" {
 
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    var zero_due_out: [0]TestEndpoint.DatagramPathResult = .{};
+    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        deadline.deadline_millis,
+        &zero_due_out,
+    ));
+    const zero_preserved_deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, zero_preserved_deadline.kind);
+    try std.testing.expectEqual(record.handle, zero_preserved_deadline.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.application, zero_preserved_deadline.recovery.?.space);
+
     var due_out: [1]TestEndpoint.DatagramPathResult = undefined;
     try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(server_dcid, new_path));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
@@ -5467,6 +5481,17 @@ test "Tls13ServerEndpoint pairs Initial due recovery output with committed route
 
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    var zero_due_out: [0]TestEndpoint.DatagramPathResult = .{};
+    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        deadline.deadline_millis,
+        &zero_due_out,
+    ));
+    const zero_preserved_deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, zero_preserved_deadline.kind);
+    try std.testing.expectEqual(record.handle, zero_preserved_deadline.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.initial, zero_preserved_deadline.recovery.?.space);
+
     var due_out: [1]TestEndpoint.DatagramPathResult = undefined;
     try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(server_dcid, new_path));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
@@ -5615,6 +5640,17 @@ test "Tls13ServerEndpoint drains Initial due recovery output without route metad
 
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    var zero_due_out: [0]root.EndpointPolledDatagramResult = .{};
+    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.processDueDeadlineAndDrainDatagrams(
+        no_allocation_allocator.allocator(),
+        deadline.deadline_millis,
+        &zero_due_out,
+    ));
+    const preserved_deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, preserved_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, preserved_deadline.kind);
+    try std.testing.expectEqual(root.PacketNumberSpace.initial, preserved_deadline.recovery.?.space);
+
     var due_out: [1]root.EndpointPolledDatagramResult = undefined;
     const due = (try endpoint_owner.processDueDeadlineAndDrainDatagrams(
         no_allocation_allocator.allocator(),

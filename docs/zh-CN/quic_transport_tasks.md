@@ -1455,6 +1455,11 @@ close 和 route cleanup 事件。
   时先返回 `BufferTooSmall`，不修改 connection state，避免出现未发出 close frame
   且没有 close deadline 的 closing record。
 
+- 2026-07-20：加固 bounded due-recovery drain 的零输出容量路径。
+  lifecycle、client endpoint 和 server endpoint 的 due-recovery drain 现在会在没有
+  output slot 时先返回 `BufferTooSmall`，不服务 recovery deadline，让后续更大的
+  drain buffer 仍可处理这次 PTO/loss wakeup。
+
 - 2026-07-17：加固 server endpoint routed output polling。route-bound
   installed-key output 在跨 record poll 与 route lookup 之间遇到 endpoint-owned
   record 消失时会报告内部一致性错误，不再依赖 unreachable 状态。

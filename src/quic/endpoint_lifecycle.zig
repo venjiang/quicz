@@ -14097,6 +14097,7 @@ pub const EndpointConnectionLifecycle = struct {
 
         const pending_drain = if (deadline.kind == .recovery) pending: {
             if (!installedKeyOptionsMatchRecoveryDeadline(deadline, options)) return error.InvalidPacket;
+            if (out.len == 0) return error.BufferTooSmall;
             break :pending try self.processPendingWorkAndDrainDatagrams(
                 connection_id,
                 connection,
@@ -14174,13 +14175,19 @@ pub const EndpointConnectionLifecycle = struct {
         const pending_drain = if (deadline.installedKeyPollOptions(
             destination_connection_id,
             source_connection_id,
-        )) |options|
-            try self.processPendingWorkAndDrainDatagrams(connection_id, connection, now_millis, options, out)
-        else
-            EndpointPendingWorkDatagramDrainResult{
-                .pending_work = try self.processPendingWork(connection_id, connection, now_millis),
-                .drain = .{},
-            };
+        )) |options| pending: {
+            if (out.len == 0) return error.BufferTooSmall;
+            break :pending try self.processPendingWorkAndDrainDatagrams(
+                connection_id,
+                connection,
+                now_millis,
+                options,
+                out,
+            );
+        } else EndpointPendingWorkDatagramDrainResult{
+            .pending_work = try self.processPendingWork(connection_id, connection, now_millis),
+            .drain = .{},
+        };
 
         return .{
             .deadline = deadline,
