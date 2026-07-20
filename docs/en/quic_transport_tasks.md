@@ -383,7 +383,8 @@ Server route-bound pending-work draining now preflights due recovery routes
 before sweeping endpoint-owned records, regardless of the caller's requested
 output drain space. Missing routes are reported through
 `drain.first_route_error` without servicing recovery, preserving the pending
-deadline for a later pass after route restoration.
+deadline for a later pass after route restoration; the same route error remains
+visible when the caller provides no pending-output slots.
 Server route-bound backend drive helpers now resolve the committed record
 route before pulling TLS backend output in Initial or Handshake space. Missing
 routes return `UnknownConnectionId` without consuming backend CRYPTO output.
@@ -1691,6 +1692,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   with zero output capacity. The server endpoint now reports `BufferTooSmall`
   in the bounded pending drain while keeping the receive classification visible
   and leaving the matching recovery deadline serviceable for a later step.
+
+- 2026-07-20: Preserved server pending-work route errors across zero output
+  capacity. Route-bound server pending-work and receive-step drains now preflight
+  due recovery routes before reporting `BufferTooSmall`, so a missing committed
+  route still appears as `first_route_error = UnknownConnectionId` without
+  servicing recovery.
 
 - 2026-07-20: Hardened client receive-step recovery drains with zero output
   capacity. The client endpoint now keeps the receive result visible and reports

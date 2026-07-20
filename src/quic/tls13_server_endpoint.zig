@@ -471,13 +471,6 @@ pub fn Tls13ServerEndpoint(
             space: root.EndpointInstalledKeyDatagramSpace,
             out: []DatagramPathResult,
         ) root.Error!PendingWorkDatagramPathDrainResult {
-            if (out.len == 0 and self.hasDueRecoveryForInstalledKeySpace(now_millis, space)) {
-                return .{
-                    .pending_work = .{},
-                    .drain = .{ .first_error = error.BufferTooSmall },
-                    .next_deadline = try self.nextDeadline(allocator),
-                };
-            }
             self.preflightDueRecoveryRoutes(now_millis) catch |err| {
                 return .{
                     .pending_work = .{},
@@ -485,6 +478,13 @@ pub fn Tls13ServerEndpoint(
                     .next_deadline = try self.nextDeadline(allocator),
                 };
             };
+            if (out.len == 0 and self.hasDueRecoveryForInstalledKeySpace(now_millis, space)) {
+                return .{
+                    .pending_work = .{},
+                    .drain = .{ .first_error = error.BufferTooSmall },
+                    .next_deadline = try self.nextDeadline(allocator),
+                };
+            }
             const pending_work = try self.records.processPendingWork(
                 &self.lifecycle,
                 allocator,
@@ -2348,14 +2348,6 @@ pub fn Tls13ServerEndpoint(
                 handshake_out,
                 installed_key_out,
             );
-            if (pending_out.len == 0 and self.hasDueRecoveryForInstalledKeySpace(now_millis, pending_space)) {
-                return .{
-                    .process = process,
-                    .pending_work = .{},
-                    .pending_drain = .{ .first_error = error.BufferTooSmall },
-                    .next_deadline = try self.nextDeadline(allocator),
-                };
-            }
             self.preflightDueRecoveryRoutes(now_millis) catch |err| {
                 return .{
                     .process = process,
@@ -2364,6 +2356,14 @@ pub fn Tls13ServerEndpoint(
                     .next_deadline = try self.nextDeadline(allocator),
                 };
             };
+            if (pending_out.len == 0 and self.hasDueRecoveryForInstalledKeySpace(now_millis, pending_space)) {
+                return .{
+                    .process = process,
+                    .pending_work = .{},
+                    .pending_drain = .{ .first_error = error.BufferTooSmall },
+                    .next_deadline = try self.nextDeadline(allocator),
+                };
+            }
             const pending_work = try self.records.processPendingWork(
                 &self.lifecycle,
                 allocator,
@@ -5212,6 +5212,22 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expectEqual(deadline.connection_id, preserved_deadline.connection_id);
     try std.testing.expectEqual(root.PacketNumberSpace.application, preserved_deadline.recovery.?.space);
 
+    var zero_missing_route_pending_out: [0]TestEndpoint.DatagramPathResult = .{};
+    const zero_missing_route_pending = try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePath(
+        no_allocation_allocator.allocator(),
+        deadline.deadline_millis,
+        .application,
+        &zero_missing_route_pending_out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), zero_missing_route_pending.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), zero_missing_route_pending.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), zero_missing_route_pending.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), zero_missing_route_pending.drain.first_route_error);
+    const zero_missing_route_deadline = zero_missing_route_pending.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, zero_missing_route_deadline.kind);
+    try std.testing.expectEqual(deadline.connection_id, zero_missing_route_deadline.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.application, zero_missing_route_deadline.recovery.?.space);
+
     const unsupported_initial = [_]u8{
         0xc0,
         0xfa,
@@ -5268,6 +5284,41 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, missing_route_step_deadline.kind);
     try std.testing.expectEqual(deadline.connection_id, missing_route_step_deadline.connection_id);
     try std.testing.expectEqual(root.PacketNumberSpace.application, missing_route_step_deadline.recovery.?.space);
+
+    var zero_missing_route_step_pending_out: [0]TestEndpoint.DatagramPathResult = .{};
+    const zero_missing_route_step = try endpoint_owner.receiveDatagramStepWithRoutePath(
+        no_allocation_allocator.allocator(),
+        first_path,
+        deadline.deadline_millis,
+        &unsupported_initial,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &missing_route_step_out,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &missing_route_scratch,
+        &[_]u8{},
+        &missing_route_initial_out,
+        &missing_route_handshake_out,
+        &missing_route_installed_out,
+        .application,
+        &zero_missing_route_step_pending_out,
+    );
+    switch (zero_missing_route_step.process) {
+        .version_negotiation => |response| try std.testing.expect(response.path.eql(first_path)),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), zero_missing_route_step.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), zero_missing_route_step.pending_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), zero_missing_route_step.pending_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), zero_missing_route_step.pending_drain.first_route_error);
+    const zero_missing_route_step_deadline = zero_missing_route_step.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, zero_missing_route_step_deadline.kind);
+    try std.testing.expectEqual(deadline.connection_id, zero_missing_route_step_deadline.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.application, zero_missing_route_step_deadline.recovery.?.space);
 
     try endpoint_owner.lifecycle.registerConnectionId(deadline.connection_id, recovery_local_id, recovery_path, .{});
 

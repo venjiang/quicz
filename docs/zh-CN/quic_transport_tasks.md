@@ -318,7 +318,8 @@ service。
 Server 的 route-bound pending-work drain 现在会在 sweep endpoint-owned record 前预检
 所有 due recovery route，不受调用方请求的 output drain space 限制。缺失 route 会通过
 `drain.first_route_error` 上报，不会 service recovery，并保留该 pending deadline，等待
-route 恢复后的下一轮处理。
+route 恢复后的下一轮处理；调用方没有提供 pending output slot 时也会保留同一 route
+错误可见性。
 Server 的 route-bound backend drive helper 现在会在 Initial 或 Handshake 空间拉取
 TLS backend output 前先解析 record 的已提交 route。缺失 route 会返回
 `UnknownConnectionId`，不会消费 backend CRYPTO output。
@@ -1469,6 +1470,11 @@ close 和 route cleanup 事件。
   server endpoint 现在会在 bounded pending drain 中报告 `BufferTooSmall`，
   同时保留本次 receive classification，并让匹配的 recovery deadline 留到后续
   有容量的 step 处理。
+
+- 2026-07-20：保留 server pending-work 零输出容量下的 route error 可见性。
+  route-bound server pending-work 与 receive-step drain 现在会先预检 due recovery
+  route，再报告 `BufferTooSmall`；缺失已提交 route 仍会以
+  `first_route_error = UnknownConnectionId` 暴露，且不会 service recovery。
 
 - 2026-07-20：加固 client receive-step recovery drain 的零输出容量路径。
   client endpoint 现在会保留 receive result，并在 due drain 中报告
