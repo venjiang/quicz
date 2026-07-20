@@ -838,8 +838,8 @@ pub const EndpointConnectionLifecycle = struct {
     /// This is the no-output form of
     /// `processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram()`.
     /// Peer transport-parameter errors queue CONNECTION_CLOSE through the
-    /// close-propagating backend path and return before selecting a deadline
-    /// or polling backend output.
+    /// close-propagating backend path and return the current deadline selection
+    /// without polling backend output.
     pub fn processAcceptedProtectedInitialWithCryptoBackendOrCloseAndSelectNextDeadline(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -861,13 +861,21 @@ pub const EndpointConnectionLifecycle = struct {
             datagram,
             options,
         );
-        const backend_progress = try self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+        const closing_before = connection.connectionState() == .closing;
+        const backend_progress = self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
             connection_id,
             connection,
             .initial,
             backend,
             scratch,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing or closing_before) return err;
+            return .{
+                .accepted_initial = accepted_initial,
+                .backend = .{},
+                .next_deadline = self.nextDeadline(connection_id, connection),
+            };
+        };
         return .{
             .accepted_initial = accepted_initial,
             .backend = backend_progress,

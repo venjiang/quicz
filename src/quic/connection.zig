@@ -42666,24 +42666,25 @@ test "EndpointConnectionLifecycle accepted Initial backend OrClose deadline stop
     defer server.deinit();
     var backend = BadBackend{};
     var scratch: [256]u8 = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndSelectNextDeadline(
-            210,
-            &server,
-            11,
-            accept,
-            &server_scid,
-            initial,
-            .{
-                .active_migration_disabled = true,
-                .stateless_reset_token = reset_token,
-            },
-            backend.backend(),
-            &scratch,
-        ),
+    const result = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndSelectNextDeadline(
+        210,
+        &server,
+        11,
+        accept,
+        &server_scid,
+        initial,
+        .{
+            .active_migration_disabled = true,
+            .stateless_reset_token = reset_token,
+        },
+        backend.backend(),
+        &scratch,
     );
 
+    try std.testing.expectEqual(@as(usize, 1), result.accepted_initial.processed_packets);
+    try std.testing.expectEqual(@as(usize, 0), result.backend.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, 0), result.backend.peer_transport_parameters_bytes);
+    try std.testing.expectEqual(@as(?EndpointConnectionDeadline, null), result.next_deadline);
     try std.testing.expectEqualStrings("client hello bad params deadline", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);

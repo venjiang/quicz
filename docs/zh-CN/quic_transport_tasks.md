@@ -400,6 +400,10 @@ information；compatible-version no-output deadline helper 也采用同一非错
 边界。
 feed、pending-work 和 due-deadline 的 no-output backend OrClose wrapper 会继承该
 selector 行为；底层 arm/sweep helper 仍保留首个错误即停止的语义，供需要该语义的调用方使用。
+accepted Initial 的 no-output backend OrClose deadline helper 现在也采用同一
+close-queue 边界：backend peer transport-parameter 错误排队 Initial
+CONNECTION_CLOSE 后，会返回当前选中的 deadline，不拉取 backend output 或 protected
+output；已安装 route 保留，未进入 closing 的 invalid input 仍会失败。
 当认证后的 Application frame 错误已排队 close、但 direct bounded-drain 调用方没有提供
 输出槽位时，该 helper 现在返回 `BufferTooSmall`，并保留 pending close 供后续 poll
 发出，而不是把零输出 drain 当作成功。

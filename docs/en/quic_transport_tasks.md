@@ -480,6 +480,11 @@ no-output deadline helper follows the same non-error close-queue boundary.
 Feed, pending-work, and due-deadline no-output backend OrClose wrappers inherit
 that selector behavior while lower arm/sweep helpers keep first-error stop
 semantics for callers that need them.
+The accepted Initial no-output backend OrClose deadline helper now follows the
+same close-queue boundary: after a backend peer transport-parameter error
+queues an Initial CONNECTION_CLOSE, it returns the current selected deadline
+without pulling backend or protected output. The accepted routes remain
+installed, and non-closing invalid inputs still fail.
 When an authenticated Application frame error queues that close but the direct
 bounded-drain caller provides no output slots, the helper now returns
 `BufferTooSmall` and leaves the close pending for a later poll instead of
