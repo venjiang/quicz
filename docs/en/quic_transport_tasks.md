@@ -832,9 +832,11 @@ recovery timers, and ECN path state for the same handle.
 The pending-work sweep also clears records that were already closed before the
 sweep starts, retiring their lifecycle routes and recovery timers before record
 destruction so stale endpoint routing state cannot survive a closed record.
-Endpoint-owned deadline selection and cross-record output polling now apply the
-same pre-closed record cleanup, so a stale closed record cannot hide later live
-deadlines or abort active-record output with `ConnectionClosed`.
+Endpoint-owned deadline selection, cross-record output polling, and installed-key
+receive view construction now apply the same pre-closed record cleanup, so a
+stale closed record cannot hide later live deadlines, abort active-record output
+with `ConnectionClosed`, or keep a stale route in front of receive
+classification.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first
@@ -1556,10 +1558,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   avoids surfacing `ConnectionClosed` from idle checks on dead records.
 
 - 2026-07-20: Extended endpoint registry pre-closed cleanup to deadline
-  selection and cross-record output polling. Closed records are retired before
-  building deadline or poll views, so live records keep producing endpoint
-  deadlines and protected output even when an earlier record has already
-  reached the closed state.
+  selection, cross-record output polling, and installed-key receive view
+  construction. Closed records are retired before building deadline, poll, or
+  receive views, so live records keep producing endpoint deadlines and
+  protected output, and stale routes do not force receive processing through a
+  record that has already reached the closed state.
 
 - 2026-07-17: Hardened server endpoint accepted-Initial rollback. If
   Handshake-space backend driving fails after record adoption, the endpoint now

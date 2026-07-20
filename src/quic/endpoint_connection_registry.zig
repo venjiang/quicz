@@ -1238,6 +1238,100 @@ test "EndpointConnectionRegistry next deadline retires closed records before sel
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 }
 
+test "EndpointConnectionRegistry installed-key feed retires closed records before routing" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: root.Connection,
+
+        fn connectionRef(self: *@This()) *root.Connection {
+            return &self.connection;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer-feed";
+        }
+
+        fn sourceConnectionId(_: *const @This()) []const u8 {
+            return "closed-feed";
+        }
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const Registry = EndpointConnectionRegistry(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.deinit,
+    );
+
+    var registry = try Registry.initWithCapacity(std.testing.allocator, 1);
+    defer registry.deinit();
+    var lifecycle = root.EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer {
+        if (record_owned) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = 91,
+        .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
+    };
+    record_initialized = true;
+    try record.connection.validatePeerAddress();
+    try record.connection.confirmHandshake();
+    try record.connection.recordPeerAddressBytesReceived(1);
+
+    const path = root.endpoint.Udp4Tuple{
+        .local = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
+    };
+    try lifecycle.registerConnectionId(record.handle, TestRecord.sourceConnectionId(record), path, .{ .sequence_number = 0 });
+    var lifecycle_registered = true;
+    errdefer if (lifecycle_registered) {
+        _ = lifecycle.retireConnection(record.handle);
+    };
+    _ = try record.connection.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(record.handle, &record.connection);
+    try registry.adopt(record.handle, record);
+    record_owned = false;
+
+    record.connection.state = .closed;
+    record.connection.closed = true;
+
+    const datagram = [_]u8{ 0x40, 'c', 'l', 'o', 's', 'e', 'd', '-', 'f', 'e', 'e', 'd', 0x01 };
+    var out: [64]u8 = undefined;
+    const reset_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde };
+    const versions = [_]root.packet.Version{.v1};
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    const feed = try registry.feedDatagramWithInstalledKeys(
+        &lifecycle,
+        no_allocation_allocator.allocator(),
+        path,
+        20,
+        &datagram,
+        .{
+            .space = .application,
+            .out = &out,
+            .unpredictable_prefix = &reset_prefix,
+            .supported_versions = &versions,
+        },
+    );
+    lifecycle_registered = false;
+    try std.testing.expectEqual(root.EndpointFeedInstalledKeyDatagramResult.dropped, feed);
+    try std.testing.expectEqual(@as(usize, 0), registry.count());
+    try std.testing.expect(registry.hasCapacity());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
 test "EndpointConnectionRegistry rotates cross-record output polling" {
     const TestRecord = struct {
         handle: u64,
