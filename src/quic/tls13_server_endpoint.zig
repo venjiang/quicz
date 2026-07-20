@@ -331,8 +331,8 @@ pub fn Tls13ServerEndpoint(
         }
 
         /// Return the number of endpoint-owned active connection records.
-        pub fn activeConnectionCount(self: *const Self) usize {
-            return self.records.count();
+        pub fn activeConnectionCount(self: *Self) usize {
+            return self.records.activeCount();
         }
 
         /// Return the configured active-connection limit.
@@ -343,13 +343,13 @@ pub fn Tls13ServerEndpoint(
         }
 
         /// Return whether this endpoint can accept one more connection record.
-        pub fn hasConnectionCapacity(self: *const Self) bool {
-            return self.records.hasCapacity();
+        pub fn hasConnectionCapacity(self: *Self) bool {
+            return self.records.hasActiveCapacity();
         }
 
         /// Write active endpoint-owned connection handles into caller-owned storage.
         pub fn activeConnectionIds(self: *Self, out: []u64) root.Error![]u64 {
-            return self.records.fillConnectionIds(out);
+            return self.records.fillActiveConnectionIds(out);
         }
 
         /// Classify one UDP datagram through this endpoint's lifecycle owner.
@@ -3008,8 +3008,10 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     const stale_close_deadline = stale_record.connection.closeDeadlineMillis() orelse return error.TestUnexpectedResult;
     try std.testing.expectError(error.ConnectionClosed, stale_record.connection.checkCloseTimeouts(stale_close_deadline));
     try std.testing.expectEqual(connection_module.ConnectionState.closed, stale_record.connection.connectionState());
-    try std.testing.expectEqual(@as(usize, 1), closed_capacity_endpoint.activeConnectionCount());
-    try std.testing.expect(!closed_capacity_endpoint.hasConnectionCapacity());
+    try std.testing.expectEqual(@as(usize, 0), closed_capacity_endpoint.activeConnectionCount());
+    try std.testing.expect(closed_capacity_endpoint.hasConnectionCapacity());
+    var closed_capacity_active_ids: [1]u64 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), (try closed_capacity_endpoint.activeConnectionIds(&closed_capacity_active_ids)).len);
     try std.testing.expectEqual(@as(usize, 1), closed_capacity_endpoint.lifecycle.routeCount());
 
     const reclaimed_capacity_record = try std.testing.allocator.create(TestRecord);
@@ -3058,6 +3060,9 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expect(closed_capacity_endpoint.records.get(stale_record.handle) == null);
     try std.testing.expect(closed_capacity_endpoint.records.get(reclaimed_capacity_record.handle) != null);
     try std.testing.expectEqual(@as(usize, 1), closed_capacity_endpoint.activeConnectionCount());
+    const reclaimed_active_ids = try closed_capacity_endpoint.activeConnectionIds(&closed_capacity_active_ids);
+    try std.testing.expectEqual(@as(usize, 1), reclaimed_active_ids.len);
+    try std.testing.expectEqual(reclaimed_capacity_record.handle, reclaimed_active_ids[0]);
     try std.testing.expectEqual(@as(usize, 2), closed_capacity_endpoint.lifecycle.routeCount());
     try std.testing.expect(!closed_capacity_endpoint.hasConnectionCapacity());
 

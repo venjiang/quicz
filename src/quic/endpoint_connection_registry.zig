@@ -86,6 +86,18 @@ pub fn EndpointConnectionRegistry(
             return self.records.count();
         }
 
+        /// Return the number of records that have not reached the closed state.
+        pub fn activeCount(self: *Self) usize {
+            var active_count: usize = 0;
+            var iterator = self.records.valueIterator();
+            while (iterator.next()) |record| {
+                if (connection_of(record.*).connectionState() != .closed) {
+                    active_count += 1;
+                }
+            }
+            return active_count;
+        }
+
         /// Return the configured active-record limit.
         ///
         /// Dynamically sized registries report `std.math.maxInt(usize)`.
@@ -98,6 +110,12 @@ pub fn EndpointConnectionRegistry(
             return self.count() < self.max_records;
         }
 
+        /// Return whether this registry can accept a new active record after
+        /// already closed records are reclaimed.
+        pub fn hasActiveCapacity(self: *Self) bool {
+            return self.activeCount() < self.max_records;
+        }
+
         /// Write active endpoint connection handles into caller-owned storage.
         pub fn fillConnectionIds(self: *Self, out: []u64) root.Error![]u64 {
             if (out.len < self.count()) return error.BufferTooSmall;
@@ -105,6 +123,19 @@ pub fn EndpointConnectionRegistry(
             var index: usize = 0;
             while (iterator.next()) |connection_id| : (index += 1) {
                 out[index] = connection_id.*;
+            }
+            return out[0..index];
+        }
+
+        /// Write non-closed endpoint connection handles into caller-owned storage.
+        pub fn fillActiveConnectionIds(self: *Self, out: []u64) root.Error![]u64 {
+            if (out.len < self.activeCount()) return error.BufferTooSmall;
+            var iterator = self.records.iterator();
+            var index: usize = 0;
+            while (iterator.next()) |entry| {
+                if (connection_of(entry.value_ptr.*).connectionState() == .closed) continue;
+                out[index] = entry.key_ptr.*;
+                index += 1;
             }
             return out[0..index];
         }

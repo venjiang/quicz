@@ -879,6 +879,9 @@ Server endpoint Retry and accepted-Initial admission also reclaim already
 closed records before enforcing bounded active-record capacity, so a terminal
 record cannot cause capacity drops after its route/timer state is safe to
 retire.
+Active-count, active-capacity, and active-handle signals now exclude records
+that have already reached `closed`, keeping socket-loop admission telemetry
+aligned with the reclaim-on-admission behavior.
 Cross-record output polling also skips closing/draining records that no longer
 have close output pending, and retires a record if polling advances it to
 `closed`, so terminal records no longer block live protected output behind
@@ -1619,6 +1622,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   adoption or accepted-Initial admission checks active-record capacity, so
   terminal records cannot cause `dropped_capacity` after their lifecycle routes
   and timers can be retired.
+
+- 2026-07-20: Aligned server endpoint active-capacity signals with terminal
+  cleanup. `activeConnectionCount()`, `hasConnectionCapacity()`, and
+  `activeConnectionIds()` now ignore records that have already reached
+  `closed`, so caller admission telemetry matches the endpoint's subsequent
+  closed-record reclaim step.
 
 - 2026-07-20: Hardened endpoint registry output polling across terminal
   records. Cross-record polling now skips closing/draining records that return

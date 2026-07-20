@@ -699,6 +699,9 @@ record 不会遮挡后续 live deadline，不会用 `ConnectionClosed` 中断 ac
 server endpoint 的 Retry record adoption 和 accepted-Initial admission 现在也会先
 回收 already-closed record，再检查有界 active-record capacity，因此终态 record
 不会在其 route/timer 已可安全退役后继续造成 capacity drop。
+active-count、active-capacity 和 active-handle 信号现在也会排除已进入
+`closed` 的 record，使 socket-loop admission telemetry 与 admission 时的
+closed-record reclaim 行为保持一致。
 跨 record output polling 现在还会跳过已经没有 close output 待发送的 closing/draining
 record；如果 polling 过程中 record 进入 `closed`，则会退役并移除该 record，避免终态
 record 阻塞后续 live protected output。
@@ -1407,6 +1410,11 @@ close 和 route cleanup 事件。
   `Tls13ServerEndpoint` 现在会在 Retry record adoption 或 accepted-Initial
   admission 检查 active-record capacity 前移除 already-closed record，因此其
   lifecycle route 与 timer 已可退役的终态 record 不会继续触发 `dropped_capacity`。
+
+- 2026-07-20：对齐 server endpoint active-capacity 信号与终态 cleanup。
+  `activeConnectionCount()`、`hasConnectionCapacity()` 和
+  `activeConnectionIds()` 现在会忽略已经进入 `closed` 的 record，因此调用方看到的
+  admission telemetry 与 endpoint 后续 closed-record reclaim 步骤一致。
 
 - 2026-07-20：加固 endpoint registry 跨终态 record 的 output polling。
   cross-record polling 现在会跳过没有 pending close output 的 closing/draining
