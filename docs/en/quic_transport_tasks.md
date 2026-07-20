@@ -462,6 +462,10 @@ Installed-key 1-RTT short OrClose helpers now do the same for Application-space
 receive and backend errors: direct and routed poll/drain helpers return the
 protected short close datagram from the selected connection while route
 mismatches and non-closing invalid packets still fail before output.
+When an authenticated Application frame error queues that close but the direct
+bounded-drain caller provides no output slots, the helper now returns
+`BufferTooSmall` and leaves the close pending for a later poll instead of
+reporting a zero-output drain as success.
 Client endpoint due-recovery service now polls the due packet number space, not
 only the Application short-packet path. `Tls13ClientTransport.pollRecoveryDatagram()`
 emits Initial, Handshake, or Application protected output according to the

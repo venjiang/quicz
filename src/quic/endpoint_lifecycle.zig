@@ -23613,6 +23613,7 @@ pub const EndpointConnectionLifecycle = struct {
             datagram,
         ) catch |err| {
             if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            if (out.len == 0) return error.BufferTooSmall;
         };
         return self.drainInstalledKeyDatagrams(
             connection_id,

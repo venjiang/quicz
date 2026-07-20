@@ -51634,6 +51634,60 @@ test "EndpointConnectionLifecycle installed-key short OrClose receive drains clo
     try std.testing.expectEqual(@as(u64, 64), out[0].connection_id);
 }
 
+test "EndpointConnectionLifecycle installed-key short OrClose drain rejects zero close capacity" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x55, 0x56, 0x57, 0x58 };
+    const server_dcid = [_]u8{ 0xe5, 0xe6, 0xe7, 0xe8 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+    try server.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_short = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
+    defer std.testing.allocator.free(invalid_short);
+
+    var zero_out: [0]EndpointPolledDatagramResult = .{};
+    try std.testing.expectError(error.BufferTooSmall, lifecycle.processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagramsWithInstalledKeyOptions(
+        65,
+        &server,
+        11,
+        server_dcid.len,
+        invalid_short,
+        .{
+            .space = .application,
+            .destination_connection_id = &client_dcid,
+        },
+        &zero_out,
+    ));
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+
+    const close_datagram = (try lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+        65,
+        &server,
+        12,
+        &client_dcid,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_datagram);
+
+    try std.testing.expect(close_datagram.len != 0);
+}
+
 test "EndpointConnectionLifecycle routes installed-key short receive and polls ACK output" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
