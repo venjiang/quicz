@@ -1023,17 +1023,20 @@ pub fn Tls13ServerEndpoint(
                     .next_deadline = try self.nextDeadline(self.records.allocator),
                 };
                 if (connection.connectionState() == .closing) {
-                    result.drain = self.drainDatagramsWithRoutePath(
-                        route.connection_id,
-                        connection,
-                        now_millis,
-                        .{
-                            .space = .application,
-                            .destination_connection_id = destination_connection_id,
-                        },
-                        route_path,
-                        out,
-                    );
+                    result.drain = if (out.len == 0)
+                        .{ .first_error = error.BufferTooSmall }
+                    else
+                        self.drainDatagramsWithRoutePath(
+                            route.connection_id,
+                            connection,
+                            now_millis,
+                            .{
+                                .space = .application,
+                                .destination_connection_id = destination_connection_id,
+                            },
+                            route_path,
+                            out,
+                        );
                     result.next_deadline = try self.nextDeadline(self.records.allocator);
                 }
                 return result;
@@ -7494,8 +7497,8 @@ test "Tls13ServerEndpoint installed-key close output uses routed CID path when c
         }
     };
 
-    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 2, .{
-        .max_routes = 4,
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 3, .{
+        .max_routes = 5,
         .max_stateless_reset_tokens = 4,
     });
     defer endpoint_owner.deinit();
@@ -7614,6 +7617,63 @@ test "Tls13ServerEndpoint installed-key close output uses routed CID path when c
     try std.testing.expectEqual(drain_record.handle, installed_key_out[0].connection_id);
     try std.testing.expect(installed_key_out[0].path.eql(second_path));
     try std.testing.expectEqual(connection_module.ConnectionState.closing, drain_record.connection.connectionState());
+
+    const zero_path = endpoint.Udp4Tuple{
+        .local = first_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_012),
+    };
+    const zero_record = try std.testing.allocator.create(TestRecord);
+    zero_record.* = .{
+        .handle = 103,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+        .local_id = "loc-c",
+        .routed_id = "alt-c",
+        .peer_id = "peer-c",
+    };
+    try zero_record.connection.validatePeerAddress();
+    try zero_record.connection.confirmHandshake();
+    try zero_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try endpoint_owner.lifecycle.registerConnectionId(zero_record.handle, zero_record.local_id, zero_path, .{});
+    try endpoint_owner.records.adopt(zero_record.handle, zero_record);
+    const zero_illegal = try IllegalHandshakeDone.protect(
+        std.testing.allocator,
+        zero_record.local_id,
+        zero_record.connection.nextPeerPacketNumber(.application),
+        secrets.client,
+    );
+    defer std.testing.allocator.free(zero_illegal);
+    var zero_installed_key_out: [0]TestEndpoint.DatagramPathResult = .{};
+    const zero_result = try endpoint_owner.processDatagramAndDrainWithRoutePath(
+        zero_path,
+        3,
+        zero_illegal,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        options,
+        &scratch,
+        &[_]u8{},
+        &initial_out,
+        &handshake_out,
+        &zero_installed_key_out,
+    );
+    const zero_installed = switch (zero_result) {
+        .routed => |routed| switch (routed) {
+            .installed_key => |installed_key| installed_key,
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(?root.EndpointProtectedDatagramError, error.InvalidPacket), zero_installed.feed_error);
+    try std.testing.expectEqual(@as(usize, 0), zero_installed.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, error.BufferTooSmall), zero_installed.drain.first_error);
+    try std.testing.expectEqual(connection_module.ConnectionState.closing, zero_record.connection.connectionState());
+    const preserved_close = (try endpoint_owner.pollOneRttDatagramWithRoutePath(zero_record.handle, 4)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(preserved_close.datagram);
+    try std.testing.expect(preserved_close.path.eql(zero_path));
 }
 
 test "Tls13ServerEndpoint bounded receive reports active stateless reset and retires record" {

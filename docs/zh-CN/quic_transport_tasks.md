@@ -412,6 +412,9 @@ CONNECTION_CLOSE，同时不会拉取普通 backend CRYPTO output。
 当认证后的 Application frame 错误已排队 close、但 direct bounded-drain 调用方没有提供
 输出槽位时，该 helper 现在返回 `BufferTooSmall`，并保留 pending close 供后续 poll
 发出，而不是把零输出 drain 当作成功。
+server endpoint 的 route-owned installed-key receive drain 也对齐该边界：
+close-on-frame-error 已提交 protected close 但有界输出 slice 为空时，routed drain
+result 会报告 `BufferTooSmall`，并保留该 close 供后续 route-bound poll 发出。
 backend OrClose bounded-drain close path 现在也对默认 poll options 和 explicit
 installed-key poll options 使用同一 zero-capacity guard：backend peer
 transport-parameter 处理已排队 close output 时，空输出 slice 会返回
@@ -1472,6 +1475,10 @@ close 和 route cleanup 事件。
 - 2026-07-20：加固 client frame-error close receive drain 的零输出容量路径。
   bounded receive helper 现在会在没有 output slot 时把 `BufferTooSmall` 写入
   close drain result，同时保留已排队 close，供后续 route-bound drain 发出。
+
+- 2026-07-20：加固 server installed-key frame-error close receive drain 的零输出容量路径。
+  routed bounded receive/drain helper 现在会报告 `BufferTooSmall`，同时保留已排队
+  close，供后续 route-bound poll 发出。
 
 - 2026-07-17：加固 server endpoint routed output polling。route-bound
   installed-key output 在跨 record poll 与 route lookup 之间遇到 endpoint-owned

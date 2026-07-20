@@ -496,6 +496,10 @@ When an authenticated Application frame error queues that close but the direct
 bounded-drain caller provides no output slots, the helper now returns
 `BufferTooSmall` and leaves the close pending for a later poll instead of
 reporting a zero-output drain as success.
+Server endpoint route-owned installed-key receive drains mirror that boundary:
+if close-on-frame-error commits a protected close but the bounded output slice is
+empty, the routed drain result reports `BufferTooSmall` and preserves the close
+for a later route-bound poll.
 Backend OrClose bounded-drain close paths now apply the same zero-capacity
 guard for default poll options and explicit installed-key poll options: when
 backend peer transport-parameter processing has queued close output, an empty
@@ -1693,6 +1697,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   output capacity. The bounded receive helper now reports `BufferTooSmall` in
   the close drain result when no output slot is available, while preserving the
   queued close for a later route-bound drain.
+
+- 2026-07-20: Hardened server installed-key close-on-frame-error receive drains
+  with zero output capacity. The routed bounded receive/drain helper now reports
+  `BufferTooSmall` while preserving the queued close for a later route-bound
+  poll.
 
 - 2026-07-17: Hardened server endpoint accepted-Initial rollback. If
   Handshake-space backend driving fails after record adoption, the endpoint now
