@@ -491,7 +491,7 @@ pub fn EndpointConnectionRegistry(
             while (offset < views.len) : (offset += 1) {
                 const index = (start + offset) % views.len;
                 const view = views[index];
-                const datagram = try lifecycle.pollDatagram(
+                const datagram = lifecycle.pollDatagram(
                     view.connection_id,
                     view.connection,
                     now_millis,
@@ -500,7 +500,16 @@ pub fn EndpointConnectionRegistry(
                         .destination_connection_id = view.destination_connection_id,
                         .source_connection_id = view.source_connection_id,
                     },
-                );
+                ) catch |err| switch (err) {
+                    error.ConnectionClosed => {
+                        if (view.connection.connectionState() == .closed) {
+                            _ = lifecycle.retireConnection(view.connection_id);
+                            self.remove(view.connection_id) catch return error.Internal;
+                        }
+                        continue;
+                    },
+                    else => return err,
+                };
                 if (datagram) |bytes| {
                     self.next_poll_index = (index + 1) % views.len;
                     return .{
@@ -1133,6 +1142,248 @@ test "EndpointConnectionRegistry output polling skips and retires closed records
     try std.testing.expectEqual(@as(usize, 1), registry.count());
     try std.testing.expect(registry.get(closed_record.handle) == null);
     try std.testing.expect(registry.get(live_record.handle) != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionRegistry output polling skips closing records without output" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: root.Connection,
+
+        fn connectionRef(self: *@This()) *root.Connection {
+            return &self.connection;
+        }
+
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return if (self.handle == 75) "closing-peer" else "live-peer";
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return if (self.handle == 75) "closing-local" else "live-local";
+        }
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const Registry = EndpointConnectionRegistry(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.deinit,
+    );
+
+    const secrets = try root.protection.deriveInitialSecrets(.v1, "skip-close");
+    var registry = try Registry.initWithCapacity(std.testing.allocator, 2);
+    defer registry.deinit();
+    var lifecycle = root.EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const closing_record = try std.testing.allocator.create(TestRecord);
+    var closing_initialized = false;
+    var closing_owned = true;
+    errdefer {
+        if (closing_owned) {
+            if (closing_initialized) closing_record.deinit();
+            std.testing.allocator.destroy(closing_record);
+        }
+    }
+    closing_record.* = .{
+        .handle = 75,
+        .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
+    };
+    closing_initialized = true;
+    try closing_record.connection.validatePeerAddress();
+    try closing_record.connection.confirmHandshake();
+    try closing_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    closing_record.connection.state = .closing;
+    try registry.adopt(closing_record.handle, closing_record);
+    closing_owned = false;
+
+    const live_record = try std.testing.allocator.create(TestRecord);
+    var live_initialized = false;
+    var live_owned = true;
+    errdefer {
+        if (live_owned) {
+            if (live_initialized) live_record.deinit();
+            std.testing.allocator.destroy(live_record);
+        }
+    }
+    live_record.* = .{
+        .handle = 76,
+        .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
+    };
+    live_initialized = true;
+    try live_record.connection.validatePeerAddress();
+    try live_record.connection.confirmHandshake();
+    try live_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try live_record.connection.sendPing();
+    try registry.adopt(live_record.handle, live_record);
+    live_owned = false;
+
+    try std.testing.expectEqual(@as(usize, 2), registry.count());
+    var poll_views: [2]root.EndpointConnectionPollView = undefined;
+    const views = try registry.fillPollViews(
+        &poll_views,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    );
+    for (views, 0..) |view, index| {
+        if (view.connection_id == closing_record.handle) {
+            registry.next_poll_index = index;
+            break;
+        }
+    }
+
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    const polled = (try registry.pollDatagramAcrossConnections(
+        &lifecycle,
+        no_allocation_allocator.allocator(),
+        20,
+        .application,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    try std.testing.expectEqual(@as(u64, live_record.handle), polled.connection_id);
+    try std.testing.expectEqual(root.ConnectionState.closing, closing_record.connection.connectionState());
+    try std.testing.expect(registry.get(closing_record.handle) != null);
+    try std.testing.expect(registry.get(live_record.handle) != null);
+    try std.testing.expectEqual(@as(usize, 2), registry.count());
+}
+
+test "EndpointConnectionRegistry output polling retires records closed by poll timeout" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: root.Connection,
+
+        fn connectionRef(self: *@This()) *root.Connection {
+            return &self.connection;
+        }
+
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return if (self.handle == 77) "expired-peer" else "live-after-expired";
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return if (self.handle == 77) "expired-local" else "live-exp-local";
+        }
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const Registry = EndpointConnectionRegistry(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.deinit,
+    );
+
+    const secrets = try root.protection.deriveInitialSecrets(.v1, "poll-expire");
+    var registry = try Registry.initWithCapacity(std.testing.allocator, 2);
+    defer registry.deinit();
+    var lifecycle = root.EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const expired_record = try std.testing.allocator.create(TestRecord);
+    var expired_initialized = false;
+    var expired_owned = true;
+    errdefer {
+        if (expired_owned) {
+            if (expired_initialized) expired_record.deinit();
+            std.testing.allocator.destroy(expired_record);
+        }
+    }
+    expired_record.* = .{
+        .handle = 77,
+        .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
+    };
+    expired_initialized = true;
+    try expired_record.connection.validatePeerAddress();
+    try expired_record.connection.confirmHandshake();
+    try expired_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    const path = root.endpoint.Udp4Tuple{
+        .local = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
+    };
+    try lifecycle.registerConnectionId(expired_record.handle, TestRecord.sourceConnectionId(expired_record), path, .{ .sequence_number = 0 });
+    var expired_lifecycle_registered = true;
+    errdefer if (expired_lifecycle_registered) {
+        _ = lifecycle.retireConnection(expired_record.handle);
+    };
+    _ = try expired_record.connection.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(expired_record.handle, &expired_record.connection);
+    expired_record.connection.state = .closing;
+    expired_record.connection.close_deadline_millis = 10;
+    try registry.adopt(expired_record.handle, expired_record);
+    expired_owned = false;
+
+    const live_record = try std.testing.allocator.create(TestRecord);
+    var live_initialized = false;
+    var live_owned = true;
+    errdefer {
+        if (live_owned) {
+            if (live_initialized) live_record.deinit();
+            std.testing.allocator.destroy(live_record);
+        }
+    }
+    live_record.* = .{
+        .handle = 78,
+        .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
+    };
+    live_initialized = true;
+    try live_record.connection.validatePeerAddress();
+    try live_record.connection.confirmHandshake();
+    try live_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try live_record.connection.sendPing();
+    try registry.adopt(live_record.handle, live_record);
+    live_owned = false;
+
+    var poll_views: [2]root.EndpointConnectionPollView = undefined;
+    const views = try registry.fillPollViews(
+        &poll_views,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    );
+    for (views, 0..) |view, index| {
+        if (view.connection_id == expired_record.handle) {
+            registry.next_poll_index = index;
+            break;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), registry.count());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
+
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    const polled = (try registry.pollDatagramAcrossConnections(
+        &lifecycle,
+        no_allocation_allocator.allocator(),
+        20,
+        .application,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(polled.datagram);
+    expired_lifecycle_registered = false;
+    try std.testing.expectEqual(@as(u64, live_record.handle), polled.connection_id);
+    try std.testing.expect(registry.get(expired_record.handle) == null);
+    try std.testing.expect(registry.get(live_record.handle) != null);
+    try std.testing.expectEqual(@as(usize, 1), registry.count());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 }

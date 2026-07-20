@@ -837,6 +837,10 @@ receive view construction now apply the same pre-closed record cleanup, so a
 stale closed record cannot hide later live deadlines, abort active-record output
 with `ConnectionClosed`, or keep a stale route in front of receive
 classification.
+Cross-record output polling also skips closing/draining records that no longer
+have close output pending, and retires a record if polling advances it to
+`closed`, so terminal records no longer block live protected output behind
+them.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first
@@ -1563,6 +1567,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   receive views, so live records keep producing endpoint deadlines and
   protected output, and stale routes do not force receive processing through a
   record that has already reached the closed state.
+
+- 2026-07-20: Hardened endpoint registry output polling across terminal
+  records. Cross-record polling now skips closing/draining records that return
+  `ConnectionClosed` without pending close output, and it retires records that
+  become closed while polling, so later live records can still emit protected
+  output.
 
 - 2026-07-17: Hardened server endpoint accepted-Initial rollback. If
   Handshake-space backend driving fails after record adoption, the endpoint now

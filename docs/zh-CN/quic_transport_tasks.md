@@ -664,6 +664,9 @@ endpoint-owned deadline selection、跨 record output polling 和 installed-key 
 view construction 现在也会执行同样的 pre-closed record cleanup，因此 stale closed
 record 不会遮挡后续 live deadline，不会用 `ConnectionClosed` 中断 active record
 输出，也不会让 stale route 阻挡 receive classification。
+跨 record output polling 现在还会跳过已经没有 close output 待发送的 closing/draining
+record；如果 polling 过程中 record 进入 `closed`，则会退役并移除该 record，避免终态
+record 阻塞后续 live protected output。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、
@@ -1361,6 +1364,11 @@ close 和 route cleanup 事件。
   构建 deadline、poll 或 receive view 前会先退役 closed record，所以较早 closed 的
   record 不会阻断后续 live record 的 endpoint deadline/protected output，也不会让
   stale route 把 receive processing 导向已 closed 的 record。
+
+- 2026-07-20：加固 endpoint registry 跨终态 record 的 output polling。
+  cross-record polling 现在会跳过没有 pending close output 的 closing/draining
+  record；如果 polling 过程中 record 进入 closed，则退役并移除它，所以后续 live
+  record 仍能发出 protected output。
 
 - 2026-07-17：加固 server endpoint routed output polling。route-bound
   installed-key output 在跨 record poll 与 route lookup 之间遇到 endpoint-owned
