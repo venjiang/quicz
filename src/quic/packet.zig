@@ -944,11 +944,22 @@ pub fn matchesStatelessReset(datagram: []const u8, expected_token: [stateless_re
     return std.crypto.timing_safe.eql([stateless_reset_token_len]u8, candidate, expected_token);
 }
 
+/// Return whether bytes can prefix a locally generated stateless reset.
+///
+/// RFC 9000 stateless resets are formatted as short-header packets with the
+/// fixed bit set. The rest of the prefix remains caller-provided unpredictable
+/// bytes.
+pub fn isStatelessResetPrefix(unpredictable_prefix: []const u8) bool {
+    if (unpredictable_prefix.len == 0) return false;
+    return (unpredictable_prefix[0] & 0xc0) == 0x40;
+}
+
 /// Serialize a stateless reset datagram with caller-provided unpredictable bytes.
 pub fn encodeStatelessReset(writer: anytype, unpredictable_prefix: []const u8, token: [stateless_reset_token_len]u8) !void {
     if (unpredictable_prefix.len < min_stateless_reset_datagram_len - stateless_reset_token_len) {
         return error.InvalidLength;
     }
+    if (!isStatelessResetPrefix(unpredictable_prefix)) return error.InvalidHeaderForm;
     try writer.writeAll(unpredictable_prefix);
     try writer.writeAll(&token);
 }
@@ -1644,6 +1655,8 @@ test "stateless reset helpers reject short datagrams and false tokens" {
     try encodeStatelessReset(out.writer(), &[_]u8{ 0x40, 0xaa, 0xbb, 0xcc, 0xdd }, token);
     try std.testing.expect(!matchesStatelessReset(out.getWritten(), other));
     try std.testing.expectError(error.InvalidLength, encodeStatelessReset(out.writer(), &[_]u8{ 0x40, 0xaa }, token));
+    try std.testing.expectError(error.InvalidHeaderForm, encodeStatelessReset(out.writer(), &[_]u8{ 0xc0, 0xaa, 0xbb, 0xcc, 0xdd }, token));
+    try std.testing.expectError(error.InvalidHeaderForm, encodeStatelessReset(out.writer(), &[_]u8{ 0x00, 0xaa, 0xbb, 0xcc, 0xdd }, token));
 }
 
 test "retry packet rejects empty token and invalid header fields" {

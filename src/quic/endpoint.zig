@@ -1058,6 +1058,7 @@ pub const EndpointRouter = struct {
         if (unpredictable_prefix.len < packet.min_stateless_reset_datagram_len - stateless_reset_token_len) {
             return error.InvalidResetSize;
         }
+        if (!packet.isStatelessResetPrefix(unpredictable_prefix)) return error.InvalidResetSize;
         const reset_len = unpredictable_prefix.len + stateless_reset_token_len;
         if (reset_len >= triggering_datagram.len) return error.InvalidResetSize;
         if (out.len < reset_len) return error.BufferTooSmall;
@@ -2686,6 +2687,8 @@ test "EndpointRouter rejects invalid stateless reset datagram sizing" {
     const token = [_]u8{0x11} ** stateless_reset_token_len;
     const prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56, 0x78 };
     const short_prefix = [_]u8{ 0x40, 0x12, 0x34, 0x56 };
+    const long_header_prefix = [_]u8{ 0xc0, 0x12, 0x34, 0x56, 0x78 };
+    const fixed_bit_clear_prefix = [_]u8{ 0x00, 0x12, 0x34, 0x56, 0x78 };
     const triggering_datagram = [_]u8{
         0x40, 0xaa, 0xbb, 0xcc, 0xdd, 0x01, 0x02, 0x03,
         0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
@@ -2709,6 +2712,14 @@ test "EndpointRouter rejects invalid stateless reset datagram sizing" {
     try std.testing.expectError(
         error.InvalidResetSize,
         router.writeStatelessResetForDatagram(&out, testPath(50_000), &too_short_trigger, &prefix),
+    );
+    try std.testing.expectError(
+        error.InvalidResetSize,
+        router.writeStatelessResetForDatagram(&out, testPath(50_000), &triggering_datagram, &long_header_prefix),
+    );
+    try std.testing.expectError(
+        error.InvalidResetSize,
+        router.writeStatelessResetForDatagram(&out, testPath(50_000), &triggering_datagram, &fixed_bit_clear_prefix),
     );
     try std.testing.expectError(
         error.BufferTooSmall,
