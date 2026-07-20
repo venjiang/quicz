@@ -5841,8 +5841,14 @@ test "Tls13Handshake client rejects server Finished with wrong verify_data" {
     // Wrong verify_data (all zeros) — must not match the real one.
     const bad: [32]u8 = [_]u8{0} ** 32;
     var fin_buf: [64]u8 = undefined;
+    const transcript_before = hs.transcript.current();
     hs.provideData(fin_buf[0..buildFinished(&fin_buf, bad)]);
     try std.testing.expectError(error.BadFinished, hs.step());
+    try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
+    try std.testing.expectEqual(HandshakeState.client_wait_finished, hs.state);
+    try std.testing.expect(!hs.key_schedule.app_secret_derived);
+    try std.testing.expect(!hs.pending_install_app);
+    try std.testing.expect(!hs.isComplete());
 }
 
 test "Tls13Handshake client rejects CertificateVerify with trailing bytes" {
@@ -7728,8 +7734,11 @@ test "Tls13Handshake server rejects client Finished with wrong verify_data" {
     try std.testing.expectEqual(@as(usize, 36), client_finished_len);
 
     client_finished[4] ^= 0xff;
+    const transcript_before = server.transcript.current();
     server.provideData(client_finished[0..client_finished_len]);
     try std.testing.expectError(error.BadFinished, server.step());
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_finished, server.state);
     try std.testing.expect(!server.isComplete());
 }
 
