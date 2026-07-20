@@ -493,6 +493,10 @@ When an authenticated Application frame error queues that close but the direct
 bounded-drain caller provides no output slots, the helper now returns
 `BufferTooSmall` and leaves the close pending for a later poll instead of
 reporting a zero-output drain as success.
+Backend OrClose bounded-drain close paths now apply the same zero-capacity
+guard for default poll options and explicit installed-key poll options: when
+backend peer transport-parameter processing has queued close output, an empty
+output slice returns `BufferTooSmall` and leaves the close pending.
 Client endpoint due-recovery service now polls the due packet number space, not
 only the Application short-packet path. `Tls13ClientTransport.pollRecoveryDatagram()`
 emits Initial, Handshake, or Application protected output according to the

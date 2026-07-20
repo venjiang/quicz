@@ -410,6 +410,10 @@ CONNECTION_CLOSE，同时不会拉取普通 backend CRYPTO output。
 当认证后的 Application frame 错误已排队 close、但 direct bounded-drain 调用方没有提供
 输出槽位时，该 helper 现在返回 `BufferTooSmall`，并保留 pending close 供后续 poll
 发出，而不是把零输出 drain 当作成功。
+backend OrClose bounded-drain close path 现在也对默认 poll options 和 explicit
+installed-key poll options 使用同一 zero-capacity guard：backend peer
+transport-parameter 处理已排队 close output 时，空输出 slice 会返回
+`BufferTooSmall`，并保留 pending close。
 Client endpoint 的 due-recovery service 现在会按到期 packet number space 取输出，不再只
 走 Application short-packet 路径。`Tls13ClientTransport.pollRecoveryDatagram()` 会根据
 已服务的 RFC 9002 timer 发出 Initial、Handshake 或 Application protected output，

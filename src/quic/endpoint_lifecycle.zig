@@ -8014,6 +8014,7 @@ pub const EndpointConnectionLifecycle = struct {
     ) Error!EndpointDatagramDrainResult {
         for (connections) |view| {
             if (view.connection_id != connection_id) continue;
+            if (out.len == 0) return error.BufferTooSmall;
             const matching_views = [_]EndpointConnectionPollView{view};
             const drain = self.drainDatagramsAcrossConnectionsAfterBackendDrive(
                 &matching_views,
@@ -8038,6 +8039,7 @@ pub const EndpointConnectionLifecycle = struct {
     ) Error!EndpointDatagramDrainResult {
         for (connections) |view| {
             if (view.connection_id != connection_id) continue;
+            if (out.len == 0) return error.BufferTooSmall;
             const matching_views = [_]EndpointConnectionInstalledKeyPollView{view};
             const drain = self.drainDatagramsAcrossConnectionsWithInstalledKeyOptionsAfterBackendDrive(
                 &matching_views,
