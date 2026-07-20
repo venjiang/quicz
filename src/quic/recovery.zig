@@ -194,7 +194,8 @@ pub const Recovery = struct {
     /// RFC 9002 uses the sender's current maximum datagram size for the
     /// initial window, minimum window, and congestion-avoidance growth. When
     /// the size decreases during handshake setup, the congestion window is
-    /// reset to the recalculated initial window for the new size.
+    /// reset to the recalculated initial window for the new size. When the
+    /// size grows, an already-reduced window is raised to the new minimum.
     pub fn updateMaxDatagramSize(self: *Recovery, new_max_datagram_size: usize) void {
         const previous = self.max_datagram_size;
         if (previous == new_max_datagram_size) return;
@@ -202,6 +203,13 @@ pub const Recovery = struct {
         self.max_datagram_size = new_max_datagram_size;
         if (new_max_datagram_size < previous) {
             self.congestion_window = initialCongestionWindow(new_max_datagram_size);
+            self.congestion_avoidance_bytes_acked = 0;
+            return;
+        }
+
+        const minimum_window = minimumCongestionWindow(new_max_datagram_size);
+        if (self.congestion_window < minimum_window) {
+            self.congestion_window = minimum_window;
             self.congestion_avoidance_bytes_acked = 0;
         }
     }
@@ -460,6 +468,13 @@ test "max datagram size update resets cwnd on decrease and preserves cwnd on inc
     try std.testing.expectEqual(@as(usize, 1300), recovery.max_datagram_size);
     try std.testing.expectEqual(@as(usize, 12_600), recovery.congestion_window);
     try std.testing.expectEqual(@as(usize, 600), recovery.congestion_avoidance_bytes_acked);
+
+    recovery.congestion_window = 2000;
+    recovery.congestion_avoidance_bytes_acked = 700;
+    recovery.updateMaxDatagramSize(1500);
+    try std.testing.expectEqual(@as(usize, 1500), recovery.max_datagram_size);
+    try std.testing.expectEqual(@as(usize, 3000), recovery.congestion_window);
+    try std.testing.expectEqual(@as(usize, 0), recovery.congestion_avoidance_bytes_acked);
 }
 
 test "underutilized ACK updates recovery accounting without growing congestion window" {
