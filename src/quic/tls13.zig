@@ -4010,7 +4010,7 @@ pub const Tls13Handshake = struct {
     /// Build the Certificate message from the configured leaf-first chain
     /// (RFC 8446 §4.4.2).
     fn serverBuildCertificate(self: *Tls13Handshake) HandshakeError!Action {
-        if (self.config.cert_chain_der.len == 0) return error.BadCertificate;
+        try validateServerCertificateChain(self.config.cert_chain_der, self.out_buf.len);
         const len = buildCertificateChain(&self.out_buf, self.config.cert_chain_der) orelse return error.BadCertificate;
         self.transcript.update(self.out_buf[0..len]);
         self.state = .server_send_certificate_verify;
@@ -6968,6 +6968,24 @@ test "Tls13Handshake server rejects CertificateVerify invalid private key withou
     try std.testing.expectEqual(@as(usize, 9), server.out_len);
     try std.testing.expectEqualSlices(u8, &([_]u8{0x5a} ** 9), server.out_buf[0..9]);
     try std.testing.expectEqual(HandshakeState.server_send_certificate_verify, server.state);
+}
+
+test "Tls13Handshake server rejects invalid certificate chain without committing output state" {
+    const leaf = [_]u8{ 0x30, 0x03, 0x01 };
+    const empty_issuer = [_]u8{};
+    var server = Tls13Handshake.initServer(.{
+        .cert_chain_der = &.{ &leaf, &empty_issuer },
+    }, &[_]u8{});
+    server.state = .server_send_certificate;
+    server.out_len = 9;
+    @memset(server.out_buf[0..9], 0x5a);
+    const transcript_before = server.transcript.current();
+
+    try std.testing.expectError(error.BadCertificate, server.serverBuildCertificate());
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(@as(usize, 9), server.out_len);
+    try std.testing.expectEqualSlices(u8, &([_]u8{0x5a} ** 9), server.out_buf[0..9]);
+    try std.testing.expectEqual(HandshakeState.server_send_certificate, server.state);
 }
 
 test "Tls13Handshake server rejects empty certificate entry without committing parsed state" {

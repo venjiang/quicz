@@ -96,6 +96,8 @@ certificate、transcript state 和 client handshake state 不变；tag 或 lengt
 client handshake state 不变，缺少可用于验证的 Certificate 时也会返回
 `BadCertificate` 而不是进入 parser panic。服务端 CertificateVerify 生成也会在
 修改 output bytes、output length、transcript 或 server state 前拒绝非法的配置私钥。
+服务端 Certificate 输出现在也会先完整校验配置的 certificate chain，再写入输出
+bytes，因此后续非法 certificate entry 不会留下半写入的 Certificate message。
 Finished verify_data 失败时会保持 transcript、completion state 和 client-side
 application key installation 未提交。
 ClientHello 构建现在也会在
@@ -1697,6 +1699,10 @@ close 和 route cleanup 事件。
 - 2026-07-19：收紧 server CertificateVerify 输出边界覆盖。非法的配置私钥会在
   server 写入 CertificateVerify output bytes、修改 output length、更新 transcript
   或推进 handshake state 前被拒绝。
+
+- 2026-07-20：收紧 server Certificate 输出边界覆盖。非法的配置 certificate
+  chain 会在 server 写入 Certificate output bytes、修改 output length、更新
+  transcript 或推进 handshake state 前被拒绝。
 
 - 2026-07-19：收紧 server ServerHello 输出边界覆盖。非法 peer X25519 key material
   会在 server 写入 ServerHello output bytes、修改 output length、提交 server

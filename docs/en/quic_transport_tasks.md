@@ -135,7 +135,10 @@ server-side ClientHello processing now rejects missing `signature_algorithms`,
 empty certificate entries, oversized configured certificate chains or encoded
 Certificate flights, plus missing, short, or otherwise invalid configured
 private keys before committing parsed peer state or queuing/emitting
-ServerHello. Pure-Zig TLS client-side ServerHello parsing now also
+ServerHello. Server-side Certificate output now also prevalidates the
+configured chain before writing bytes, so a later invalid certificate entry
+cannot leave a partial Certificate message in the output buffer. Pure-Zig TLS
+client-side ServerHello parsing now also
 rejects a ServerHello random that repeats the ClientHello random without
 committing peer random, transcript, or handshake secrets, and a wrong
 ServerHello cipher suite likewise leaves the staged peer key, peer random, PSK
@@ -1938,6 +1941,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   Invalid configured private keys are rejected before the server writes
   CertificateVerify output bytes, mutates output length, updates the
   transcript, or advances handshake state.
+
+- 2026-07-20: Tightened server Certificate output-boundary coverage. Invalid
+  configured certificate chains are rejected before the server writes
+  Certificate output bytes, mutates output length, updates the transcript, or
+  advances handshake state.
 
 - 2026-07-19: Tightened server ServerHello output-boundary coverage. Invalid
   peer X25519 key material is rejected before the server writes ServerHello
