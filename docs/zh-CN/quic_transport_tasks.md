@@ -391,10 +391,13 @@ peer-parameter 错误会直接返回或 drain 触发连接上的 protected Hands
 包括 routed backend drain/poll wrapper。
 installed-key 1-RTT short OrClose helper 对 Application-space receive 和 backend 错误也
 采用同一边界：direct/routed poll/drain helper 会从选中的连接返回 protected short close
-datagram；route mismatch 和未进入 closing 的 invalid packet 仍在输出前失败。
+datagram；no-output backend deadline helper 会在排队 close 后返回当前选中的 deadline，
+不再把该 close path 暴露成 `InvalidPacket`。route mismatch 和未进入 closing 的 invalid
+packet 仍在输出前失败。
 compatible-version installed-key backend OrClose poll/drain helper 现在也会在 peer
 Version Information 校验失败时 drain 该 close output，并且不会应用失败的 peer version
-information。
+information；compatible-version no-output deadline helper 也采用同一非错误 close-queue
+边界。
 当认证后的 Application frame 错误已排队 close、但 direct bounded-drain 调用方没有提供
 输出槽位时，该 helper 现在返回 `BufferTooSmall`，并保留 pending close 供后续 poll
 发出，而不是把零输出 drain 当作成功。
@@ -1755,7 +1758,7 @@ close 和 route cleanup 事件。
   认证和接收，再由 compatible-version backend 应用 peer Version Information、报告
   selected compatible version、保留 backend output 给后续 installed-key output path；
   OrClose 变体在 peer Version Information 无法匹配 configured compatibility 时会排队
-  CONNECTION_CLOSE，并停在 deadline selection 和 backend output pull 之前。
+  CONNECTION_CLOSE，返回当前 deadline selection，并避免 backend output pull。
 - 2026-06-18：新增 routed installed-key 1-RTT short
   receive-to-compatible-backend no-output 形态：
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`

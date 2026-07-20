@@ -22469,9 +22469,10 @@ pub const EndpointConnectionLifecycle = struct {
     /// Process installed-key 1-RTT input through close propagation, drive a backend, and select a wakeup.
     ///
     /// Authenticated Application frame errors or backend peer
-    /// transport-parameter errors queue CONNECTION_CLOSE and return before
-    /// deadline selection. Backend output is not pulled after a peer-parameter
-    /// close path, leaving the close frame as the next observable output.
+    /// transport-parameter errors queue CONNECTION_CLOSE and return the current
+    /// wakeup selection instead of failing before deadline selection. Backend
+    /// output is not pulled after a peer-parameter close path, leaving the
+    /// close frame as the next observable output.
     pub fn processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -22483,20 +22484,32 @@ pub const EndpointConnectionLifecycle = struct {
         backend: CryptoBackend,
         scratch: []u8,
     ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
-        try self.processProtectedShortDatagramWithInstalledKeysOrClose(
+        self.processProtectedShortDatagramWithInstalledKeysOrClose(
             connection_id,
             connection,
             now_millis,
             dcid_len,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            return .{
+                .backend = .{},
+                .next_deadline = self.nextDeadline(connection_id, connection),
+            };
+        };
         return self.driveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
             connection_id,
             connection,
             backend_space,
             backend,
             scratch,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            return .{
+                .backend = .{},
+                .next_deadline = self.nextDeadline(connection_id, connection),
+            };
+        };
     }
 
     /// Process installed-key 1-RTT input, drive a compatible-version backend, and select a wakeup.
@@ -22536,8 +22549,8 @@ pub const EndpointConnectionLifecycle = struct {
     /// Process installed-key 1-RTT input through compatible-version close propagation.
     ///
     /// Authenticated Application frame errors or RFC 9368 peer Version
-    /// Information errors queue CONNECTION_CLOSE and return before ordinary
-    /// deadline selection or backend output polling.
+    /// Information errors queue CONNECTION_CLOSE and return the current wakeup
+    /// selection instead of failing before deadline selection.
     pub fn processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -22550,13 +22563,19 @@ pub const EndpointConnectionLifecycle = struct {
         scratch: []u8,
         compatibilities: []const VersionCompatibility,
     ) Error!EndpointCryptoBackendDriveNextDeadlineResult {
-        try self.processProtectedShortDatagramWithInstalledKeysOrClose(
+        self.processProtectedShortDatagramWithInstalledKeysOrClose(
             connection_id,
             connection,
             now_millis,
             dcid_len,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            return .{
+                .backend = .{},
+                .next_deadline = self.nextDeadline(connection_id, connection),
+            };
+        };
         return self.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
             connection_id,
             connection,
@@ -22564,7 +22583,13 @@ pub const EndpointConnectionLifecycle = struct {
             backend,
             scratch,
             compatibilities,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            return .{
+                .backend = .{},
+                .next_deadline = self.nextDeadline(connection_id, connection),
+            };
+        };
     }
 
     /// Route installed-key 1-RTT input, drive a backend, and select a wakeup.

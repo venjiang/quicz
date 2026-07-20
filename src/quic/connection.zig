@@ -49220,7 +49220,7 @@ test "EndpointConnectionLifecycle routed installed-key short compatible backend 
     try std.testing.expectEqual(ConnectionState.active, server.connectionState());
 }
 
-test "EndpointConnectionLifecycle installed-key short compatible backend OrClose stops before deadline" {
+test "EndpointConnectionLifecycle installed-key short compatible backend OrClose returns current deadline" {
     const BadBackend = struct {
         peer_transport_parameters: []const u8,
         received: [96]u8 = undefined,
@@ -49318,7 +49318,7 @@ test "EndpointConnectionLifecycle installed-key short compatible backend OrClose
 
     var backend = BadBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
     var scratch: [256]u8 = undefined;
-    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
+    const result = try server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndSelectNextDeadline(
         66,
         &server,
         11,
@@ -49328,7 +49328,7 @@ test "EndpointConnectionLifecycle installed-key short compatible backend OrClose
         backend.backend(),
         &scratch,
         &[_]VersionCompatibility{},
-    ));
+    );
     try std.testing.expectEqualStrings("bad compatible app crypto", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
@@ -49337,6 +49337,9 @@ test "EndpointConnectionLifecycle installed-key short compatible backend OrClose
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(?i64, null), server.closeDeadlineMillis());
+    try std.testing.expect(result.next_deadline == null);
 }
 
 test "EndpointConnectionLifecycle installed-key short compatible backend poll emits output" {
@@ -50534,7 +50537,7 @@ test "EndpointConnectionLifecycle installed-key short compatible backend OrClose
     try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
 }
 
-test "EndpointConnectionLifecycle installed-key short backend OrClose stops before deadline on peer parameters" {
+test "EndpointConnectionLifecycle installed-key short backend OrClose returns current deadline on peer parameters" {
     const BadBackend = struct {
         received: [64]u8 = undefined,
         received_len: usize = 0,
@@ -50612,7 +50615,7 @@ test "EndpointConnectionLifecycle installed-key short backend OrClose stops befo
 
     var backend = BadBackend{};
     var scratch: [64]u8 = undefined;
-    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
+    const result = try server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceOrCloseAndSelectNextDeadline(
         66,
         &server,
         11,
@@ -50621,13 +50624,17 @@ test "EndpointConnectionLifecycle installed-key short backend OrClose stops befo
         .application,
         backend.backend(),
         &scratch,
-    ));
+    );
     try std.testing.expectEqualStrings("bad peer tp app", backend.received[0..backend.received_len]);
+    try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, 0), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(?i64, null), server.closeDeadlineMillis());
+    try std.testing.expect(result.next_deadline == null);
 }
 
 test "EndpointConnectionLifecycle routed installed-key short backend OrClose validates route before backend" {

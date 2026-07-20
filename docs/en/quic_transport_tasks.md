@@ -469,11 +469,14 @@ protected Handshake close datagram from the triggering connection, including
 routed backend drain/poll wrappers.
 Installed-key 1-RTT short OrClose helpers now do the same for Application-space
 receive and backend errors: direct and routed poll/drain helpers return the
-protected short close datagram from the selected connection while route
-mismatches and non-closing invalid packets still fail before output.
+protected short close datagram from the selected connection, while no-output
+backend deadline helpers return the current selected deadline after queueing
+the close instead of surfacing `InvalidPacket`. Route mismatches and
+non-closing invalid packets still fail before output.
 The compatible-version installed-key backend OrClose poll/drain helpers now
 also drain that close output when peer Version Information validation fails,
-without applying failed peer version information.
+without applying failed peer version information; the compatible-version
+no-output deadline helper follows the same non-error close-queue boundary.
 When an authenticated Application frame error queues that close but the direct
 bounded-drain caller provides no output slots, the helper now returns
 `BufferTooSmall` and leaves the close pending for a later poll instead of
@@ -2003,9 +2006,9 @@ QUIC unless the gap is named and the verification evidence is added here.
   through the installed-key short-packet path before the compatible-version
   backend applies peer Version Information, reports the selected compatible
   version, and leaves backend output queued for a later installed-key output
-  path; the OrClose variant queues CONNECTION_CLOSE and stops before deadline
-  selection or backend output pull when peer Version Information cannot match
-  the configured compatibility set.
+  path; the OrClose variant queues CONNECTION_CLOSE, returns the current
+  deadline selection, and avoids backend output pull when peer Version
+  Information cannot match the configured compatibility set.
 - 2026-06-18: Added the routed installed-key 1-RTT short
   receive-to-compatible-backend no-output forms
   `EndpointConnectionLifecycle.processRoutedProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionAndSelectNextDeadline()`
