@@ -49486,7 +49486,7 @@ test "EndpointConnectionLifecycle installed-key short compatible backend poll em
     try std.testing.expectEqualStrings("poll compatible response", recv_buf[0..recv_len]);
 }
 
-test "EndpointConnectionLifecycle installed-key short compatible backend OrClose poll stops before output" {
+test "EndpointConnectionLifecycle installed-key short compatible backend OrClose poll returns close output" {
     const BadBackend = struct {
         peer_transport_parameters: []const u8,
         received: [96]u8 = undefined,
@@ -49585,7 +49585,7 @@ test "EndpointConnectionLifecycle installed-key short compatible backend OrClose
 
     var backend = BadBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
     var scratch: [256]u8 = undefined;
-    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
+    const result = try server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
         68,
         &server,
         11,
@@ -49600,14 +49600,26 @@ test "EndpointConnectionLifecycle installed-key short compatible backend OrClose
             .space = .application,
             .destination_connection_id = &client_dcid,
         },
-    ));
+    );
     try std.testing.expectEqualStrings("bad poll compatible app", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expect(server.peerVersionInformation() == null);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
-    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), result.backend.connections_driven);
+    const close_packet = result.datagram orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 68), close_packet.connection_id);
+    defer std.testing.allocator.free(close_packet.datagram);
+
+    try client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
+        58,
+        &client,
+        13,
+        client_dcid.len,
+        close_packet.datagram,
+    );
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
 }
 
 test "EndpointConnectionLifecycle routes installed-key short compatible backend poll" {
@@ -50381,7 +50393,7 @@ test "EndpointConnectionLifecycle installed-key short compatible backend drain e
     try std.testing.expectEqualStrings("drain compatible response", recv_buf[0..recv_len]);
 }
 
-test "EndpointConnectionLifecycle installed-key short compatible backend OrClose drain stops before output" {
+test "EndpointConnectionLifecycle installed-key short compatible backend OrClose drain returns close output" {
     const BadBackend = struct {
         peer_transport_parameters: []const u8,
         received: [96]u8 = undefined,
@@ -50481,7 +50493,7 @@ test "EndpointConnectionLifecycle installed-key short compatible backend OrClose
     var backend = BadBackend{ .peer_transport_parameters = peer_params_out.getWritten() };
     var scratch: [256]u8 = undefined;
     var out: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(error.InvalidPacket, server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
+    const result = try server_lifecycle.processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
         72,
         &server,
         11,
@@ -50497,14 +50509,29 @@ test "EndpointConnectionLifecycle installed-key short compatible backend OrClose
             .destination_connection_id = &client_dcid,
         },
         &out,
-    ));
+    );
+    defer for (out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
     try std.testing.expectEqualStrings("bad drain compatible app", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expect(server.peerVersionInformation() == null);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
-    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 0), result.backend.connections_driven);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 72), out[0].connection_id);
+
+    try client_lifecycle.processProtectedShortDatagramWithInstalledKeys(
+        62,
+        &client,
+        13,
+        client_dcid.len,
+        out[0].datagram,
+    );
+    try std.testing.expectEqual(ConnectionState.draining, client.connectionState());
 }
 
 test "EndpointConnectionLifecycle installed-key short backend OrClose stops before deadline on peer parameters" {

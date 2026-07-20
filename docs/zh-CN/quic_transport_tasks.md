@@ -392,6 +392,9 @@ peer-parameter 错误会直接返回或 drain 触发连接上的 protected Hands
 installed-key 1-RTT short OrClose helper 对 Application-space receive 和 backend 错误也
 采用同一边界：direct/routed poll/drain helper 会从选中的连接返回 protected short close
 datagram；route mismatch 和未进入 closing 的 invalid packet 仍在输出前失败。
+compatible-version installed-key backend OrClose poll/drain helper 现在也会在 peer
+Version Information 校验失败时 drain 该 close output，并且不会应用失败的 peer version
+information。
 当认证后的 Application frame 错误已排队 close、但 direct bounded-drain 调用方没有提供
 输出槽位时，该 helper 现在返回 `BufferTooSmall`，并保留 pending close 供后续 poll
 发出，而不是把零输出 drain 当作成功。

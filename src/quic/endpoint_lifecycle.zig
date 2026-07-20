@@ -22851,8 +22851,8 @@ pub const EndpointConnectionLifecycle = struct {
     /// Process installed-key 1-RTT input through compatible-version close propagation and poll output.
     ///
     /// Authenticated Application frame errors or peer Version Information
-    /// errors queue CONNECTION_CLOSE and return before ordinary installed-key
-    /// output polling. Successful paths preserve the receive-to-backend-to-
+    /// errors queue CONNECTION_CLOSE and poll protected close output instead of
+    /// ordinary installed-key output. Successful paths preserve the receive-to-backend-to-
     /// output behavior of the non-close-propagating variant.
     pub fn processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
         self: *EndpointConnectionLifecycle,
@@ -22868,13 +22868,28 @@ pub const EndpointConnectionLifecycle = struct {
         poll_now_millis: i64,
         poll_options: EndpointPollInstalledKeyDatagramOptions,
     ) Error!EndpointCryptoBackendDriveDatagramResult {
-        try self.processProtectedShortDatagramWithInstalledKeysOrClose(
+        self.processProtectedShortDatagramWithInstalledKeysOrClose(
             connection_id,
             connection,
             now_millis,
             dcid_len,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            const polled = try self.pollDatagram(
+                connection_id,
+                connection,
+                poll_now_millis,
+                poll_options,
+            );
+            return .{
+                .backend = .{},
+                .datagram = if (polled) |out_datagram| .{
+                    .connection_id = connection_id,
+                    .datagram = out_datagram,
+                } else null,
+            };
+        };
         return self.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndPollDatagram(
             connection_id,
             connection,
@@ -22884,7 +22899,22 @@ pub const EndpointConnectionLifecycle = struct {
             compatibilities,
             poll_now_millis,
             poll_options,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            const polled = try self.pollDatagram(
+                connection_id,
+                connection,
+                poll_now_millis,
+                poll_options,
+            );
+            return .{
+                .backend = .{},
+                .datagram = if (polled) |out_datagram| .{
+                    .connection_id = connection_id,
+                    .datagram = out_datagram,
+                } else null,
+            };
+        };
     }
 
     /// Route installed-key 1-RTT input, drive a backend, and poll output.
@@ -23185,8 +23215,8 @@ pub const EndpointConnectionLifecycle = struct {
     /// Process installed-key 1-RTT input through compatible-version close propagation and drain output.
     ///
     /// Authenticated Application frame errors or peer Version Information
-    /// errors queue CONNECTION_CLOSE and return before ordinary bounded output
-    /// draining. Successful paths preserve the bounded receive-to-backend
+    /// errors queue CONNECTION_CLOSE and drain protected close output instead of
+    /// ordinary bounded output. Successful paths preserve the bounded receive-to-backend
     /// output behavior of the non-close-propagating variant.
     pub fn processProtectedShortDatagramWithInstalledKeysAndDriveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
         self: *EndpointConnectionLifecycle,
@@ -23203,13 +23233,25 @@ pub const EndpointConnectionLifecycle = struct {
         poll_options: EndpointPollInstalledKeyDatagramOptions,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointCryptoBackendDriveDatagramDrainResult {
-        try self.processProtectedShortDatagramWithInstalledKeysOrClose(
+        self.processProtectedShortDatagramWithInstalledKeysOrClose(
             connection_id,
             connection,
             now_millis,
             dcid_len,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            return .{
+                .backend = .{},
+                .drain = self.drainInstalledKeyDatagrams(
+                    connection_id,
+                    connection,
+                    drain_now_millis,
+                    poll_options,
+                    out,
+                ),
+            };
+        };
         return self.driveCryptoBackendInSpaceWithCompatibleVersionOrCloseAndDrainDatagrams(
             connection_id,
             connection,
@@ -23220,7 +23262,19 @@ pub const EndpointConnectionLifecycle = struct {
             drain_now_millis,
             poll_options,
             out,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            return .{
+                .backend = .{},
+                .drain = self.drainInstalledKeyDatagrams(
+                    connection_id,
+                    connection,
+                    drain_now_millis,
+                    poll_options,
+                    out,
+                ),
+            };
+        };
     }
 
     /// Route installed-key 1-RTT input, drive a backend, and drain output.

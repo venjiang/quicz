@@ -471,6 +471,9 @@ Installed-key 1-RTT short OrClose helpers now do the same for Application-space
 receive and backend errors: direct and routed poll/drain helpers return the
 protected short close datagram from the selected connection while route
 mismatches and non-closing invalid packets still fail before output.
+The compatible-version installed-key backend OrClose poll/drain helpers now
+also drain that close output when peer Version Information validation fails,
+without applying failed peer version information.
 When an authenticated Application frame error queues that close but the direct
 bounded-drain caller provides no output slots, the helper now returns
 `BufferTooSmall` and leaves the close pending for a later poll instead of
