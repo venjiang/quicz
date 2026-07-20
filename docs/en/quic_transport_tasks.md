@@ -841,6 +841,10 @@ Cross-record output polling also skips closing/draining records that no longer
 have close output pending, and retires a record if polling advances it to
 `closed`, so terminal records no longer block live protected output behind
 them.
+`Tls13ServerEndpoint` route-bound cross-record output polling now applies the
+same terminal-record skip/retire behavior before route lookup and after
+`ConnectionClosed`, so a stale closed server record cannot block later live
+route-bound protected output.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first
@@ -1573,6 +1577,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   `ConnectionClosed` without pending close output, and it retires records that
   become closed while polling, so later live records can still emit protected
   output.
+
+- 2026-07-20: Hardened server endpoint route-bound output polling across
+  terminal records. Route-bound cross-record polling now retires closed records
+  before route lookup and after `ConnectionClosed`, while preserving route
+  errors for active records whose route is genuinely missing.
 
 - 2026-07-17: Hardened server endpoint accepted-Initial rollback. If
   Handshake-space backend driving fails after record adoption, the endpoint now

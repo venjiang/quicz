@@ -667,6 +667,9 @@ record 不会遮挡后续 live deadline，不会用 `ConnectionClosed` 中断 ac
 跨 record output polling 现在还会跳过已经没有 close output 待发送的 closing/draining
 record；如果 polling 过程中 record 进入 `closed`，则会退役并移除该 record，避免终态
 record 阻塞后续 live protected output。
+`Tls13ServerEndpoint` 的 route-bound 跨 record output polling 现在也会在 route lookup
+前和 `ConnectionClosed` 后执行同样的终态 record skip/retire，因此陈旧 closed server
+record 不会阻塞后续 live route-bound protected output。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、
@@ -1369,6 +1372,10 @@ close 和 route cleanup 事件。
   cross-record polling 现在会跳过没有 pending close output 的 closing/draining
   record；如果 polling 过程中 record 进入 closed，则退役并移除它，所以后续 live
   record 仍能发出 protected output。
+
+- 2026-07-20：加固 server endpoint 跨终态 record 的 route-bound output polling。
+  route-bound cross-record polling 现在会在 route lookup 前和 `ConnectionClosed`
+  后退役 closed record，同时保留活跃 record 真正缺失 route 时的 route error。
 
 - 2026-07-17：加固 server endpoint routed output polling。route-bound
   installed-key output 在跨 record poll 与 route lookup 之间遇到 endpoint-owned

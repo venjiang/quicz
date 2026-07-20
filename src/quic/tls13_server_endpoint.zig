@@ -1162,8 +1162,12 @@ pub fn Tls13ServerEndpoint(
             while (offset < views.len) : (offset += 1) {
                 const index = (start + offset) % views.len;
                 const view = views[index];
+                if (view.connection.connectionState() == .closed) {
+                    _ = self.records.retire(&self.lifecycle, view.connection_id) catch return error.Internal;
+                    continue;
+                }
                 const path = try self.lifecycle.currentRoutePath(view.source_connection_id);
-                const datagram = try self.lifecycle.pollDatagram(
+                const datagram = self.lifecycle.pollDatagram(
                     view.connection_id,
                     view.connection,
                     now_millis,
@@ -1172,7 +1176,15 @@ pub fn Tls13ServerEndpoint(
                         .destination_connection_id = view.destination_connection_id,
                         .source_connection_id = view.source_connection_id,
                     },
-                );
+                ) catch |err| switch (err) {
+                    error.ConnectionClosed => {
+                        if (view.connection.connectionState() == .closed) {
+                            _ = self.records.retire(&self.lifecycle, view.connection_id) catch return error.Internal;
+                        }
+                        continue;
+                    },
+                    else => return err,
+                };
                 if (datagram) |bytes| {
                     self.records.next_poll_index = (index + 1) % views.len;
                     return .{
@@ -5176,6 +5188,46 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expect(step_pending_out[0].datagram.len != 0);
     const step_next_deadline = step.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, step_next_deadline.kind);
+
+    try first_record.connection.sendPing();
+    var terminal_close_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const terminal_close = try endpoint_owner.closeWithRoutePathAndDrainDatagrams(
+        no_allocation_allocator.allocator(),
+        second_record.handle,
+        0,
+        @intFromEnum(frame.FrameType.ping),
+        "done",
+        30,
+        &terminal_close_out,
+    );
+    try std.testing.expectEqual(@as(usize, 1), terminal_close.drain.datagrams_written);
+    defer std.testing.allocator.free(terminal_close_out[0].datagram);
+    const close_deadline = (try endpoint_owner.closeDeadlineMillis(second_record.handle)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectError(error.ConnectionClosed, second_record.connection.checkCloseTimeouts(close_deadline));
+    try std.testing.expectEqual(connection_module.ConnectionState.closed, second_record.connection.connectionState());
+    var terminal_poll_views: [2]root.EndpointConnectionPollView = undefined;
+    const terminal_views = try endpoint_owner.records.fillPollViews(
+        &terminal_poll_views,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    );
+    for (terminal_views, 0..) |view, index| {
+        if (view.connection_id == second_record.handle) {
+            endpoint_owner.records.next_poll_index = index;
+            break;
+        }
+    }
+    const terminal_skipped = (try endpoint_owner.pollDatagramWithRoutePath(
+        no_allocation_allocator.allocator(),
+        close_deadline,
+        .application,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(terminal_skipped.datagram);
+    try std.testing.expectEqual(first_record.handle, terminal_skipped.connection_id);
+    try std.testing.expect(terminal_skipped.path.eql(first_path));
+    try std.testing.expect(terminal_skipped.datagram.len != 0);
+    try std.testing.expect(endpoint_owner.records.get(second_record.handle) == null);
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
 }
 
 test "Tls13ServerEndpoint pairs Initial due recovery output with committed route path" {
