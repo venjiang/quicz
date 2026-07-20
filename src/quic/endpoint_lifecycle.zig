@@ -19385,14 +19385,16 @@ pub const EndpointConnectionLifecycle = struct {
         dcid: []const u8,
         send_keys: protection.Aes128PacketProtectionKeys,
     ) Error!?EndpointPolledDatagramResult {
-        try self.processProtectedShortDatagramOrClose(
+        self.processProtectedShortDatagramOrClose(
             connection_id,
             connection,
             now_millis,
             receive_keys,
             dcid_len,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+        };
         const output = try self.pollProtectedShortDatagram(
             connection_id,
             connection,
@@ -19534,14 +19536,17 @@ pub const EndpointConnectionLifecycle = struct {
         send_keys: protection.Aes128PacketProtectionKeys,
         out: []EndpointPolledDatagramResult,
     ) Error!EndpointDatagramDrainResult {
-        try self.processProtectedShortDatagramOrClose(
+        self.processProtectedShortDatagramOrClose(
             connection_id,
             connection,
             now_millis,
             receive_keys,
             dcid_len,
             datagram,
-        );
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing) return err;
+            if (out.len == 0) return error.BufferTooSmall;
+        };
         var result = EndpointDatagramDrainResult{};
         while (result.datagrams_written < out.len) {
             const output = self.pollProtectedShortDatagram(

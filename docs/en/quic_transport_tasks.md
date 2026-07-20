@@ -454,6 +454,12 @@ protected close datagram from the triggering connection instead of requiring a
 separate output poll.
 The same caller-keyed long-header backend poll/drain result types now expose
 the next deadline after Initial/Handshake protected CRYPTO output.
+Caller-keyed 1-RTT short OrClose poll/drain helpers now match that same
+Application close boundary: authenticated frame errors that enter `closing`
+return or drain the selected connection's protected short close output in the
+same step, while non-closing invalid packets still fail before output. The
+direct bounded-drain helper returns `BufferTooSmall` if no output slots are
+available for that queued close and leaves it pending for a later poll.
 Installed-key Handshake OrClose helpers now follow that same boundary:
 receive-side frame errors and backend peer-parameter errors return or drain the
 protected Handshake close datagram from the triggering connection, including

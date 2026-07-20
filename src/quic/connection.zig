@@ -46334,7 +46334,7 @@ test "EndpointConnectionLifecycle caller-keyed short receive selects deadline wi
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
 }
 
-test "EndpointConnectionLifecycle caller-keyed short OrClose receive stops before poll" {
+test "EndpointConnectionLifecycle caller-keyed short OrClose receive polls close output directly" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x13, 0x23, 0x33, 0x43 };
     const server_dcid = [_]u8{ 0xa3, 0xb3, 0xc3, 0xd3 };
@@ -46368,7 +46368,7 @@ test "EndpointConnectionLifecycle caller-keyed short OrClose receive stops befor
     }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
     defer std.testing.allocator.free(invalid_short);
 
-    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedShortDatagramOrCloseAndPollDatagram(
+    const result = try lifecycle.processRoutedProtectedShortDatagramOrCloseAndPollDatagram(
         server_connection_id,
         &server,
         server_receive_path,
@@ -46377,12 +46377,17 @@ test "EndpointConnectionLifecycle caller-keyed short OrClose receive stops befor
         invalid_short,
         &client_dcid,
         secrets.server,
-    ));
+    );
+    const close_output = result.datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_output.datagram);
+
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
+    try std.testing.expectEqual(server_connection_id, close_output.connection_id);
+    try std.testing.expect(close_output.datagram.len != 0);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
-    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
 }
 
 test "EndpointConnectionLifecycle routes caller-keyed short receive and drains ACK output" {
@@ -46593,7 +46598,7 @@ test "EndpointConnectionLifecycle routes caller-keyed short receive and selects 
     try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight(.application));
 }
 
-test "EndpointConnectionLifecycle caller-keyed short OrClose receive stops before drain" {
+test "EndpointConnectionLifecycle caller-keyed short OrClose receive drains close output directly" {
     const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
     const client_dcid = [_]u8{ 0x15, 0x25, 0x35, 0x45 };
     const server_dcid = [_]u8{ 0xa5, 0xb5, 0xc5, 0xd5 };
@@ -46628,7 +46633,7 @@ test "EndpointConnectionLifecycle caller-keyed short OrClose receive stops befor
     defer std.testing.allocator.free(invalid_short);
 
     var out: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(error.InvalidPacket, lifecycle.processRoutedProtectedShortDatagramOrCloseAndDrainDatagrams(
+    const result = try lifecycle.processRoutedProtectedShortDatagramOrCloseAndDrainDatagrams(
         server_connection_id,
         &server,
         server_receive_path,
@@ -46638,12 +46643,70 @@ test "EndpointConnectionLifecycle caller-keyed short OrClose receive stops befor
         &client_dcid,
         secrets.server,
         &out,
-    ));
+    );
+    defer for (out[0..result.drain.datagrams_written]) |entry| {
+        std.testing.allocator.free(entry.datagram);
+    };
+
+    try std.testing.expectEqual(server_connection_id, result.route.connection_id);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
     try std.testing.expect(server.pending_close != null);
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
-    try std.testing.expectEqual(@as(usize, 0), server.sentPacketCount(.application));
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(server_connection_id, out[0].connection_id);
+    try std.testing.expect(out[0].datagram.len != 0);
+}
+
+test "EndpointConnectionLifecycle caller-keyed short OrClose drain rejects zero close capacity" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_dcid = [_]u8{ 0x16, 0x26, 0x36, 0x46 };
+    const server_dcid = [_]u8{ 0xa6, 0xb6, 0xc6, 0xd6 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var lifecycle = EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    var server = try Connection.init(std.testing.allocator, .server, .{});
+    defer server.deinit();
+    try server.validatePeerAddress();
+    try server.confirmHandshake();
+
+    const unknown_frame = [_]u8{ 0x1f, 0, 0, 0 };
+    const invalid_short = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &server_dcid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &unknown_frame);
+    defer std.testing.allocator.free(invalid_short);
+
+    var zero_out: [0]EndpointPolledDatagramResult = .{};
+    try std.testing.expectError(error.BufferTooSmall, lifecycle.processProtectedShortDatagramOrCloseAndDrainDatagrams(
+        26,
+        &server,
+        11,
+        secrets.client,
+        server_dcid.len,
+        invalid_short,
+        &client_dcid,
+        secrets.server,
+        &zero_out,
+    ));
+    try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
+    try std.testing.expect(server.pending_close != null);
+
+    const close_datagram = (try lifecycle.pollProtectedShortDatagram(
+        26,
+        &server,
+        12,
+        &client_dcid,
+        secrets.server,
+    )) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_datagram);
+
+    try std.testing.expect(close_datagram.len != 0);
 }
 
 test "EndpointConnectionLifecycle routed protected OrClose queues close after authenticated frame errors" {
