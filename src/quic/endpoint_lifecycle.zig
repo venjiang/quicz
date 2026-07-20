@@ -781,9 +781,9 @@ pub const EndpointConnectionLifecycle = struct {
     /// `processAcceptedProtectedInitialWithCryptoBackendAndPollDatagram()`, but
     /// peer transport-parameter errors returned by `backend` queue
     /// `CONNECTION_CLOSE` through
-    /// `driveCryptoBackendInSpaceOrCloseAndArmConnection()` and return before
-    /// polling a response datagram. The caller can then poll the pending close
-    /// through the existing protected long-packet path.
+    /// `driveCryptoBackendInSpaceOrCloseAndArmConnection()` and poll that
+    /// protected Initial close instead of polling ordinary backend CRYPTO
+    /// output.
     pub fn processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -805,17 +805,34 @@ pub const EndpointConnectionLifecycle = struct {
             datagram,
             options,
         );
-        const backend_progress = try self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+        const initial_secrets = protection.deriveInitialSecrets(
+            accepted_initial.initial_accept.version,
+            accepted_initial.initial_accept.original_destination_connection_id,
+        ) catch return error.InvalidPacket;
+        const closing_before = connection.connectionState() == .closing;
+        const backend_progress = self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
             connection_id,
             connection,
             .initial,
             backend,
             scratch,
-        );
-        const initial_secrets = protection.deriveInitialSecrets(
-            accepted_initial.initial_accept.version,
-            accepted_initial.initial_accept.original_destination_connection_id,
-        ) catch return error.InvalidPacket;
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing or closing_before) return err;
+            return .{
+                .accepted_initial = accepted_initial,
+                .backend = .{},
+                .response_datagram = try self.pollProtectedLongDatagram(
+                    connection_id,
+                    connection,
+                    now_millis,
+                    accepted_initial.initial_accept.source_connection_id,
+                    server_source_connection_id,
+                    &[_]u8{},
+                    .{ .initial = initial_secrets.server },
+                ),
+                .next_deadline = self.nextDeadline(connection_id, connection),
+            };
+        };
         return .{
             .accepted_initial = accepted_initial,
             .backend = backend_progress,
@@ -888,8 +905,9 @@ pub const EndpointConnectionLifecycle = struct {
     /// This bounded-output form preserves the success behavior of
     /// `processAcceptedProtectedInitialWithCryptoBackendAndDrainDatagrams()`,
     /// while using the close-propagating backend path. Peer
-    /// transport-parameter errors queue CONNECTION_CLOSE and return before any
-    /// output slot is initialized.
+    /// transport-parameter errors queue CONNECTION_CLOSE and drain that
+    /// protected Initial close instead of draining ordinary backend CRYPTO
+    /// output.
     pub fn processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams(
         self: *EndpointConnectionLifecycle,
         connection_id: u64,
@@ -912,17 +930,36 @@ pub const EndpointConnectionLifecycle = struct {
             datagram,
             options,
         );
-        const backend_progress = try self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
+        const initial_secrets = protection.deriveInitialSecrets(
+            accepted_initial.initial_accept.version,
+            accepted_initial.initial_accept.original_destination_connection_id,
+        ) catch return error.InvalidPacket;
+        const closing_before = connection.connectionState() == .closing;
+        const backend_progress = self.driveCryptoBackendInSpaceOrCloseAndArmConnection(
             connection_id,
             connection,
             .initial,
             backend,
             scratch,
-        );
-        const initial_secrets = protection.deriveInitialSecrets(
-            accepted_initial.initial_accept.version,
-            accepted_initial.initial_accept.original_destination_connection_id,
-        ) catch return error.InvalidPacket;
+        ) catch |err| {
+            if (err != error.InvalidPacket or connection.connectionState() != .closing or closing_before) return err;
+            if (out.len == 0) return error.BufferTooSmall;
+            return .{
+                .accepted_initial = accepted_initial,
+                .backend = .{},
+                .drain = self.drainProtectedLongDatagrams(
+                    connection_id,
+                    connection,
+                    now_millis,
+                    accepted_initial.initial_accept.source_connection_id,
+                    server_source_connection_id,
+                    &[_]u8{},
+                    .{ .initial = initial_secrets.server },
+                    out,
+                ),
+                .next_deadline = self.nextDeadline(connection_id, connection),
+            };
+        };
         return .{
             .accepted_initial = accepted_initial,
             .backend = backend_progress,

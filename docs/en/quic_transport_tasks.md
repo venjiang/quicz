@@ -485,6 +485,10 @@ same close-queue boundary: after a backend peer transport-parameter error
 queues an Initial CONNECTION_CLOSE, it returns the current selected deadline
 without pulling backend or protected output. The accepted routes remain
 installed, and non-closing invalid inputs still fail.
+Accepted Initial backend OrClose poll and bounded-drain helpers now align with
+the output forms of that boundary: the same backend error returns or drains the
+protected Initial CONNECTION_CLOSE in the triggering step, while ordinary
+backend CRYPTO output is not pulled.
 When an authenticated Application frame error queues that close but the direct
 bounded-drain caller provides no output slots, the helper now returns
 `BufferTooSmall` and leaves the close pending for a later poll instead of

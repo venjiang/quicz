@@ -42420,7 +42420,7 @@ test "EndpointConnectionLifecycle accepts Initial and drains backend response da
     try std.testing.expectEqualStrings(server_flight, client_crypto_buf[0..client_recv_len]);
 }
 
-test "EndpointConnectionLifecycle accepted Initial backend OrClose queues Initial close" {
+test "EndpointConnectionLifecycle accepted Initial backend OrClose polls Initial close" {
     const BadBackend = struct {
         received: [128]u8 = undefined,
         received_len: usize = 0,
@@ -42513,53 +42513,31 @@ test "EndpointConnectionLifecycle accepted Initial backend OrClose queues Initia
     defer server.deinit();
     var backend = BadBackend{};
     var scratch: [256]u8 = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram(
-            206,
-            &server,
-            11,
-            accept,
-            &server_scid,
-            initial,
-            .{
-                .active_migration_disabled = true,
-                .stateless_reset_token = reset_token,
-            },
-            backend.backend(),
-            &scratch,
-        ),
+    const result = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram(
+        206,
+        &server,
+        11,
+        accept,
+        &server_scid,
+        initial,
+        .{
+            .active_migration_disabled = true,
+            .stateless_reset_token = reset_token,
+        },
+        backend.backend(),
+        &scratch,
     );
+    const close_packet = result.response_datagram orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(close_packet);
 
     try std.testing.expectEqualStrings("client hello with bad params", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
-    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), result.backend.inbound_chunks);
     try std.testing.expectEqual(@as(usize, 2), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
-    switch (server.pending_close orelse return error.TestUnexpectedResult) {
-        .connection => |close| {
-            try std.testing.expectEqual(transport_error.codeValue(.transport_parameter_error), close.error_code);
-            try std.testing.expectEqual(@as(u64, @intFromEnum(frame.FrameType.crypto)), close.frame_type);
-            try std.testing.expectEqualStrings("transport parameters", close.reason_phrase);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-
-    const close_packet = (try lifecycle.pollProtectedLongDatagram(
-        206,
-        &server,
-        12,
-        &client_scid,
-        &server_scid,
-        &[_]u8{},
-        .{ .initial = secrets.server },
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(close_packet);
-    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
-    const close_deadline = lifecycle.nextDeadline(206, &server) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(EndpointConnectionDeadlineKind.close_timeout, close_deadline.kind);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.close_timeout, (result.next_deadline orelse return error.TestUnexpectedResult).kind);
 
     const response_route = try client_lifecycle.processRoutedProtectedInitialDatagram(
         122,
@@ -42694,7 +42672,7 @@ test "EndpointConnectionLifecycle accepted Initial backend OrClose deadline stop
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 }
 
-test "EndpointConnectionLifecycle accepted Initial backend OrClose drain stops before output" {
+test "EndpointConnectionLifecycle accepted Initial backend OrClose drains Initial close" {
     const BadBackend = struct {
         received: [128]u8 = undefined,
         received_len: usize = 0,
@@ -42781,46 +42759,34 @@ test "EndpointConnectionLifecycle accepted Initial backend OrClose drain stops b
     var backend = BadBackend{};
     var scratch: [256]u8 = undefined;
     var drained: [1]EndpointPolledDatagramResult = undefined;
-    try std.testing.expectError(
-        error.InvalidPacket,
-        lifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams(
-            208,
-            &server,
-            11,
-            accept,
-            &server_scid,
-            initial,
-            .{
-                .active_migration_disabled = true,
-                .stateless_reset_token = reset_token,
-            },
-            backend.backend(),
-            &scratch,
-            &drained,
-        ),
+    const result = try lifecycle.processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams(
+        208,
+        &server,
+        11,
+        accept,
+        &server_scid,
+        initial,
+        .{
+            .active_migration_disabled = true,
+            .stateless_reset_token = reset_token,
+        },
+        backend.backend(),
+        &scratch,
+        &drained,
     );
+    defer std.testing.allocator.free(drained[0].datagram);
 
     try std.testing.expectEqualStrings("client hello bad params drain", backend.received[0..backend.received_len]);
     try std.testing.expect(backend.peer_sent);
     try std.testing.expect(!backend.output_pulled);
     try std.testing.expectEqual(ConnectionState.closing, server.connectionState());
-    try std.testing.expect(server.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), result.backend.inbound_chunks);
+    try std.testing.expectEqual(@as(usize, 1), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Error, null), result.drain.first_error);
+    try std.testing.expectEqual(@as(u64, 208), drained[0].connection_id);
     try std.testing.expectEqual(@as(usize, 2), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
-
-    const close_packet = (try lifecycle.pollProtectedLongDatagram(
-        208,
-        &server,
-        12,
-        &client_scid,
-        &server_scid,
-        &[_]u8{},
-        .{ .initial = secrets.server },
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(close_packet);
-    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
-    const close_deadline = lifecycle.nextDeadline(208, &server) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(EndpointConnectionDeadlineKind.close_timeout, close_deadline.kind);
+    try std.testing.expectEqual(EndpointConnectionDeadlineKind.close_timeout, (result.next_deadline orelse return error.TestUnexpectedResult).kind);
 }
 
 test "EndpointConnectionLifecycle rejects accepted Initial without installing routes" {
