@@ -699,6 +699,10 @@ record 不会遮挡后续 live deadline，不会用 `ConnectionClosed` 中断 ac
 registry-owned due-deadline bounded drain 现在也会在构建 poll view 前执行同样
 cleanup，因此无输入 timer service 不会被一个 route 或 recovery timer 已应退役的
 closed record 阻塞。
+direct registry view builder 现在也会在 deadline、receive 和 recovery-poll view
+中排除 closed record；server route-bound output polling 也会在构建这些 view 前退役
+closed record，使直接 registry 调用方和 socket-facing server output poll 保持同一
+active-record 边界。
 server endpoint 的 Retry record adoption 和 accepted-Initial admission 现在也会先
 回收 already-closed record，再检查有界 active-record capacity，因此终态 record
 不会在其 route/timer 已可安全退役后继续造成 capacity drop。
@@ -1430,6 +1434,12 @@ close 和 route cleanup 事件。
   bounded drain。`EndpointConnectionRegistry.processDueDeadlineAndDrainDatagrams()`
   现在会在构建 lifecycle poll view 前移除 already-closed record，因此终态 record
   的 route state 与 recovery timer 会先退役，再 service 下一个 live due timer。
+
+- 2026-07-20：保持 endpoint registry view builder 只暴露 active records。
+  `deadlineViews()`、`receiveViews()`、`pollViews()` 及对应 caller-owned fill
+  变体现在会排除已经进入 `closed` 的 record；server route-bound output polling
+  也会在构建 poll view 前退役 closed record，因此直接 view 调用方和 socket-facing
+  route output 使用相同 active-record 边界。
 
 - 2026-07-20：加固 endpoint registry 跨终态 record 的 output polling。
   cross-record polling 现在会跳过没有 pending close output 的 closing/draining

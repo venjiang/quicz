@@ -878,6 +878,10 @@ classification.
 Registry-owned due-deadline bounded drains now apply that same cleanup before
 building poll views, so no-input timer service cannot be blocked by a closed
 record whose route or recovery timer should already be retired.
+Direct registry view builders now also omit closed records from deadline,
+receive, and recovery-poll views, and server route-bound output polling retires
+closed records before building those views, preserving the same active-record
+boundary for direct registry callers and socket-facing server output polls.
 Server endpoint Retry and accepted-Initial admission also reclaim already
 closed records before enforcing bounded active-record capacity, so a terminal
 record cannot cause capacity drops after its route/timer state is safe to
@@ -1646,6 +1650,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   now removes already-closed records before building lifecycle poll views, so
   route state and recovery timers for terminal records are retired before the
   next live due timer is serviced.
+
+- 2026-07-20: Kept endpoint registry view builders active-only.
+  `deadlineViews()`, `receiveViews()`, `pollViews()`, and their caller-owned
+  fill variants now omit records that have already reached `closed`; server
+  route-bound output polling also retires closed records before building poll
+  views, so direct view callers and socket-facing route output use the same
+  active-record boundary.
 
 - 2026-07-20: Hardened endpoint registry output polling across terminal
   records. Cross-record polling now skips closing/draining records that return

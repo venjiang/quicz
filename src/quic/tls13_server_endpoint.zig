@@ -1084,6 +1084,7 @@ pub fn Tls13ServerEndpoint(
             now_millis: i64,
             space: root.EndpointInstalledKeyDatagramSpace,
         ) (root.Error || endpoint.RouteError)!?DatagramPathResult {
+            _ = try self.records.removeClosedRecords(&self.lifecycle);
             if (self.records.poll_view_scratch) |views| {
                 return self.pollDatagramAcrossRecordViewsWithRoutePath(
                     try self.records.fillPollViews(views, destination_connection_id_of, source_connection_id_of),
@@ -5314,6 +5315,7 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expectEqual(@as(usize, 1), terminal_close.drain.datagrams_written);
     defer std.testing.allocator.free(terminal_close_out[0].datagram);
     const close_deadline = (try endpoint_owner.closeDeadlineMillis(second_record.handle)) orelse return error.TestUnexpectedResult;
+    const terminal_record_handle = second_record.handle;
     try std.testing.expectError(error.ConnectionClosed, second_record.connection.checkCloseTimeouts(close_deadline));
     try std.testing.expectEqual(connection_module.ConnectionState.closed, second_record.connection.connectionState());
     var terminal_poll_views: [2]root.EndpointConnectionPollView = undefined;
@@ -5323,7 +5325,7 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
         TestRecord.sourceConnectionId,
     );
     for (terminal_views, 0..) |view, index| {
-        if (view.connection_id == second_record.handle) {
+        if (view.connection_id == terminal_record_handle) {
             endpoint_owner.records.next_poll_index = index;
             break;
         }
@@ -5337,7 +5339,7 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expectEqual(first_record.handle, terminal_skipped.connection_id);
     try std.testing.expect(terminal_skipped.path.eql(first_path));
     try std.testing.expect(terminal_skipped.datagram.len != 0);
-    try std.testing.expect(endpoint_owner.records.get(second_record.handle) == null);
+    try std.testing.expect(endpoint_owner.records.get(terminal_record_handle) == null);
     try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
 }
 
