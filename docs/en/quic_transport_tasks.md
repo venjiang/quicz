@@ -3356,7 +3356,18 @@ QUIC unless the gap is named and the verification evidence is added here.
   matching OrClose forms. The new helpers reuse the cross-space compatible
   backend-drive primitive and the existing installed-key output poll/drain
   path. Unit coverage proves explicit 0-RTT output after compatible cross-space
-  backend progress and confirms OrClose errors return before output is pulled.
+  backend progress and confirms OrClose errors return same-connection close
+  output when a matching output view exists, while missing views still fail
+  before unrelated output is pulled.
+- 2026-07-20: Aligned compatible-version OrClose output helpers with the
+  existing backend OrClose close boundary. In-space and cross-space poll/drain
+  helpers now catch peer Version Information `InvalidPacket` only when the
+  driven connection entered `closing`, then return or drain that connection's
+  protected close output through the caller's matching installed-key output
+  view. Non-closing invalid packets, missing output views, and unrelated output
+  views still return the original error before ordinary backend output is
+  pulled. Regression coverage now exercises pending-work, feed, and
+  due-deadline compatible OrClose poll/drain paths.
 - 2026-07-03: Added cross-space RFC 9368-compatible lifecycle no-output
   wrappers for pending-work and due-deadline deadline selection:
   `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendAcrossSpacesWithCompatibleVersionAndSelectNextDeadline()`,
@@ -3516,9 +3527,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   lifecycle path with one connection/backend pair and proves one-slot bounded
   drain plus later peer delivery; the single compatible-version form also
   proves peer Version Information application before bounded drain, while its
-  OrClose form queues CONNECTION_CLOSE and stops before output draining when no
-  compatible version is selected. Dropped datagrams do not drive any backend,
-  and close-propagating peer-parameter errors stop before output draining. The
+  OrClose form now drains the same connection's protected close output when no
+  compatible version is selected and the caller supplied a matching output
+  view. Dropped datagrams do not drive any backend, and close-propagating
+  peer-parameter errors stop before unrelated output draining. The
   bounded-drain result now also returns the post-drain deadline after
   backend-driven protected output.
 - 2026-06-11: Added cross-connection pending-work-to-output and
@@ -3556,11 +3568,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   the caller provided a matching output view; missing matching views still
   return the error before unrelated output is consumed. The
   single-connection compatible-version form proves peer Version Information is
-  applied before bounded drain, while its OrClose form queues CONNECTION_CLOSE
-  and stops before output draining when no compatible version is selected.
-  The single-connection output-polling forms prove one-datagram polling,
+  applied before bounded drain, while its OrClose form now drains or polls the
+  same connection's protected close output when no compatible version is
+  selected and the caller supplied a matching output view. The
+  single-connection output-polling forms prove one-datagram polling,
   close-before-poll suppression, compatible peer Version Information handling,
-  and compatible-version close-before-poll suppression.
+  compatible-version close output emission, and missing-view suppression.
 - 2026-06-10: Added due-deadline-to-backend-to-output and
   due-deadline-to-backend-to-bounded-drain loop steps:
   `EndpointConnectionLifecycle.processDueDeadlineAndDriveCryptoBackendInSpaceAndPollDatagram()`,
@@ -3585,16 +3598,17 @@ QUIC unless the gap is named and the verification evidence is added here.
   same-connection close output when a matching output view exists. The single
   compatible-version form proves peer Version Information
   is applied before bounded drain after an Initial recovery wakeup with no
-  installed-key datagram, while its OrClose form queues CONNECTION_CLOSE and
-  stops before output draining when no compatible version is selected. Unit
-  coverage proves recovery-datagram ownership, non-output deadline backend
+  installed-key datagram, while its OrClose form now drains or polls the same
+  connection's protected close output when no compatible version is selected
+  and the caller supplied a matching output view. Unit coverage proves
+  recovery-datagram ownership, non-output deadline backend
   drive, close-propagating drain suppression, and an Initial recovery wakeup
   that continues into Handshake backend output, emits only the first protected
   datagram under a one-slot budget, and delivers the remaining backend CRYPTO
   through a later drain. The single-connection output-polling forms prove the
   same non-output deadline backend progression with one-datagram polling,
   close-before-poll suppression, compatible peer Version Information handling,
-  and compatible-version close-before-poll suppression. Cross-connection
+  and compatible-version close output emission. Cross-connection
   output-polling and bounded-drain forms now also stop before backend progress
   after terminal idle/close cleanup, including close-propagating and
   compatible-version variants.

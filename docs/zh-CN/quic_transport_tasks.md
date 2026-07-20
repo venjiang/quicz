@@ -3021,9 +3021,9 @@ close 和 route cleanup 事件。
   response datagram；单连接形态复用同一 lifecycle path，只接收一个 connection/backend
   pair，并证明一格 bounded drain 和后续 peer delivery；单连接 compatible-version
   形态还证明 peer Version Information 会先应用再执行 bounded drain，其 OrClose 形态在
-  未选出 compatible version 时会排队 CONNECTION_CLOSE 并在 output draining 前停止。
-  dropped datagram 不会驱动 backend，close-propagating peer-parameter 错误会在
-  output draining 前停止。bounded-drain result 现在也会在 backend-driven protected
+  未选出 compatible version 且调用方提供匹配 output view 时，会 drain 同连接 protected
+  close output。dropped datagram 不会驱动 backend，close-propagating peer-parameter
+  错误会在消费无关 output 前停止。bounded-drain result 现在也会在 backend-driven protected
   output 后返回 drain 后 deadline。
 - 2026-06-11：新增 cross-connection pending-work-to-output 和
   pending-work-to-bounded-drain loop step：
@@ -3055,11 +3055,11 @@ close 和 route cleanup 事件。
   caller-owned output queue 的 bounded drain。单元测试证明 no-new-datagram loop tick
   可以驱动 backend 并 drain 多个已排队 installed-key datagram；单连接
   compatible-version 形态证明 peer Version Information 会先应用再执行 bounded drain，
-  其 OrClose 形态在未选出 compatible version 时会排队 CONNECTION_CLOSE 并在 output
-  draining 前停止；close-propagating backend error 现在会在调用方提供同连接 output view
-  时返回该连接的 close output，缺少匹配 view 时仍先返回错误且不消费无关连接输出。单连接 output-polling 形态证明
+  其 OrClose 形态在未选出 compatible version 且调用方提供匹配 output view 时，会
+  drain 或 poll 同连接 protected close output；close-propagating backend error
+  缺少匹配 view 时仍先返回错误且不消费无关连接输出。单连接 output-polling 形态证明
   one-datagram polling、close-before-poll suppression、compatible peer Version
-  Information 处理，以及 compatible-version close-before-poll suppression。
+  Information 处理，以及 compatible-version close output emission。
 - 2026-07-02：新增 cross-space RFC 9368-compatible backend-drive primitive：
   `Connection.driveCryptoBackendAcrossSpacesWithCompatibleVersion()`、
   `Connection.driveCryptoBackendAcrossSpacesWithCompatibleVersionOrClose()`、
@@ -3075,7 +3075,15 @@ close 和 route cleanup 事件。
   poll、显式 poll、bounded drain、显式 bounded drain 和对应 OrClose 形态。这些 helper
   复用 cross-space compatible backend-drive primitive 与现有 installed-key output poll/drain
   路径。单元测试证明 compatible cross-space backend progress 后可以发出显式 0-RTT output，
-  并确认 OrClose 错误会在拉取 output 前返回。
+  并确认 OrClose 错误在有匹配 output view 时会返回同连接 close output；缺少匹配
+  view 时仍会在拉取无关 output 前失败。
+- 2026-07-20：对齐 compatible-version OrClose output helper 与既有 backend OrClose
+  close 边界。in-space 和 cross-space poll/drain helper 现在只会在 peer Version
+  Information `InvalidPacket` 已让被驱动连接进入 `closing` 时捕获错误，然后通过调用方
+  匹配的 installed-key output view 返回或 drain 该连接的 protected close output。非
+  closing invalid packet、缺少 output view、无关 output view 仍返回原错误，且不会拉取普通
+  backend output。回归测试覆盖 pending-work、feed 和 due-deadline compatible OrClose
+  poll/drain 路径。
 - 2026-07-03：新增 cross-space RFC 9368-compatible lifecycle no-output wrapper，
   覆盖 pending-work 和 due-deadline deadline selection：
   `EndpointConnectionLifecycle.processPendingWorkAndDriveCryptoBackendAcrossSpacesWithCompatibleVersionAndSelectNextDeadline()`、
@@ -3112,14 +3120,15 @@ close 和 route cleanup 事件。
   peer-parameter 错误时排队 CONNECTION_CLOSE，并在存在同连接 output view 时返回 close output；单连接
   compatible-version 形态证明无 installed-key datagram 的 Initial recovery wakeup 后会
   先应用 peer Version Information 再执行 bounded drain，其 OrClose 形态在未选出
-  compatible version 时会排队 CONNECTION_CLOSE 并在 output draining 前停止。单元测试覆盖
+  compatible version 且调用方提供匹配 output view 时，会 drain 或 poll 同连接 protected
+  close output。单元测试覆盖
   recovery datagram 所有权、无输出 deadline 后的 backend drive、close-propagating
   drain suppression，以及 Initial recovery wakeup 不产出 installed-key datagram
   时继续进入 Handshake backend output；一格预算只发出第一段 protected datagram，
   剩余 backend CRYPTO 可由后续 drain 交付给 peer。单连接 output-polling 形态证明同样的
   no-output deadline backend progression：one-datagram polling、close-before-poll
   suppression、compatible peer Version Information 处理，以及 compatible-version
-  close-before-poll suppression。跨连接 output-polling 和 bounded-drain 形态现在也会在
+  close output emission。跨连接 output-polling 和 bounded-drain 形态现在也会在
   terminal idle/close cleanup 后停止，不再驱动 backend；close-propagating 和
   compatible-version 变体同样覆盖该边界。
 - 2026-06-05：扩展 `examples/tls_openssl_backend_adapter.zig`，让 server
