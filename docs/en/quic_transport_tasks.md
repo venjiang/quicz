@@ -875,6 +875,9 @@ receive view construction now apply the same pre-closed record cleanup, so a
 stale closed record cannot hide later live deadlines, abort active-record output
 with `ConnectionClosed`, or keep a stale route in front of receive
 classification.
+Registry-owned due-deadline bounded drains now apply that same cleanup before
+building poll views, so no-input timer service cannot be blocked by a closed
+record whose route or recovery timer should already be retired.
 Server endpoint Retry and accepted-Initial admission also reclaim already
 closed records before enforcing bounded active-record capacity, so a terminal
 record cannot cause capacity drops after its route/timer state is safe to
@@ -1637,6 +1640,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   `activeConnectionIds()` remain const-callable while reporting only non-closed
   records, so capacity policy can inspect endpoint state without requiring a
   mutable handle.
+
+- 2026-07-20: Extended endpoint registry pre-closed cleanup to due-deadline
+  bounded drains. `EndpointConnectionRegistry.processDueDeadlineAndDrainDatagrams()`
+  now removes already-closed records before building lifecycle poll views, so
+  route state and recovery timers for terminal records are retired before the
+  next live due timer is serviced.
 
 - 2026-07-20: Hardened endpoint registry output polling across terminal
   records. Cross-record polling now skips closing/draining records that return

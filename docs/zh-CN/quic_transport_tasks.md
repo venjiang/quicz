@@ -696,6 +696,9 @@ endpoint-owned deadline selection、跨 record output polling 和 installed-key 
 view construction 现在也会执行同样的 pre-closed record cleanup，因此 stale closed
 record 不会遮挡后续 live deadline，不会用 `ConnectionClosed` 中断 active record
 输出，也不会让 stale route 阻挡 receive classification。
+registry-owned due-deadline bounded drain 现在也会在构建 poll view 前执行同样
+cleanup，因此无输入 timer service 不会被一个 route 或 recovery timer 已应退役的
+closed record 阻塞。
 server endpoint 的 Retry record adoption 和 accepted-Initial admission 现在也会先
 回收 already-closed record，再检查有界 active-record capacity，因此终态 record
 不会在其 route/timer 已可安全退役后继续造成 capacity drop。
@@ -1422,6 +1425,11 @@ close 和 route cleanup 事件。
   `activeConnectionCount()`、`hasConnectionCapacity()` 和
   `activeConnectionIds()` 在只统计非 closed record 的同时仍可通过 const endpoint
   view 调用，因此 capacity policy 不需要 mutable handle 也能检查 endpoint 状态。
+
+- 2026-07-20：把 endpoint registry pre-closed cleanup 扩展到 due-deadline
+  bounded drain。`EndpointConnectionRegistry.processDueDeadlineAndDrainDatagrams()`
+  现在会在构建 lifecycle poll view 前移除 already-closed record，因此终态 record
+  的 route state 与 recovery timer 会先退役，再 service 下一个 live due timer。
 
 - 2026-07-20：加固 endpoint registry 跨终态 record 的 output polling。
   cross-record polling 现在会跳过没有 pending close output 的 closing/draining

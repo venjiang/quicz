@@ -442,6 +442,7 @@ pub fn EndpointConnectionRegistry(
             comptime destination_connection_id: *const fn (*const Record) []const u8,
             comptime source_connection_id: *const fn (*const Record) []const u8,
         ) root.Error!?root.EndpointDueWorkDatagramDrainResult {
+            _ = try self.removeClosedRecords(lifecycle);
             var result: ?root.EndpointDueWorkDatagramDrainResult = null;
             if (self.poll_view_scratch) |views| {
                 result = try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
@@ -1516,6 +1517,116 @@ test "EndpointConnectionRegistry next deadline retires closed records before sel
     try std.testing.expectEqual(@as(usize, 1), registry.count());
     try std.testing.expect(registry.get(closed_record.handle) == null);
     try std.testing.expect(registry.get(live_record.handle) != null);
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
+}
+
+test "EndpointConnectionRegistry due drain retires closed records before servicing live work" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: root.Connection,
+
+        fn connectionRef(self: *@This()) *root.Connection {
+            return &self.connection;
+        }
+
+        fn destinationConnectionId(_: *const @This()) []const u8 {
+            return "peer-due";
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return if (self.handle == 91) "closed-due" else "live-due";
+        }
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const Registry = EndpointConnectionRegistry(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.deinit,
+    );
+
+    var registry = try Registry.initWithCapacity(std.testing.allocator, 2);
+    defer registry.deinit();
+    var lifecycle = root.EndpointConnectionLifecycle.init(std.testing.allocator);
+    defer lifecycle.deinit();
+
+    const closed_record = try std.testing.allocator.create(TestRecord);
+    var closed_initialized = false;
+    var closed_owned = true;
+    errdefer {
+        if (closed_owned) {
+            if (closed_initialized) closed_record.deinit();
+            std.testing.allocator.destroy(closed_record);
+        }
+    }
+    closed_record.* = .{
+        .handle = 91,
+        .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
+    };
+    const closed_handle = closed_record.handle;
+    closed_initialized = true;
+    try closed_record.connection.validatePeerAddress();
+    try closed_record.connection.confirmHandshake();
+    try closed_record.connection.recordPeerAddressBytesReceived(1);
+    const closed_path = root.endpoint.Udp4Tuple{
+        .local = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
+    };
+    try lifecycle.registerConnectionId(closed_handle, TestRecord.sourceConnectionId(closed_record), closed_path, .{ .sequence_number = 0 });
+    var closed_lifecycle_registered = true;
+    errdefer if (closed_lifecycle_registered) {
+        _ = lifecycle.retireConnection(closed_handle);
+    };
+    _ = try closed_record.connection.recordPacketSentInSpace(.application, 10, 100);
+    try lifecycle.armRecoveryTimerFromConnection(closed_handle, &closed_record.connection);
+    try registry.adopt(closed_handle, closed_record);
+    closed_owned = false;
+
+    const live_record = try std.testing.allocator.create(TestRecord);
+    var live_initialized = false;
+    var live_owned = true;
+    errdefer {
+        if (live_owned) {
+            if (live_initialized) live_record.deinit();
+            std.testing.allocator.destroy(live_record);
+        }
+    }
+    live_record.* = .{
+        .handle = 92,
+        .connection = try root.Connection.init(std.testing.allocator, .server, .{ .max_idle_timeout_ms = 30 }),
+    };
+    const live_handle = live_record.handle;
+    live_initialized = true;
+    live_record.connection.last_packet_activity_millis = 5;
+    try registry.adopt(live_handle, live_record);
+    live_owned = false;
+
+    closed_record.connection.state = .closed;
+    closed_record.connection.closed = true;
+
+    var no_allocation_storage: [0]u8 = .{};
+    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    var out: [1]root.EndpointPolledDatagramResult = undefined;
+    const due = (try registry.processDueDeadlineAndDrainDatagrams(
+        &lifecycle,
+        no_allocation_allocator.allocator(),
+        35,
+        &out,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    )) orelse return error.TestUnexpectedResult;
+    closed_lifecycle_registered = false;
+    try std.testing.expectEqual(@as(u64, live_handle), due.deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.idle_timeout, due.deadline.kind);
+    try std.testing.expect(due.pending_work.idle_retired != null);
+    try std.testing.expectEqual(@as(usize, 0), due.drain.datagrams_written);
+    try std.testing.expect(registry.get(closed_handle) == null);
+    try std.testing.expect(registry.get(live_handle) == null);
+    try std.testing.expectEqual(@as(usize, 0), registry.count());
+    try std.testing.expect(registry.hasCapacity());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 }
