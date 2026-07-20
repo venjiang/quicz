@@ -1447,6 +1447,11 @@ close 和 route cleanup 事件。
   pending-work sweep、route-bound output poll/drain 和 server receive-step pending drain；
   dynamic registry 在 scratch-only 路径上会返回 `BufferTooSmall`。
 
+- 2026-07-20：新增 server due-deadline scratch-backed drain。fixed-capacity
+  `Tls13ServerEndpoint` 现在可以通过 scratch-backed API service route-facing
+  和 route-less due deadline，同时保留 zero-capacity、missing-route、终态 cleanup
+  和 step 后 next-deadline 行为。
+
 - 2026-07-20：把 endpoint registry pre-closed cleanup 扩展到 due-deadline
   bounded drain。`EndpointConnectionRegistry.processDueDeadlineAndDrainDatagrams()`
   现在会在构建 lifecycle poll view 前移除 already-closed record，因此终态 record

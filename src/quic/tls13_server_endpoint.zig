@@ -647,6 +647,69 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Service the earliest due deadline using registry scratch storage.
+        pub fn processDueDeadlineAndDrainDatagramsWithScratch(
+            self: *Self,
+            now_millis: i64,
+            out: []root.EndpointPolledDatagramResult,
+        ) root.Error!?root.EndpointDueWorkDatagramDrainResult {
+            const deadline = (try self.nextDeadlineWithScratch()) orelse return null;
+            if (deadline.deadline_millis > now_millis) return null;
+            const record = self.records.get(deadline.connection_id) orelse return error.Internal;
+            const connection = connection_of(record);
+            const source_connection_id = source_connection_id_of(record);
+
+            const pending_drain = if (deadline.installedKeyPollOptions(
+                destination_connection_id_of(record),
+                source_connection_id,
+            )) |options|
+                try self.lifecycle.processPendingWorkAndDrainDatagrams(
+                    deadline.connection_id,
+                    connection,
+                    now_millis,
+                    options,
+                    out,
+                )
+            else if (deadline.kind == .recovery and deadline.recovery != null and deadline.recovery.?.space == .initial) pending: {
+                if (out.len == 0) return error.BufferTooSmall;
+                const pending = try self.lifecycle.processPendingWork(
+                    deadline.connection_id,
+                    connection,
+                    now_millis,
+                );
+                const serviced = pending.recovery_serviced orelse break :pending root.EndpointPendingWorkDatagramDrainResult{
+                    .pending_work = pending,
+                    .drain = .{},
+                };
+                if (serviced.timer.space != .initial) return error.InvalidPacket;
+                break :pending root.EndpointPendingWorkDatagramDrainResult{
+                    .pending_work = pending,
+                    .drain = self.drainInitialDatagrams(
+                        deadline.connection_id,
+                        record,
+                        connection,
+                        now_millis,
+                        out,
+                    ),
+                };
+            } else root.EndpointPendingWorkDatagramDrainResult{
+                .pending_work = try self.lifecycle.processPendingWork(
+                    deadline.connection_id,
+                    connection,
+                    now_millis,
+                ),
+                .drain = .{},
+            };
+
+            try self.retireRecordAfterTerminalPendingWork(deadline.connection_id, pending_drain.pending_work);
+            return .{
+                .deadline = deadline,
+                .pending_work = pending_drain.pending_work,
+                .drain = pending_drain.drain,
+                .next_deadline = try self.nextDeadlineWithScratch(),
+            };
+        }
+
         /// Service the earliest due deadline and pair output with route paths.
         ///
         /// This socket-facing form keeps recovery service and packet generation
@@ -731,6 +794,87 @@ pub fn Tls13ServerEndpoint(
                 .pending_work = pending_work,
                 .drain = .{},
                 .next_deadline = try self.nextDeadline(allocator),
+            };
+        }
+
+        /// Service the earliest due deadline with route paths using registry scratch storage.
+        pub fn processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
+            self: *Self,
+            now_millis: i64,
+            out: []DatagramPathResult,
+        ) (root.Error || endpoint.RouteError)!?DueWorkDatagramPathDrainResult {
+            const deadline = (try self.nextDeadlineWithScratch()) orelse return null;
+            if (deadline.deadline_millis > now_millis) return null;
+            const record = self.records.get(deadline.connection_id) orelse return error.Internal;
+            const connection = connection_of(record);
+            const source_connection_id = source_connection_id_of(record);
+            const drains_recovery_datagram = deadline.kind == .recovery and deadline.recovery != null and (deadline.installedKeyPollOptions(
+                destination_connection_id_of(record),
+                source_connection_id,
+            ) != null or deadline.recovery.?.space == .initial);
+            if (drains_recovery_datagram and out.len == 0) return error.BufferTooSmall;
+            const route_path = if (drains_recovery_datagram)
+                try self.lifecycle.currentRoutePath(source_connection_id)
+            else
+                null;
+
+            const pending_work = if (deadline.installedKeyPollOptions(
+                destination_connection_id_of(record),
+                source_connection_id,
+            )) |options| pending: {
+                const pending = try self.lifecycle.processPendingWork(
+                    deadline.connection_id,
+                    connection,
+                    now_millis,
+                );
+                const serviced = pending.recovery_serviced orelse break :pending pending;
+                if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
+                return .{
+                    .deadline = deadline,
+                    .pending_work = pending,
+                    .drain = self.drainDatagramsWithRoutePath(
+                        deadline.connection_id,
+                        connection,
+                        now_millis,
+                        options,
+                        route_path.?,
+                        out,
+                    ),
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                };
+            } else if (deadline.kind == .recovery and deadline.recovery != null and deadline.recovery.?.space == .initial) pending: {
+                const pending = try self.lifecycle.processPendingWork(
+                    deadline.connection_id,
+                    connection,
+                    now_millis,
+                );
+                const serviced = pending.recovery_serviced orelse break :pending pending;
+                if (serviced.timer.space != .initial) return error.InvalidPacket;
+                return .{
+                    .deadline = deadline,
+                    .pending_work = pending,
+                    .drain = self.drainInitialDatagramsWithRoutePath(
+                        deadline.connection_id,
+                        record,
+                        connection,
+                        now_millis,
+                        route_path.?,
+                        out,
+                    ),
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                };
+            } else try self.lifecycle.processPendingWork(
+                deadline.connection_id,
+                connection,
+                now_millis,
+            );
+            try self.retireRecordAfterTerminalPendingWork(deadline.connection_id, pending_work);
+
+            return .{
+                .deadline = deadline,
+                .pending_work = pending_work,
+                .drain = .{},
+                .next_deadline = try self.nextDeadlineWithScratch(),
             };
         }
 
@@ -5336,34 +5480,29 @@ test "Tls13ServerEndpoint pairs due recovery output with committed route path" {
         &record.connection,
     );
 
-    var no_allocation_storage: [0]u8 = .{};
-    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
     var zero_due_out: [0]TestEndpoint.DatagramPathResult = .{};
-    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
-        no_allocation_allocator.allocator(),
+    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
         deadline.deadline_millis,
         &zero_due_out,
     ));
-    const zero_preserved_deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
+    const zero_preserved_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, zero_preserved_deadline.kind);
     try std.testing.expectEqual(record.handle, zero_preserved_deadline.connection_id);
     try std.testing.expectEqual(root.PacketNumberSpace.application, zero_preserved_deadline.recovery.?.space);
 
     var due_out: [1]TestEndpoint.DatagramPathResult = undefined;
     try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(server_dcid, new_path));
-    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
-        no_allocation_allocator.allocator(),
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
         deadline.deadline_millis,
         &due_out,
     ));
-    const preserved_deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
+    const preserved_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, preserved_deadline.kind);
     try std.testing.expectEqual(record.handle, preserved_deadline.connection_id);
     try std.testing.expectEqual(root.PacketNumberSpace.application, preserved_deadline.recovery.?.space);
     try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, new_path, .{});
 
-    const due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
-        no_allocation_allocator.allocator(),
+    const due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
         deadline.deadline_millis,
         &due_out,
     )) orelse return error.TestUnexpectedResult;
@@ -6145,34 +6284,29 @@ test "Tls13ServerEndpoint pairs Initial due recovery output with committed route
         &record.connection,
     );
 
-    var no_allocation_storage: [0]u8 = .{};
-    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
     var zero_due_out: [0]TestEndpoint.DatagramPathResult = .{};
-    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
-        no_allocation_allocator.allocator(),
+    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
         deadline.deadline_millis,
         &zero_due_out,
     ));
-    const zero_preserved_deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
+    const zero_preserved_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, zero_preserved_deadline.kind);
     try std.testing.expectEqual(record.handle, zero_preserved_deadline.connection_id);
     try std.testing.expectEqual(root.PacketNumberSpace.initial, zero_preserved_deadline.recovery.?.space);
 
     var due_out: [1]TestEndpoint.DatagramPathResult = undefined;
     try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(server_dcid, new_path));
-    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
-        no_allocation_allocator.allocator(),
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
         deadline.deadline_millis,
         &due_out,
     ));
-    const preserved_deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
+    const preserved_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, preserved_deadline.kind);
     try std.testing.expectEqual(record.handle, preserved_deadline.connection_id);
     try std.testing.expectEqual(root.PacketNumberSpace.initial, preserved_deadline.recovery.?.space);
     try endpoint_owner.lifecycle.registerConnectionId(record.handle, server_dcid, new_path, .{});
 
-    const due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
-        no_allocation_allocator.allocator(),
+    const due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
         deadline.deadline_millis,
         &due_out,
     )) orelse return error.TestUnexpectedResult;
@@ -6304,22 +6438,18 @@ test "Tls13ServerEndpoint drains Initial due recovery output without route metad
     const timer = deadline.recovery orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(root.PacketNumberSpace.initial, timer.space);
 
-    var no_allocation_storage: [0]u8 = .{};
-    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
     var zero_due_out: [0]root.EndpointPolledDatagramResult = .{};
-    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.processDueDeadlineAndDrainDatagrams(
-        no_allocation_allocator.allocator(),
+    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.processDueDeadlineAndDrainDatagramsWithScratch(
         deadline.deadline_millis,
         &zero_due_out,
     ));
-    const preserved_deadline = (try endpoint_owner.nextDeadline(no_allocation_allocator.allocator())) orelse return error.TestUnexpectedResult;
+    const preserved_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(record.handle, preserved_deadline.connection_id);
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, preserved_deadline.kind);
     try std.testing.expectEqual(root.PacketNumberSpace.initial, preserved_deadline.recovery.?.space);
 
     var due_out: [1]root.EndpointPolledDatagramResult = undefined;
-    const due = (try endpoint_owner.processDueDeadlineAndDrainDatagrams(
-        no_allocation_allocator.allocator(),
+    const due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithScratch(
         deadline.deadline_millis,
         &due_out,
     )) orelse return error.TestUnexpectedResult;

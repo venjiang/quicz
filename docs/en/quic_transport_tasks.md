@@ -1666,6 +1666,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   receive-step pending drains without passing an allocator; dynamic registries
   report `BufferTooSmall` on scratch-only paths.
 
+- 2026-07-20: Added scratch-backed server due-deadline drains. Fixed-capacity
+  `Tls13ServerEndpoint` instances can now service route-facing and route-less
+  due deadlines through scratch-backed APIs while preserving zero-capacity,
+  missing-route, terminal-cleanup, and post-step next-deadline behavior.
+
 - 2026-07-20: Extended endpoint registry pre-closed cleanup to due-deadline
   bounded drains. `EndpointConnectionRegistry.processDueDeadlineAndDrainDatagrams()`
   now removes already-closed records before building lifecycle poll views, so
