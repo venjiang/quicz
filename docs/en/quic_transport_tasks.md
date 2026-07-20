@@ -1660,6 +1660,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   allocating on every event-loop iteration. Tests cover undersized storage and
   correct idle-deadline selection.
 
+- 2026-07-20: Extended bounded server endpoint scratch paths to pending work
+  and receive steps. Fixed-capacity registries can now use scratch-backed
+  pending-work sweep, route-bound output polling/draining, and server
+  receive-step pending drains without passing an allocator; dynamic registries
+  report `BufferTooSmall` on scratch-only paths.
+
 - 2026-07-20: Extended endpoint registry pre-closed cleanup to due-deadline
   bounded drains. `EndpointConnectionRegistry.processDueDeadlineAndDrainDatagrams()`
   now removes already-closed records before building lifecycle poll views, so

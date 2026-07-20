@@ -305,6 +305,20 @@ pub fn EndpointConnectionRegistry(
             return lifecycle.nextDeadlineAcrossConnections(try self.fillDeadlineViews(out));
         }
 
+        /// Select the earliest lifecycle deadline using registry-owned scratch storage.
+        ///
+        /// This is available for fixed-capacity registries created with
+        /// `initWithCapacity()`. Dynamic registries without scratch storage
+        /// return `BufferTooSmall` so callers do not accidentally allocate in a
+        /// bounded event-loop path.
+        pub fn nextDeadlineWithScratch(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+        ) root.Error!?root.EndpointConnectionDeadline {
+            const views = self.deadline_view_scratch orelse return error.BufferTooSmall;
+            return self.nextDeadlineWithStorage(lifecycle, views);
+        }
+
         /// Retire lifecycle state and remove every record whose connection has reached the closed state.
         pub fn removeClosedRecords(
             self: *Self,
@@ -352,6 +366,22 @@ pub fn EndpointConnectionRegistry(
                     now_millis,
                 );
             };
+            _ = try self.removeClosedRecords(lifecycle);
+            return pending_work;
+        }
+
+        /// Sweep pending work using registry-owned receive-view scratch storage.
+        pub fn processPendingWorkWithScratch(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            now_millis: i64,
+        ) root.Error!root.EndpointPendingWorkSweepResult {
+            _ = try self.removeClosedRecords(lifecycle);
+            const views = self.receive_view_scratch orelse return error.BufferTooSmall;
+            const pending_work = try lifecycle.processPendingWorkAcrossConnections(
+                try self.fillReceiveViews(views),
+                now_millis,
+            );
             _ = try self.removeClosedRecords(lifecycle);
             return pending_work;
         }
@@ -1016,6 +1046,17 @@ test "EndpointConnectionRegistry removes record after due idle retirement" {
     var deadline_views: [1]root.EndpointConnectionView = undefined;
     const storage_deadline = (try registry.nextDeadlineWithStorage(&lifecycle, &deadline_views)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(idle_deadline, storage_deadline);
+    const scratch_deadline = (try registry.nextDeadlineWithScratch(&lifecycle)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(idle_deadline, scratch_deadline);
+    const scratch_pending_before_deadline = try registry.processPendingWorkWithScratch(&lifecycle, 19);
+    try std.testing.expectEqual(@as(usize, 0), scratch_pending_before_deadline.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), scratch_pending_before_deadline.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), scratch_pending_before_deadline.recovery_serviced_count);
+
+    var dynamic_registry = Registry.init(std.testing.allocator);
+    defer dynamic_registry.deinit();
+    try std.testing.expectError(error.BufferTooSmall, dynamic_registry.nextDeadlineWithScratch(&lifecycle));
+    try std.testing.expectError(error.BufferTooSmall, dynamic_registry.processPendingWorkWithScratch(&lifecycle, 19));
 
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);

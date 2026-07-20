@@ -1442,6 +1442,11 @@ close 和 route cleanup 事件。
   view storage 选择下一次 endpoint-visible wakeup，避免每轮 event-loop 都分配。
   测试覆盖 storage 太小和正确 idle-deadline 选择。
 
+- 2026-07-20：把有界 server endpoint scratch 路径扩展到 pending work 与
+  receive step。fixed-capacity registry 现在可以不传 allocator 就执行 scratch-backed
+  pending-work sweep、route-bound output poll/drain 和 server receive-step pending drain；
+  dynamic registry 在 scratch-only 路径上会返回 `BufferTooSmall`。
+
 - 2026-07-20：把 endpoint registry pre-closed cleanup 扩展到 due-deadline
   bounded drain。`EndpointConnectionRegistry.processDueDeadlineAndDrainDatagrams()`
   现在会在构建 lifecycle poll view 前移除 already-closed record，因此终态 record

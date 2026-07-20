@@ -481,6 +481,11 @@ pub fn Tls13ServerEndpoint(
             return self.records.nextDeadlineWithStorage(&self.lifecycle, out);
         }
 
+        /// Select the earliest endpoint-owned deadline using registry scratch storage.
+        pub fn nextDeadlineWithScratch(self: *Self) root.Error!?root.EndpointConnectionDeadline {
+            return self.records.nextDeadlineWithScratch(&self.lifecycle);
+        }
+
         /// Sweep all endpoint-owned records, retire closed records, and return
         /// the next endpoint-visible deadline.
         pub fn processPendingWorkAndSelectNextDeadline(
@@ -535,6 +540,46 @@ pub fn Tls13ServerEndpoint(
                 .pending_work = pending_work,
                 .drain = drain,
                 .next_deadline = try self.nextDeadline(allocator),
+            };
+        }
+
+        /// Sweep pending work and drain route-bound output using registry scratch storage.
+        pub fn processPendingWorkAndDrainDatagramsWithRoutePathWithScratch(
+            self: *Self,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+            out: []DatagramPathResult,
+        ) root.Error!PendingWorkDatagramPathDrainResult {
+            self.preflightDueRecoveryRoutes(now_millis) catch |err| {
+                return .{
+                    .pending_work = .{},
+                    .drain = .{ .first_route_error = err },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                };
+            };
+            if (out.len == 0 and self.hasDueRecoveryForInstalledKeySpace(now_millis, space)) {
+                return .{
+                    .pending_work = .{},
+                    .drain = .{ .first_error = error.BufferTooSmall },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                };
+            }
+            const pending_work = try self.records.processPendingWorkWithScratch(
+                &self.lifecycle,
+                now_millis,
+            );
+            const drain = if (pending_work.recovery_serviced_count == 0)
+                DatagramPathDrainResult{}
+            else
+                self.drainDatagramsAcrossRecordsWithRoutePathWithScratch(
+                    now_millis,
+                    space,
+                    out,
+                );
+            return .{
+                .pending_work = pending_work,
+                .drain = drain,
+                .next_deadline = try self.nextDeadlineWithScratch(),
             };
         }
 
@@ -1170,6 +1215,21 @@ pub fn Tls13ServerEndpoint(
             );
         }
 
+        /// Poll the first installed-key datagram using registry-owned poll scratch.
+        pub fn pollDatagramWithRoutePathWithScratch(
+            self: *Self,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+        ) (root.Error || endpoint.RouteError)!?DatagramPathResult {
+            _ = try self.records.removeClosedRecords(&self.lifecycle);
+            const views = self.records.poll_view_scratch orelse return error.BufferTooSmall;
+            return self.pollDatagramAcrossRecordViewsWithRoutePath(
+                try self.records.fillPollViews(views, destination_connection_id_of, source_connection_id_of),
+                now_millis,
+                space,
+            );
+        }
+
         /// Drain installed-key datagrams across active endpoint-owned records.
         ///
         /// Each initialized output slot owns its datagram. If `first_error` or
@@ -1186,6 +1246,43 @@ pub fn Tls13ServerEndpoint(
             while (result.datagrams_written < out.len) {
                 const datagram = self.pollDatagramWithRoutePath(
                     allocator,
+                    now_millis,
+                    space,
+                ) catch |err| {
+                    switch (err) {
+                        error.InvalidConnectionIdLength,
+                        error.InvalidConnectionIdSequence,
+                        error.InvalidDatagram,
+                        error.InvalidVersionList,
+                        error.InvalidResetSize,
+                        error.DuplicateConnectionId,
+                        error.RouteCapacityReached,
+                        error.StatelessResetTokenCapacityReached,
+                        error.UnknownConnectionId,
+                        error.AmbiguousConnectionId,
+                        error.ActiveMigrationDisabled,
+                        error.PathMismatch,
+                        => result.first_route_error = @errorCast(err),
+                        else => result.first_error = @errorCast(err),
+                    }
+                    return result;
+                };
+                out[result.datagrams_written] = datagram orelse return result;
+                result.datagrams_written += 1;
+            }
+            return result;
+        }
+
+        /// Drain installed-key datagrams using registry-owned poll scratch.
+        pub fn drainDatagramsAcrossRecordsWithRoutePathWithScratch(
+            self: *Self,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+            out: []DatagramPathResult,
+        ) DatagramPathDrainResult {
+            var result = DatagramPathDrainResult{};
+            while (result.datagrams_written < out.len) {
+                const datagram = self.pollDatagramWithRoutePathWithScratch(
                     now_millis,
                     space,
                 ) catch |err| {
@@ -2394,6 +2491,49 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Run one bounded server receive step using registry scratch storage.
+        pub fn receiveDatagramStepWithRoutePathWithScratch(
+            self: *Self,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            unpredictable_prefix: []const u8,
+            supported_versions: []const quic_packet.Version,
+            installed_key_options: root.EndpointFeedInstalledKeyDatagramOptions,
+            scratch: []u8,
+            initial_token: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+            installed_key_out: []DatagramPathResult,
+            pending_space: root.EndpointInstalledKeyDatagramSpace,
+            pending_out: []DatagramPathResult,
+        ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!DatagramStepPathResult {
+            const process = try self.processDatagramAndDrainWithRoutePath(
+                path,
+                now_millis,
+                datagram,
+                unpredictable_prefix,
+                supported_versions,
+                installed_key_options,
+                scratch,
+                initial_token,
+                out,
+                handshake_out,
+                installed_key_out,
+            );
+            const pending = try self.sweepPendingWorkAndDrainWithRoutePathWithScratch(
+                now_millis,
+                pending_space,
+                pending_out,
+            );
+            return .{
+                .process = process,
+                .pending_work = pending.pending_work,
+                .pending_drain = pending.pending_drain,
+                .next_deadline = pending.next_deadline,
+            };
+        }
+
         /// Run one bounded server receive step, admitting a caller-supplied
         /// record when the datagram is a fresh Initial.
         ///
@@ -2465,6 +2605,45 @@ pub fn Tls13ServerEndpoint(
                 .pending_work = pending.pending_work,
                 .pending_drain = pending.pending_drain,
                 .next_deadline = pending.next_deadline,
+            };
+        }
+
+        fn sweepPendingWorkAndDrainWithRoutePathWithScratch(
+            self: *Self,
+            now_millis: i64,
+            pending_space: root.EndpointInstalledKeyDatagramSpace,
+            pending_out: []DatagramPathResult,
+        ) root.Error!PendingStepPathResult {
+            self.preflightDueRecoveryRoutes(now_millis) catch |err| {
+                return .{
+                    .pending_work = .{},
+                    .pending_drain = .{ .first_route_error = err },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                };
+            };
+            if (pending_out.len == 0 and self.hasDueRecoveryForInstalledKeySpace(now_millis, pending_space)) {
+                return .{
+                    .pending_work = .{},
+                    .pending_drain = .{ .first_error = error.BufferTooSmall },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                };
+            }
+            const pending_work = try self.records.processPendingWorkWithScratch(
+                &self.lifecycle,
+                now_millis,
+            );
+            const pending_drain = if (pending_work.recovery_serviced_count == 0)
+                DatagramPathDrainResult{}
+            else
+                self.drainDatagramsAcrossRecordsWithRoutePathWithScratch(
+                    now_millis,
+                    pending_space,
+                    pending_out,
+                );
+            return .{
+                .pending_work = pending_work,
+                .pending_drain = pending_drain,
+                .next_deadline = try self.nextDeadlineWithScratch(),
             };
         }
 
@@ -5462,8 +5641,7 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expect(preserved_drain_out[0].datagram.len != 0);
 
     try second_record.connection.sendPing();
-    const recovery_first = (try endpoint_owner.pollDatagramWithRoutePath(
-        no_allocation_allocator.allocator(),
+    const recovery_first = (try endpoint_owner.pollDatagramWithRoutePathWithScratch(
         20,
         .application,
     )) orelse return error.TestUnexpectedResult;
@@ -5582,6 +5760,39 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try std.testing.expectEqual(deadline.connection_id, missing_route_step_deadline.connection_id);
     try std.testing.expectEqual(root.PacketNumberSpace.application, missing_route_step_deadline.recovery.?.space);
 
+    const missing_route_step_scratch = try endpoint_owner.receiveDatagramStepWithRoutePathWithScratch(
+        first_path,
+        deadline.deadline_millis,
+        &unsupported_initial,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &missing_route_step_out,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &missing_route_scratch,
+        &[_]u8{},
+        &missing_route_initial_out,
+        &missing_route_handshake_out,
+        &missing_route_installed_out,
+        .application,
+        &missing_route_step_pending_out,
+    );
+    switch (missing_route_step_scratch.process) {
+        .version_negotiation => |response| try std.testing.expect(response.path.eql(first_path)),
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), missing_route_step_scratch.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_step_scratch.pending_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), missing_route_step_scratch.pending_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_step_scratch.pending_drain.first_route_error);
+    const missing_route_step_scratch_deadline = missing_route_step_scratch.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, missing_route_step_scratch_deadline.kind);
+    try std.testing.expectEqual(deadline.connection_id, missing_route_step_scratch_deadline.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.application, missing_route_step_scratch_deadline.recovery.?.space);
+
     var zero_missing_route_step_pending_out: [0]TestEndpoint.DatagramPathResult = .{};
     const zero_missing_route_step = try endpoint_owner.receiveDatagramStepWithRoutePath(
         no_allocation_allocator.allocator(),
@@ -5620,6 +5831,20 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
     try endpoint_owner.lifecycle.registerConnectionId(deadline.connection_id, recovery_local_id, recovery_path, .{});
 
     var zero_pending_out: [0]TestEndpoint.DatagramPathResult = .{};
+    const zero_pending_scratch = try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePathWithScratch(
+        deadline.deadline_millis,
+        .application,
+        &zero_pending_out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), zero_pending_scratch.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), zero_pending_scratch.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, error.BufferTooSmall), zero_pending_scratch.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), zero_pending_scratch.drain.first_route_error);
+    const zero_pending_scratch_deadline = zero_pending_scratch.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, zero_pending_scratch_deadline.kind);
+    try std.testing.expectEqual(deadline.connection_id, zero_pending_scratch_deadline.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.application, zero_pending_scratch_deadline.recovery.?.space);
+
     const zero_pending = try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePath(
         no_allocation_allocator.allocator(),
         deadline.deadline_millis,
