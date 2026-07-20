@@ -1685,6 +1685,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   in the bounded pending drain while keeping the receive classification visible
   and leaving the matching recovery deadline serviceable for a later step.
 
+- 2026-07-20: Hardened client receive-step recovery drains with zero output
+  capacity. The client endpoint now keeps the receive result visible and reports
+  `BufferTooSmall` on the due drain without servicing the recovery deadline.
+
 - 2026-07-17: Hardened server endpoint accepted-Initial rollback. If
   Handshake-space backend driving fails after record adoption, the endpoint now
   removes the adopted record explicitly and reports cleanup inconsistency as

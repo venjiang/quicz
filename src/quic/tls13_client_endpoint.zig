@@ -251,6 +251,21 @@ pub const Tls13ClientEndpoint = struct {
             datagram,
             receive_out,
         );
+        if (due_out.len == 0) {
+            if (self.nextDeadline()) |deadline| {
+                if (deadline == .recovery and deadline.deadlineMillis() <= now_millis) {
+                    return .{
+                        .receive = received,
+                        .due = .{
+                            .deadline = deadline,
+                            .drain = .{ .first_error = error.BufferTooSmall },
+                            .next_deadline = self.nextDeadline(),
+                        },
+                        .next_deadline = self.nextDeadline(),
+                    };
+                }
+            }
+        }
         var due = try self.serviceDueDeadlineAndDrainDatagramsWithRoutePath(now_millis, due_out);
         if (due == null) {
             if (selected_deadline) |deadline| {
@@ -1749,6 +1764,27 @@ test "Tls13ClientEndpoint receive step drains due recovery with committed route 
     const decoy_datagram = [_]u8{ 0x40, 0xe1, 0xe2, 0xe3, 0xe4, 0x00 };
     var scratch: [128]u8 = undefined;
     var receive_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    var zero_due_out: [0]Tls13ClientEndpoint.ApplicationDatagramPathResult = .{};
+    const zero_step = try client.receiveDatagramStepWithRoutePath(
+        deadline.deadlineMillis(),
+        &scratch,
+        &decoy_datagram,
+        &receive_out,
+        &zero_due_out,
+    );
+    try std.testing.expect(zero_step.receive.receive == null);
+    try std.testing.expectEqual(@as(?transport_types.Error, error.InvalidPacket), zero_step.receive.receive_error);
+    try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), zero_step.receive.drain.datagrams_written);
+    const zero_due = zero_step.due orelse return error.TestUnexpectedResult;
+    try std.testing.expect(zero_due.deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, zero_due.deadline.recovery.space);
+    try std.testing.expectEqual(@as(usize, 0), zero_due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, error.BufferTooSmall), zero_due.drain.first_error);
+    const zero_next_deadline = zero_step.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expect(zero_next_deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, zero_next_deadline.recovery.space);
+
     var due_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
     const step = try client.receiveDatagramStepWithRoutePath(
         deadline.deadlineMillis(),
