@@ -204,7 +204,9 @@ CRYPTO frame type，因此 lifecycle poll/drain wrapper 可以发出 close outpu
 对 client key_share 唯一性的要求。
 它也会拒绝不在 peer `supported_groups` extension 中，或顺序与
 `supported_groups` 不一致的 ClientHello KeyShareEntry group，同时保留 X25519
-key_share 未列入 supported_groups 时的既有 `NoKeyShare` 表面。
+key_share 未列入 supported_groups 时的既有 `NoKeyShare` 表面。空的 ClientHello
+key_share vector 现在也会走同一个 `NoKeyShare` 边界，而不是 wire-format
+`DecodeError`，并保持 peer key-share 与 key schedule state 不变。
 server-side ClientHello 解析现在还会拒绝重复的 SNI `ServerName`
 `name_type` entry，包括重复的未知 name type，然后才接受或复制 host_name。
 server-side Finished verification 现在有直接非 PSK loopback 覆盖：篡改后的
@@ -1738,6 +1740,10 @@ close 和 route cleanup 事件。
 
 - 2026-07-17：收紧纯 Zig TLS ClientHello supported_groups 校验。server 现在会在
   选择 X25519 或推进 handshake 前拒绝 `supported_groups` 里的重复 NamedGroup entry。
+
+- 2026-07-20：收紧纯 Zig TLS 空 ClientHello key_share 处理。server 现在会把空
+  key_share vector 报为 `NoKeyShare`，对齐当前不支持 HRR 时的 no-key-share
+  边界，并保持 peer key-share 与 key schedule state 不变。
 
 - 2026-07-17：收紧纯 Zig TLS ClientHello ALPN 校验。server 现在会在记录协商的
   application protocol 前拒绝 ALPN protocol list 里的重复 protocol name。

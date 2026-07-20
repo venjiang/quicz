@@ -3578,7 +3578,8 @@ pub const Tls13Handshake = struct {
                     // client_shares_len(2) + [group(2) + key_len(2) + key]
                     if (el < 2) return error.DecodeError;
                     const shares_len = readU16(ext[0..2]);
-                    if (shares_len == 0 or 2 + shares_len != el) return error.DecodeError;
+                    if (shares_len == 0) return error.NoKeyShare;
+                    if (2 + shares_len != el) return error.DecodeError;
                     var sp: usize = 2; // skip client_shares_len
                     while (sp + 4 <= el) {
                         const entry_offset = sp - 2;
@@ -6197,6 +6198,44 @@ fn extendClientHelloExtensionBody(buf: []u8, msg_len: usize, ext_type: u16, extr
     return buf[0 .. msg_len + extra.len];
 }
 
+fn replaceClientHelloExtensionBody(buf: []u8, msg_len: usize, ext_type: u16, payload: []const u8) ![]u8 {
+    if (payload.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
+    const ext = try clientHelloExtension(buf[0..msg_len], ext_type);
+    const old_total_len = 4 + ext.body_len;
+    const new_total_len = 4 + payload.len;
+    const ext_end = ext.header_offset + old_total_len;
+    const new_msg_len = if (new_total_len >= old_total_len)
+        msg_len + (new_total_len - old_total_len)
+    else
+        msg_len - (old_total_len - new_total_len);
+    if (new_msg_len > buf.len) return error.TestUnexpectedResult;
+
+    if (new_total_len > old_total_len) {
+        const growth = new_total_len - old_total_len;
+        std.mem.copyBackwards(
+            u8,
+            buf[ext_end + growth ..][0 .. msg_len - ext_end],
+            buf[ext_end..msg_len],
+        );
+    } else if (new_total_len < old_total_len) {
+        const shrink = old_total_len - new_total_len;
+        std.mem.copyForwards(
+            u8,
+            buf[ext_end - shrink ..][0 .. msg_len - ext_end],
+            buf[ext_end..msg_len],
+        );
+    }
+
+    writeU16(buf[ext.header_offset + 2 ..][0..2], @as(u16, @intCast(payload.len)));
+    @memcpy(buf[ext.body_offset..][0..payload.len], payload);
+    try setClientHelloBodyLen(buf, new_msg_len - 4);
+
+    const old_extensions_len = readU16(buf[ext.extensions_len_offset..]);
+    const new_extensions_len = old_extensions_len - old_total_len + new_total_len;
+    writeU16(buf[ext.extensions_len_offset..][0..2], @as(u16, @intCast(new_extensions_len)));
+    return buf[0..new_msg_len];
+}
+
 fn appendClientHelloKeyShareEntry(buf: []u8, msg_len: usize, group: u16, key_exchange: []const u8) ![]u8 {
     if (key_exchange.len == 0 or key_exchange.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
     const ext = try clientHelloExtension(buf[0..msg_len], @intFromEnum(ExtType.key_share));
@@ -7129,6 +7168,26 @@ test "Tls13Handshake server rejects malformed ClientHello key_share length" {
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects empty ClientHello key_share vector as no key share" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const hello = try replaceClientHelloExtensionBody(
+        &hello_buf,
+        base_hello.len,
+        @intFromEnum(ExtType.key_share),
+        &[_]u8{ 0x00, 0x00 },
+    );
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    const old_peer_key = [_]u8{0x46} ** 32;
+    server.peer_x25519_public = old_peer_key;
+    server.provideData(hello);
+    try std.testing.expectError(error.NoKeyShare, server.step());
+    try std.testing.expectEqualSlices(u8, &old_peer_key, &server.peer_x25519_public);
+    try std.testing.expect(!server.key_schedule.handshake_secret_derived);
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
 test "Tls13Handshake server rejects duplicate ClientHello X25519 key_share entries" {

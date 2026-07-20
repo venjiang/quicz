@@ -247,7 +247,9 @@ agreement, matching RFC 8446's client key_share uniqueness rule.
 It also rejects ClientHello KeyShareEntry groups that are absent from the
 peer's supported_groups extension, or whose order differs from
 supported_groups, while preserving the existing NoKeyShare surface for an
-X25519 key_share omitted from supported_groups.
+X25519 key_share omitted from supported_groups. An empty ClientHello key_share
+vector is now classified through the same `NoKeyShare` boundary instead of the
+wire-format `DecodeError` path, preserving peer key-share and key-schedule state.
 Server-side ClientHello parsing now rejects duplicate SNI `ServerName`
 `name_type` entries, including duplicate unknown name types, before accepting
 or copying the host_name value.
@@ -1987,6 +1989,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 - 2026-07-17: Tightened pure-Zig TLS ClientHello supported_groups validation.
   The server now rejects duplicate NamedGroup entries in `supported_groups`
   before selecting X25519 or progressing the handshake.
+
+- 2026-07-20: Tightened pure-Zig TLS empty ClientHello key_share handling. The
+  server now reports an empty key_share vector as `NoKeyShare`, matching the
+  unsupported-HRR/no-key-share boundary while leaving peer key-share and key
+  schedule state unchanged.
 
 - 2026-07-17: Tightened pure-Zig TLS ClientHello ALPN validation. The server
   now rejects duplicate protocol names in the ALPN protocol list before
