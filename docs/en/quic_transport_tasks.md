@@ -143,8 +143,9 @@ rejects a ServerHello random that repeats the ClientHello random without
 committing peer random, transcript, or handshake secrets, and a wrong
 ServerHello cipher suite likewise leaves the staged peer key, peer random, PSK
 selection, transcript, pending key installation, and client state unchanged.
-Missing required ServerHello `supported_versions` or `key_share` extensions are
-covered by the same rollback invariant.
+Missing required ServerHello `supported_versions` or `key_share` extensions, and
+an unsupported ServerHello `key_share` group, are covered by the same rollback
+invariant.
 ServerHello and
 EncryptedExtensions parsing now reject unsolicited extension types while still
 rejecting duplicate extension types; EncryptedExtensions parsing keeps ALPN,
@@ -2015,6 +2016,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   `supported_versions` or `key_share` now has direct test coverage proving no
   peer key, peer random, PSK selection, transcript, pending Handshake key
   installation, or client state is committed.
+
+- 2026-07-20: Added unsupported ServerHello `key_share` group rollback evidence.
+  A server-selected non-X25519 group is rejected as `NoKeyShare` before peer key,
+  peer random, transcript, Handshake secret, pending key installation, or client
+  state changes are committed.
 
 - 2026-07-19: Tightened server EncryptedExtensions output-boundary coverage.
   Oversized local QUIC transport parameters are rejected before transcript

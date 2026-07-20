@@ -121,8 +121,8 @@ flight，以及缺失、过短或其它非法的本地私钥配置。
 ServerHello random，且不会提交 peer random、transcript 或 handshake secret；
 ServerHello cipher suite 错误时同样会保持 staged peer key、peer random、PSK
 selection、transcript、pending key installation 和 client state 不变。
-缺失 required ServerHello `supported_versions` 或 `key_share` extension
-时也覆盖同一 rollback 不变量。
+缺失 required ServerHello `supported_versions` 或 `key_share` extension，
+以及 ServerHello 选择不支持的 `key_share` group 时也覆盖同一 rollback 不变量。
 ServerHello 和 EncryptedExtensions 解析现在会拒绝 unsolicited extension type，同时继续拒绝重复 extension type；EncryptedExtensions
 解析在后续 extension 失败时会保持 ALPN、peer transport parameters、early-data
 acceptance、transcript state 和 client handshake state 不变；backend 拉取 peer
@@ -1763,6 +1763,11 @@ close 和 route cleanup 事件。
   `supported_versions` 或 `key_share` 现在有直接测试证明不会提交 peer key、
   peer random、PSK selection、transcript、pending Handshake key installation
   或 client state。
+
+- 2026-07-20：新增 unsupported ServerHello `key_share` group rollback 证据。
+  服务端选择非 X25519 group 时会以 `NoKeyShare` 拒绝，且不会提交 peer key、
+  peer random、transcript、Handshake secret、pending key installation 或 client
+  state。
 
 - 2026-07-19：收紧 server EncryptedExtensions 输出边界覆盖。过大的本地 QUIC
   transport parameters 会在 transcript update、output-length mutation 或 server

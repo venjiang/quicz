@@ -4974,6 +4974,36 @@ test "Tls13Handshake client rejects invalid ServerHello X25519 public key withou
     try std.testing.expectEqual(HandshakeState.client_wait_server_hello, hs.state);
 }
 
+test "Tls13Handshake client rejects unsupported ServerHello key_share group without committing peer key" {
+    var hs = Tls13Handshake.initClient(.{}, &[_]u8{});
+    const ch = try hs.step();
+    try std.testing.expect(std.meta.activeTag(ch) == .send_data);
+    const old_peer_key = [_]u8{0x42} ** 32;
+    const old_server_random = [_]u8{0x24} ** 32;
+    hs.peer_x25519_public = old_peer_key;
+    hs.server_random = old_server_random;
+    hs.server_random_available = true;
+    const transcript_before = hs.transcript.current();
+
+    var server_secret: [32]u8 = undefined;
+    secureRandomBytes(&server_secret);
+    const server_public = try X25519.recoverPublicKey(server_secret);
+    var sh_buf: [128]u8 = undefined;
+    const sh_len = buildServerHello(&sh_buf, server_public, cipher_aes_128_gcm_sha256, true, true);
+    const key_share = try serverHelloExtension(sh_buf[0..sh_len], @intFromEnum(ExtType.key_share));
+    writeU16(sh_buf[key_share.body_offset..][0..2], 0x0017);
+    hs.provideData(sh_buf[0..sh_len]);
+
+    try std.testing.expectError(error.NoKeyShare, hs.step());
+    try std.testing.expectEqualSlices(u8, &old_peer_key, &hs.peer_x25519_public);
+    try std.testing.expectEqualSlices(u8, &old_server_random, &hs.server_random);
+    try std.testing.expect(hs.server_random_available);
+    try std.testing.expect(!hs.key_schedule.handshake_secret_derived);
+    try std.testing.expect(!hs.pending_install_handshake);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &hs.transcript.current());
+    try std.testing.expectEqual(HandshakeState.client_wait_server_hello, hs.state);
+}
+
 // ─── Tests for client handshake completion ───────────────────────────
 
 /// Build a minimal EncryptedExtensions carrying an optional ALPN protocol
