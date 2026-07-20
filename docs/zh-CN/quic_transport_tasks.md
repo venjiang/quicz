@@ -657,6 +657,9 @@ active connection 由 lifecycle 统一完成 receive/send/timer/close routing、
 边界，不得削弱既有证据。
 `EndpointConnectionRegistry` 现在提供显式 connection retirement，会先按同一 handle
 退役 lifecycle route、recovery timer 和 ECN path state，再销毁 endpoint-owned record。
+pending-work sweep 现在也会清理 sweep 开始前已经 closed 的 record，并在销毁 record
+前退役其 lifecycle route 和 recovery timer，避免已关闭 record 留下陈旧 endpoint
+routing 状态。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、
@@ -1342,6 +1345,12 @@ close 和 route cleanup 事件。
 - 2026-07-17：加固 server endpoint accepted-Initial rollback。Handshake-space
   backend drive 在 record adopt 后失败时，endpoint 现在会显式移除已 adopt record，
   并把 cleanup 不一致报告为 internal error，不再依赖 unreachable `errdefer` 路径。
+
+- 2026-07-20：加固 endpoint registry 的 pre-closed record sweep。
+  `EndpointConnectionRegistry.processPendingWork()` 现在会先移除 sweep 前
+  已经 closed 的 record，并先退役对应 route 与 recovery timer。这样不会留下
+  stale lifecycle state，也不会从死 record 的 idle 检查中向外暴露
+  `ConnectionClosed`。
 
 - 2026-07-17：加固 server endpoint routed output polling。route-bound
   installed-key output 在跨 record poll 与 route lookup 之间遇到 endpoint-owned

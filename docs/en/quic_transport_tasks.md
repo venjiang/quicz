@@ -829,6 +829,9 @@ ownership boundary and must not weaken the established evidence.
 `EndpointConnectionRegistry` now exposes explicit connection retirement that
 destroys the endpoint-owned record only after retiring lifecycle routes,
 recovery timers, and ECN path state for the same handle.
+The pending-work sweep also clears records that were already closed before the
+sweep starts, retiring their lifecycle routes and recovery timers before record
+destruction so stale endpoint routing state cannot survive a closed record.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first
@@ -1542,6 +1545,12 @@ QUIC unless the gap is named and the verification evidence is added here.
 - 2026-07-17: Hardened server endpoint route-bound due-deadline lookup.
   Route-bound due-deadline service now reports an internal consistency error
   if the selected endpoint-owned record disappears after deadline selection.
+
+- 2026-07-20: Hardened endpoint registry pre-closed record sweep.
+  `EndpointConnectionRegistry.processPendingWork()` now removes records that
+  are already closed before running lifecycle pending work, retiring their
+  routes and recovery timers first. This prevents stale lifecycle state and
+  avoids surfacing `ConnectionClosed` from idle checks on dead records.
 
 - 2026-07-17: Hardened server endpoint accepted-Initial rollback. If
   Handshake-space backend driving fails after record adoption, the endpoint now
