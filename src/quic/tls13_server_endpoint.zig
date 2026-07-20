@@ -1381,6 +1381,7 @@ pub fn Tls13ServerEndpoint(
         ) (root.Error || endpoint.RouteError)!CloseDatagramPathDrainResult {
             const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
             const path = try self.currentRecordRoutePath(record);
+            if (out.len == 0) return error.BufferTooSmall;
             const connection = connection_of(record);
             try connection.closeConnection(error_code, frame_type, reason_phrase);
             const drain = self.drainDatagramsWithRoutePath(
@@ -6748,6 +6749,19 @@ test "Tls13ServerEndpoint drains close output with route and deadline" {
     }
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
+    var zero_out: [0]TestEndpoint.DatagramPathResult = .{};
+    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.closeWithRoutePathAndDrainDatagrams(
+        no_allocation_allocator.allocator(),
+        record_handle,
+        0,
+        0,
+        "server done",
+        10,
+        &zero_out,
+    ));
+    try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
+    try std.testing.expectEqual(@as(?i64, null), try endpoint_owner.closeDeadlineMillis(record_handle));
+
     var out: [2]TestEndpoint.DatagramPathResult = undefined;
     const closed = try endpoint_owner.closeWithRoutePathAndDrainDatagrams(
         no_allocation_allocator.allocator(),

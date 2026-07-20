@@ -703,6 +703,7 @@ pub const Tls13ClientEndpoint = struct {
     ) !CloseDatagramPathDrainResult {
         const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
         _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        if (out.len == 0) return error.BufferTooSmall;
         try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
         return .{
             .drain = try self.drainApplicationDatagramsWithRoutePath(now_millis, out),
@@ -2481,6 +2482,11 @@ test "Tls13ClientEndpoint drains close output with committed route and deadline"
     } });
     try client.transport.connection.processDatagram(0, writer.getWritten());
     _ = try client.updatePath(new_path);
+
+    var zero_out: [0]Tls13ClientEndpoint.ApplicationDatagramPathResult = .{};
+    try std.testing.expectError(error.BufferTooSmall, client.closeWithRoutePathAndDrainDatagrams(0, 0, "done", 1, &zero_out));
+    try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
+    try std.testing.expectEqual(@as(?i64, null), client.closeDeadlineMillis());
 
     var out: [2]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
     const closed = try client.closeWithRoutePathAndDrainDatagrams(0, 0, "done", 1, &out);
