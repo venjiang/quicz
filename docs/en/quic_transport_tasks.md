@@ -1702,6 +1702,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   deadline from registry-owned scratch; dynamic endpoints fail with
   `BufferTooSmall` before pending-work side effects.
 
+- 2026-07-21: Added scratch-backed server installed-key receive wakeup
+  selection. `Tls13ServerEndpoint.feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch()`
+  keeps protected receive under server endpoint ownership, then selects the
+  next deadline from registry-owned scratch; dynamic endpoints fail before
+  datagram classification.
+
 - 2026-07-20: Extended bounded server endpoint scratch paths to pending work
   and receive steps. Fixed-capacity registries can now use scratch-backed
   pending-work sweep, route-bound output polling/draining, and server

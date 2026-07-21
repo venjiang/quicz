@@ -1019,6 +1019,21 @@ pub fn Tls13ServerEndpoint(
             options: root.EndpointFeedInstalledKeyDatagramOptions,
         ) root.EndpointProtectedDatagramError!root.EndpointFeedInstalledKeyDatagramResult {
             _ = allocator;
+            return self.feedDatagramWithInstalledKeysOwned(
+                path,
+                now_millis,
+                datagram,
+                options,
+            );
+        }
+
+        fn feedDatagramWithInstalledKeysOwned(
+            self: *Self,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!root.EndpointFeedInstalledKeyDatagramResult {
             const action = try self.lifecycle.feedDatagram(
                 options.out,
                 path,
@@ -1042,6 +1057,26 @@ pub fn Tls13ServerEndpoint(
                 datagram,
                 options,
             );
+        }
+
+        /// Route one installed-key datagram and select the next endpoint-owned deadline using scratch storage.
+        pub fn feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch(
+            self: *Self,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!root.EndpointFeedInstalledKeyDatagramNextDeadlineResult {
+            _ = try self.records.nextDeadlineWithScratch(&self.lifecycle);
+            return .{
+                .feed = try self.feedDatagramWithInstalledKeysOwned(
+                    path,
+                    now_millis,
+                    datagram,
+                    options,
+                ),
+                .next_deadline = try self.nextDeadlineWithScratch(),
+            };
         }
 
         /// Route one installed-key datagram, apply validated path-update
@@ -5029,7 +5064,13 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
         TestRecord.deinit,
     );
 
-    var endpoint_owner = TestEndpoint.init(std.testing.allocator);
+    var dynamic_endpoint = TestEndpoint.init(std.testing.allocator);
+    defer dynamic_endpoint.deinit();
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 1,
+        .max_stateless_reset_tokens = 1,
+    });
     defer endpoint_owner.deinit();
 
     const path = endpoint.Udp4Tuple{
@@ -5077,10 +5118,22 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
     const datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(1, server_dcid)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(datagram);
 
+    var dynamic_out: [64]u8 = undefined;
+    try std.testing.expectError(error.BufferTooSmall, dynamic_endpoint.feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch(
+        path,
+        2,
+        datagram,
+        .{
+            .space = .application,
+            .out = &dynamic_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+    ));
+
     var no_allocation_storage: [0]u8 = .{};
     var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
-    const feed_result = try endpoint_owner.feedDatagramWithInstalledKeys(
-        no_allocation_allocator.allocator(),
+    const feed_deadline = try endpoint_owner.feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch(
         path,
         2,
         datagram,
@@ -5091,11 +5144,12 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
             .supported_versions = &[_]quic_packet.Version{.v1},
         },
     );
-    const route = switch (feed_result) {
+    const route = switch (feed_deadline.feed) {
         .routed => |route| route,
         else => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqual(record.handle, route.connection_id);
+    try std.testing.expect(feed_deadline.next_deadline == null);
 
     const fixed_bit_clear = [_]u8{ 0, 0, 0 };
     var scratch: [64]u8 = undefined;
