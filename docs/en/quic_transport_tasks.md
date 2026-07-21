@@ -929,6 +929,10 @@ registry-owned receive views.
 now combines installed-key receive classification with next-deadline selection
 for fixed-capacity no-output socket loops, prechecking receive and deadline
 scratch before receive side effects.
+`EndpointConnectionRegistry.feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch()`
+now adds the receive-to-pending-work-to-deadline no-output socket-loop step,
+with the same receive and deadline scratch preflight before receive or timer
+side effects.
 `EndpointConnectionRegistry.drainDatagramsAcrossConnectionsWithScratch()` now
 adds the matching bounded installed-key output drain, preserving round-robin
 record polling while failing dynamic registries before output side effects.

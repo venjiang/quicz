@@ -851,6 +851,76 @@ pub fn EndpointConnectionRegistry(
             };
         }
 
+        /// Classify one installed-key datagram, sweep pending work, and return the next deadline.
+        pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadline(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            allocator: std.mem.Allocator,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!root.EndpointFeedPendingWorkNextDeadlineResult {
+            if (self.receive_view_scratch != null and self.deadline_view_scratch != null) {
+                return self.feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch(
+                    lifecycle,
+                    path,
+                    now_millis,
+                    datagram,
+                    options,
+                );
+            }
+            return .{
+                .feed = try self.feedDatagramWithInstalledKeys(
+                    lifecycle,
+                    allocator,
+                    path,
+                    now_millis,
+                    datagram,
+                    options,
+                ),
+                .pending_work = try self.processPendingWork(
+                    lifecycle,
+                    allocator,
+                    now_millis,
+                ),
+                .next_deadline = try self.nextDeadline(lifecycle, allocator),
+            };
+        }
+
+        /// Classify one installed-key datagram, sweep pending work, and select the next deadline using scratch.
+        ///
+        /// This fixed-capacity no-output socket-loop step checks both receive
+        /// and deadline scratch before receive processing, so missing scratch
+        /// cannot fail after datagram or pending-work side effects.
+        pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!root.EndpointFeedPendingWorkNextDeadlineResult {
+            _ = self.receive_view_scratch orelse return error.BufferTooSmall;
+            _ = self.deadline_view_scratch orelse return error.BufferTooSmall;
+            const feed = try self.feedDatagramWithInstalledKeysWithScratch(
+                lifecycle,
+                path,
+                now_millis,
+                datagram,
+                options,
+            );
+            const pending_deadline = try self.processPendingWorkAndSelectNextDeadlineWithScratch(
+                lifecycle,
+                now_millis,
+            );
+            return .{
+                .feed = feed,
+                .pending_work = pending_deadline.pending_work,
+                .next_deadline = pending_deadline.next_deadline,
+            };
+        }
+
         /// Classify and process one installed-key datagram using registry-owned receive scratch.
         ///
         /// Fixed-capacity endpoint owners can use this to avoid per-receive
@@ -1009,6 +1079,35 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
     );
     try std.testing.expect(feed_deadline.feed == .dropped);
     try std.testing.expect(feed_deadline.next_deadline == null);
+    try std.testing.expectError(error.BufferTooSmall, dynamic_registry.feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch(
+        &lifecycle,
+        feed_path,
+        0,
+        &.{0x40},
+        .{
+            .space = .application,
+            .out = &endpoint_output,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &.{.v1},
+        },
+    ));
+    const feed_pending_deadline = try registry.feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch(
+        &lifecycle,
+        feed_path,
+        0,
+        &.{0x40},
+        .{
+            .space = .application,
+            .out = &endpoint_output,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &.{.v1},
+        },
+    );
+    try std.testing.expect(feed_pending_deadline.feed == .dropped);
+    try std.testing.expectEqual(@as(usize, 0), feed_pending_deadline.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), feed_pending_deadline.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), feed_pending_deadline.pending_work.recovery_serviced_count);
+    try std.testing.expect(feed_pending_deadline.next_deadline == null);
 
     var due_datagrams: [1]root.EndpointPolledDatagramResult = undefined;
     try std.testing.expect((try registry.processDueDeadlineAndDrainDatagrams(

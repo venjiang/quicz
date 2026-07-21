@@ -741,6 +741,9 @@ closed record。
 `EndpointConnectionRegistry.feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch()`
 现在把 installed-key receive classification 和 next-deadline selection 组合成固定容量
 无 output socket loop 步骤，并在 receive 副作用前预检查 receive 与 deadline scratch。
+`EndpointConnectionRegistry.feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch()`
+现在补齐 receive-to-pending-work-to-deadline 的无 output socket loop 步骤，并在
+receive 或 timer 副作用前同样预检查 receive 与 deadline scratch。
 `EndpointConnectionRegistry.drainDatagramsAcrossConnectionsWithScratch()` 现在补齐
 对应的 bounded installed-key output drain；它保留跨 record round-robin polling，并让
 dynamic registry 在 output 副作用前失败。
