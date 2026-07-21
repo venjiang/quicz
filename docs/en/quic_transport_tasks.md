@@ -928,6 +928,10 @@ registry-owned receive views.
 `EndpointConnectionRegistry.drainDatagramsAcrossConnectionsWithScratch()` now
 adds the matching bounded installed-key output drain, preserving round-robin
 record polling while failing dynamic registries before output side effects.
+`EndpointConnectionRegistry.processPendingWorkAndDrainDatagramsWithScratch()`
+now exposes the combined pending-work sweep plus bounded output drain as one
+scratch-only registry step, checking receive and poll scratch before timer or
+recovery side effects.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first

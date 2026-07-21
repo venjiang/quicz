@@ -741,6 +741,9 @@ closed record。
 `EndpointConnectionRegistry.drainDatagramsAcrossConnectionsWithScratch()` 现在补齐
 对应的 bounded installed-key output drain；它保留跨 record round-robin polling，并让
 dynamic registry 在 output 副作用前失败。
+`EndpointConnectionRegistry.processPendingWorkAndDrainDatagramsWithScratch()`
+现在把 pending-work sweep 和 bounded output drain 组合成一个 scratch-only registry
+step，并在 timer 或 recovery 副作用前同时检查 receive 与 poll scratch。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、

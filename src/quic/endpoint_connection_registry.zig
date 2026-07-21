@@ -399,6 +399,16 @@ pub fn EndpointConnectionRegistry(
             comptime destination_connection_id: *const fn (*const Record) []const u8,
             comptime source_connection_id: *const fn (*const Record) []const u8,
         ) root.Error!root.EndpointPendingWorkSweepDatagramDrainResult {
+            if (self.receive_view_scratch != null and self.poll_view_scratch != null) {
+                return self.processPendingWorkAndDrainDatagramsWithScratch(
+                    lifecycle,
+                    now_millis,
+                    space,
+                    out,
+                    destination_connection_id,
+                    source_connection_id,
+                );
+            }
             const pending_work = try self.processPendingWork(
                 lifecycle,
                 allocator,
@@ -438,6 +448,45 @@ pub fn EndpointConnectionRegistry(
             return .{
                 .pending_work = pending_work,
                 .drain = drain,
+            };
+        }
+
+        /// Sweep pending work and drain installed-key output using registry scratch storage.
+        ///
+        /// This fixed-capacity form checks both receive and poll scratch before
+        /// servicing pending work, so scratch availability failures cannot
+        /// occur after timer or recovery side effects.
+        pub fn processPendingWorkAndDrainDatagramsWithScratch(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+            out: []root.EndpointPolledDatagramResult,
+            comptime destination_connection_id: *const fn (*const Record) []const u8,
+            comptime source_connection_id: *const fn (*const Record) []const u8,
+        ) root.Error!root.EndpointPendingWorkSweepDatagramDrainResult {
+            _ = self.receive_view_scratch orelse return error.BufferTooSmall;
+            _ = self.poll_view_scratch orelse return error.BufferTooSmall;
+            const pending_work = try self.processPendingWorkWithScratch(
+                lifecycle,
+                now_millis,
+            );
+            if (pending_work.recovery_serviced_count == 0) {
+                return .{
+                    .pending_work = pending_work,
+                    .drain = .{},
+                };
+            }
+            return .{
+                .pending_work = pending_work,
+                .drain = try self.drainDatagramsAcrossConnectionsWithScratch(
+                    lifecycle,
+                    now_millis,
+                    space,
+                    out,
+                    destination_connection_id,
+                    source_connection_id,
+                ),
             };
         }
 
@@ -861,9 +910,16 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
         TestRecord.destinationConnectionId,
         TestRecord.sourceConnectionId,
     )) == null);
-    const pending_drain = try registry.processPendingWorkAndDrainDatagrams(
+    try std.testing.expectError(error.BufferTooSmall, dynamic_registry.processPendingWorkAndDrainDatagramsWithScratch(
         &lifecycle,
-        no_allocation_allocator.allocator(),
+        0,
+        .application,
+        &due_datagrams,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    ));
+    const pending_drain = try registry.processPendingWorkAndDrainDatagramsWithScratch(
+        &lifecycle,
         0,
         .application,
         &due_datagrams,
