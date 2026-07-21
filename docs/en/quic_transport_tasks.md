@@ -1724,6 +1724,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   provides the single-output companion to the bounded drain step while
   preserving the same scratch preflight and pending-work output trigger.
 
+- 2026-07-21: Added scratch-backed server route-bound installed-key receive
+  poll. `Tls13ServerEndpoint.feedInstalledKeyDatagramWithRoutePathWithScratch()`
+  preserves the existing path-update, stateless reset, and close-on-error
+  route-bound output behavior while selecting endpoint deadlines from
+  registry-owned scratch.
+
 - 2026-07-20: Extended bounded server endpoint scratch paths to pending work
   and receive steps. Fixed-capacity registries can now use scratch-backed
   pending-work sweep, route-bound output polling/draining, and server

@@ -1292,6 +1292,55 @@ pub fn Tls13ServerEndpoint(
             );
         }
 
+        /// Route, process, and poll one installed-key datagram using deadline scratch.
+        ///
+        /// This preserves `feedInstalledKeyDatagramWithRoutePath` semantics for
+        /// socket-loop callers that preallocate endpoint deadline views.
+        pub fn feedInstalledKeyDatagramWithRoutePathWithScratch(
+            self: *Self,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!InstalledKeyDatagramRoutePollResult {
+            _ = try self.records.nextDeadlineWithScratch(&self.lifecycle);
+            const action = try self.lifecycle.feedDatagram(
+                options.out,
+                path,
+                datagram,
+                options.unpredictable_prefix,
+                options.supported_versions,
+            );
+            const route = switch (action) {
+                .routed => |value| value,
+                .accept_initial => |initial| return .{
+                    .feed = .{ .feed = .{ .accept_initial = initial } },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                },
+                .version_negotiation => |response| return .{
+                    .feed = .{ .feed = .{ .version_negotiation = response } },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                },
+                .stateless_reset => |reset| return .{
+                    .feed = .{ .feed = .{ .stateless_reset = reset } },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                },
+                .dropped => return .{
+                    .feed = .{ .feed = .dropped },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                },
+            };
+            const record = self.records.get(route.connection_id) orelse return error.Internal;
+            return self.processRoutedInstalledKeyDatagramWithRoutePathWithScratch(
+                route,
+                record,
+                path,
+                now_millis,
+                datagram,
+                options,
+            );
+        }
+
         fn processRoutedInstalledKeyDatagramWithRoutePath(
             self: *Self,
             route: endpoint.RouteResult,
@@ -1367,6 +1416,84 @@ pub fn Tls13ServerEndpoint(
                     .path = output_path,
                 } else null,
                 .next_deadline = try self.nextDeadline(self.records.allocator),
+            };
+        }
+
+        fn processRoutedInstalledKeyDatagramWithRoutePathWithScratch(
+            self: *Self,
+            route: endpoint.RouteResult,
+            record: *Record,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!InstalledKeyDatagramRoutePollResult {
+            const connection = connection_of(record);
+            const destination_connection_id = destination_connection_id_of(record);
+            const route_path = try self.lifecycle.currentRoutePath(route.destination_connection_id.asSlice());
+            if (datagram.len != 0 and quic_packet.parseHeaderForm(datagram[0]) == .short) {
+                if (connection.processStatelessResetDatagram(now_millis, datagram)) |sequence_number| {
+                    try self.lifecycle.armRecoveryTimerFromConnection(route.connection_id, connection);
+                    return .{
+                        .feed = .{ .feed = .dropped },
+                        .stateless_reset_sequence_number = sequence_number,
+                        .next_deadline = try self.nextDeadlineWithScratch(),
+                    };
+                }
+            }
+            const feed = self.lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+                route.connection_id,
+                connection,
+                path,
+                now_millis,
+                datagram,
+                options,
+            ) catch |err| {
+                if (err != error.InvalidPacket) return err;
+                const close_datagram = if (connection.connectionState() == .closing) try self.lifecycle.pollDatagram(
+                    route.connection_id,
+                    connection,
+                    now_millis,
+                    .{
+                        .space = .application,
+                        .destination_connection_id = destination_connection_id,
+                    },
+                ) else null;
+                return .{
+                    .feed_error = err,
+                    .datagram = if (close_datagram) |value| .{
+                        .connection_id = route.connection_id,
+                        .datagram = value,
+                        .path = route_path,
+                    } else null,
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                };
+            };
+            switch (feed.feed) {
+                .routed => {},
+                else => return .{
+                    .feed = feed,
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                },
+            }
+            const output_path = feed.selected_output_path orelse route_path;
+            const polled = try self.lifecycle.pollDatagram(
+                route.connection_id,
+                connection,
+                now_millis,
+                .{
+                    .space = .application,
+                    .destination_connection_id = destination_connection_id,
+                },
+            );
+            return .{
+                .feed = feed,
+                .datagram = if (polled) |protected_datagram| .{
+                    .connection_id = route.connection_id,
+                    .datagram = protected_datagram,
+                    .path = output_path,
+                } else null,
+                .next_deadline = try self.nextDeadlineWithScratch(),
             };
         }
 
@@ -5383,6 +5510,44 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
     try std.testing.expectEqual(@as(usize, 0), feed_pending_poll.pending_work.recovery_serviced_count);
     try std.testing.expect(feed_pending_poll.datagram == null);
     try std.testing.expect(feed_pending_poll.next_deadline == null);
+
+    try client.sendPing();
+    const route_poll_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(9, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(route_poll_datagram);
+    try std.testing.expectError(error.BufferTooSmall, dynamic_endpoint.feedInstalledKeyDatagramWithRoutePathWithScratch(
+        path,
+        10,
+        route_poll_datagram,
+        .{
+            .space = .application,
+            .out = &dynamic_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+    ));
+    const route_poll = try endpoint_owner.feedInstalledKeyDatagramWithRoutePathWithScratch(
+        path,
+        10,
+        route_poll_datagram,
+        .{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+    );
+    const route_poll_feed = route_poll.feed orelse return error.TestUnexpectedResult;
+    const route_poll_route = switch (route_poll_feed.feed) {
+        .routed => |route_poll_route| route_poll_route,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(record.handle, route_poll_route.connection_id);
+    if (route_poll.datagram) |polled| {
+        defer std.testing.allocator.free(polled.datagram);
+        try std.testing.expectEqual(record.handle, polled.connection_id);
+        try std.testing.expect(polled.path.eql(path));
+    }
+    try std.testing.expect(route_poll.next_deadline == null);
 
     const fixed_bit_clear = [_]u8{ 0, 0, 0 };
     var scratch: [64]u8 = undefined;

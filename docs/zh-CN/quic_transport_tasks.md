@@ -1500,6 +1500,12 @@ close 和 route cleanup 事件。
   作为 bounded drain 的单输出 companion，保留相同 scratch preflight 和
   pending-work output trigger。
 
+- 2026-07-21：新增 server route-bound installed-key receive poll 的
+  scratch-backed 入口。
+  `Tls13ServerEndpoint.feedInstalledKeyDatagramWithRoutePathWithScratch()`
+  保留现有 path-update、stateless reset 和 close-on-error 的 route-bound output
+  行为，同时用 registry-owned scratch 选择 endpoint deadline。
+
 - 2026-07-20：把有界 server endpoint scratch 路径扩展到 pending work 与
   receive step。fixed-capacity registry 现在可以不传 allocator 就执行 scratch-backed
   pending-work sweep、route-bound output poll/drain 和 server receive-step pending drain；
