@@ -792,6 +792,65 @@ pub fn EndpointConnectionRegistry(
             );
         }
 
+        /// Classify one installed-key datagram and return the next live deadline.
+        pub fn feedDatagramWithInstalledKeysAndSelectNextDeadline(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            allocator: std.mem.Allocator,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!root.EndpointFeedInstalledKeyDatagramNextDeadlineResult {
+            if (self.receive_view_scratch != null and self.deadline_view_scratch != null) {
+                return self.feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch(
+                    lifecycle,
+                    path,
+                    now_millis,
+                    datagram,
+                    options,
+                );
+            }
+            return .{
+                .feed = try self.feedDatagramWithInstalledKeys(
+                    lifecycle,
+                    allocator,
+                    path,
+                    now_millis,
+                    datagram,
+                    options,
+                ),
+                .next_deadline = try self.nextDeadline(lifecycle, allocator),
+            };
+        }
+
+        /// Classify one installed-key datagram and select the next deadline using registry scratch.
+        ///
+        /// Fixed-capacity endpoint owners can use this no-output receive step
+        /// without caller-managed receive or deadline views. Missing scratch is
+        /// reported before datagram classification can mutate endpoint state.
+        pub fn feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!root.EndpointFeedInstalledKeyDatagramNextDeadlineResult {
+            _ = self.receive_view_scratch orelse return error.BufferTooSmall;
+            _ = self.deadline_view_scratch orelse return error.BufferTooSmall;
+            return .{
+                .feed = try self.feedDatagramWithInstalledKeysWithScratch(
+                    lifecycle,
+                    path,
+                    now_millis,
+                    datagram,
+                    options,
+                ),
+                .next_deadline = try self.nextDeadlineWithScratch(lifecycle),
+            };
+        }
+
         /// Classify and process one installed-key datagram using registry-owned receive scratch.
         ///
         /// Fixed-capacity endpoint owners can use this to avoid per-receive
@@ -924,6 +983,32 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
         },
     );
     try std.testing.expect(feed == .dropped);
+    try std.testing.expectError(error.BufferTooSmall, dynamic_registry.feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch(
+        &lifecycle,
+        feed_path,
+        0,
+        &.{0x40},
+        .{
+            .space = .application,
+            .out = &endpoint_output,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &.{.v1},
+        },
+    ));
+    const feed_deadline = try registry.feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch(
+        &lifecycle,
+        feed_path,
+        0,
+        &.{0x40},
+        .{
+            .space = .application,
+            .out = &endpoint_output,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &.{.v1},
+        },
+    );
+    try std.testing.expect(feed_deadline.feed == .dropped);
+    try std.testing.expect(feed_deadline.next_deadline == null);
 
     var due_datagrams: [1]root.EndpointPolledDatagramResult = undefined;
     try std.testing.expect((try registry.processDueDeadlineAndDrainDatagrams(

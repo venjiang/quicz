@@ -925,6 +925,10 @@ before filling registry-owned poll views.
 extends that fixed-capacity contract to installed-key receive classification:
 dynamic registries fail before receive side effects, while bounded owners reuse
 registry-owned receive views.
+`EndpointConnectionRegistry.feedDatagramWithInstalledKeysAndSelectNextDeadlineWithScratch()`
+now combines installed-key receive classification with next-deadline selection
+for fixed-capacity no-output socket loops, prechecking receive and deadline
+scratch before receive side effects.
 `EndpointConnectionRegistry.drainDatagramsAcrossConnectionsWithScratch()` now
 adds the matching bounded installed-key output drain, preserving round-robin
 record polling while failing dynamic registries before output side effects.
