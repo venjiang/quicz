@@ -914,6 +914,10 @@ caller-supplied record, drain route-bound output, sweep pending work, and select
 the next deadline without allocator-backed registry views. The scratch path
 preflights registry scratch before packet processing, so dynamic registries
 fail with `BufferTooSmall` before taking record ownership or installing routes.
+`EndpointConnectionRegistry.processDueDeadlineAndDrainDatagramsWithScratch()`
+now exposes the same scratch-only contract at the registry layer: fixed-capacity
+owners can service due timers and bounded recovery output from registry-owned
+poll views, while dynamic registries fail before timer side effects.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first

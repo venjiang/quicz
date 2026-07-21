@@ -495,27 +495,55 @@ pub fn EndpointConnectionRegistry(
             comptime destination_connection_id: *const fn (*const Record) []const u8,
             comptime source_connection_id: *const fn (*const Record) []const u8,
         ) root.Error!?root.EndpointDueWorkDatagramDrainResult {
-            _ = try self.removeClosedRecords(lifecycle);
-            var result: ?root.EndpointDueWorkDatagramDrainResult = null;
-            if (self.poll_view_scratch) |views| {
-                result = try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
-                    try self.fillPollViews(views, destination_connection_id, source_connection_id),
+            if (self.poll_view_scratch != null) {
+                return self.processDueDeadlineAndDrainDatagramsWithScratch(
+                    lifecycle,
                     now_millis,
                     out,
-                );
-            } else {
-                const views = try self.pollViews(
-                    allocator,
                     destination_connection_id,
                     source_connection_id,
                 );
-                defer allocator.free(views);
-                result = try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
-                    views,
-                    now_millis,
-                    out,
-                );
             }
+            _ = try self.removeClosedRecords(lifecycle);
+            const views = try self.pollViews(
+                allocator,
+                destination_connection_id,
+                source_connection_id,
+            );
+            defer allocator.free(views);
+            const result = try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
+                views,
+                now_millis,
+                out,
+            );
+            if (result) |due_work| {
+                if (due_work.pending_work.idle_retired != null or due_work.pending_work.close_retired != null) {
+                    self.remove(due_work.deadline.connection_id) catch return error.Internal;
+                }
+            }
+            return result;
+        }
+
+        /// Service the earliest due lifecycle deadline using registry-owned scratch storage.
+        ///
+        /// This is the fixed-capacity form for event loops created with
+        /// `initWithCapacity()`. Dynamic registries without poll scratch return
+        /// `BufferTooSmall` before servicing timers or emitting recovery output.
+        pub fn processDueDeadlineAndDrainDatagramsWithScratch(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            now_millis: i64,
+            out: []root.EndpointPolledDatagramResult,
+            comptime destination_connection_id: *const fn (*const Record) []const u8,
+            comptime source_connection_id: *const fn (*const Record) []const u8,
+        ) root.Error!?root.EndpointDueWorkDatagramDrainResult {
+            const views = self.poll_view_scratch orelse return error.BufferTooSmall;
+            _ = try self.removeClosedRecords(lifecycle);
+            const result = try lifecycle.processDueDeadlineAcrossConnectionsAndDrainDatagrams(
+                try self.fillPollViews(views, destination_connection_id, source_connection_id),
+                now_millis,
+                out,
+            );
             if (result) |due_work| {
                 if (due_work.pending_work.idle_retired != null or due_work.pending_work.close_retired != null) {
                     self.remove(due_work.deadline.connection_id) catch return error.Internal;
@@ -1058,12 +1086,16 @@ test "EndpointConnectionRegistry removes record after due idle retirement" {
     try std.testing.expectError(error.BufferTooSmall, dynamic_registry.nextDeadlineWithScratch(&lifecycle));
     try std.testing.expectError(error.BufferTooSmall, dynamic_registry.processPendingWorkWithScratch(&lifecycle, 19));
 
-    var no_allocation_storage: [0]u8 = .{};
-    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
     var out: [1]root.EndpointPolledDatagramResult = undefined;
-    try std.testing.expect((try registry.processDueDeadlineAndDrainDatagrams(
+    try std.testing.expectError(error.BufferTooSmall, dynamic_registry.processDueDeadlineAndDrainDatagramsWithScratch(
         &lifecycle,
-        no_allocation_allocator.allocator(),
+        19,
+        &out,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    ));
+    try std.testing.expect((try registry.processDueDeadlineAndDrainDatagramsWithScratch(
+        &lifecycle,
         19,
         &out,
         TestRecord.destinationConnectionId,
@@ -1072,9 +1104,8 @@ test "EndpointConnectionRegistry removes record after due idle retirement" {
     try std.testing.expectEqual(@as(usize, 1), registry.count());
     try std.testing.expectEqual(@as(usize, 1), lifecycle.routeCount());
 
-    const due = (try registry.processDueDeadlineAndDrainDatagrams(
+    const due = (try registry.processDueDeadlineAndDrainDatagramsWithScratch(
         &lifecycle,
-        no_allocation_allocator.allocator(),
         20,
         &out,
         TestRecord.destinationConnectionId,

@@ -728,6 +728,10 @@ record 不会阻塞后续 live route-bound protected output。
 fresh Initial 分类、接纳 caller-supplied record、drain route-bound output、sweep pending
 work 和选择下一 deadline。该 scratch 路径会在 packet processing 前预检查 registry
 scratch，因此动态 registry 会在接管 record 或安装 route 前以 `BufferTooSmall` 失败。
+`EndpointConnectionRegistry.processDueDeadlineAndDrainDatagramsWithScratch()`
+现在也在 registry 层提供同样的 scratch-only 契约：固定容量 owner 可用 registry-owned
+poll view service due timer 并 bounded drain recovery output；动态 registry 会在 timer
+产生副作用前失败。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、
