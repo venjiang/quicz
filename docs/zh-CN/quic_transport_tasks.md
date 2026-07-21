@@ -738,6 +738,9 @@ closed record。
 `EndpointConnectionRegistry.feedDatagramWithInstalledKeysWithScratch()` 现在把该
 固定容量契约扩展到 installed-key receive classification：dynamic registry 会在 receive
 副作用前失败，有界 owner 复用 registry-owned receive view。
+`EndpointConnectionRegistry.drainDatagramsAcrossConnectionsWithScratch()` 现在补齐
+对应的 bounded installed-key output drain；它保留跨 record round-robin polling，并让
+dynamic registry 在 output 副作用前失败。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、

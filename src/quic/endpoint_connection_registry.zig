@@ -411,13 +411,14 @@ pub fn EndpointConnectionRegistry(
                 };
             }
 
-            const drain = if (self.poll_view_scratch) |views|
-                self.drainDatagramsAcrossConnectionViews(
+            const drain = if (self.poll_view_scratch != null)
+                try self.drainDatagramsAcrossConnectionsWithScratch(
                     lifecycle,
-                    try self.fillPollViews(views, destination_connection_id, source_connection_id),
                     now_millis,
                     space,
                     out,
+                    destination_connection_id,
+                    source_connection_id,
                 )
             else drain: {
                 const views = try self.pollViews(
@@ -438,6 +439,31 @@ pub fn EndpointConnectionRegistry(
                 .pending_work = pending_work,
                 .drain = drain,
             };
+        }
+
+        /// Drain installed-key datagrams using registry-owned poll scratch storage.
+        ///
+        /// Dynamic registries without poll scratch return `BufferTooSmall`
+        /// before polling records, preserving fixed-capacity event-loop
+        /// all-or-nothing behavior around scratch availability.
+        pub fn drainDatagramsAcrossConnectionsWithScratch(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+            out: []root.EndpointPolledDatagramResult,
+            comptime destination_connection_id: *const fn (*const Record) []const u8,
+            comptime source_connection_id: *const fn (*const Record) []const u8,
+        ) root.Error!root.EndpointDatagramDrainResult {
+            const views = self.poll_view_scratch orelse return error.BufferTooSmall;
+            _ = try self.removeClosedRecords(lifecycle);
+            return self.drainDatagramsAcrossConnectionViews(
+                lifecycle,
+                try self.fillPollViews(views, destination_connection_id, source_connection_id),
+                now_millis,
+                space,
+                out,
+            );
         }
 
         fn drainDatagramsAcrossConnectionViews(
@@ -2098,34 +2124,35 @@ test "EndpointConnectionRegistry rotates cross-record output polling" {
     try registry.adopt(second_record.handle, second_record);
     second_owned = false;
 
-    var no_allocation_storage: [0]u8 = .{};
-    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
-    const first = (try registry.pollDatagramAcrossConnections(
+    var dynamic_registry = Registry.init(std.testing.allocator);
+    defer dynamic_registry.deinit();
+    var drain_out: [2]root.EndpointPolledDatagramResult = undefined;
+    try std.testing.expectError(error.BufferTooSmall, dynamic_registry.drainDatagramsAcrossConnectionsWithScratch(
         &lifecycle,
-        no_allocation_allocator.allocator(),
         10,
         .application,
+        &drain_out,
         TestRecord.destinationConnectionId,
         TestRecord.sourceConnectionId,
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(first.datagram);
-    try std.testing.expect(first.connection_id == first_record.handle or first.connection_id == second_record.handle);
-
-    const second = (try registry.pollDatagramAcrossConnections(
+    ));
+    const drain = try registry.drainDatagramsAcrossConnectionsWithScratch(
         &lifecycle,
-        no_allocation_allocator.allocator(),
-        11,
+        10,
         .application,
+        &drain_out,
         TestRecord.destinationConnectionId,
         TestRecord.sourceConnectionId,
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(second.datagram);
-    try std.testing.expect(second.connection_id == first_record.handle or second.connection_id == second_record.handle);
-    try std.testing.expect(second.connection_id != first.connection_id);
+    );
+    defer std.testing.allocator.free(drain_out[0].datagram);
+    defer std.testing.allocator.free(drain_out[1].datagram);
+    try std.testing.expectEqual(@as(usize, 2), drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), drain.first_error);
+    try std.testing.expect(drain_out[0].connection_id == first_record.handle or drain_out[0].connection_id == second_record.handle);
+    try std.testing.expect(drain_out[1].connection_id == first_record.handle or drain_out[1].connection_id == second_record.handle);
+    try std.testing.expect(drain_out[1].connection_id != drain_out[0].connection_id);
 
-    try std.testing.expect((try registry.pollDatagramAcrossConnections(
+    try std.testing.expect((try registry.pollDatagramAcrossConnectionsWithScratch(
         &lifecycle,
-        no_allocation_allocator.allocator(),
         12,
         .application,
         TestRecord.destinationConnectionId,
