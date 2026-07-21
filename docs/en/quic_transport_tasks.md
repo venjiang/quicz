@@ -1696,6 +1696,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   allocating on every event-loop iteration. Tests cover undersized storage and
   correct idle-deadline selection.
 
+- 2026-07-21: Added scratch-backed server pending-work wakeup selection.
+  `Tls13ServerEndpoint.processPendingWorkAndSelectNextDeadlineWithScratch()`
+  lets fixed-capacity server loops sweep pending work and select the next
+  deadline from registry-owned scratch; dynamic endpoints fail with
+  `BufferTooSmall` before pending-work side effects.
+
 - 2026-07-20: Extended bounded server endpoint scratch paths to pending work
   and receive steps. Fixed-capacity registries can now use scratch-backed
   pending-work sweep, route-bound output polling/draining, and server

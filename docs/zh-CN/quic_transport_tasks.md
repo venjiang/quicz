@@ -1472,6 +1472,12 @@ close 和 route cleanup 事件。
   view storage 选择下一次 endpoint-visible wakeup，避免每轮 event-loop 都分配。
   测试覆盖 storage 太小和正确 idle-deadline 选择。
 
+- 2026-07-21：新增 server pending-work wakeup 的 scratch-backed 入口。
+  `Tls13ServerEndpoint.processPendingWorkAndSelectNextDeadlineWithScratch()`
+  允许 fixed-capacity server loop 用 registry-owned scratch 完成 pending-work
+  sweep 和下一 deadline 选择；dynamic endpoint 会在 pending-work 副作用前以
+  `BufferTooSmall` 失败。
+
 - 2026-07-20：把有界 server endpoint scratch 路径扩展到 pending work 与
   receive step。fixed-capacity registry 现在可以不传 allocator 就执行 scratch-backed
   pending-work sweep、route-bound output poll/drain 和 server receive-step pending drain；

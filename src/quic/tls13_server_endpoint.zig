@@ -500,6 +500,17 @@ pub fn Tls13ServerEndpoint(
             );
         }
 
+        /// Sweep pending work and select the next endpoint-owned deadline using scratch storage.
+        pub fn processPendingWorkAndSelectNextDeadlineWithScratch(
+            self: *Self,
+            now_millis: i64,
+        ) root.Error!root.EndpointPendingWorkNextDeadlineResult {
+            return self.records.processPendingWorkAndSelectNextDeadlineWithScratch(
+                &self.lifecycle,
+                now_millis,
+            );
+        }
+
         /// Sweep pending work across endpoint-owned records and drain route-bound output.
         pub fn processPendingWorkAndDrainDatagramsWithRoutePath(
             self: *Self,
@@ -7472,6 +7483,12 @@ test "Tls13ServerEndpoint sweeps pending work and keeps next live deadline" {
         .max_stateless_reset_tokens = 2,
     });
     defer endpoint_owner.deinit();
+    var dynamic_endpoint = TestEndpoint.init(std.testing.allocator);
+    defer dynamic_endpoint.deinit();
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        dynamic_endpoint.processPendingWorkAndSelectNextDeadlineWithScratch(20),
+    );
 
     var empty_backend = EmptyBackend{};
     const path = endpoint.Udp4Tuple{
@@ -7566,12 +7583,7 @@ test "Tls13ServerEndpoint sweeps pending work and keeps next live deadline" {
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.idle_timeout, first_deadline.kind);
     try std.testing.expectEqual(@as(i64, 20), first_deadline.deadline_millis);
 
-    var no_allocation_storage: [0]u8 = .{};
-    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
-    const swept = try endpoint_owner.processPendingWorkAndSelectNextDeadline(
-        no_allocation_allocator.allocator(),
-        20,
-    );
+    const swept = try endpoint_owner.processPendingWorkAndSelectNextDeadlineWithScratch(20);
     try std.testing.expectEqual(@as(usize, 1), swept.pending_work.idle_retired_count);
     try std.testing.expectEqual(@as(usize, 0), swept.pending_work.close_retired_count);
     try std.testing.expect(endpoint_owner.records.get(91) == null);
