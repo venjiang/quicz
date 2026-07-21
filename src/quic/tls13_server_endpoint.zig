@@ -123,6 +123,18 @@ pub fn Tls13ServerEndpoint(
             next_deadline: ?root.EndpointConnectionDeadline = null,
         };
 
+        /// Installed-key receive plus pending-work result with one route-bound output poll.
+        pub const FeedPendingWorkDatagramPathPollResult = struct {
+            /// Receive classification and processing result.
+            feed: root.EndpointFeedInstalledKeyDatagramResult,
+            /// Pending-work actions applied after receive processing.
+            pending_work: root.EndpointPendingWorkSweepResult,
+            /// Protected output emitted after pending recovery work, if any.
+            datagram: ?DatagramPathResult = null,
+            /// Next endpoint-visible deadline after receive, pending work, and output poll.
+            next_deadline: ?root.EndpointConnectionDeadline = null,
+        };
+
         /// Result from draining active-record output with committed route paths.
         pub const DatagramPathDrainResult = struct {
             /// Number of initialized entries written to the caller-provided output slice.
@@ -1144,6 +1156,43 @@ pub fn Tls13ServerEndpoint(
                 .pending_work = pending_drain.pending_work,
                 .drain = pending_drain.drain,
                 .next_deadline = pending_drain.next_deadline,
+            };
+        }
+
+        /// Route one installed-key datagram, sweep pending work, and poll one route-bound output using scratch storage.
+        pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagramWithRoutePathWithScratch(
+            self: *Self,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+            space: root.EndpointInstalledKeyDatagramSpace,
+        ) root.EndpointProtectedDatagramError!FeedPendingWorkDatagramPathPollResult {
+            _ = self.records.receive_view_scratch orelse return error.BufferTooSmall;
+            _ = self.records.deadline_view_scratch orelse return error.BufferTooSmall;
+            _ = self.records.poll_view_scratch orelse return error.BufferTooSmall;
+            const feed = try self.feedDatagramWithInstalledKeysOwned(
+                path,
+                now_millis,
+                datagram,
+                options,
+            );
+            const pending_work = try self.records.processPendingWorkWithScratch(
+                &self.lifecycle,
+                now_millis,
+            );
+            const datagram_out = if (pending_work.recovery_serviced_count == 0)
+                null
+            else
+                try self.pollDatagramWithRoutePathWithScratch(
+                    now_millis,
+                    space,
+                );
+            return .{
+                .feed = feed,
+                .pending_work = pending_work,
+                .datagram = datagram_out,
+                .next_deadline = try self.nextDeadlineWithScratch(),
             };
         }
 
@@ -5296,6 +5345,44 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
     try std.testing.expectEqual(@as(?root.Error, null), feed_pending_drain.drain.first_error);
     try std.testing.expectEqual(@as(?endpoint.RouteError, null), feed_pending_drain.drain.first_route_error);
     try std.testing.expect(feed_pending_drain.next_deadline == null);
+
+    try client.sendPing();
+    const poll_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(7, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(poll_datagram);
+    try std.testing.expectError(error.BufferTooSmall, dynamic_endpoint.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagramWithRoutePathWithScratch(
+        path,
+        8,
+        poll_datagram,
+        .{
+            .space = .application,
+            .out = &dynamic_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        .application,
+    ));
+    const feed_pending_poll = try endpoint_owner.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagramWithRoutePathWithScratch(
+        path,
+        8,
+        poll_datagram,
+        .{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        .application,
+    );
+    const poll_route = switch (feed_pending_poll.feed) {
+        .routed => |poll_route| poll_route,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(record.handle, poll_route.connection_id);
+    try std.testing.expectEqual(@as(usize, 0), feed_pending_poll.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), feed_pending_poll.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), feed_pending_poll.pending_work.recovery_serviced_count);
+    try std.testing.expect(feed_pending_poll.datagram == null);
+    try std.testing.expect(feed_pending_poll.next_deadline == null);
 
     const fixed_bit_clear = [_]u8{ 0, 0, 0 };
     var scratch: [64]u8 = undefined;

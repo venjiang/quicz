@@ -1719,6 +1719,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   preflights receive, deadline, and poll scratch before receive, then reuses
   the existing route-bound bounded drain after pending work.
 
+- 2026-07-21: Added scratch-backed server receive-to-pending-work route-bound
+  poll. `Tls13ServerEndpoint.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagramWithRoutePathWithScratch()`
+  provides the single-output companion to the bounded drain step while
+  preserving the same scratch preflight and pending-work output trigger.
+
 - 2026-07-20: Extended bounded server endpoint scratch paths to pending work
   and receive steps. Fixed-capacity registries can now use scratch-backed
   pending-work sweep, route-bound output polling/draining, and server
