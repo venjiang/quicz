@@ -1512,6 +1512,12 @@ close 和 route cleanup 事件。
   作为 route-bound receive poll 的 bounded-output companion，保留同样的
   stateless-reset 和 close-on-error 行为，并用 scratch 选择 deadline。
 
+- 2026-07-21：新增 server routed datagram dispatch 的 scratch-backed
+  入口。`Tls13ServerEndpoint.processRoutedDatagramWithRoutePathWithScratch()`
+  的 short-header 分支复用 scratch-backed route-bound installed-key
+  receive/poll，因此 socket loop 可以先分类一次，再无 allocator-backed deadline
+  view 地 dispatch short packet。
+
 - 2026-07-20：把有界 server endpoint scratch 路径扩展到 pending work 与
   receive step。fixed-capacity registry 现在可以不传 allocator 就执行 scratch-backed
   pending-work sweep、route-bound output poll/drain 和 server receive-step pending drain；

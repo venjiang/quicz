@@ -1736,6 +1736,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   preserving the same stateless-reset and close-on-error behavior with
   scratch-backed deadline selection.
 
+- 2026-07-21: Added scratch-backed server routed datagram dispatch. The
+  short-header branch of `Tls13ServerEndpoint.processRoutedDatagramWithRoutePathWithScratch()`
+  now reuses scratch-backed route-bound installed-key receive/poll handling,
+  so socket loops can classify once and dispatch short packets without
+  allocator-backed deadline views.
+
 - 2026-07-20: Extended bounded server endpoint scratch paths to pending work
   and receive steps. Fixed-capacity registries can now use scratch-backed
   pending-work sweep, route-bound output polling/draining, and server

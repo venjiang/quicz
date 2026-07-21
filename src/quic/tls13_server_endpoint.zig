@@ -2884,6 +2884,50 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Dispatch one already-routed UDP datagram using scratch-backed short-packet handling.
+        ///
+        /// Long-header processing still uses the caller-provided CRYPTO scratch
+        /// buffers. Short-header installed-key processing uses registry-owned
+        /// deadline scratch for the route-bound receive/poll result.
+        pub fn processRoutedDatagramWithRoutePathWithScratch(
+            self: *Self,
+            route: endpoint.RouteResult,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            installed_key_options: root.EndpointFeedInstalledKeyDatagramOptions,
+            scratch: []u8,
+            initial_token: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!RoutedDatagramProcessPathResult {
+            if (datagram.len == 0) return error.InvalidPacket;
+            if ((datagram[0] & 0x40) == 0) return error.InvalidPacket;
+            return switch (quic_packet.parseHeaderForm(datagram[0])) {
+                .long => .{ .long = try self.processLongDatagramWithRoutePath(
+                    route.connection_id,
+                    path,
+                    now_millis,
+                    datagram,
+                    scratch,
+                    initial_token,
+                    out,
+                    handshake_out,
+                ) },
+                .short => short: {
+                    const record = self.records.get(route.connection_id) orelse return error.Internal;
+                    break :short .{ .installed_key = try self.processRoutedInstalledKeyDatagramWithRoutePathWithScratch(
+                        route,
+                        record,
+                        path,
+                        now_millis,
+                        datagram,
+                        installed_key_options,
+                    ) };
+                },
+            };
+        }
+
         /// Dispatch one already-routed UDP datagram and drain bounded output.
         pub fn processRoutedDatagramAndDrainWithRoutePath(
             self: *Self,
@@ -5722,6 +5766,46 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
     }
     try std.testing.expectEqual(@as(?root.Error, null), route_drain.drain.first_error);
     try std.testing.expect(route_drain.next_deadline == null);
+
+    try client.sendPing();
+    const routed_dispatch_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(13, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(routed_dispatch_datagram);
+    const dispatch_route = try endpoint_owner.routeDatagram(path, routed_dispatch_datagram);
+    var process_scratch: [64]u8 = undefined;
+    var process_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var process_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    const routed_dispatch = try endpoint_owner.processRoutedDatagramWithRoutePathWithScratch(
+        dispatch_route,
+        path,
+        14,
+        routed_dispatch_datagram,
+        .{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &process_scratch,
+        &[_]u8{},
+        &process_initial_out,
+        &process_handshake_out,
+    );
+    const routed_dispatch_short = switch (routed_dispatch) {
+        .installed_key => |installed_key| installed_key,
+        else => return error.TestUnexpectedResult,
+    };
+    const routed_dispatch_feed = routed_dispatch_short.feed orelse return error.TestUnexpectedResult;
+    const routed_dispatch_route = switch (routed_dispatch_feed.feed) {
+        .routed => |routed_dispatch_route| routed_dispatch_route,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(record.handle, routed_dispatch_route.connection_id);
+    if (routed_dispatch_short.datagram) |polled| {
+        defer std.testing.allocator.free(polled.datagram);
+        try std.testing.expectEqual(record.handle, polled.connection_id);
+        try std.testing.expect(polled.path.eql(path));
+    }
+    try std.testing.expect(routed_dispatch_short.next_deadline == null);
 
     const fixed_bit_clear = [_]u8{ 0, 0, 0 };
     var scratch: [64]u8 = undefined;
