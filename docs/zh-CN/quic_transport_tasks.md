@@ -1538,6 +1538,12 @@ close 和 route cleanup 事件。
   现在先复用 `processDatagramAndDrainWithRoutePathWithScratch()`，再 sweep pending
   work，因此 short-packet receive-step 不再回退到 allocator-backed deadline view。
 
+- 2026-07-21：将 Initial-admission receive-step scratch 接到 classified
+  datagram scratch drain。
+  `Tls13ServerEndpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmissionWithScratch()`
+  现在让 routed short-header packet 保持在 scratch receive/drain 路径上，并且只有
+  datagram 真正作为 Initial 接受时才接管调用方提供的 Initial record。
+
 - 2026-07-20：把有界 server endpoint scratch 路径扩展到 pending work 与
   receive step。fixed-capacity registry 现在可以不传 allocator 就执行 scratch-backed
   pending-work sweep、route-bound output poll/drain 和 server receive-step pending drain；

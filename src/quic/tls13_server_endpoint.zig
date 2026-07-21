@@ -3300,7 +3300,7 @@ pub fn Tls13ServerEndpoint(
             pending_out: []DatagramPathResult,
         ) (root.EndpointProtectedDatagramError || root.EndpointProtectedInitialError || root.Error || endpoint.RouteError)!InitialAdmissionDatagramStepPathResult {
             try self.ensureReceiveStepScratch();
-            const process = try self.processDatagramAndDrainWithRoutePath(
+            const process = try self.processDatagramAndDrainWithRoutePathWithScratch(
                 path,
                 now_millis,
                 datagram,
@@ -6132,6 +6132,102 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
     try std.testing.expectEqual(@as(?root.Error, null), receive_step.pending_drain.first_error);
     try std.testing.expectEqual(@as(?endpoint.RouteError, null), receive_step.pending_drain.first_route_error);
     try std.testing.expect(receive_step.next_deadline == null);
+
+    const admission_record = try std.testing.allocator.create(TestRecord);
+    var admission_record_initialized = false;
+    defer {
+        if (admission_record_initialized) admission_record.deinit();
+        std.testing.allocator.destroy(admission_record);
+    }
+    admission_record.* = .{
+        .handle = 82,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    admission_record_initialized = true;
+
+    try client.sendPing();
+    const admission_step_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(23, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(admission_step_datagram);
+    var admission_step_installed_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    var admission_step_pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    try std.testing.expectError(error.BufferTooSmall, dynamic_endpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmissionWithScratch(
+        path,
+        24,
+        admission_step_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &dynamic_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        admission_record.handle,
+        admission_record,
+        server_dcid,
+        .{ .active_migration_disabled = true },
+        &process_scratch,
+        &[_]u8{},
+        &process_initial_out,
+        &process_handshake_out,
+        &admission_step_installed_out,
+        .application,
+        &admission_step_pending_out,
+    ));
+    const admission_step = try endpoint_owner.receiveDatagramStepWithRoutePathAndInitialRecordAdmissionWithScratch(
+        path,
+        24,
+        admission_step_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        admission_record.handle,
+        admission_record,
+        server_dcid,
+        .{ .active_migration_disabled = true },
+        &process_scratch,
+        &[_]u8{},
+        &process_initial_out,
+        &process_handshake_out,
+        &admission_step_installed_out,
+        .application,
+        &admission_step_pending_out,
+    );
+    const admission_step_routed = switch (admission_step.process) {
+        .routed => |routed| routed,
+        else => return error.TestUnexpectedResult,
+    };
+    const admission_step_short = switch (admission_step_routed) {
+        .installed_key => |installed_key| installed_key,
+        else => return error.TestUnexpectedResult,
+    };
+    const admission_step_feed = admission_step_short.feed orelse return error.TestUnexpectedResult;
+    const admission_step_route = switch (admission_step_feed.feed) {
+        .routed => |admission_step_route| admission_step_route,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(record.handle, admission_step_route.connection_id);
+    try std.testing.expect(admission_step.admission == null);
+    try std.testing.expect(endpoint_owner.records.get(admission_record.handle) == null);
+    for (admission_step_installed_out[0..admission_step_short.drain.datagrams_written]) |drained| {
+        defer std.testing.allocator.free(drained.datagram);
+        try std.testing.expectEqual(record.handle, drained.connection_id);
+        try std.testing.expect(drained.path.eql(path));
+    }
+    try std.testing.expectEqual(@as(?root.Error, null), admission_step_short.drain.first_error);
+    try std.testing.expectEqual(@as(usize, 0), admission_step.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), admission_step.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), admission_step.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), admission_step.pending_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), admission_step.pending_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), admission_step.pending_drain.first_route_error);
+    try std.testing.expect(admission_step.next_deadline == null);
 
     const fixed_bit_clear = [_]u8{ 0, 0, 0 };
     var scratch: [64]u8 = undefined;

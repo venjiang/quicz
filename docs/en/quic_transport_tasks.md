@@ -1766,6 +1766,13 @@ QUIC unless the gap is named and the verification evidence is added here.
   pending work, so short-packet receive-step processing no longer falls back to
   allocator-backed deadline views.
 
+- 2026-07-21: Routed Initial-admission receive-step scratch through classified
+  datagram scratch drain.
+  `Tls13ServerEndpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmissionWithScratch()`
+  now keeps routed short-header packets on the scratch receive/drain path and
+  does not take ownership of the caller-supplied Initial record unless the
+  datagram is actually accepted as Initial.
+
 - 2026-07-20: Extended bounded server endpoint scratch paths to pending work
   and receive steps. Fixed-capacity registries can now use scratch-backed
   pending-work sweep, route-bound output polling/draining, and server
