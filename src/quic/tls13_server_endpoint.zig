@@ -2652,6 +2652,7 @@ pub fn Tls13ServerEndpoint(
             pending_space: root.EndpointInstalledKeyDatagramSpace,
             pending_out: []DatagramPathResult,
         ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!DatagramStepPathResult {
+            try self.ensureReceiveStepScratch();
             const process = try self.processDatagramAndDrainWithRoutePath(
                 path,
                 now_millis,
@@ -2672,6 +2673,78 @@ pub fn Tls13ServerEndpoint(
             );
             return .{
                 .process = process,
+                .pending_work = pending.pending_work,
+                .pending_drain = pending.pending_drain,
+                .next_deadline = pending.next_deadline,
+            };
+        }
+
+        /// Run one bounded server receive step with Initial admission using
+        /// registry scratch storage.
+        ///
+        /// Scratch storage is checked before packet processing so dynamic
+        /// registries cannot return `BufferTooSmall` after taking ownership of
+        /// the caller-supplied `record`.
+        pub fn receiveDatagramStepWithRoutePathAndInitialRecordAdmissionWithScratch(
+            self: *Self,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            unpredictable_prefix: []const u8,
+            supported_versions: []const quic_packet.Version,
+            installed_key_options: root.EndpointFeedInstalledKeyDatagramOptions,
+            connection_id: u64,
+            record: *Record,
+            server_source_connection_id: []const u8,
+            options: endpoint.AcceptedInitialRouteOptions,
+            scratch: []u8,
+            initial_token: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+            installed_key_out: []DatagramPathResult,
+            pending_space: root.EndpointInstalledKeyDatagramSpace,
+            pending_out: []DatagramPathResult,
+        ) (root.EndpointProtectedDatagramError || root.EndpointProtectedInitialError || root.Error || endpoint.RouteError)!InitialAdmissionDatagramStepPathResult {
+            try self.ensureReceiveStepScratch();
+            const process = try self.processDatagramAndDrainWithRoutePath(
+                path,
+                now_millis,
+                datagram,
+                unpredictable_prefix,
+                supported_versions,
+                installed_key_options,
+                scratch,
+                initial_token,
+                out,
+                handshake_out,
+                installed_key_out,
+            );
+            var admission: ?InitialRecordAdmissionAttemptPathResult = null;
+            switch (process) {
+                .accept_initial => |initial| {
+                    admission = try self.tryAcceptInitialRecordWithRoutePath(
+                        connection_id,
+                        record,
+                        now_millis,
+                        initial,
+                        server_source_connection_id,
+                        datagram,
+                        options,
+                        scratch,
+                        out,
+                        handshake_out,
+                    );
+                },
+                else => {},
+            }
+            const pending = try self.sweepPendingWorkAndDrainWithRoutePathWithScratch(
+                now_millis,
+                pending_space,
+                pending_out,
+            );
+            return .{
+                .process = process,
+                .admission = admission,
                 .pending_work = pending.pending_work,
                 .pending_drain = pending.pending_drain,
                 .next_deadline = pending.next_deadline,
@@ -2750,6 +2823,12 @@ pub fn Tls13ServerEndpoint(
                 .pending_drain = pending.pending_drain,
                 .next_deadline = pending.next_deadline,
             };
+        }
+
+        fn ensureReceiveStepScratch(self: *Self) root.Error!void {
+            _ = self.records.deadline_view_scratch orelse return error.BufferTooSmall;
+            _ = self.records.receive_view_scratch orelse return error.BufferTooSmall;
+            _ = self.records.poll_view_scratch orelse return error.BufferTooSmall;
         }
 
         fn sweepPendingWorkAndDrainWithRoutePathWithScratch(
@@ -5297,6 +5376,130 @@ test "Tls13ServerEndpoint pairs accepted Initial output with committed route pat
     try std.testing.expect((try step_endpoint.lifecycle.currentRoutePath(server_scid)).eql(path));
     try std.testing.expectEqual(@as(?root.Error, null), step.pending_drain.first_error);
     try std.testing.expectEqual(@as(?endpoint.RouteError, null), step.pending_drain.first_route_error);
+
+    var scratch_step_endpoint = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer scratch_step_endpoint.deinit();
+    var scratch_step_backend = InitialOutputBackend{};
+    const scratch_step_record = try std.testing.allocator.create(TestRecord);
+    var scratch_step_record_initialized = false;
+    var scratch_step_record_owned_by_test = true;
+    errdefer {
+        if (scratch_step_record_owned_by_test) {
+            if (scratch_step_record_initialized) scratch_step_record.deinit();
+            std.testing.allocator.destroy(scratch_step_record);
+        }
+    }
+    scratch_step_record.* = .{
+        .handle = 86,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = scratch_step_backend.backend(),
+    };
+    scratch_step_record_initialized = true;
+    var scratch_step_classification_out: [256]u8 = undefined;
+    var scratch_step_scratch: [256]u8 = undefined;
+    var scratch_step_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var scratch_step_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var scratch_step_installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    var scratch_step_pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const scratch_step = try scratch_step_endpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmissionWithScratch(
+        path,
+        5,
+        initial_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &scratch_step_classification_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        scratch_step_record.handle,
+        scratch_step_record,
+        server_scid,
+        .{ .active_migration_disabled = true },
+        &scratch_step_scratch,
+        &[_]u8{},
+        &scratch_step_initial_out,
+        &scratch_step_handshake_out,
+        &scratch_step_installed_key_out,
+        .application,
+        &scratch_step_pending_out,
+    );
+    switch (scratch_step.process) {
+        .accept_initial => {},
+        else => return error.TestUnexpectedResult,
+    }
+    const scratch_step_admission = scratch_step.admission orelse return error.TestUnexpectedResult;
+    switch (scratch_step_admission) {
+        .admitted => |scratch_step_admitted| {
+            scratch_step_record_owned_by_test = false;
+            try std.testing.expect(scratch_step_backend.received_initial);
+            try std.testing.expect(scratch_step_admitted.initial.path.eql(path));
+            try std.testing.expectEqual(@as(usize, 1), scratch_step_admitted.initial.accepted.drain.datagrams_written);
+            try std.testing.expectEqual(@as(?root.Error, null), scratch_step_admitted.initial.accepted.drain.first_error);
+            defer std.testing.allocator.free(scratch_step_initial_out[0].datagram);
+            try std.testing.expectEqual(scratch_step_record.handle, scratch_step_initial_out[0].connection_id);
+            try std.testing.expectEqual(@as(?TestEndpoint.CryptoBackendDatagramDrainPathResult, null), scratch_step_admitted.handshake);
+        },
+        .dropped_capacity => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(scratch_step_endpoint.records.get(scratch_step_record.handle) != null);
+    try std.testing.expect((try scratch_step_endpoint.lifecycle.currentRoutePath(server_scid)).eql(path));
+    try std.testing.expectEqual(@as(?root.Error, null), scratch_step.pending_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), scratch_step.pending_drain.first_route_error);
+
+    var dynamic_scratch_endpoint = TestEndpoint.init(std.testing.allocator);
+    defer dynamic_scratch_endpoint.deinit();
+    var dynamic_scratch_backend = InitialOutputBackend{};
+    const dynamic_scratch_record = try std.testing.allocator.create(TestRecord);
+    var dynamic_scratch_record_initialized = false;
+    defer {
+        if (dynamic_scratch_record_initialized) dynamic_scratch_record.deinit();
+        std.testing.allocator.destroy(dynamic_scratch_record);
+    }
+    dynamic_scratch_record.* = .{
+        .handle = 87,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = dynamic_scratch_backend.backend(),
+    };
+    dynamic_scratch_record_initialized = true;
+    var dynamic_scratch_classification_out: [256]u8 = undefined;
+    var dynamic_scratch_scratch: [256]u8 = undefined;
+    var dynamic_scratch_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var dynamic_scratch_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var dynamic_scratch_installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    var dynamic_scratch_pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    try std.testing.expectError(error.BufferTooSmall, dynamic_scratch_endpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmissionWithScratch(
+        path,
+        6,
+        initial_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &dynamic_scratch_classification_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        dynamic_scratch_record.handle,
+        dynamic_scratch_record,
+        server_scid,
+        .{ .active_migration_disabled = true },
+        &dynamic_scratch_scratch,
+        &[_]u8{},
+        &dynamic_scratch_initial_out,
+        &dynamic_scratch_handshake_out,
+        &dynamic_scratch_installed_key_out,
+        .application,
+        &dynamic_scratch_pending_out,
+    ));
+    try std.testing.expect(!dynamic_scratch_backend.received_initial);
+    try std.testing.expect(dynamic_scratch_endpoint.records.get(dynamic_scratch_record.handle) == null);
+    try std.testing.expectEqual(@as(usize, 0), dynamic_scratch_endpoint.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), dynamic_scratch_endpoint.activeConnectionCount());
 
     var full_step_endpoint = try TestEndpoint.initWithCapacity(std.testing.allocator, 0, .{
         .max_routes = 0,

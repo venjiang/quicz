@@ -723,6 +723,11 @@ record 阻塞后续 live protected output。
 `Tls13ServerEndpoint` 的 route-bound 跨 record output polling 现在也会在 route lookup
 前和 `ConnectionClosed` 后执行同样的终态 record skip/retire，因此陈旧 closed server
 record 不会阻塞后续 live route-bound protected output。
+`Tls13ServerEndpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmissionWithScratch()`
+现在可让固定容量 server loop 在不构建 allocator-backed registry view 的情况下完成
+fresh Initial 分类、接纳 caller-supplied record、drain route-bound output、sweep pending
+work 和选择下一 deadline。该 scratch 路径会在 packet processing 前预检查 registry
+scratch，因此动态 registry 会在接管 record 或安装 route 前以 `BufferTooSmall` 失败。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、
