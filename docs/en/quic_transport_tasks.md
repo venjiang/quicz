@@ -1748,6 +1748,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   dispatch while keeping short-packet receive/drain on scratch-backed deadline
   views.
 
+- 2026-07-21: Added scratch-backed server classified datagram dispatch.
+  `Tls13ServerEndpoint.processDatagramWithRoutePathWithScratch()` classifies
+  one UDP datagram, keeps non-routed responses visible, and sends routed
+  short-header packets through the scratch-backed route-bound receive/poll
+  path.
+
 - 2026-07-20: Extended bounded server endpoint scratch paths to pending work
   and receive steps. Fixed-capacity registries can now use scratch-backed
   pending-work sweep, route-bound output polling/draining, and server

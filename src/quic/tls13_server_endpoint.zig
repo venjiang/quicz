@@ -3060,6 +3060,46 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Classify one UDP datagram and process routed packets using scratch-backed short-packet handling.
+        pub fn processDatagramWithRoutePathWithScratch(
+            self: *Self,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            unpredictable_prefix: []const u8,
+            supported_versions: []const quic_packet.Version,
+            installed_key_options: root.EndpointFeedInstalledKeyDatagramOptions,
+            scratch: []u8,
+            initial_token: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+        ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!DatagramProcessPathResult {
+            const action = try self.feedDatagramWithResponsePath(
+                installed_key_options.out,
+                path,
+                datagram,
+                unpredictable_prefix,
+                supported_versions,
+            );
+            return switch (action) {
+                .routed => |route| .{ .routed = try self.processRoutedDatagramWithRoutePathWithScratch(
+                    route,
+                    path,
+                    now_millis,
+                    datagram,
+                    installed_key_options,
+                    scratch,
+                    initial_token,
+                    out,
+                    handshake_out,
+                ) },
+                .accept_initial => |initial| .{ .accept_initial = initial },
+                .version_negotiation => |response| .{ .version_negotiation = response },
+                .stateless_reset => |reset| .{ .stateless_reset = reset },
+                .dropped => .dropped,
+            };
+        }
+
         /// Classify one UDP datagram, process routed packets, and drain bounded output.
         pub fn processDatagramAndDrainWithRoutePath(
             self: *Self,
@@ -5892,6 +5932,47 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
     }
     try std.testing.expectEqual(@as(?root.Error, null), routed_dispatch_drain_short.drain.first_error);
     try std.testing.expect(routed_dispatch_drain_short.next_deadline == null);
+
+    try client.sendPing();
+    const classified_dispatch_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(17, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(classified_dispatch_datagram);
+    const classified_dispatch = try endpoint_owner.processDatagramWithRoutePathWithScratch(
+        path,
+        18,
+        classified_dispatch_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &process_scratch,
+        &[_]u8{},
+        &process_initial_out,
+        &process_handshake_out,
+    );
+    const classified_dispatch_routed = switch (classified_dispatch) {
+        .routed => |routed| routed,
+        else => return error.TestUnexpectedResult,
+    };
+    const classified_dispatch_short = switch (classified_dispatch_routed) {
+        .installed_key => |installed_key| installed_key,
+        else => return error.TestUnexpectedResult,
+    };
+    const classified_dispatch_feed = classified_dispatch_short.feed orelse return error.TestUnexpectedResult;
+    const classified_dispatch_route = switch (classified_dispatch_feed.feed) {
+        .routed => |classified_dispatch_route| classified_dispatch_route,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(record.handle, classified_dispatch_route.connection_id);
+    if (classified_dispatch_short.datagram) |polled| {
+        defer std.testing.allocator.free(polled.datagram);
+        try std.testing.expectEqual(record.handle, polled.connection_id);
+        try std.testing.expect(polled.path.eql(path));
+    }
+    try std.testing.expect(classified_dispatch_short.next_deadline == null);
 
     const fixed_bit_clear = [_]u8{ 0, 0, 0 };
     var scratch: [64]u8 = undefined;
