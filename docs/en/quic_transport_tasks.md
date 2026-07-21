@@ -1754,6 +1754,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   short-header packets through the scratch-backed route-bound receive/poll
   path.
 
+- 2026-07-21: Added scratch-backed server classified datagram drain dispatch.
+  `Tls13ServerEndpoint.processDatagramAndDrainWithRoutePathWithScratch()`
+  adds the bounded-output companion for classify-first socket loops, keeping
+  non-routed responses visible and routed short-header receive/drain on scratch
+  views.
+
 - 2026-07-20: Extended bounded server endpoint scratch paths to pending work
   and receive steps. Fixed-capacity registries can now use scratch-backed
   pending-work sweep, route-bound output polling/draining, and server

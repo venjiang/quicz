@@ -1528,6 +1528,11 @@ close 和 route cleanup 事件。
   对单个 UDP datagram 完成分类，保留 non-routed response 可见性，并把 routed
   short-header packet 交给 scratch-backed route-bound receive/poll 路径。
 
+- 2026-07-21：新增 server classified datagram drain dispatch 的 scratch-backed
+  入口。`Tls13ServerEndpoint.processDatagramAndDrainWithRoutePathWithScratch()`
+  给 classify-first socket loop 提供 bounded-output companion，保留 non-routed
+  response 可见性，并让 routed short-header receive/drain 使用 scratch view。
+
 - 2026-07-20：把有界 server endpoint scratch 路径扩展到 pending work 与
   receive step。fixed-capacity registry 现在可以不传 allocator 就执行 scratch-backed
   pending-work sweep、route-bound output poll/drain 和 server receive-step pending drain；

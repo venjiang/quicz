@@ -3142,6 +3142,48 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Classify one UDP datagram, process routed packets, and drain bounded output using scratch-backed short-packet handling.
+        pub fn processDatagramAndDrainWithRoutePathWithScratch(
+            self: *Self,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            unpredictable_prefix: []const u8,
+            supported_versions: []const quic_packet.Version,
+            installed_key_options: root.EndpointFeedInstalledKeyDatagramOptions,
+            scratch: []u8,
+            initial_token: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+            installed_key_out: []DatagramPathResult,
+        ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!DatagramProcessDrainPathResult {
+            const action = try self.feedDatagramWithResponsePath(
+                installed_key_options.out,
+                path,
+                datagram,
+                unpredictable_prefix,
+                supported_versions,
+            );
+            return switch (action) {
+                .routed => |route| .{ .routed = try self.processRoutedDatagramAndDrainWithRoutePathWithScratch(
+                    route,
+                    path,
+                    now_millis,
+                    datagram,
+                    installed_key_options,
+                    scratch,
+                    initial_token,
+                    out,
+                    handshake_out,
+                    installed_key_out,
+                ) },
+                .accept_initial => |initial| .{ .accept_initial = initial },
+                .version_negotiation => |response| .{ .version_negotiation = response },
+                .stateless_reset => |reset| .{ .stateless_reset = reset },
+                .dropped => .dropped,
+            };
+        }
+
         /// Run one bounded server receive step and sweep endpoint pending work.
         pub fn receiveDatagramStepWithRoutePath(
             self: *Self,
@@ -5973,6 +6015,50 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
         try std.testing.expect(polled.path.eql(path));
     }
     try std.testing.expect(classified_dispatch_short.next_deadline == null);
+
+    try client.sendPing();
+    const classified_dispatch_drain_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(19, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(classified_dispatch_drain_datagram);
+    var classified_installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const classified_dispatch_drain = try endpoint_owner.processDatagramAndDrainWithRoutePathWithScratch(
+        path,
+        20,
+        classified_dispatch_drain_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &process_scratch,
+        &[_]u8{},
+        &process_initial_out,
+        &process_handshake_out,
+        &classified_installed_key_out,
+    );
+    const classified_dispatch_drain_routed = switch (classified_dispatch_drain) {
+        .routed => |routed| routed,
+        else => return error.TestUnexpectedResult,
+    };
+    const classified_dispatch_drain_short = switch (classified_dispatch_drain_routed) {
+        .installed_key => |installed_key| installed_key,
+        else => return error.TestUnexpectedResult,
+    };
+    const classified_dispatch_drain_feed = classified_dispatch_drain_short.feed orelse return error.TestUnexpectedResult;
+    const classified_dispatch_drain_route = switch (classified_dispatch_drain_feed.feed) {
+        .routed => |classified_dispatch_drain_route| classified_dispatch_drain_route,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(record.handle, classified_dispatch_drain_route.connection_id);
+    for (classified_installed_key_out[0..classified_dispatch_drain_short.drain.datagrams_written]) |drained| {
+        defer std.testing.allocator.free(drained.datagram);
+        try std.testing.expectEqual(record.handle, drained.connection_id);
+        try std.testing.expect(drained.path.eql(path));
+    }
+    try std.testing.expectEqual(@as(?root.Error, null), classified_dispatch_drain_short.drain.first_error);
+    try std.testing.expect(classified_dispatch_drain_short.next_deadline == null);
 
     const fixed_bit_clear = [_]u8{ 0, 0, 0 };
     var scratch: [64]u8 = undefined;
