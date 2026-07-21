@@ -1497,6 +1497,57 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Route, process, and drain one installed-key datagram using deadline scratch.
+        ///
+        /// This is the bounded-output companion to
+        /// `feedInstalledKeyDatagramWithRoutePathWithScratch()`.
+        pub fn feedInstalledKeyDatagramAndDrainWithRoutePathWithScratch(
+            self: *Self,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+            out: []DatagramPathResult,
+        ) (root.EndpointProtectedDatagramError || endpoint.RouteError)!InstalledKeyDatagramRouteDrainResult {
+            _ = try self.records.nextDeadlineWithScratch(&self.lifecycle);
+            const action = try self.lifecycle.feedDatagram(
+                options.out,
+                path,
+                datagram,
+                options.unpredictable_prefix,
+                options.supported_versions,
+            );
+            const route = switch (action) {
+                .routed => |value| value,
+                .accept_initial => |initial| return .{
+                    .feed = .{ .feed = .{ .accept_initial = initial } },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                },
+                .version_negotiation => |response| return .{
+                    .feed = .{ .feed = .{ .version_negotiation = response } },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                },
+                .stateless_reset => |reset| return .{
+                    .feed = .{ .feed = .{ .stateless_reset = reset } },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                },
+                .dropped => return .{
+                    .feed = .{ .feed = .dropped },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                },
+            };
+            const record = self.records.get(route.connection_id) orelse return error.Internal;
+            return self.processRoutedInstalledKeyDatagramAndDrainWithRoutePathWithScratch(
+                route,
+                record,
+                path,
+                now_millis,
+                datagram,
+                options,
+                out,
+            );
+        }
+
         fn processRoutedInstalledKeyDatagramAndDrainWithRoutePath(
             self: *Self,
             route: endpoint.RouteResult,
@@ -1575,6 +1626,87 @@ pub fn Tls13ServerEndpoint(
                 .feed = feed,
                 .drain = drain,
                 .next_deadline = try self.nextDeadline(self.records.allocator),
+            };
+        }
+
+        fn processRoutedInstalledKeyDatagramAndDrainWithRoutePathWithScratch(
+            self: *Self,
+            route: endpoint.RouteResult,
+            record: *Record,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+            out: []DatagramPathResult,
+        ) (root.EndpointProtectedDatagramError || endpoint.RouteError)!InstalledKeyDatagramRouteDrainResult {
+            const connection = connection_of(record);
+            const destination_connection_id = destination_connection_id_of(record);
+            const route_path = try self.lifecycle.currentRoutePath(route.destination_connection_id.asSlice());
+            if (datagram.len != 0 and quic_packet.parseHeaderForm(datagram[0]) == .short) {
+                if (connection.processStatelessResetDatagram(now_millis, datagram)) |sequence_number| {
+                    try self.lifecycle.armRecoveryTimerFromConnection(route.connection_id, connection);
+                    return .{
+                        .feed = .{ .feed = .dropped },
+                        .stateless_reset_sequence_number = sequence_number,
+                        .next_deadline = try self.nextDeadlineWithScratch(),
+                    };
+                }
+            }
+            const feed = self.lifecycle.feedDatagramWithInstalledKeysAndUpdatePathOrClose(
+                route.connection_id,
+                connection,
+                path,
+                now_millis,
+                datagram,
+                options,
+            ) catch |err| {
+                if (err != error.InvalidPacket) return err;
+                var result = InstalledKeyDatagramRouteDrainResult{
+                    .feed_error = err,
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                };
+                if (connection.connectionState() == .closing) {
+                    result.drain = if (out.len == 0)
+                        .{ .first_error = error.BufferTooSmall }
+                    else
+                        self.drainDatagramsWithRoutePath(
+                            route.connection_id,
+                            connection,
+                            now_millis,
+                            .{
+                                .space = .application,
+                                .destination_connection_id = destination_connection_id,
+                            },
+                            route_path,
+                            out,
+                        );
+                    result.next_deadline = try self.nextDeadlineWithScratch();
+                }
+                return result;
+            };
+            switch (feed.feed) {
+                .routed => {},
+                else => return .{
+                    .feed = feed,
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                },
+            }
+            const output_path = feed.selected_output_path orelse route_path;
+            const drain = self.drainDatagramsWithRoutePath(
+                route.connection_id,
+                connection,
+                now_millis,
+                .{
+                    .space = .application,
+                    .destination_connection_id = destination_connection_id,
+                },
+                output_path,
+                out,
+            );
+            return .{
+                .feed = feed,
+                .drain = drain,
+                .next_deadline = try self.nextDeadlineWithScratch(),
             };
         }
 
@@ -5548,6 +5680,48 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
         try std.testing.expect(polled.path.eql(path));
     }
     try std.testing.expect(route_poll.next_deadline == null);
+
+    try client.sendPing();
+    const route_drain_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(11, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(route_drain_datagram);
+    var route_drain_scratch_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    try std.testing.expectError(error.BufferTooSmall, dynamic_endpoint.feedInstalledKeyDatagramAndDrainWithRoutePathWithScratch(
+        path,
+        12,
+        route_drain_datagram,
+        .{
+            .space = .application,
+            .out = &dynamic_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &route_drain_scratch_out,
+    ));
+    const route_drain = try endpoint_owner.feedInstalledKeyDatagramAndDrainWithRoutePathWithScratch(
+        path,
+        12,
+        route_drain_datagram,
+        .{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &route_drain_scratch_out,
+    );
+    const route_drain_feed = route_drain.feed orelse return error.TestUnexpectedResult;
+    const route_drain_route = switch (route_drain_feed.feed) {
+        .routed => |route_drain_route| route_drain_route,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(record.handle, route_drain_route.connection_id);
+    for (route_drain_scratch_out[0..route_drain.drain.datagrams_written]) |drained| {
+        defer std.testing.allocator.free(drained.datagram);
+        try std.testing.expectEqual(record.handle, drained.connection_id);
+        try std.testing.expect(drained.path.eql(path));
+    }
+    try std.testing.expectEqual(@as(?root.Error, null), route_drain.drain.first_error);
+    try std.testing.expect(route_drain.next_deadline == null);
 
     const fixed_bit_clear = [_]u8{ 0, 0, 0 };
     var scratch: [64]u8 = undefined;
