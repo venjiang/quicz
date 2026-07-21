@@ -672,20 +672,45 @@ pub fn EndpointConnectionRegistry(
             datagram: []const u8,
             options: root.EndpointFeedInstalledKeyDatagramOptions,
         ) root.EndpointProtectedDatagramError!root.EndpointFeedInstalledKeyDatagramResult {
-            _ = try self.removeClosedRecords(lifecycle);
-            if (self.receive_view_scratch) |views| {
-                return lifecycle.feedDatagramWithInstalledKeysAcrossConnections(
-                    try self.fillReceiveViews(views),
+            if (self.receive_view_scratch != null) {
+                return self.feedDatagramWithInstalledKeysWithScratch(
+                    lifecycle,
                     path,
                     now_millis,
                     datagram,
                     options,
                 );
             }
+            _ = try self.removeClosedRecords(lifecycle);
             const views = try self.receiveViews(allocator);
             defer allocator.free(views);
             return lifecycle.feedDatagramWithInstalledKeysAcrossConnections(
                 views,
+                path,
+                now_millis,
+                datagram,
+                options,
+            );
+        }
+
+        /// Classify and process one installed-key datagram using registry-owned receive scratch.
+        ///
+        /// Fixed-capacity endpoint owners can use this to avoid per-receive
+        /// view allocation. Dynamic registries without receive scratch fail
+        /// before datagram classification can mutate connection or lifecycle
+        /// state.
+        pub fn feedDatagramWithInstalledKeysWithScratch(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!root.EndpointFeedInstalledKeyDatagramResult {
+            const views = self.receive_view_scratch orelse return error.BufferTooSmall;
+            _ = try self.removeClosedRecords(lifecycle);
+            return lifecycle.feedDatagramWithInstalledKeysAcrossConnections(
+                try self.fillReceiveViews(views),
                 path,
                 now_millis,
                 datagram,
@@ -769,13 +794,27 @@ test "EndpointConnectionRegistry owns records and exposes lifecycle views" {
     try std.testing.expect((try registry.nextDeadline(&lifecycle, no_allocation_allocator.allocator())) == null);
 
     var endpoint_output: [64]u8 = undefined;
-    const feed = try registry.feedDatagramWithInstalledKeys(
+    var dynamic_registry = Registry.init(std.testing.allocator);
+    defer dynamic_registry.deinit();
+    const feed_path = root.endpoint.Udp4Tuple{
+        .local = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
+    };
+    try std.testing.expectError(error.BufferTooSmall, dynamic_registry.feedDatagramWithInstalledKeysWithScratch(
         &lifecycle,
-        no_allocation_allocator.allocator(),
+        feed_path,
+        0,
+        &.{0x40},
         .{
-            .local = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
-            .remote = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
+            .space = .application,
+            .out = &endpoint_output,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &.{.v1},
         },
+    ));
+    const feed = try registry.feedDatagramWithInstalledKeysWithScratch(
+        &lifecycle,
+        feed_path,
         0,
         &.{0x40},
         .{

@@ -735,6 +735,9 @@ poll view service due timer 并 bounded drain recovery output；动态 registry 
 `EndpointConnectionRegistry.pollDatagramAcrossConnectionsWithScratch()` 现在也为
 installed-key output polling 提供同样能力，并会在填充 registry-owned poll view 前清理
 closed record。
+`EndpointConnectionRegistry.feedDatagramWithInstalledKeysWithScratch()` 现在把该
+固定容量契约扩展到 installed-key receive classification：dynamic registry 会在 receive
+副作用前失败，有界 owner 复用 registry-owned receive view。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、

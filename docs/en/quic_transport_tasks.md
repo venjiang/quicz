@@ -921,6 +921,10 @@ poll views, while dynamic registries fail before timer side effects.
 `EndpointConnectionRegistry.pollDatagramAcrossConnectionsWithScratch()` now
 does the same for installed-key output polling, including closed-record cleanup
 before filling registry-owned poll views.
+`EndpointConnectionRegistry.feedDatagramWithInstalledKeysWithScratch()` now
+extends that fixed-capacity contract to installed-key receive classification:
+dynamic registries fail before receive side effects, while bounded owners reuse
+registry-owned receive views.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first
