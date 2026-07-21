@@ -1079,6 +1079,30 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Route one installed-key datagram, sweep pending work, and select the next deadline using scratch storage.
+        pub fn feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch(
+            self: *Self,
+            path: root.endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            options: root.EndpointFeedInstalledKeyDatagramOptions,
+        ) root.EndpointProtectedDatagramError!root.EndpointFeedPendingWorkNextDeadlineResult {
+            _ = self.records.receive_view_scratch orelse return error.BufferTooSmall;
+            _ = self.records.deadline_view_scratch orelse return error.BufferTooSmall;
+            const feed = try self.feedDatagramWithInstalledKeysOwned(
+                path,
+                now_millis,
+                datagram,
+                options,
+            );
+            const pending_deadline = try self.processPendingWorkAndSelectNextDeadlineWithScratch(now_millis);
+            return .{
+                .feed = feed,
+                .pending_work = pending_deadline.pending_work,
+                .next_deadline = pending_deadline.next_deadline,
+            };
+        }
+
         /// Route one installed-key datagram, apply validated path-update
         /// handling on the selected record, and poll one 1-RTT output datagram.
         ///
@@ -5150,6 +5174,41 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
     };
     try std.testing.expectEqual(record.handle, route.connection_id);
     try std.testing.expect(feed_deadline.next_deadline == null);
+
+    try client.sendPing();
+    const pending_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(3, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(pending_datagram);
+    try std.testing.expectError(error.BufferTooSmall, dynamic_endpoint.feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch(
+        path,
+        4,
+        pending_datagram,
+        .{
+            .space = .application,
+            .out = &dynamic_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+    ));
+    const feed_pending_deadline = try endpoint_owner.feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch(
+        path,
+        4,
+        pending_datagram,
+        .{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+    );
+    const pending_route = switch (feed_pending_deadline.feed) {
+        .routed => |pending_route| pending_route,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(record.handle, pending_route.connection_id);
+    try std.testing.expectEqual(@as(usize, 0), feed_pending_deadline.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), feed_pending_deadline.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), feed_pending_deadline.pending_work.recovery_serviced_count);
+    try std.testing.expect(feed_pending_deadline.next_deadline == null);
 
     const fixed_bit_clear = [_]u8{ 0, 0, 0 };
     var scratch: [64]u8 = undefined;

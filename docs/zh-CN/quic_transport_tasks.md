@@ -1483,6 +1483,11 @@ close 和 route cleanup 事件。
   保持 protected receive 由 server endpoint owning，然后用 registry-owned scratch
   选择下一 deadline；dynamic endpoint 会在 datagram classification 前失败。
 
+- 2026-07-21：新增 server receive-to-pending-work wakeup 的 scratch-backed
+  入口。`Tls13ServerEndpoint.feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch()`
+  先预检查 registry scratch，再由 server endpoint owning protected receive，
+  随后 sweep pending work 并无 allocator-backed view 选择下一 deadline。
+
 - 2026-07-20：把有界 server endpoint scratch 路径扩展到 pending work 与
   receive step。fixed-capacity registry 现在可以不传 allocator 就执行 scratch-backed
   pending-work sweep、route-bound output poll/drain 和 server receive-step pending drain；

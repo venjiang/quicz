@@ -1708,6 +1708,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   next deadline from registry-owned scratch; dynamic endpoints fail before
   datagram classification.
 
+- 2026-07-21: Added scratch-backed server receive-to-pending-work wakeup
+  selection. `Tls13ServerEndpoint.feedDatagramWithInstalledKeysAndProcessPendingWorkAndSelectNextDeadlineWithScratch()`
+  preflights registry scratch, keeps protected receive under server endpoint
+  ownership, sweeps pending work, and selects the next deadline without
+  allocator-backed views.
+
 - 2026-07-20: Extended bounded server endpoint scratch paths to pending work
   and receive steps. Fixed-capacity registries can now use scratch-backed
   pending-work sweep, route-bound output polling/draining, and server
