@@ -1742,6 +1742,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   so socket loops can classify once and dispatch short packets without
   allocator-backed deadline views.
 
+- 2026-07-21: Added scratch-backed server routed datagram drain dispatch.
+  `Tls13ServerEndpoint.processRoutedDatagramAndDrainWithRoutePathWithScratch()`
+  gives route-first socket loops the bounded-output companion to routed
+  dispatch while keeping short-packet receive/drain on scratch-backed deadline
+  views.
+
 - 2026-07-20: Extended bounded server endpoint scratch paths to pending work
   and receive steps. Fixed-capacity registries can now use scratch-backed
   pending-work sweep, route-bound output polling/draining, and server

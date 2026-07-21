@@ -2970,6 +2970,52 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Dispatch one already-routed UDP datagram and drain bounded output.
+        ///
+        /// Long-header processing keeps the existing caller scratch behavior.
+        /// Short-header installed-key processing uses the scratch-backed
+        /// route-bound receive/drain path.
+        pub fn processRoutedDatagramAndDrainWithRoutePathWithScratch(
+            self: *Self,
+            route: endpoint.RouteResult,
+            path: endpoint.Udp4Tuple,
+            now_millis: i64,
+            datagram: []const u8,
+            installed_key_options: root.EndpointFeedInstalledKeyDatagramOptions,
+            scratch: []u8,
+            initial_token: []const u8,
+            out: []root.EndpointPolledDatagramResult,
+            handshake_out: []root.EndpointPolledDatagramResult,
+            installed_key_out: []DatagramPathResult,
+        ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!RoutedDatagramDrainPathResult {
+            if (datagram.len == 0) return error.InvalidPacket;
+            if ((datagram[0] & 0x40) == 0) return error.InvalidPacket;
+            return switch (quic_packet.parseHeaderForm(datagram[0])) {
+                .long => .{ .long = try self.processLongDatagramWithRoutePath(
+                    route.connection_id,
+                    path,
+                    now_millis,
+                    datagram,
+                    scratch,
+                    initial_token,
+                    out,
+                    handshake_out,
+                ) },
+                .short => short: {
+                    const record = self.records.get(route.connection_id) orelse return error.Internal;
+                    break :short .{ .installed_key = try self.processRoutedInstalledKeyDatagramAndDrainWithRoutePathWithScratch(
+                        route,
+                        record,
+                        path,
+                        now_millis,
+                        datagram,
+                        installed_key_options,
+                        installed_key_out,
+                    ) };
+                },
+            };
+        }
+
         /// Classify one UDP datagram and process it if it routes to an owned record.
         ///
         /// Non-routed Initial, Version Negotiation, stateless reset, and drop
@@ -5806,6 +5852,46 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
         try std.testing.expect(polled.path.eql(path));
     }
     try std.testing.expect(routed_dispatch_short.next_deadline == null);
+
+    try client.sendPing();
+    const routed_dispatch_drain_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(15, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(routed_dispatch_drain_datagram);
+    const dispatch_drain_route = try endpoint_owner.routeDatagram(path, routed_dispatch_drain_datagram);
+    var process_installed_key_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const routed_dispatch_drain = try endpoint_owner.processRoutedDatagramAndDrainWithRoutePathWithScratch(
+        dispatch_drain_route,
+        path,
+        16,
+        routed_dispatch_drain_datagram,
+        .{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &process_scratch,
+        &[_]u8{},
+        &process_initial_out,
+        &process_handshake_out,
+        &process_installed_key_out,
+    );
+    const routed_dispatch_drain_short = switch (routed_dispatch_drain) {
+        .installed_key => |installed_key| installed_key,
+        else => return error.TestUnexpectedResult,
+    };
+    const routed_dispatch_drain_feed = routed_dispatch_drain_short.feed orelse return error.TestUnexpectedResult;
+    const routed_dispatch_drain_route = switch (routed_dispatch_drain_feed.feed) {
+        .routed => |routed_dispatch_drain_route| routed_dispatch_drain_route,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(record.handle, routed_dispatch_drain_route.connection_id);
+    for (process_installed_key_out[0..routed_dispatch_drain_short.drain.datagrams_written]) |drained| {
+        defer std.testing.allocator.free(drained.datagram);
+        try std.testing.expectEqual(record.handle, drained.connection_id);
+        try std.testing.expect(drained.path.eql(path));
+    }
+    try std.testing.expectEqual(@as(?root.Error, null), routed_dispatch_drain_short.drain.first_error);
+    try std.testing.expect(routed_dispatch_drain_short.next_deadline == null);
 
     const fixed_bit_clear = [_]u8{ 0, 0, 0 };
     var scratch: [64]u8 = undefined;

@@ -1518,6 +1518,11 @@ close 和 route cleanup 事件。
   receive/poll，因此 socket loop 可以先分类一次，再无 allocator-backed deadline
   view 地 dispatch short packet。
 
+- 2026-07-21：新增 server routed datagram drain dispatch 的 scratch-backed
+  入口。`Tls13ServerEndpoint.processRoutedDatagramAndDrainWithRoutePathWithScratch()`
+  给 route-first socket loop 提供 routed dispatch 的 bounded-output companion，
+  short packet receive/drain 继续使用 scratch-backed deadline view。
+
 - 2026-07-20：把有界 server endpoint scratch 路径扩展到 pending work 与
   receive step。fixed-capacity registry 现在可以不传 allocator 就执行 scratch-backed
   pending-work sweep、route-bound output poll/drain 和 server receive-step pending drain；
