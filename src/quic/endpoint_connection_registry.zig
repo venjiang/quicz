@@ -565,15 +565,16 @@ pub fn EndpointConnectionRegistry(
             comptime destination_connection_id: *const fn (*const Record) []const u8,
             comptime source_connection_id: *const fn (*const Record) []const u8,
         ) root.Error!?root.EndpointPolledDatagramResult {
-            _ = try self.removeClosedRecords(lifecycle);
-            if (self.poll_view_scratch) |views| {
-                return self.pollDatagramAcrossConnectionViews(
+            if (self.poll_view_scratch != null) {
+                return self.pollDatagramAcrossConnectionsWithScratch(
                     lifecycle,
-                    try self.fillPollViews(views, destination_connection_id, source_connection_id),
                     now_millis,
                     space,
+                    destination_connection_id,
+                    source_connection_id,
                 );
             }
+            _ = try self.removeClosedRecords(lifecycle);
             const views = try self.pollViews(
                 allocator,
                 destination_connection_id,
@@ -583,6 +584,29 @@ pub fn EndpointConnectionRegistry(
             return self.pollDatagramAcrossConnectionViews(
                 lifecycle,
                 views,
+                now_millis,
+                space,
+            );
+        }
+
+        /// Poll one installed-key datagram using registry-owned poll scratch storage.
+        ///
+        /// This fixed-capacity form rejects dynamic registries before polling
+        /// records, so callers do not observe partial output side effects after
+        /// a missing scratch-storage failure.
+        pub fn pollDatagramAcrossConnectionsWithScratch(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            now_millis: i64,
+            space: root.EndpointInstalledKeyDatagramSpace,
+            comptime destination_connection_id: *const fn (*const Record) []const u8,
+            comptime source_connection_id: *const fn (*const Record) []const u8,
+        ) root.Error!?root.EndpointPolledDatagramResult {
+            const views = self.poll_view_scratch orelse return error.BufferTooSmall;
+            _ = try self.removeClosedRecords(lifecycle);
+            return self.pollDatagramAcrossConnectionViews(
+                lifecycle,
+                try self.fillPollViews(views, destination_connection_id, source_connection_id),
                 now_millis,
                 space,
             );
@@ -1381,11 +1405,17 @@ test "EndpointConnectionRegistry output polling skips and retires closed records
     closed_record.connection.state = .closed;
     closed_record.connection.closed = true;
 
-    var no_allocation_storage: [0]u8 = .{};
-    var no_allocation_allocator = std.heap.FixedBufferAllocator.init(&no_allocation_storage);
-    const polled = (try registry.pollDatagramAcrossConnections(
+    var dynamic_registry = Registry.init(std.testing.allocator);
+    defer dynamic_registry.deinit();
+    try std.testing.expectError(error.BufferTooSmall, dynamic_registry.pollDatagramAcrossConnectionsWithScratch(
         &lifecycle,
-        no_allocation_allocator.allocator(),
+        20,
+        .application,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+    ));
+    const polled = (try registry.pollDatagramAcrossConnectionsWithScratch(
+        &lifecycle,
         20,
         .application,
         TestRecord.destinationConnectionId,

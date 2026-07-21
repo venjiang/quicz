@@ -732,6 +732,9 @@ scratch，因此动态 registry 会在接管 record 或安装 route 前以 `Buff
 现在也在 registry 层提供同样的 scratch-only 契约：固定容量 owner 可用 registry-owned
 poll view service due timer 并 bounded drain recovery output；动态 registry 会在 timer
 产生副作用前失败。
+`EndpointConnectionRegistry.pollDatagramAcrossConnectionsWithScratch()` 现在也为
+installed-key output polling 提供同样能力，并会在填充 registry-owned poll view 前清理
+closed record。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、

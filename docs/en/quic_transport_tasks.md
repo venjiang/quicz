@@ -918,6 +918,9 @@ fail with `BufferTooSmall` before taking record ownership or installing routes.
 now exposes the same scratch-only contract at the registry layer: fixed-capacity
 owners can service due timers and bounded recovery output from registry-owned
 poll views, while dynamic registries fail before timer side effects.
+`EndpointConnectionRegistry.pollDatagramAcrossConnectionsWithScratch()` now
+does the same for installed-key output polling, including closed-record cleanup
+before filling registry-owned poll views.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first
