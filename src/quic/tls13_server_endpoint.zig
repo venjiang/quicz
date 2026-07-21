@@ -2133,6 +2133,42 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Queue a transport CONNECTION_CLOSE, drain route-bound output, and select the next deadline using scratch storage.
+        pub fn closeWithRoutePathAndDrainDatagramsWithScratch(
+            self: *Self,
+            connection_id: u64,
+            error_code: u64,
+            frame_type: u64,
+            reason_phrase: []const u8,
+            now_millis: i64,
+            out: []DatagramPathResult,
+        ) (root.Error || endpoint.RouteError)!CloseDatagramPathDrainResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
+            if (out.len == 0) return error.BufferTooSmall;
+            _ = self.records.deadline_view_scratch orelse return error.BufferTooSmall;
+            const connection = connection_of(record);
+            try connection.closeConnection(error_code, frame_type, reason_phrase);
+            const drain = self.drainDatagramsWithRoutePath(
+                connection_id,
+                connection,
+                now_millis,
+                .{
+                    .space = .application,
+                    .destination_connection_id = destination_connection_id_of(record),
+                },
+                path,
+                out,
+            );
+            return .{
+                .drain = .{
+                    .datagrams_written = drain.datagrams_written,
+                    .first_error = drain.first_error,
+                },
+                .next_deadline = try self.nextDeadlineWithScratch(),
+            };
+        }
+
         /// Return the active close deadline for an endpoint-owned server record.
         pub fn closeDeadlineMillis(
             self: *Self,
@@ -9052,10 +9088,19 @@ test "Tls13ServerEndpoint drains close output with route and deadline" {
     ));
     try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
     try std.testing.expectEqual(@as(?i64, null), try endpoint_owner.closeDeadlineMillis(record_handle));
+    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.closeWithRoutePathAndDrainDatagramsWithScratch(
+        record_handle,
+        0,
+        0,
+        "server done",
+        10,
+        &zero_out,
+    ));
+    try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
+    try std.testing.expectEqual(@as(?i64, null), try endpoint_owner.closeDeadlineMillis(record_handle));
 
     var out: [2]TestEndpoint.DatagramPathResult = undefined;
-    const closed = try endpoint_owner.closeWithRoutePathAndDrainDatagrams(
-        no_allocation_allocator.allocator(),
+    const closed = try endpoint_owner.closeWithRoutePathAndDrainDatagramsWithScratch(
         record_handle,
         0,
         0,

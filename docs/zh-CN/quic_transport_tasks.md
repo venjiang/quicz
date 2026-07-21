@@ -1399,6 +1399,12 @@ close 和 route cleanup 事件。
   endpoint-owned record 排队 protected CONNECTION_CLOSE，按已提交 route 做有界
   drain，并返回 drain 后的 endpoint close deadline 供 socket loop 选择等待目标。
 
+- 2026-07-21：为 server endpoint 增加 scratch-backed route-bound 显式
+  close drain。`Tls13ServerEndpoint.closeWithRoutePathAndDrainDatagramsWithScratch()`
+  保持已提交 route 的 close output 路径，但用 registry-owned scratch 选择 drain
+  后的 endpoint deadline，fixed-capacity socket loop 不再需要 allocator-backed
+  deadline view。
+
 - 2026-07-17：收紧 TLS client transport 空 datagram 处理。
   `Tls13ClientTransport.receive()` 现在会把 zero-length UDP datagram 拒绝为
   `InvalidPacket`，不再返回成功 no-op receive；完整 packet 后的 all-zero tail

@@ -1617,6 +1617,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   and reports the post-drain endpoint close deadline for socket-loop wait
   selection.
 
+- 2026-07-21: Added scratch-backed route-bound explicit close draining to the
+  server endpoint. `Tls13ServerEndpoint.closeWithRoutePathAndDrainDatagramsWithScratch()`
+  keeps the committed-route close output path but selects the post-drain
+  endpoint deadline from registry-owned scratch, so fixed-capacity socket loops
+  do not need allocator-backed deadline views.
+
 - 2026-07-17: Tightened TLS client transport empty-datagram handling.
   `Tls13ClientTransport.receive()` now rejects zero-length UDP datagrams as
   `InvalidPacket` instead of returning a successful no-op receive result, while
