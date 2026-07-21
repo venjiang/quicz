@@ -932,6 +932,10 @@ record polling while failing dynamic registries before output side effects.
 now exposes the combined pending-work sweep plus bounded output drain as one
 scratch-only registry step, checking receive and poll scratch before timer or
 recovery side effects.
+`EndpointConnectionRegistry.processPendingWorkAndSelectNextDeadlineWithScratch()`
+now adds the no-output pending-work plus deadline selection step for
+fixed-capacity loops, checking receive and deadline scratch before pending-work
+side effects.
 
 After the echo path, keep the transport core embeddable instead of baking
 production socket policy into demos. The lifecycle core now exposes the first

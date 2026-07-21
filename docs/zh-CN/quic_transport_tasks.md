@@ -744,6 +744,9 @@ dynamic registry 在 output 副作用前失败。
 `EndpointConnectionRegistry.processPendingWorkAndDrainDatagramsWithScratch()`
 现在把 pending-work sweep 和 bounded output drain 组合成一个 scratch-only registry
 step，并在 timer 或 recovery 副作用前同时检查 receive 与 poll scratch。
+`EndpointConnectionRegistry.processPendingWorkAndSelectNextDeadlineWithScratch()`
+现在补齐无 output 的 pending-work 加 deadline selection 固定容量步骤，并在
+pending-work 副作用前同时检查 receive 与 deadline scratch。
 
 echo 路径之后，transport core 要保持可嵌入，不把生产级 socket 策略写死在 demo 中。
 lifecycle core 现在已经暴露第一版面向 socket 和 TLS-backend loop 的 API 形态：`feedDatagram`、

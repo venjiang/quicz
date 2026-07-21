@@ -551,9 +551,33 @@ pub fn EndpointConnectionRegistry(
             allocator: std.mem.Allocator,
             now_millis: i64,
         ) root.Error!root.EndpointPendingWorkNextDeadlineResult {
+            if (self.receive_view_scratch != null and self.deadline_view_scratch != null) {
+                return self.processPendingWorkAndSelectNextDeadlineWithScratch(
+                    lifecycle,
+                    now_millis,
+                );
+            }
             return .{
                 .pending_work = try self.processPendingWork(lifecycle, allocator, now_millis),
                 .next_deadline = try self.nextDeadline(lifecycle, allocator),
+            };
+        }
+
+        /// Sweep pending work and return the next live deadline using registry scratch storage.
+        ///
+        /// This fixed-capacity form checks both receive and deadline scratch
+        /// before servicing pending work, so scratch availability failures
+        /// cannot occur after timer or recovery side effects.
+        pub fn processPendingWorkAndSelectNextDeadlineWithScratch(
+            self: *Self,
+            lifecycle: *root.EndpointConnectionLifecycle,
+            now_millis: i64,
+        ) root.Error!root.EndpointPendingWorkNextDeadlineResult {
+            _ = self.receive_view_scratch orelse return error.BufferTooSmall;
+            _ = self.deadline_view_scratch orelse return error.BufferTooSmall;
+            return .{
+                .pending_work = try self.processPendingWorkWithScratch(lifecycle, now_millis),
+                .next_deadline = try self.nextDeadlineWithScratch(lifecycle),
             };
         }
 
@@ -1225,11 +1249,20 @@ test "EndpointConnectionRegistry removes record after due idle retirement" {
     try std.testing.expectEqual(@as(usize, 0), scratch_pending_before_deadline.idle_retired_count);
     try std.testing.expectEqual(@as(usize, 0), scratch_pending_before_deadline.close_retired_count);
     try std.testing.expectEqual(@as(usize, 0), scratch_pending_before_deadline.recovery_serviced_count);
+    const scratch_pending_deadline = try registry.processPendingWorkAndSelectNextDeadlineWithScratch(&lifecycle, 19);
+    try std.testing.expectEqual(@as(usize, 0), scratch_pending_deadline.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), scratch_pending_deadline.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), scratch_pending_deadline.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(idle_deadline, scratch_pending_deadline.next_deadline.?);
 
     var dynamic_registry = Registry.init(std.testing.allocator);
     defer dynamic_registry.deinit();
     try std.testing.expectError(error.BufferTooSmall, dynamic_registry.nextDeadlineWithScratch(&lifecycle));
     try std.testing.expectError(error.BufferTooSmall, dynamic_registry.processPendingWorkWithScratch(&lifecycle, 19));
+    try std.testing.expectError(error.BufferTooSmall, dynamic_registry.processPendingWorkAndSelectNextDeadlineWithScratch(
+        &lifecycle,
+        19,
+    ));
 
     var out: [1]root.EndpointPolledDatagramResult = undefined;
     try std.testing.expectError(error.BufferTooSmall, dynamic_registry.processDueDeadlineAndDrainDatagramsWithScratch(
