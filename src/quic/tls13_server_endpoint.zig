@@ -3247,7 +3247,7 @@ pub fn Tls13ServerEndpoint(
             pending_out: []DatagramPathResult,
         ) (root.EndpointProtectedDatagramError || root.Error || endpoint.RouteError)!DatagramStepPathResult {
             try self.ensureReceiveStepScratch();
-            const process = try self.processDatagramAndDrainWithRoutePath(
+            const process = try self.processDatagramAndDrainWithRoutePathWithScratch(
                 path,
                 now_millis,
                 datagram,
@@ -6059,6 +6059,79 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
     }
     try std.testing.expectEqual(@as(?root.Error, null), classified_dispatch_drain_short.drain.first_error);
     try std.testing.expect(classified_dispatch_drain_short.next_deadline == null);
+
+    try client.sendPing();
+    const receive_step_datagram = (try client.pollProtectedShortDatagramWithInstalledKeys(21, server_dcid)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(receive_step_datagram);
+    var receive_step_installed_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    var receive_step_pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    try std.testing.expectError(error.BufferTooSmall, dynamic_endpoint.receiveDatagramStepWithRoutePathWithScratch(
+        path,
+        22,
+        receive_step_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &dynamic_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &process_scratch,
+        &[_]u8{},
+        &process_initial_out,
+        &process_handshake_out,
+        &receive_step_installed_out,
+        .application,
+        &receive_step_pending_out,
+    ));
+    const receive_step = try endpoint_owner.receiveDatagramStepWithRoutePathWithScratch(
+        path,
+        22,
+        receive_step_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &[_]u8{},
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &process_scratch,
+        &[_]u8{},
+        &process_initial_out,
+        &process_handshake_out,
+        &receive_step_installed_out,
+        .application,
+        &receive_step_pending_out,
+    );
+    const receive_step_routed = switch (receive_step.process) {
+        .routed => |routed| routed,
+        else => return error.TestUnexpectedResult,
+    };
+    const receive_step_short = switch (receive_step_routed) {
+        .installed_key => |installed_key| installed_key,
+        else => return error.TestUnexpectedResult,
+    };
+    const receive_step_feed = receive_step_short.feed orelse return error.TestUnexpectedResult;
+    const receive_step_route = switch (receive_step_feed.feed) {
+        .routed => |receive_step_route| receive_step_route,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(record.handle, receive_step_route.connection_id);
+    for (receive_step_installed_out[0..receive_step_short.drain.datagrams_written]) |drained| {
+        defer std.testing.allocator.free(drained.datagram);
+        try std.testing.expectEqual(record.handle, drained.connection_id);
+        try std.testing.expect(drained.path.eql(path));
+    }
+    try std.testing.expectEqual(@as(?root.Error, null), receive_step_short.drain.first_error);
+    try std.testing.expectEqual(@as(usize, 0), receive_step.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), receive_step.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), receive_step.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), receive_step.pending_drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), receive_step.pending_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), receive_step.pending_drain.first_route_error);
+    try std.testing.expect(receive_step.next_deadline == null);
 
     const fixed_bit_clear = [_]u8{ 0, 0, 0 };
     var scratch: [64]u8 = undefined;

@@ -1533,6 +1533,11 @@ close 和 route cleanup 事件。
   给 classify-first socket loop 提供 bounded-output companion，保留 non-routed
   response 可见性，并让 routed short-header receive/drain 使用 scratch view。
 
+- 2026-07-21：将 server receive-step scratch 路径接到 classified datagram
+  scratch drain。`Tls13ServerEndpoint.receiveDatagramStepWithRoutePathWithScratch()`
+  现在先复用 `processDatagramAndDrainWithRoutePathWithScratch()`，再 sweep pending
+  work，因此 short-packet receive-step 不再回退到 allocator-backed deadline view。
+
 - 2026-07-20：把有界 server endpoint scratch 路径扩展到 pending work 与
   receive step。fixed-capacity registry 现在可以不传 allocator 就执行 scratch-backed
   pending-work sweep、route-bound output poll/drain 和 server receive-step pending drain；

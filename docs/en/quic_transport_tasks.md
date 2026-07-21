@@ -1760,6 +1760,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   non-routed responses visible and routed short-header receive/drain on scratch
   views.
 
+- 2026-07-21: Routed the server receive-step scratch path through classified
+  datagram scratch drain. `Tls13ServerEndpoint.receiveDatagramStepWithRoutePathWithScratch()`
+  now reuses `processDatagramAndDrainWithRoutePathWithScratch()` before sweeping
+  pending work, so short-packet receive-step processing no longer falls back to
+  allocator-backed deadline views.
+
 - 2026-07-20: Extended bounded server endpoint scratch paths to pending work
   and receive steps. Fixed-capacity registries can now use scratch-backed
   pending-work sweep, route-bound output polling/draining, and server
