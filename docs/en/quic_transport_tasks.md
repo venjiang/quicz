@@ -82,8 +82,8 @@ P0 gates below are complete:
 | P0-A0 | Bounded endpoint receive steps | RFC 9000 packet input, output, timers; RFC 9001 packet spaces | `Tls13ClientEndpoint`, `Tls13ServerEndpoint` | Client and server receive steps return input result, routed output, due work, close/key-discard/idle cleanup, route errors, capacity errors, and next deadline without caller-side branching. | Done |
 | P0-A1 | Local endpoint TLS handshake | RFC 9001 handshake; RFC 9000 Initial/Handshake packets | Endpoint-owned client/server loop | A Zig client and server complete a certificate-verified handshake through endpoint APIs only; outputs remain route-bound; no mock keys, OpenSSL, examples, or per-case caller glue. | Done |
 | P0-A2 | Local endpoint 1-RTT close loop | RFC 9000 1-RTT packet processing, stream data, close; RFC 9001 key discard | Endpoint-owned client/server loop | The same local loop sends protected STREAM echo, services due timers, emits protected close, discards obsolete keys, and retires routes/records. | Done |
-| P0-B1 | Protected bidi/uni stream data | RFC 9000 Sections 2, 4, 19.8 | `Connection` stream state behind endpoint send/receive | Bidi and uni data plus FIN work over protected endpoint packets. | Active |
-| P0-B2 | Stream control and credit release | RFC 9000 Sections 4, 19.11-19.14 | Stream-limit and flow-control state | RESET_STREAM, STOP_SENDING, MAX_STREAMS release, connection-window unblock, and stream-window unblock work over protected endpoint packets. | Next |
+| P0-B1 | Protected bidi/uni stream data | RFC 9000 Sections 2, 4, 19.8 | `Connection` stream state behind endpoint send/receive | Bidi and uni data plus FIN work over protected endpoint packets. | Done |
+| P0-B2 | Stream control and credit release | RFC 9000 Sections 4, 19.11-19.14 | Stream-limit and flow-control state | RESET_STREAM, STOP_SENDING, MAX_STREAMS release, connection-window unblock, and stream-window unblock work over protected endpoint packets. | Active |
 | P0-B3 | Stream retransmission requeue | RFC 9002 loss recovery for stream frames | Recovery queue plus stream sender | Lost STREAM/FIN/reset/stop data is requeued and retransmitted without duplicating committed stream state. | Next |
 | P0-C1 | ACK and RTT accounting | RFC 9000 ACK; RFC 9002 RTT and outstanding packet state | Recovery and ACK receive path | ACK cleanup updates outstanding packets, RTT samples, bytes-in-flight, and ack-eliciting state. | Next |
 | P0-C2 | Loss, PTO, and congestion baseline | RFC 9002 packet/time loss, PTO, NewReno baseline | Endpoint timer service | CRYPTO and STREAM PTO output is route-bound and retransmittable; PTO backoff and congestion window updates do not create stale deadlines or tight loops. | Next |
@@ -105,8 +105,8 @@ by the required protected endpoint or external interop behavior.
 | --- | --- | --- | --- |
 | 1 | P0-A1 local endpoint TLS handshake | Done | Added the smallest core Zig endpoint test for certificate-verified local handshake. |
 | 2 | P0-A2 local endpoint STREAM/close loop | Done | Extended the same local loop to protected STREAM echo, due timer service, close, Initial key discard, and route/record cleanup. |
-| 3 | P0-B1 protected bidi/uni stream data | Active | Add endpoint-level bidi/uni data and FIN coverage; fix only stream/endpoint code needed for that proof. |
-| 4 | P0-B2 stream control and flow-control credit | Next | Add endpoint-level reset/stop, stream-count release, and flow-control unblock coverage. |
+| 3 | P0-B1 protected bidi/uni stream data | Done | Added client-initiated uni, server-initiated uni, and bidi echo with FIN through protected endpoint packets. |
+| 4 | P0-B2 stream control and flow-control credit | Active | Add endpoint-level reset/stop, stream-count release, and flow-control unblock coverage. |
 | 5 | P0-B3 stream retransmission requeue | Next | Prove lost stream/control frames requeue through recovery without duplicate stream commits. |
 | 6 | P0-C1 ACK/RTT accounting | Next | Close ACK cleanup, RTT, outstanding packet, and bytes-in-flight evidence at the endpoint seam. |
 | 7 | P0-C2 loss/PTO/NewReno baseline | Next | Close route-bound CRYPTO/STREAM PTO, loss detection, PTO backoff, and congestion-window evidence. |
