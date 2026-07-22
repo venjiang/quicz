@@ -37,23 +37,35 @@ version-information 原语）：
 
 ## 实现优先级矩阵
 
-成熟 QUIC 栈会在核心 transport 可用后继续长期完善。quic-go、s2n-quic、quiche 的
-发布节奏都呈现类似模式：先保证核心握手、stream、recovery、routing、close 和互通；
-FIPS 或 crypto provider 细节、qlog、HTTP/3、DATAGRAM、PMTU、fuzz 覆盖、API cleanup
-和性能调优会持续后置演进。`quicz` 也应采用这个形状，而不是在第一轮可用
-transport 前补完所有可选或低频功能。
+规划规则是先完成一个小而真实可用的 QUIC v1 transport，再扩展周边功能。成熟 QUIC
+栈通常也是先让 handshake、packet protection、stream、recovery、endpoint routing、
+close 和互通可用；运维扩展、API polish、HTTP/3、DATAGRAM、qlog、PMTU，以及更大的
+fuzz/performance 工程继续后置演进。`quicz` 按这个形状推进。
 
-| 优先级 | 目标 | 当前范围 | 退出证据 |
+### P0 执行矩阵：第一轮可用 QUIC v1 transport
+
+| 编号 | 工作流 | 为什么是 P0 | 交付范围 | 退出证据 |
+| --- | --- | --- | --- | --- |
+| P0.1 | TLS-owned packet protection | 没有这层，stream/recovery 证据仍可能只是 mock-only。 | 纯 Zig TLS 驱动 Initial、Handshake 和 1-RTT secret；protected long/short packet send/receive 使用 TLS 安装的 secret；certificate、SNI、ALPN、transport parameter 失败不会提交连接状态。 | 本地 Zig client/server 在 UDP 上完成证书校验握手，并在不使用 mock key 或 OpenSSL 的情况下交换 protected 1-RTT packet。 |
+| P0.2 | Endpoint-owned UDP lifecycle | 用户需要一个 owner 驱动 socket、route、timer、cleanup 和 close。 | Client/server endpoint 持有 connection record、route registration、datagram classification、receive/process/drain step、next-deadline selection、idle cleanup、close cleanup，以及 capacity/admission failure。 | 有界本地 client/server loop 通过 endpoint API 完成 handshake、stream transfer、timer service、close 和 route cleanup。 |
+| P0.3 | STREAM data path | STREAM 是 transport 最小可用载荷。 | Bidirectional/unidirectional open/read/write/FIN；有序投递；retransmission requeue；RESET_STREAM；STOP_SENDING；MAX_STREAMS release；connection 和 per-stream flow control。 | Protected UDP echo 覆盖 bidi/uni FIN、flow-control unblock、reset/stop、stream-count credit release，以及一次可控丢包后的 retransmission。 |
+| P0.4 | ACK、loss、PTO 与 NewReno 基线 | 只能在完美 loopback 上工作的 transport 不算可用。 | ACK 校验；RTT sampling；packet/time-threshold loss；PTO probe；ACK/loss 驱动 STREAM 和 CRYPTO retransmission；bytes-in-flight accounting；最小 NewReno 行为。 | 确定性测试加一次 socket-backed loss run 证明 retransmission 与最终 ACK cleanup；terminal close/drain 后不残留 recovery timer。 |
+| P0.5 | Close、CID、Retry、address validation 与 stateless reset | 这些是正常 QUIC 生命周期边界和常见互通路径的必需能力。 | CONNECTION_CLOSE 和 APPLICATION_CLOSE 发出；peer close 处理；NEW_CONNECTION_ID/RETIRE_CONNECTION_ID routing；Retry token validation；address-validation route update；idle close；stateless reset receive 与 inactive-CID reset emission。 | Endpoint 测试覆盖每个 lifecycle edge，且 route/capacity 校验前不提前变更状态；protected close/reset packet 能在已提交 route 上观测到。 |
+| P0.6 | 第一轮外部互通门禁 | Local-only 成功不足以声明 QUIC 可用。 | `quicz` 对一个外部栈的可重复矩阵：可行时覆盖 client/server 两个方向；证书校验；Retry；stream FIN echo；close；一次可控 loss/PTO。 | 默认以 `quic-go` 作为第一门禁。除非第一个门禁暴露必须用第二实现消歧的问题，否则第二个外部栈不阻塞 P0。 |
+
+### P0 之后的矩阵
+
+| 优先级 | 目标 | 范围 | 退出证据 |
 | --- | --- | --- | --- |
-| P0 | 基本可用 QUIC v1 transport | Endpoint-owned UDP client/server loop；证书校验的 TLS-owned Initial/Handshake/1-RTT packet protection；bidirectional 和 unidirectional STREAM open/read/write/FIN；RESET_STREAM 与 STOP_SENDING；connection、stream、stream-count flow control；ACK/loss/PTO/NewReno baseline；CONNECTION_CLOSE 与 APPLICATION_CLOSE；CID routing、NEW_CONNECTION_ID/RETIRE_CONNECTION_ID、Retry/address validation、stateless reset、idle/close cleanup。 | 本地 Zig client/server 通过 protected UDP 完成 STREAM echo；至少一个外部栈与 `quicz` 完成证书校验 bidirectional STREAM FIN echo、Retry、close，以及一次可控 loss/PTO 运行。 |
-| P1 | 互通加固和生产策略 | 更广的 stream-limit interop；route migration/path validation policy；生产 token/replay policy；多连接 server event-loop policy；常见 RFC 9000 frame 错误映射和 rollback 缺口；可行时加入第二个外部栈 smoke 证据。 | quic-go 加 s2n-quic/quiche/基础 Rust client-server 路径之一，通过小型可重复矩阵：handshake、stream echo、reset/stop、Retry、close、loss recovery。 |
-| P2 | 公开可用性和可维护性 | 公开 API 简化、稳定 endpoint API 命名、精简 README/examples 文档；pure-Zig TLS 行为稳定后，如能降低耦合，再单独抽取 `src/tls/`。 | 用户面对的小 API 能构建 client/server，不需要接触内部 lifecycle 变体；文档链接完整 examples，但 examples 不再作为开发主目标。 |
-| P3 | 扩展和高级运维 | 0-RTT 生产/分布式 replay policy、HTTP/3/QPACK、RFC 9221 DATAGRAM、qlog、PMTU/GSO/GRO、完整 QUIC v2/RFC 9368、高级 congestion controller、multipath、广泛 fuzz/observability。 | P0/P1 稳定后再跟踪；除非选定互通目标要求，否则这些项不能阻塞第一轮可用 QUIC v1 transport。 |
+| P1 | 互通加固和生产策略 | 更广的 stream-limit interop；server 多连接 event-loop policy；生产 token/replay storage policy；route migration policy；常见 RFC 9000 error-code 与 rollback 缺口；第二外部栈，例如 s2n-quic、quiche 或小型 Rust 路径。 | 两个外部栈通过可重复 smoke matrix：handshake、stream echo、reset/stop、Retry、close 和 loss recovery。 |
+| P2 | 公开可用性和可维护性 | 公开 endpoint API 简化；稳定 API 命名；精简 README 和 examples 文档；pure-Zig TLS 行为稳定后，如能降低耦合，再考虑 `src/tls/` 抽取。 | 用户可以用公开 API 构建基本 client/server，不需要接触内部 lifecycle 变体；文档链接 examples，但 examples 不作为开发主目标。 |
+| P3 | 扩展和高级运维 | 0-RTT 生产/分布式 replay policy；HTTP/3/QPACK；RFC 9221 DATAGRAM；qlog；PMTU/GSO/GRO；完整 QUIC v2/RFC 9368；高级 congestion controller；multipath；广泛 fuzz 和 observability。 | 仅在 P0/P1 稳定后跟踪；除非选定 P0/P1 互通目标要求窄子集，否则不提前做。 |
 
-任务选择规则：优先选择最高优先级里尚未完成、且能让第一轮可用 transport 更真实的项。
-只有会阻塞 handshake、protected stream I/O、close、recovery、routing、Retry/address
-validation 或必需外部互通证据的修复，才归入 P0；其他都归入 P1/P2/P3，除非它是解除
-P0 阻塞的最小安全路径，否则后置。
+任务选择规则：始终选择最高优先级里尚未完成、且能让第一轮可用 transport 更真实的 P0
+工作流。只有会阻塞 TLS-owned handshake、protected STREAM I/O、close、recovery、
+endpoint routing、Retry/address validation、stateless reset、idle cleanup 或第一轮
+外部互通门禁的改动才归入 P0。其他全部归入 P1/P2/P3，除非它是解除 P0 阻塞的最小安全
+步骤。
 
 ## 实用 Transport 基线
 

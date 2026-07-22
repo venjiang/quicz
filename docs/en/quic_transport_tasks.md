@@ -43,26 +43,38 @@ packet/key/token and RFC 9368 version-information primitives:
 
 ## Implementation Priority Matrix
 
-Mature QUIC stacks keep improving after their core transport is usable. Recent
-release themes in quic-go, s2n-quic, and quiche show the same pattern: core
-handshake, streams, recovery, routing, close, and interop come first; FIPS or
-crypto-provider details, qlog, HTTP/3, DATAGRAM, PMTU, fuzzing breadth, API
-cleanup, and performance tuning continue later. `quicz` should follow that
-shape instead of trying to finish every optional or low-frequency feature before
-the first usable transport.
+The planning rule is to finish a small, real QUIC v1 transport before expanding
+side features. Mature QUIC stacks generally become useful first through
+handshake, packet protection, streams, recovery, endpoint routing, close, and
+interop; operational extensions, API polish, HTTP/3, DATAGRAM, qlog, PMTU, and
+larger fuzz/performance programs continue afterward. `quicz` should follow that
+shape.
 
-| Priority | Goal | In scope now | Exit evidence |
+### P0 execution matrix: first usable QUIC v1 transport
+
+| ID | Workstream | Why it is P0 | Delivery scope | Exit evidence |
+| --- | --- | --- | --- | --- |
+| P0.1 | TLS-owned packet protection | Without this, all stream/recovery evidence can still be mock-only. | Pure-Zig TLS drives Initial, Handshake, and 1-RTT secrets; protected long/short packet send and receive use installed TLS secrets; certificate, SNI, ALPN, and transport-parameter failures do not commit connection state. | Local Zig client/server completes a certificate-verified handshake over UDP and exchanges protected 1-RTT packets without mock keys or OpenSSL. |
+| P0.2 | Endpoint-owned UDP lifecycle | Users need one owner that can drive sockets, routes, timers, cleanup, and close. | Client and server endpoints own connection records, route registration, datagram classification, receive/process/drain steps, next-deadline selection, idle cleanup, close cleanup, and capacity/admission failures. | A bounded local client/server loop completes handshake, stream transfer, timer service, close, and route cleanup through endpoint APIs. |
+| P0.3 | STREAM data path | STREAM is the minimum useful transport payload. | Bidirectional and unidirectional open/read/write/FIN; ordered delivery; retransmission requeue; RESET_STREAM; STOP_SENDING; MAX_STREAMS release; connection and per-stream flow control. | Protected UDP echo covers bidi and uni FIN paths, flow-control unblock, reset/stop, stream-count credit release, and retransmission after a controlled drop. |
+| P0.4 | ACK, loss, PTO, and NewReno baseline | A transport that only works on perfect loopback is not usable. | ACK validation; RTT sampling; packet/time-threshold loss; PTO probes; ACK/loss-driven STREAM and CRYPTO retransmission; bytes-in-flight accounting; minimum NewReno behavior. | Deterministic tests plus one socket-backed loss run show retransmission and eventual ACK cleanup; no recovery timer remains armed after terminal close/drain. |
+| P0.5 | Close, CID, Retry, address validation, and stateless reset | These are required to survive normal QUIC lifecycle edges and common interop paths. | CONNECTION_CLOSE and APPLICATION_CLOSE emission; peer close handling; NEW_CONNECTION_ID and RETIRE_CONNECTION_ID routing; Retry token validation; address-validation route update; idle close; stateless reset receive and inactive-CID reset emission. | Endpoint tests cover each lifecycle edge without mutating state before route/capacity validation, and protected close/reset packets are observable on the committed route. |
+| P0.6 | First external interop gate | Local-only success is insufficient to claim usable QUIC. | One repeatable external-stack matrix against `quicz`: client and server direction where practical; certificate verification; Retry; stream FIN echo; close; one controlled loss/PTO case. | `quic-go` is the default first gate. A second stack is not required for P0 unless the first gate exposes ambiguity that another implementation must resolve. |
+
+### Post-P0 matrix
+
+| Priority | Goal | Scope | Exit evidence |
 | --- | --- | --- | --- |
-| P0 | Basic usable QUIC v1 transport | Endpoint-owned UDP client/server loop; certificate-verified TLS-owned Initial/Handshake/1-RTT packet protection; bidirectional and unidirectional STREAM open/read/write/FIN; RESET_STREAM and STOP_SENDING; connection, stream, and stream-count flow control; ACK/loss/PTO/NewReno baseline; CONNECTION_CLOSE and APPLICATION_CLOSE; CID routing, NEW_CONNECTION_ID/RETIRE_CONNECTION_ID, Retry/address validation, stateless reset, and idle/close cleanup. | Local Zig client/server STREAM echo over protected UDP, plus at least one external stack completing certificate-verified bidirectional STREAM FIN echo, Retry, close, and one controlled loss/PTO run against `quicz`. |
-| P1 | Interop hardening and production policies | Broader stream-limit interop; route migration/path validation policy; production token/replay policy; multi-connection server event-loop policy; common RFC 9000 frame error mapping and rollback gaps; second external stack smoke proof when practical. | quic-go plus one of s2n-quic/quiche/basic Rust client/server paths pass a small repeatable matrix: handshake, stream echo, reset/stop, Retry, close, and loss recovery. |
-| P2 | Public usability and maintainability | Public API simplification, stable endpoint API names, concise README/examples documentation, and a separate `src/tls/` extraction if it reduces coupling after pure-Zig TLS behavior stabilizes. | A small user-facing API can build a client/server without internal lifecycle variants, and docs point to complete examples without making examples the development target. |
-| P3 | Extensions and advanced operations | 0-RTT production/distributed replay policy, HTTP/3/QPACK, RFC 9221 DATAGRAM, qlog, PMTU/GSO/GRO, full QUIC v2/RFC 9368, advanced congestion controllers, multipath, and broad fuzz/observability expansion. | Tracked after P0/P1 are stable; none of these can block claiming the first usable QUIC v1 transport unless a selected interop target requires one. |
+| P1 | Interop hardening and production policies | Broader stream-limit interop; server multi-connection event-loop policy; production token/replay storage policy; route migration policy; common RFC 9000 error-code and rollback gaps; second external stack such as s2n-quic, quiche, or a small Rust path. | Two external stacks pass a repeatable smoke matrix: handshake, stream echo, reset/stop, Retry, close, and loss recovery. |
+| P2 | Public usability and maintainability | Public endpoint API simplification; stable API names; concise README and examples documentation; optional `src/tls/` extraction after pure-Zig TLS behavior stabilizes. | A user can build a basic client/server from public APIs without internal lifecycle variants; docs link to examples but examples are not the development target. |
+| P3 | Extensions and advanced operations | 0-RTT production/distributed replay policy; HTTP/3/QPACK; RFC 9221 DATAGRAM; qlog; PMTU/GSO/GRO; full QUIC v2/RFC 9368; advanced congestion controllers; multipath; broad fuzzing and observability. | Tracked only after P0/P1 are stable, unless a selected P0/P1 interop target requires a narrow subset. |
 
-Task selection rule: choose the highest-priority incomplete item that makes the
-first usable transport more true. A fix belongs in P0 only when it can block
-handshake, protected stream I/O, close, recovery, routing, Retry/address
-validation, or the required external interop proof. Otherwise it is P1/P2/P3
-and should wait unless it is the smallest safe way to unblock a P0 item.
+Task selection rule: always pick the highest incomplete P0 workstream that makes
+the first usable transport more real. A change only belongs in P0 if it can
+block TLS-owned handshake, protected STREAM I/O, close, recovery, endpoint
+routing, Retry/address validation, stateless reset, idle cleanup, or the first
+external interop gate. Everything else is P1/P2/P3 unless it is the smallest
+safe step that unblocks a P0 item.
 
 ## Practical Transport Baseline
 
