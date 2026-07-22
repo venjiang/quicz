@@ -1379,6 +1379,33 @@ test "Tls13Handshake initServerWithPsk derives matching client early traffic sec
     try std.testing.expectEqualSlices(u8, &client_early, &server.server_early_traffic_secret);
 }
 
+test "Tls13Handshake server selects matching ClientHello PSK identity beyond first" {
+    const psk = [_]u8{0xab} ** secret_len;
+    const matching_ticket = [_]u8{ 0x44, 0x55, 0x66, 0x77 };
+    var hello_buf: [2048]u8 = undefined;
+    const base_hello = try clientHelloPskBytes(.{}, psk, &hello_buf);
+    const hello = try appendClientHelloPskIdentityAndBinder(
+        &hello_buf,
+        base_hello.len,
+        &matching_ticket,
+        0x01020304,
+        psk,
+    );
+
+    var server = Tls13Handshake.initServerWithPsk(.{}, &[_]u8{}, psk);
+    try server.setServerPskIdentity(&matching_ticket);
+    server.provideData(hello);
+    _ = try server.step();
+
+    try std.testing.expect(server.peer_offered_psk);
+    try std.testing.expect(server.psk_selected);
+    try std.testing.expect(server.peer_psk_binder_valid);
+    try std.testing.expect(server.server_early_traffic_secret_derived);
+    try std.testing.expectEqual(@as(usize, matching_ticket.len), server.peer_psk_identity_len);
+    try std.testing.expectEqualSlices(u8, &matching_ticket, server.peer_psk_identity[0..server.peer_psk_identity_len]);
+    try std.testing.expectEqual(@as(u32, 0x01020304), server.peer_psk_obfuscated_ticket_age);
+}
+
 test "Tls13Handshake server applies PSK ticket age policy" {
     const alpn = [_][]const u8{"hq-interop"};
     const tp = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
@@ -3564,6 +3591,7 @@ pub const Tls13Handshake = struct {
         var parsed_peer_psk_obfuscated_ticket_age: u32 = 0;
         var parsed_peer_psk_binder: [32]u8 = undefined;
         var parsed_peer_psk_binder_msg_offset: usize = 0;
+        var parsed_peer_psk_identity_index: ?usize = null;
         var previous_key_share_supported_group_index: ?usize = null;
         var seen_known_extensions: u16 = 0;
         const server_sig_scheme = signatureSchemeForPrivateKeyAlgorithm(self.config.private_key_algorithm);
@@ -3782,11 +3810,26 @@ pub const Tls13Handshake = struct {
                         pp += 2;
                         if (identity_len == 0) return error.DecodeError;
                         if (pp + identity_len + 4 > identities_end) return error.DecodeError;
-                        if (identity_count == 0) {
+                        const identity = ext[pp..][0..identity_len];
+                        const obfuscated_ticket_age = readU32(ext[pp + identity_len ..]);
+                        const identity_matches_config = self.server_psk_identity_len == 0 or
+                            (identity_len == self.server_psk_identity_len and
+                                std.mem.eql(
+                                    u8,
+                                    identity,
+                                    self.server_psk_identity[0..self.server_psk_identity_len],
+                                ));
+                        const identity_age_allowed = self.serverPskTicketAgeAllowed(obfuscated_ticket_age);
+                        if (identity_count == 0 or
+                            (parsed_peer_psk_identity_index == null and identity_matches_config and identity_age_allowed))
+                        {
                             if (identity_len > parsed_peer_psk_identity.len) return error.DecodeError;
-                            @memcpy(parsed_peer_psk_identity[0..identity_len], ext[pp..][0..identity_len]);
+                            @memcpy(parsed_peer_psk_identity[0..identity_len], identity);
                             parsed_peer_psk_identity_len = identity_len;
-                            parsed_peer_psk_obfuscated_ticket_age = readU32(ext[pp + identity_len ..]);
+                            parsed_peer_psk_obfuscated_ticket_age = obfuscated_ticket_age;
+                            if (identity_matches_config and identity_age_allowed) {
+                                parsed_peer_psk_identity_index = identity_count;
+                            }
                         }
                         pp += identity_len;
                         pp += 4; // obfuscated_ticket_age
@@ -3799,6 +3842,7 @@ pub const Tls13Handshake = struct {
                     if (binders_len < 33) return error.DecodeError;
                     if (pp + binders_len != el) return error.DecodeError;
                     const binders_end = pp + binders_len;
+                    const binder_capture_index = parsed_peer_psk_identity_index orelse 0;
                     var binder_count: usize = 0;
                     while (pp < binders_end) {
                         if (pp + 1 > binders_end) return error.DecodeError;
@@ -3807,7 +3851,7 @@ pub const Tls13Handshake = struct {
                         if (binder_len != self.peer_psk_binder.len or pp + binder_len > binders_end) {
                             return error.DecodeError;
                         }
-                        if (binder_count == 0) {
+                        if (binder_count == binder_capture_index) {
                             @memcpy(&parsed_peer_psk_binder, ext[pp..][0..binder_len]);
                             // Record the binder's offset within the ClientHello
                             // message so the truncated transcript hash can be
@@ -6188,6 +6232,73 @@ fn refreshClientHelloPskBinder(hello: []u8, psk: [secret_len]u8) !void {
     const binder_key = key_schedule.deriveBinderKey();
     const binder = KeySchedule.computeFinishedVerifyData(binder_key, transcript.current());
     @memcpy(hello[binder_offset..][0..binder_len], &binder);
+}
+
+fn appendClientHelloPskIdentityAndBinder(
+    buf: []u8,
+    msg_len: usize,
+    identity: []const u8,
+    obfuscated_ticket_age: u32,
+    psk: [secret_len]u8,
+) ![]u8 {
+    if (identity.len == 0 or identity.len > std.math.maxInt(u16)) return error.TestUnexpectedResult;
+    var psk_ext = try clientHelloExtension(buf[0..msg_len], @intFromEnum(ExtType.pre_shared_key));
+    const identity_entry_len = 2 + identity.len + 4;
+    const identities_len = readU16(buf[psk_ext.body_offset..]);
+    const identity_insert_offset = psk_ext.body_offset + 2 + identities_len;
+    if (msg_len + identity_entry_len > buf.len) return error.TestUnexpectedResult;
+    std.mem.copyBackwards(
+        u8,
+        buf[identity_insert_offset + identity_entry_len .. msg_len + identity_entry_len],
+        buf[identity_insert_offset..msg_len],
+    );
+    writeU16(buf[identity_insert_offset..][0..2], @as(u16, @intCast(identity.len)));
+    @memcpy(buf[identity_insert_offset + 2 ..][0..identity.len], identity);
+    writeU32(buf[identity_insert_offset + 2 + identity.len ..][0..4], obfuscated_ticket_age);
+    writeU16(buf[psk_ext.body_offset..][0..2], @as(u16, @intCast(identities_len + identity_entry_len)));
+    writeU16(buf[psk_ext.header_offset + 2 ..][0..2], @as(u16, @intCast(psk_ext.body_len + identity_entry_len)));
+    try setClientHelloBodyLen(buf, msg_len - 4 + identity_entry_len);
+    var extensions_len = readU16(buf[psk_ext.extensions_len_offset..]);
+    writeU16(buf[psk_ext.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + identity_entry_len)));
+    var current_len = msg_len + identity_entry_len;
+
+    psk_ext = try clientHelloExtension(buf[0..current_len], @intFromEnum(ExtType.pre_shared_key));
+    const updated_identities_len = readU16(buf[psk_ext.body_offset..]);
+    const binders_len_offset = psk_ext.body_offset + 2 + updated_identities_len;
+    if (binders_len_offset + 3 > psk_ext.body_offset + psk_ext.body_len) return error.TestUnexpectedResult;
+    const first_binder_len_offset = binders_len_offset + 2;
+    const first_binder_len = buf[first_binder_len_offset];
+    const second_binder_insert_offset = first_binder_len_offset + 1 + first_binder_len;
+    const binder_entry_len = 1 + secret_len;
+    if (current_len + binder_entry_len > buf.len) return error.TestUnexpectedResult;
+    std.mem.copyBackwards(
+        u8,
+        buf[second_binder_insert_offset + binder_entry_len .. current_len + binder_entry_len],
+        buf[second_binder_insert_offset..current_len],
+    );
+    buf[second_binder_insert_offset] = secret_len;
+    @memset(buf[second_binder_insert_offset + 1 ..][0..secret_len], 0);
+    const binders_len = readU16(buf[binders_len_offset..]);
+    writeU16(buf[binders_len_offset..][0..2], @as(u16, @intCast(binders_len + binder_entry_len)));
+    writeU16(buf[psk_ext.header_offset + 2 ..][0..2], @as(u16, @intCast(psk_ext.body_len + binder_entry_len)));
+    try setClientHelloBodyLen(buf, current_len - 4 + binder_entry_len);
+    extensions_len = readU16(buf[psk_ext.extensions_len_offset..]);
+    writeU16(buf[psk_ext.extensions_len_offset..][0..2], @as(u16, @intCast(extensions_len + binder_entry_len)));
+    current_len += binder_entry_len;
+
+    psk_ext = try clientHelloExtension(buf[0..current_len], @intFromEnum(ExtType.pre_shared_key));
+    const final_identities_len = readU16(buf[psk_ext.body_offset..]);
+    const final_binders_len_offset = psk_ext.body_offset + 2 + final_identities_len;
+    const binder_offset = final_binders_len_offset + 2 + 1 + first_binder_len + 1;
+    if (binder_offset + secret_len > psk_ext.body_offset + psk_ext.body_len) return error.TestUnexpectedResult;
+    var transcript = TranscriptHash.init();
+    transcript.update(buf[0..binder_offset]);
+    const key_schedule = KeySchedule.initWithPsk(psk);
+    const binder_key = key_schedule.deriveBinderKey();
+    const binder = KeySchedule.computeFinishedVerifyData(binder_key, transcript.current());
+    @memcpy(buf[binder_offset..][0..secret_len], &binder);
+
+    return buf[0..current_len];
 }
 
 fn setClientHelloBodyLen(buf: []u8, new_body_len: usize) !void {

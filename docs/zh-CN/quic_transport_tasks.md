@@ -113,6 +113,8 @@ ClientHello 成功后提交；backend keylog 输出现在也会等待 ClientHell
 解析出的 PSK identity、obfuscated ticket age、binder bytes、binder offset、
 binder verification result、PSK selection 与 ClientHello transcript update
 同样只会在服务端准备推进状态后提交。
+当 ClientHello 携带多个 PSK identity 时，server-side selection 现在会暂存匹配配置的
+identity 以及同下标 binder，而不是固定校验第一个 binder。
 需要证书路径时，服务端 ClientHello 处理现在还会在发出
 ServerHello、排队 ServerHello 输出或提交已解析 peer 状态前拒绝缺失的
 `signature_algorithms`、重复的 `supported_versions` 条目、重复的

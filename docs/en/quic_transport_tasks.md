@@ -130,7 +130,10 @@ waits until a ClientHello random has actually been generated or parsed. Parsed
 PSK identity, obfuscated
 ticket age, binder bytes, binder offset, binder verification result, PSK
 selection, and the ClientHello transcript update are likewise committed only
-after the server is ready to advance. When the certificate path is required,
+after the server is ready to advance. When multiple ClientHello PSK identities
+are offered, server-side selection now stages the matching configured identity
+and same-index binder instead of always verifying the first binder.
+When the certificate path is required,
 server-side ClientHello processing now rejects duplicate `supported_versions`
 entries, missing `signature_algorithms`, duplicate `signature_algorithms`
 entries, duplicate `psk_key_exchange_modes` entries, empty certificate entries,
