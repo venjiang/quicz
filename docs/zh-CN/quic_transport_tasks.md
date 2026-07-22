@@ -49,7 +49,7 @@ version-information 原语）：
 | Connection ID 和 stateless reset | 必须具备。Routing、CID issue/retire、reset-token handling、close cleanup 和 inactive-CID reset emission 必须接入 endpoint lifecycle。 | 部分完成：已有 endpoint router、连接层 reset receive-to-draining 状态、endpoint installed-key feed 的 active-route reset 处理与 recovery timer disarm、client endpoint active reset receive-to-draining 处理以及 receive-step close-deadline 选择、server endpoint bounded receive/drain 与直接 receive-step active reset 上报及 close-deadline record 退役、server endpoint inactive-reset response path pairing、本地生成 stateless reset datagram 的 short-header/fixed-bit 校验、lifecycle helper 和 socket-backed loopback。TLS client/server transport 会为发包选择最新未退役的 peer `NEW_CONNECTION_ID`，并在没有该值时回退到已认证 Initial SCID；server 现在只会在已知非空 Initial Source Connection ID 后广告 stateless reset token。并发 TLS process server 现为每个接纳的连接生成独立的 8 字节 CSPRNG Initial SCID。完整 TLS-owned lifecycle 集成仍未完成。 |
 | Retry 和 address validation | 服务端健壮性和互通必须具备。 | 部分完成：并发 Retry 使用每个进程的新 token secret 与每次签发的新 nonce 熵；已有 token policy、Retry validation、address-validation loopback 和 TLS extension byte 校验。Replay-filter snapshot 现在会恢复最新的唯一 token fingerprint，避免合并后的持久化状态浪费有界 replay 容量；更完整的生产存储/replay policy 仍缺。 |
 | Path validation 和迁移 | 需要单路径 validation 和 route update；完整 multipath 不在范围内。 | 部分完成：已有 PATH_CHALLENGE/PATH_RESPONSE 和 route-update loopback；endpoint-owned server output 与 process server datagram send 现在可在已验证迁移后使用已提交 route tuple。独立进程 Zig migration 运行已在客户端迁移端口后完成 STREAM echo，并输出 `path_challenge_queued=true`、`route_updated=true` 和 `migrated=true`。生产 path policy 和外部迁移证据仍未完成。 |
-| 0-RTT | 第一轮 1-RTT stream echo 互通之后推进；不阻塞当前里程碑。 | 部分完成：已有显式 accept/reject、mock installed-key 0-RTT 路径、NewSessionTicket RFC 9001 sentinel 校验、按 ticket permission gate 的 ClientHello `early_data` 发送、绑定连接策略的 EncryptedExtensions acceptance、client rejection-driven key discard、server-side ticket-age policy，以及支持 snapshot/restore 的有界本地 PSK identity replay filter；生产/分布式 replay policy 仍缺。 |
+| 0-RTT | 第一轮 1-RTT stream echo 互通之后推进；不阻塞当前里程碑。 | 部分完成：已有显式 accept/reject、mock installed-key 0-RTT 路径、server-only protected 0-RTT receive guard、NewSessionTicket RFC 9001 sentinel 校验、按 ticket permission gate 的 ClientHello `early_data` 发送、绑定连接策略的 EncryptedExtensions acceptance、client rejection-driven key discard、server-side ticket-age policy，以及支持 snapshot/restore 的有界本地 PSK identity replay filter；生产/分布式 replay policy 仍缺。 |
 | RFC 9221 DATAGRAM | 可选扩展，不属于第一轮 transport 里程碑。 | Deferred。 |
 | HTTP/3 和 QPACK | transport 可互通后再做的应用层工作。 | Deferred。 |
 | QUIC v2 和 RFC 9368 compatible version negotiation | 可选扩展，除非选定互通目标要求。 | 已有部分 primitive；完整行为 deferred。 |
@@ -258,6 +258,8 @@ TLS-owned 0-RTT acceptance signal 现在绑定到连接策略：server 只有在
 connection 接受已安装 peer 0-RTT key 时才发送 EncryptedExtensions
 `early_data`；client 一旦从 EncryptedExtensions 确认 server 拒绝 early data，
 会立即丢弃本地 0-RTT send key。
+protected 0-RTT receive 现在也被限制为 server-only：active client 会在推进
+packet number 或 ACK 状态前拒绝 explicit-key 和 installed-key 0-RTT long packet。
 
 并发纯 Zig server 现经由其拥有的 `EndpointConnectionRegistry` 分发已路由的
 1-RTT short packet，涵盖 lifecycle route lookup、installed-key 接收和

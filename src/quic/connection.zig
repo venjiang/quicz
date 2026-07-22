@@ -3763,6 +3763,7 @@ pub const Connection = struct {
         close_on_frame_payload_error: bool,
     ) Error!void {
         if (!try self.prepareInboundDatagramProcessing(now_millis)) return;
+        if (self.side != .server) return error.InvalidPacket;
         try self.validateReceivedUdpDatagramSize(datagram);
 
         try self.processProtectedLongDatagramWithRoute(.{
@@ -62273,6 +62274,48 @@ test "processProtectedZeroRttDatagram rejects protected ACK frame" {
     );
     try std.testing.expectEqual(@as(u64, 0), server.nextPeerPacketNumber(.application));
     try std.testing.expectEqual(@as(?u64, null), server.pendingAckLargest(.application));
+}
+
+test "client rejects protected zero RTT receive before packet mutation" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    const server_scid = [_]u8{ 0x55, 0x66, 0x77, 0x88 };
+    const secrets = try protection.deriveInitialSecrets(.v1, &original_dcid);
+
+    var plaintext: [16]u8 = undefined;
+    @memset(&plaintext, @intFromEnum(frame.FrameType.padding));
+    plaintext[0] = @intFromEnum(frame.FrameType.ping);
+
+    const protected = try protection.protectLongPacketAes128(std.testing.allocator, .{
+        .version = .v1,
+        .dcid = &server_scid,
+        .scid = &client_scid,
+        .packet_type = .zero_rtt,
+        .token = &[_]u8{},
+        .packet_number = 0,
+        .payload_length = 0,
+    }, try packet.encodePacketNumberForHeader(0, null), secrets.client, &plaintext);
+    defer std.testing.allocator.free(protected);
+
+    var explicit_client = try Connection.init(std.testing.allocator, .client, .{});
+    defer explicit_client.deinit();
+    try std.testing.expectError(
+        error.InvalidPacket,
+        explicit_client.processProtectedZeroRttDatagram(10, secrets.client, protected),
+    );
+    try std.testing.expectEqual(@as(u64, 0), explicit_client.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), explicit_client.pendingAckLargest(.application));
+
+    var installed_client = try Connection.init(std.testing.allocator, .client, .{});
+    defer installed_client.deinit();
+    try installed_client.installZeroRttTrafficSecrets(.{ .peer = secrets.client.secret });
+    try installed_client.acceptZeroRtt();
+    try std.testing.expectError(
+        error.InvalidPacket,
+        installed_client.processProtectedZeroRttDatagramWithInstalledKeys(10, protected),
+    );
+    try std.testing.expectEqual(@as(u64, 0), installed_client.nextPeerPacketNumber(.application));
+    try std.testing.expectEqual(@as(?u64, null), installed_client.pendingAckLargest(.application));
 }
 
 test "processProtectedZeroRttDatagram rejects oversized UDP datagram before mutation" {
