@@ -12157,6 +12157,160 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
     try std.testing.expectEqualStrings(server_uni_payload, client_uni_recv_buf[0..client_uni_recv_len]);
     try std.testing.expect(try client.streamFinished(server_uni_id));
 
+    // --- Phase 7i: Client resets a new bidi stream with RESET_STREAM ---
+    const reset_stream_id = try client.openStream();
+    try client.sendStream(reset_stream_id, "partial", false);
+    var client_reset_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const client_reset = try client.resetStreamWithRoutePathAndDrainDatagrams(
+        reset_stream_id,
+        42,
+        28,
+        &client_reset_out,
+    );
+    try std.testing.expect(client_reset.drain.datagrams_written >= 1);
+    const client_reset_written = client_reset.drain.datagrams_written;
+    defer {
+        for (client_reset_out[0..client_reset_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 7j: Server receives every client RESET_STREAM datagram ---
+    for (client_reset_out[0..client_reset_written]) |reset_datagram| {
+        var sr_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var sr_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var sr_installed_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var sr_pending_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var sr_route_out: [256]u8 = undefined;
+        const sr_step = try server_endpoint.receiveDatagramStepWithRoutePath(
+            std.testing.allocator,
+            server_path,
+            29,
+            reset_datagram.datagram,
+            &[_]u8{},
+            &[_]quic_packet.Version{.v1},
+            .{
+                .space = .application,
+                .out = &sr_route_out,
+                .unpredictable_prefix = &[_]u8{},
+                .supported_versions = &[_]quic_packet.Version{.v1},
+            },
+            &server_scratch,
+            &[_]u8{},
+            &sr_initial_out,
+            &sr_handshake_out,
+            &sr_installed_out,
+            .application,
+            &sr_pending_out,
+        );
+        var sr_ik_written: usize = 0;
+        switch (sr_step.process) {
+            .routed => |routed| switch (routed) {
+                .installed_key => |ik| {
+                    sr_ik_written = ik.drain.datagrams_written;
+                },
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        for (sr_installed_out[0..sr_ik_written]) |o| std.testing.allocator.free(o.datagram);
+        for (sr_pending_out[0..sr_step.pending_drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 7k: Server opens a uni stream with partial data for STOP_SENDING ---
+    const stop_stream_id = try server_endpoint.openUniStream(server_handle);
+    const server_partial_payload = "partial server";
+    var server_partial_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+    const server_partial = try server_endpoint.sendStreamWithRoutePathAndDrainDatagrams(
+        std.testing.allocator,
+        server_handle,
+        stop_stream_id,
+        server_partial_payload,
+        false,
+        30,
+        &server_partial_out,
+    );
+    try std.testing.expect(server_partial.drain.datagrams_written >= 1);
+    const server_partial_written = server_partial.drain.datagrams_written;
+    defer {
+        for (server_partial_out[0..server_partial_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 7l: Client receives partial server data ---
+    for (server_partial_out[0..server_partial_written]) |partial_datagram| {
+        var sp_recv_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+        var sp_due_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+        const sp_step = try client.receiveDatagramStepWithRoutePath(
+            31,
+            &client_scratch,
+            partial_datagram.datagram,
+            &sp_recv_out,
+            &sp_due_out,
+        );
+        try std.testing.expect(sp_step.receive.receive != null);
+        for (sp_recv_out[0..sp_step.receive.drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+        if (sp_step.due) |due| {
+            for (sp_due_out[0..due.drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+        }
+    }
+    var client_partial_buf: [64]u8 = undefined;
+    const client_partial_len = (try client.recvStream(stop_stream_id, &client_partial_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(server_partial_payload, client_partial_buf[0..client_partial_len]);
+
+    // --- Phase 7m: Client sends STOP_SENDING on the partial server stream ---
+    var client_stop_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const client_stop = try client.stopSendingWithRoutePathAndDrainDatagrams(
+        stop_stream_id,
+        99,
+        32,
+        &client_stop_out,
+    );
+    try std.testing.expect(client_stop.drain.datagrams_written >= 1);
+    const client_stop_written = client_stop.drain.datagrams_written;
+    defer {
+        for (client_stop_out[0..client_stop_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 7n: Server receives every client STOP_SENDING datagram ---
+    for (client_stop_out[0..client_stop_written]) |stop_datagram| {
+        var ss_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var ss_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var ss_installed_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var ss_pending_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var ss_route_out: [256]u8 = undefined;
+        const ss_step = try server_endpoint.receiveDatagramStepWithRoutePath(
+            std.testing.allocator,
+            server_path,
+            33,
+            stop_datagram.datagram,
+            &[_]u8{},
+            &[_]quic_packet.Version{.v1},
+            .{
+                .space = .application,
+                .out = &ss_route_out,
+                .unpredictable_prefix = &[_]u8{},
+                .supported_versions = &[_]quic_packet.Version{.v1},
+            },
+            &server_scratch,
+            &[_]u8{},
+            &ss_initial_out,
+            &ss_handshake_out,
+            &ss_installed_out,
+            .application,
+            &ss_pending_out,
+        );
+        var ss_ik_written: usize = 0;
+        switch (ss_step.process) {
+            .routed => |routed| switch (routed) {
+                .installed_key => |ik| {
+                    ss_ik_written = ik.drain.datagrams_written;
+                },
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        for (ss_installed_out[0..ss_ik_written]) |o| std.testing.allocator.free(o.datagram);
+        for (ss_pending_out[0..ss_step.pending_drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
     // --- Phase 7b: Service due server recovery timer ---
     if (try server_endpoint.nextDeadline(std.testing.allocator)) |server_deadline| {
         var due_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
