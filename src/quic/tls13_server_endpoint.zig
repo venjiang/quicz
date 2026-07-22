@@ -153,6 +153,12 @@ pub fn Tls13ServerEndpoint(
             next_deadline: ?root.EndpointConnectionDeadline = null,
         };
 
+        /// Application stream/control result with bounded route-bound output.
+        pub const OneRttControlDatagramPathDrainResult = struct {
+            drain: DatagramPathDrainResult = .{},
+            next_deadline: ?root.EndpointConnectionDeadline = null,
+        };
+
         /// Accepted Initial output paired with the committed UDP route.
         pub const AcceptedInitialDatagramDrainPathResult = struct {
             accepted: root.EndpointAcceptedInitialCryptoBackendDatagramDrainResult,
@@ -2043,6 +2049,44 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Queue stream bytes and drain protected datagrams with the committed route.
+        ///
+        /// The route and output capacity are checked before mutating stream state.
+        pub fn sendStreamWithRoutePathAndDrainDatagrams(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            connection_id: u64,
+            stream_id: u64,
+            data: []const u8,
+            fin: bool,
+            now_millis: i64,
+            out: []DatagramPathResult,
+        ) (root.Error || endpoint.RouteError)!OneRttControlDatagramPathDrainResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
+            if (out.len == 0) return error.BufferTooSmall;
+            const connection = connection_of(record);
+            try connection.sendOnStream(stream_id, data, fin);
+            const drain = self.drainDatagramsWithRoutePath(
+                connection_id,
+                connection,
+                now_millis,
+                .{
+                    .space = .application,
+                    .destination_connection_id = destination_connection_id_of(record),
+                },
+                path,
+                out,
+            );
+            return .{
+                .drain = .{
+                    .datagrams_written = drain.datagrams_written,
+                    .first_error = drain.first_error,
+                },
+                .next_deadline = try self.nextDeadline(allocator),
+            };
+        }
+
         /// Abort a locally writable stream and queue a RESET_STREAM frame.
         pub fn resetStream(
             self: *Self,
@@ -2077,6 +2121,43 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Queue RESET_STREAM and drain protected datagrams with the committed route.
+        ///
+        /// The route and output capacity are checked before mutating stream state.
+        pub fn resetStreamWithRoutePathAndDrainDatagrams(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            connection_id: u64,
+            stream_id: u64,
+            application_error_code: u64,
+            now_millis: i64,
+            out: []DatagramPathResult,
+        ) (root.Error || endpoint.RouteError)!OneRttControlDatagramPathDrainResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
+            if (out.len == 0) return error.BufferTooSmall;
+            const connection = connection_of(record);
+            try connection.resetStream(stream_id, application_error_code);
+            const drain = self.drainDatagramsWithRoutePath(
+                connection_id,
+                connection,
+                now_millis,
+                .{
+                    .space = .application,
+                    .destination_connection_id = destination_connection_id_of(record),
+                },
+                path,
+                out,
+            );
+            return .{
+                .drain = .{
+                    .datagrams_written = drain.datagrams_written,
+                    .first_error = drain.first_error,
+                },
+                .next_deadline = try self.nextDeadline(allocator),
+            };
+        }
+
         /// Ask the peer to stop sending on a receive-capable stream.
         pub fn stopSending(
             self: *Self,
@@ -2108,6 +2189,43 @@ pub fn Tls13ServerEndpoint(
             return .{
                 .datagram = datagram,
                 .path = path,
+            };
+        }
+
+        /// Queue STOP_SENDING and drain protected datagrams with the committed route.
+        ///
+        /// The route and output capacity are checked before mutating stream state.
+        pub fn stopSendingWithRoutePathAndDrainDatagrams(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            connection_id: u64,
+            stream_id: u64,
+            application_error_code: u64,
+            now_millis: i64,
+            out: []DatagramPathResult,
+        ) (root.Error || endpoint.RouteError)!OneRttControlDatagramPathDrainResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
+            if (out.len == 0) return error.BufferTooSmall;
+            const connection = connection_of(record);
+            try connection.stopSending(stream_id, application_error_code);
+            const drain = self.drainDatagramsWithRoutePath(
+                connection_id,
+                connection,
+                now_millis,
+                .{
+                    .space = .application,
+                    .destination_connection_id = destination_connection_id_of(record),
+                },
+                path,
+                out,
+            );
+            return .{
+                .drain = .{
+                    .datagrams_written = drain.datagrams_written,
+                    .first_error = drain.first_error,
+                },
+                .next_deadline = try self.nextDeadline(allocator),
             };
         }
 
@@ -3877,6 +3995,35 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectEqual(@as(usize, 0), record.connection.pending_reset_streams.items.len);
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.stopSendingWithRoutePath(record_handle, server_bidirectional_stream, 42, 1));
     try std.testing.expectEqual(@as(usize, 0), record.connection.pending_stop_sending.items.len);
+    var missing_route_control_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.sendStreamWithRoutePathAndDrainDatagrams(
+        std.testing.allocator,
+        record_handle,
+        server_bidirectional_stream,
+        "missing route",
+        false,
+        1,
+        &missing_route_control_out,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), record.connection.send_queue.items.len);
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.resetStreamWithRoutePathAndDrainDatagrams(
+        std.testing.allocator,
+        record_handle,
+        server_unidirectional_stream,
+        41,
+        1,
+        &missing_route_control_out,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), record.connection.pending_reset_streams.items.len);
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.stopSendingWithRoutePathAndDrainDatagrams(
+        std.testing.allocator,
+        record_handle,
+        server_bidirectional_stream,
+        42,
+        1,
+        &missing_route_control_out,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), record.connection.pending_stop_sending.items.len);
     const record_path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5443),
@@ -3923,6 +4070,97 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     defer std.testing.allocator.free(stop_datagram.datagram);
     try std.testing.expect(stop_datagram.datagram.len != 0);
     try std.testing.expect(stop_datagram.path.eql(record_path));
+    const drain_send_stream = try endpoint_owner.openStream(record_handle);
+    const drain_reset_stream = try endpoint_owner.openUniStream(record_handle);
+    const drain_stop_stream = try endpoint_owner.openStream(record_handle);
+    var zero_control_out: [0]TestEndpoint.DatagramPathResult = .{};
+    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.sendStreamWithRoutePathAndDrainDatagrams(
+        std.testing.allocator,
+        record_handle,
+        drain_send_stream,
+        "server drain",
+        false,
+        4,
+        &zero_control_out,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), record.connection.send_queue.items.len);
+    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.resetStreamWithRoutePathAndDrainDatagrams(
+        std.testing.allocator,
+        record_handle,
+        drain_reset_stream,
+        51,
+        4,
+        &zero_control_out,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), record.connection.pending_reset_streams.items.len);
+    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.stopSendingWithRoutePathAndDrainDatagrams(
+        std.testing.allocator,
+        record_handle,
+        drain_stop_stream,
+        52,
+        4,
+        &zero_control_out,
+    ));
+    try std.testing.expectEqual(@as(usize, 0), record.connection.pending_stop_sending.items.len);
+
+    var control_out: [2]TestEndpoint.DatagramPathResult = undefined;
+    const sent_drain = try endpoint_owner.sendStreamWithRoutePathAndDrainDatagrams(
+        std.testing.allocator,
+        record_handle,
+        drain_send_stream,
+        "server drain",
+        false,
+        4,
+        &control_out,
+    );
+    try std.testing.expect(sent_drain.drain.datagrams_written >= 1);
+    try std.testing.expectEqual(@as(?root.Error, null), sent_drain.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), sent_drain.drain.first_route_error);
+    for (control_out[0..sent_drain.drain.datagrams_written]) |drained| {
+        defer std.testing.allocator.free(drained.datagram);
+        try std.testing.expectEqual(record_handle, drained.connection_id);
+        try std.testing.expect(drained.path.eql(record_path));
+        try std.testing.expect(drained.datagram.len != 0);
+    }
+    try std.testing.expect(sent_drain.next_deadline != null);
+
+    const reset_drain = try endpoint_owner.resetStreamWithRoutePathAndDrainDatagrams(
+        std.testing.allocator,
+        record_handle,
+        drain_reset_stream,
+        51,
+        5,
+        &control_out,
+    );
+    try std.testing.expect(reset_drain.drain.datagrams_written >= 1);
+    try std.testing.expectEqual(@as(?root.Error, null), reset_drain.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), reset_drain.drain.first_route_error);
+    for (control_out[0..reset_drain.drain.datagrams_written]) |drained| {
+        defer std.testing.allocator.free(drained.datagram);
+        try std.testing.expectEqual(record_handle, drained.connection_id);
+        try std.testing.expect(drained.path.eql(record_path));
+        try std.testing.expect(drained.datagram.len != 0);
+    }
+    try std.testing.expect(reset_drain.next_deadline != null);
+
+    const stop_drain = try endpoint_owner.stopSendingWithRoutePathAndDrainDatagrams(
+        std.testing.allocator,
+        record_handle,
+        drain_stop_stream,
+        52,
+        6,
+        &control_out,
+    );
+    try std.testing.expect(stop_drain.drain.datagrams_written >= 1);
+    try std.testing.expectEqual(@as(?root.Error, null), stop_drain.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), stop_drain.drain.first_route_error);
+    for (control_out[0..stop_drain.drain.datagrams_written]) |drained| {
+        defer std.testing.allocator.free(drained.datagram);
+        try std.testing.expectEqual(record_handle, drained.connection_id);
+        try std.testing.expect(drained.path.eql(record_path));
+        try std.testing.expect(drained.datagram.len != 0);
+    }
+    try std.testing.expect(stop_drain.next_deadline != null);
     var stream_read_buffer: [8]u8 = undefined;
     try std.testing.expectEqual(@as(?usize, null), try endpoint_owner.recvStream(record_handle, server_bidirectional_stream, &stream_read_buffer));
     try std.testing.expect(!try endpoint_owner.streamFinished(record_handle, server_bidirectional_stream));
@@ -3930,6 +4168,9 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.sendStreamWithRoutePath(99, server_bidirectional_stream, "server", false, 1));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.resetStreamWithRoutePath(99, server_unidirectional_stream, 41, 2));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.stopSendingWithRoutePath(99, server_bidirectional_stream, 42, 3));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.sendStreamWithRoutePathAndDrainDatagrams(std.testing.allocator, 99, server_bidirectional_stream, "server", false, 1, &control_out));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.resetStreamWithRoutePathAndDrainDatagrams(std.testing.allocator, 99, server_unidirectional_stream, 41, 2, &control_out));
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.stopSendingWithRoutePathAndDrainDatagrams(std.testing.allocator, 99, server_bidirectional_stream, 42, 3, &control_out));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.resetStream(99, server_unidirectional_stream, 41));
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.stopSending(99, server_bidirectional_stream, 42));
     try record.connection.sendPing();

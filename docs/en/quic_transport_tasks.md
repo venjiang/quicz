@@ -118,6 +118,12 @@ evidence requires protected UDP or external interop.
 | qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
 | External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes certificate-verified QUIC/TLS handshakes with two independently implemented local servers, plus certificate-verified bidirectional STREAM FIN echoes through a `quic-go` v0.59.0 server that forces Retry and a separate run whose peer drops one post-handshake 1-RTT packet for PTO recovery; a v1-only `quic-go` server returns Version Negotiation to a Zig v2 Initial, after which Zig validates it and completes a fresh v1 certificate-verified stream echo. Go and Rust clients complete certificate-verified bidirectional STREAM FIN echoes against the local Zig server, including its bounded Retry path. A `quic-go` client also proves sequential stream-count credit release across streams 0-to-4-to-8-to-12, RESET_STREAM(41), server STOP_SENDING(42) followed by peer RESET_STREAM(42), uni stream 2-to-3 FIN exchange, and server PTO recovery after it drops four post-stream Zig datagrams or four server-flight datagrams before handshake completion. Broader server and application-protocol scenarios remain unproven. |
 
+Endpoint-owned TLS client and server stream controls now have bounded
+route-bound drain APIs for STREAM data, RESET_STREAM, and STOP_SENDING. The
+tests cover missing-route and zero-capacity preflight failures before stream
+state mutation, then drain protected 1-RTT output on the committed route and
+return the next endpoint-visible deadline.
+
 Connection-level RFC 9000 `NEW_CONNECTION_ID` processing now tracks the largest
 peer `Retire Prior To` value. It rejects `retire_prior_to > sequence_number`
 before retiring peer-issued connection IDs, queuing `RETIRE_CONNECTION_ID`,
@@ -1577,6 +1583,11 @@ QUIC unless the gap is named and the verification evidence is added here.
 | Interop | Partial | A certificate-verified Zig client completes a FIN-terminated protected STREAM echo against a local independent `quic-go` v0.59.0 server; separate Go and Rust clients complete the inverse echo direction against the Zig server. | Record repeatable peer-version evidence and add Retry, loss/recovery, version-negotiation, broader server, and application-protocol scenarios. |
 
 ## Progress Notes
+
+- 2026-07-22: Endpoint-owned TLS client and server stream controls now expose
+  bounded route-bound drain APIs for STREAM data, RESET_STREAM, and
+  STOP_SENDING. Focused tests cover missing-route and zero-capacity non-commit
+  behavior plus committed-route protected output and next-deadline selection.
 
 - 2026-07-22: Connection-level `NEW_TOKEN` validation now has explicit
   malformed-empty-token regression coverage. The rollback-only receive path

@@ -106,6 +106,11 @@ DATAGRAM、qlog、CUBIC/BBR、大范围 fuzz 和第二外部栈互通都不是 P
 | qlog、PMTU discovery、GSO/GRO、高级 congestion selection | transport loop 可用后的运维/性能扩展。 | Deferred 或未实现。 |
 | 外部互通 | 声称第一轮可用 transport 里程碑前必须具备。 | 部分完成：客户端专用二进制已与两个来自不同实现家族的本机独立服务端完成证书校验的 QUIC/TLS 握手，并通过强制 Retry 的 `quic-go` v0.59.0 server、以及另一次由 peer 丢弃一个 post-handshake 1-RTT 包以触发 PTO recovery 的运行完成证书校验的双向 STREAM FIN echo；仅支持 v1 的 `quic-go` server 会对 Zig v2 Initial 返回 Version Negotiation，Zig 校验后创建全新的 v1 连接并完成证书校验 stream echo。Go 与 Rust 客户端已和本地 Zig server 完成证书校验的双向 STREAM FIN echo，包含有界 Retry 路径。`quic-go` client 还证明 Zig server 在 stream 0 到 4 到 8 到 12 的连续 stream-count 额度释放、接收 RESET_STREAM(41)、server 的 STOP_SENDING(42) 后收到对端 RESET_STREAM(42)、单向 stream 2 到 3 的 FIN 交换，以及丢弃 4 个 post-stream Zig datagram 或握手完成前 4 个 server-flight datagram 后的服务端 PTO recovery。更广泛的服务端和应用层场景尚未验证。 |
 
+Endpoint-owned TLS client/server 的 stream 控制现在有有界 route-bound drain
+API，覆盖 STREAM data、RESET_STREAM 和 STOP_SENDING。测试覆盖 missing-route
+与 zero-capacity preflight 在 stream 状态变化前失败，并在已提交 route 上 drain
+protected 1-RTT output，同时返回下一 endpoint-visible deadline。
+
 Connection-level RFC 9000 `NEW_CONNECTION_ID` 处理现在会跟踪 peer 最大
 `Retire Prior To` 值。它会在 retiring peer-issued connection IDs、排队
 `RETIRE_CONNECTION_ID`、推进 peer packet-number 状态或调度 ACK 前拒绝
@@ -1364,6 +1369,11 @@ close 和 route cleanup 事件。
 以上仅是有界的 1-RTT short-packet 证据。Initial 和 Handshake 接收路径仍保持当前的有序规则，尚未记录外部 server 互通结果。
 
 ## 进展记录
+
+- 2026-07-22：Endpoint-owned TLS client/server 的 stream 控制现在暴露有界
+  route-bound drain API，覆盖 STREAM data、RESET_STREAM 和 STOP_SENDING。
+  聚焦测试覆盖 missing-route 与 zero-capacity non-commit，以及已提交 route 上的
+  protected output 和下一 deadline 选择。
 
 - 2026-07-22：Connection-level `NEW_TOKEN` 校验现在补充了畸形空 token
   的显式回归覆盖。只回滚的 receive 路径会拒绝该 wire payload，不存 token，也不
