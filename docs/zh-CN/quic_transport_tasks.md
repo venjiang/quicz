@@ -1644,6 +1644,10 @@ close 和 route cleanup 事件。
   cleanup step，生产 event loop 可以在下一次 admission 或维护周期前退役已 closed
   的 record、route 和 recovery timer。
 
+- 2026-07-22：加固 endpoint registry cleanup 测试中的 destroyed-record 边界。
+  terminal polling 和 deadline 测试会在 cleanup 可能销毁 endpoint-owned
+  record 前保存 handle，测试证据不再通过已退役 record 指针读取 handle。
+
 - 2026-07-17：加固 server endpoint 终态 record cleanup。
   `Tls13ServerEndpoint` 在 due idle/close retirement 后如果无法移除
   endpoint-owned record，现在返回 internal consistency error，而不是依赖

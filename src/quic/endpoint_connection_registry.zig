@@ -1693,6 +1693,7 @@ test "EndpointConnectionRegistry output polling skips and retires closed records
         .handle = 71,
         .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
     };
+    const closed_handle = closed_record.handle;
     closed_initialized = true;
     try closed_record.connection.validatePeerAddress();
     try closed_record.connection.confirmHandshake();
@@ -1702,14 +1703,14 @@ test "EndpointConnectionRegistry output polling skips and retires closed records
         .local = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
         .remote = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
     };
-    try lifecycle.registerConnectionId(closed_record.handle, TestRecord.sourceConnectionId(closed_record), path, .{ .sequence_number = 0 });
+    try lifecycle.registerConnectionId(closed_handle, TestRecord.sourceConnectionId(closed_record), path, .{ .sequence_number = 0 });
     var closed_lifecycle_registered = true;
     errdefer if (closed_lifecycle_registered) {
-        _ = lifecycle.retireConnection(closed_record.handle);
+        _ = lifecycle.retireConnection(closed_handle);
     };
     _ = try closed_record.connection.recordPacketSentInSpace(.application, 10, 100);
-    try lifecycle.armRecoveryTimerFromConnection(closed_record.handle, &closed_record.connection);
-    try registry.adopt(closed_record.handle, closed_record);
+    try lifecycle.armRecoveryTimerFromConnection(closed_handle, &closed_record.connection);
+    try registry.adopt(closed_handle, closed_record);
     closed_owned = false;
 
     const live_record = try std.testing.allocator.create(TestRecord);
@@ -1725,6 +1726,7 @@ test "EndpointConnectionRegistry output polling skips and retires closed records
         .handle = 72,
         .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
     };
+    const live_handle = live_record.handle;
     live_initialized = true;
     try live_record.connection.validatePeerAddress();
     try live_record.connection.confirmHandshake();
@@ -1733,7 +1735,7 @@ test "EndpointConnectionRegistry output polling skips and retires closed records
         .peer = secrets.client.secret,
     });
     try live_record.connection.sendPing();
-    try registry.adopt(live_record.handle, live_record);
+    try registry.adopt(live_handle, live_record);
     live_owned = false;
 
     try std.testing.expectEqual(@as(usize, 2), registry.count());
@@ -1761,10 +1763,10 @@ test "EndpointConnectionRegistry output polling skips and retires closed records
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(polled.datagram);
     closed_lifecycle_registered = false;
-    try std.testing.expectEqual(@as(u64, live_record.handle), polled.connection_id);
+    try std.testing.expectEqual(@as(u64, live_handle), polled.connection_id);
     try std.testing.expectEqual(@as(usize, 1), registry.count());
-    try std.testing.expect(registry.get(closed_record.handle) == null);
-    try std.testing.expect(registry.get(live_record.handle) != null);
+    try std.testing.expect(registry.get(closed_handle) == null);
+    try std.testing.expect(registry.get(live_handle) != null);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
 }
@@ -1928,6 +1930,7 @@ test "EndpointConnectionRegistry output polling retires records closed by poll t
         .handle = 77,
         .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
     };
+    const expired_handle = expired_record.handle;
     expired_initialized = true;
     try expired_record.connection.validatePeerAddress();
     try expired_record.connection.confirmHandshake();
@@ -1939,16 +1942,16 @@ test "EndpointConnectionRegistry output polling retires records closed by poll t
         .local = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
         .remote = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
     };
-    try lifecycle.registerConnectionId(expired_record.handle, TestRecord.sourceConnectionId(expired_record), path, .{ .sequence_number = 0 });
+    try lifecycle.registerConnectionId(expired_handle, TestRecord.sourceConnectionId(expired_record), path, .{ .sequence_number = 0 });
     var expired_lifecycle_registered = true;
     errdefer if (expired_lifecycle_registered) {
-        _ = lifecycle.retireConnection(expired_record.handle);
+        _ = lifecycle.retireConnection(expired_handle);
     };
     _ = try expired_record.connection.recordPacketSentInSpace(.application, 10, 100);
-    try lifecycle.armRecoveryTimerFromConnection(expired_record.handle, &expired_record.connection);
+    try lifecycle.armRecoveryTimerFromConnection(expired_handle, &expired_record.connection);
     expired_record.connection.state = .closing;
     expired_record.connection.close_deadline_millis = 10;
-    try registry.adopt(expired_record.handle, expired_record);
+    try registry.adopt(expired_handle, expired_record);
     expired_owned = false;
 
     const live_record = try std.testing.allocator.create(TestRecord);
@@ -1964,6 +1967,7 @@ test "EndpointConnectionRegistry output polling retires records closed by poll t
         .handle = 78,
         .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
     };
+    const live_handle = live_record.handle;
     live_initialized = true;
     try live_record.connection.validatePeerAddress();
     try live_record.connection.confirmHandshake();
@@ -1972,7 +1976,7 @@ test "EndpointConnectionRegistry output polling retires records closed by poll t
         .peer = secrets.client.secret,
     });
     try live_record.connection.sendPing();
-    try registry.adopt(live_record.handle, live_record);
+    try registry.adopt(live_handle, live_record);
     live_owned = false;
 
     var poll_views: [2]root.EndpointConnectionPollView = undefined;
@@ -1982,7 +1986,7 @@ test "EndpointConnectionRegistry output polling retires records closed by poll t
         TestRecord.sourceConnectionId,
     );
     for (views, 0..) |view, index| {
-        if (view.connection_id == expired_record.handle) {
+        if (view.connection_id == expired_handle) {
             registry.next_poll_index = index;
             break;
         }
@@ -2003,9 +2007,9 @@ test "EndpointConnectionRegistry output polling retires records closed by poll t
     )) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(polled.datagram);
     expired_lifecycle_registered = false;
-    try std.testing.expectEqual(@as(u64, live_record.handle), polled.connection_id);
-    try std.testing.expect(registry.get(expired_record.handle) == null);
-    try std.testing.expect(registry.get(live_record.handle) != null);
+    try std.testing.expectEqual(@as(u64, live_handle), polled.connection_id);
+    try std.testing.expect(registry.get(expired_handle) == null);
+    try std.testing.expect(registry.get(live_handle) != null);
     try std.testing.expectEqual(@as(usize, 1), registry.count());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 1), lifecycle.recoveryTimerCount());
@@ -2056,6 +2060,7 @@ test "EndpointConnectionRegistry next deadline retires closed records before sel
         .handle = 81,
         .connection = try root.Connection.init(std.testing.allocator, .server, .{}),
     };
+    const closed_handle = closed_record.handle;
     closed_initialized = true;
     try closed_record.connection.validatePeerAddress();
     try closed_record.connection.confirmHandshake();
@@ -2064,14 +2069,14 @@ test "EndpointConnectionRegistry next deadline retires closed records before sel
         .local = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
         .remote = root.endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
     };
-    try lifecycle.registerConnectionId(closed_record.handle, TestRecord.sourceConnectionId(closed_record), path, .{ .sequence_number = 0 });
+    try lifecycle.registerConnectionId(closed_handle, TestRecord.sourceConnectionId(closed_record), path, .{ .sequence_number = 0 });
     var closed_lifecycle_registered = true;
     errdefer if (closed_lifecycle_registered) {
-        _ = lifecycle.retireConnection(closed_record.handle);
+        _ = lifecycle.retireConnection(closed_handle);
     };
     _ = try closed_record.connection.recordPacketSentInSpace(.application, 10, 100);
-    try lifecycle.armRecoveryTimerFromConnection(closed_record.handle, &closed_record.connection);
-    try registry.adopt(closed_record.handle, closed_record);
+    try lifecycle.armRecoveryTimerFromConnection(closed_handle, &closed_record.connection);
+    try registry.adopt(closed_handle, closed_record);
     closed_owned = false;
 
     const live_record = try std.testing.allocator.create(TestRecord);
@@ -2087,9 +2092,10 @@ test "EndpointConnectionRegistry next deadline retires closed records before sel
         .handle = 82,
         .connection = try root.Connection.init(std.testing.allocator, .server, .{ .max_idle_timeout_ms = 30 }),
     };
+    const live_handle = live_record.handle;
     live_initialized = true;
     live_record.connection.last_packet_activity_millis = 5;
-    try registry.adopt(live_record.handle, live_record);
+    try registry.adopt(live_handle, live_record);
     live_owned = false;
 
     closed_record.connection.state = .closed;
@@ -2102,12 +2108,12 @@ test "EndpointConnectionRegistry next deadline retires closed records before sel
         no_allocation_allocator.allocator(),
     )) orelse return error.TestUnexpectedResult;
     closed_lifecycle_registered = false;
-    try std.testing.expectEqual(@as(u64, live_record.handle), deadline.connection_id);
+    try std.testing.expectEqual(@as(u64, live_handle), deadline.connection_id);
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.idle_timeout, deadline.kind);
     try std.testing.expectEqual(@as(i64, 35), deadline.deadline_millis);
     try std.testing.expectEqual(@as(usize, 1), registry.count());
-    try std.testing.expect(registry.get(closed_record.handle) == null);
-    try std.testing.expect(registry.get(live_record.handle) != null);
+    try std.testing.expect(registry.get(closed_handle) == null);
+    try std.testing.expect(registry.get(live_handle) != null);
     try std.testing.expectEqual(@as(usize, 0), lifecycle.routeCount());
     try std.testing.expectEqual(@as(usize, 0), lifecycle.recoveryTimerCount());
 }

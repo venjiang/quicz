@@ -1893,6 +1893,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   to retire already-closed records, routes, and recovery timers before the next
   admission or maintenance cycle.
 
+- 2026-07-22: Hardened endpoint registry cleanup tests around destroyed records.
+  Terminal polling and deadline tests now preserve record handles before
+  cleanup can destroy endpoint-owned records, so the evidence no longer reads
+  through retired record pointers after route/timer cleanup.
+
 - 2026-07-17: Hardened server endpoint terminal record cleanup.
   `Tls13ServerEndpoint` now reports an internal consistency error if due
   idle/close retirement cannot remove the endpoint-owned record, instead of
