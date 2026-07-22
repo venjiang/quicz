@@ -72,13 +72,12 @@ transport，P0 最后才做其它语言互通，examples 和可选扩展放到 P
 
 | 顺序 | 任务 | 门禁 | 完成标准 |
 | --- | --- | --- | --- |
-| 1 | 统一 client due-deadline route error | P0-4 | Client route-bound due recovery drain 通过 result metadata 报告 missing committed route，保留 due deadline，不 service recovery，也不消费 output。 |
-| 2 | 收敛 endpoint socket-loop step 表面 | P0-1 | Client 和 server 各自暴露一个有界 receive/process/drain/due-deadline result shape，UDP loop 可直接调用，不需要 per-case 胶水。 |
-| 3 | 证明 protected stream/control/credit 纵向路径 | P0-2 | 一个 endpoint-loop 测试覆盖 bidi FIN、uni FIN、stream-count release、RESET_STREAM、STOP_SENDING、flow-control unblock 和 route-bound output。 |
-| 4 | 加固 recovery timer 集成 | P0-3 | Endpoint 测试证明 route-bound PTO 会重传 CRYPTO/STREAM，ACK 会清理 outstanding state，PTO backoff 不会形成 tight loop，terminal close/drain 会 disarm recovery timer。 |
-| 5 | 扫 Close、CID、Retry、reset 和 migration 安全边界 | P0-4 | Missing-route、zero-capacity、invalid token/CID、stateless reset、close 和 migration 失败都能通过 endpoint 观测且不提交状态。 |
-| 6 | 修剪 TLS/backend rollback 阻塞点 | P0-5 | 只剩会影响本地 protected 纵向路径或 P0 互通的失败路径；每个都有 targeted rollback test。 |
-| 7 | 运行第一轮外部互通门禁 | P0-6 | `quic-go` 互通可从干净 checkout 重复运行，覆盖 handshake、Retry、FIN echo、reset/stop、close 和可控 PTO。 |
+| 1 | 收敛 endpoint socket-loop step 表面 | P0-1 | Client 和 server 各自暴露一个有界 receive/process/drain/due-deadline result shape，UDP loop 可直接调用，不需要 per-case 胶水。 |
+| 2 | 证明 protected stream/control/credit 纵向路径 | P0-2 | 一个 endpoint-loop 测试覆盖 bidi FIN、uni FIN、stream-count release、RESET_STREAM、STOP_SENDING、flow-control unblock 和 route-bound output。 |
+| 3 | 加固 recovery timer 集成 | P0-3 | Endpoint 测试证明 route-bound PTO 会重传 CRYPTO/STREAM，ACK 会清理 outstanding state，PTO backoff 不会形成 tight loop，terminal close/drain 会 disarm recovery timer。 |
+| 4 | 扫 Close、CID、Retry、reset 和 migration 安全边界 | P0-4 | Missing-route、zero-capacity、invalid token/CID、stateless reset、close 和 migration 失败都能通过 endpoint 观测且不提交状态。 |
+| 5 | 修剪 TLS/backend rollback 阻塞点 | P0-5 | 只剩会影响本地 protected 纵向路径或 P0 互通的失败路径；每个都有 targeted rollback test。 |
+| 6 | 运行第一轮外部互通门禁 | P0-6 | `quic-go` 互通可从干净 checkout 重复运行，覆盖 handshake、Retry、FIN echo、reset/stop、close 和可控 PTO。 |
 
 ### P0 后停放项
 
@@ -129,6 +128,10 @@ output 与下一 deadline 选择。
 Server due-deadline route-bound recovery drain 现在会在 allocator 和 scratch
 路径里通过 `drain.first_route_error` 暴露 missing-route preflight 失败，保留 due
 recovery deadline，不 service recovery，也不消费 output。
+Client due-deadline route-bound recovery drain 现在会通过
+`drain.first_route_error` 暴露 missing-route preflight 失败，保留 due recovery
+deadline，不 service recovery，也不消费 output。同一个 drain result 仍会在 route
+lookup 前用 `drain.first_error` 报告 zero-capacity，保持原有 non-commit guard。
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` 处理现在会跟踪 peer 最大
 `Retire Prior To` 值。它会在 retiring peer-issued connection IDs、排队
@@ -1404,6 +1407,12 @@ close 和 route cleanup 事件。
   route-aware drain result 报告缺失 committed route，不再从 socket-loop 路径直接抛错。
   Allocator 与 scratch 测试覆盖 Application 和 Initial recovery deadline，证明 route
   preflight 失败时不会 service recovery、不会消费 output，也不会丢失 deadline。
+
+- 2026-07-22：Client due-deadline route-bound recovery drain 现在会通过
+  `drain.first_route_error` 报告缺失 committed route，不再从 bounded drain 路径直接抛错。
+  聚焦测试证明 due recovery deadline 会保留，recovery 不会被 service，output 不会被
+  消费，zero-capacity 仍在 route lookup 前失败，并且恢复 route 后会在已提交路径上
+  drain protected 1-RTT recovery output。
 
 - 2026-07-22：Connection-level `NEW_TOKEN` 校验现在补充了畸形空 token
   的显式回归覆盖。只回滚的 receive 路径会拒绝该 wire payload，不存 token，也不

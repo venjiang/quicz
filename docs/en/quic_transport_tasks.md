@@ -83,13 +83,12 @@ A task may enter the active queue only when all checks pass:
 
 | Order | Task | Gate | Done when |
 | --- | --- | --- | --- |
-| 1 | Normalize client due-deadline route errors | P0-4 | Client route-bound due recovery drains report missing committed routes as result metadata, preserve the due deadline, do not service recovery, and do not consume output. |
-| 2 | Collapse endpoint socket-loop step surface | P0-1 | Client and server each expose one bounded receive/process/drain/due-deadline result shape that a UDP loop can call without per-case glue. |
-| 3 | Prove protected stream/control/credit vertical | P0-2 | One focused endpoint-loop test covers bidi FIN, uni FIN, stream-count release, RESET_STREAM, STOP_SENDING, flow-control unblock, and route-bound output. |
-| 4 | Harden recovery timer integration | P0-3 | Endpoint tests prove route-bound PTO retransmits CRYPTO/STREAM, ACK clears outstanding state, PTO backoff cannot form a tight loop, and terminal close/drain disarms recovery timers. |
-| 5 | Sweep close, CID, Retry, reset, and migration safety | P0-4 | Missing-route, zero-capacity, invalid token/CID, stateless reset, close, and migration failures are endpoint-visible and non-committing. |
-| 6 | Trim TLS/backend rollback blockers | P0-5 | Only failures that can affect the local protected vertical or P0 interop remain; each has a targeted rollback test. |
-| 7 | Run the first external interop gate | P0-6 | `quic-go` interop is repeatable from a clean checkout for handshake, Retry, FIN echo, reset/stop, close, and controlled PTO. |
+| 1 | Collapse endpoint socket-loop step surface | P0-1 | Client and server each expose one bounded receive/process/drain/due-deadline result shape that a UDP loop can call without per-case glue. |
+| 2 | Prove protected stream/control/credit vertical | P0-2 | One focused endpoint-loop test covers bidi FIN, uni FIN, stream-count release, RESET_STREAM, STOP_SENDING, flow-control unblock, and route-bound output. |
+| 3 | Harden recovery timer integration | P0-3 | Endpoint tests prove route-bound PTO retransmits CRYPTO/STREAM, ACK clears outstanding state, PTO backoff cannot form a tight loop, and terminal close/drain disarms recovery timers. |
+| 4 | Sweep close, CID, Retry, reset, and migration safety | P0-4 | Missing-route, zero-capacity, invalid token/CID, stateless reset, close, and migration failures are endpoint-visible and non-committing. |
+| 5 | Trim TLS/backend rollback blockers | P0-5 | Only failures that can affect the local protected vertical or P0 interop remain; each has a targeted rollback test. |
+| 6 | Run the first external interop gate | P0-6 | `quic-go` interop is repeatable from a clean checkout for handshake, Retry, FIN echo, reset/stop, close, and controlled PTO. |
 
 ### Parked after P0
 
@@ -144,6 +143,11 @@ Server due-deadline route-bound recovery drains now surface missing-route
 preflight failures through `drain.first_route_error` for both allocator and
 scratch paths, preserving the due recovery deadline without servicing recovery
 or consuming output.
+Client due-deadline route-bound recovery drains now surface missing-route
+preflight failures through `drain.first_route_error`, preserving the due
+recovery deadline without servicing recovery or consuming output. The same
+drain result still reports zero-capacity as `drain.first_error` before route
+lookup, preserving the prior non-commit guard.
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` processing now tracks the largest
 peer `Retire Prior To` value. It rejects `retire_prior_to > sequence_number`
@@ -1623,6 +1627,13 @@ the top of this file.
   throwing from the socket-loop path. Allocator and scratch tests cover
   Application and Initial recovery deadlines, proving no recovery service,
   output consumption, or deadline loss happens on route preflight failure.
+
+- 2026-07-22: Client due-deadline route-bound recovery drains now report a
+  missing committed route through `drain.first_route_error` instead of throwing
+  from the bounded drain path. Focused tests prove the due recovery deadline is
+  preserved, recovery is not serviced, output is not consumed, zero-capacity
+  still fails before route lookup, and the restored route drains protected
+  1-RTT recovery output on the committed path.
 
 - 2026-07-22: Connection-level `NEW_TOKEN` validation now has explicit
   malformed-empty-token regression coverage. The rollback-only receive path

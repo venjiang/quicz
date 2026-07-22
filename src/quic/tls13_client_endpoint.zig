@@ -434,8 +434,16 @@ pub const Tls13ClientEndpoint = struct {
         if (deadline.deadlineMillis() > now_millis) return null;
         if (deadline == .recovery) {
             if (out.len == 0) return error.BufferTooSmall;
-            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-            _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
+            const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return .{
+                .deadline = deadline,
+                .drain = .{ .first_route_error = error.UnknownConnectionId },
+                .next_deadline = self.nextDeadline(),
+            };
+            _ = self.lifecycle.currentRoutePath(local_source_connection_id) catch |err| return .{
+                .deadline = deadline,
+                .drain = .{ .first_route_error = err },
+                .next_deadline = self.nextDeadline(),
+            };
         }
         const serviced = (try self.serviceDueDeadline(now_millis)) orelse return null;
         if (serviced != .recovery) {
@@ -926,6 +934,8 @@ pub const Tls13ClientEndpoint = struct {
         datagrams_written: usize = 0,
         /// First polling error observed after any earlier entries were written.
         first_error: ?ApplicationDatagramPollError = null,
+        /// First route lookup error observed before servicing due recovery.
+        first_route_error: ?endpoint.RouteError = null,
     };
 
     /// Client Version Negotiation restart result.
@@ -1883,7 +1893,15 @@ test "Tls13ClientEndpoint drains due recovery with committed route output" {
     try std.testing.expectEqual(transport_types.PacketNumberSpace.application, zero_preserved_deadline.recovery.space);
 
     try std.testing.expect(try client.lifecycle.retireConnectionIdOnPath(&client_scid, new_path));
-    try std.testing.expectError(error.UnknownConnectionId, client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(deadline.deadlineMillis(), &out));
+    const missing_route_due = (try client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(deadline.deadlineMillis(), &out)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(missing_route_due.deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, missing_route_due.deadline.recovery.space);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), missing_route_due.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_due.drain.first_route_error);
+    const missing_route_next_deadline = missing_route_due.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expect(missing_route_next_deadline == .recovery);
+    try std.testing.expectEqual(transport_types.PacketNumberSpace.application, missing_route_next_deadline.recovery.space);
     const preserved_deadline = client.nextDeadline() orelse return error.TestUnexpectedResult;
     try std.testing.expect(preserved_deadline == .recovery);
     try std.testing.expectEqual(transport_types.PacketNumberSpace.application, preserved_deadline.recovery.space);
@@ -1894,6 +1912,7 @@ test "Tls13ClientEndpoint drains due recovery with committed route output" {
     try std.testing.expectEqual(transport_types.PacketNumberSpace.application, serviced.deadline.recovery.space);
     try std.testing.expectEqual(@as(usize, 1), serviced.drain.datagrams_written);
     try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), serviced.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), serviced.drain.first_route_error);
     defer std.testing.allocator.free(out[0].datagram);
     try std.testing.expect(out[0].path.eql(new_path));
     try std.testing.expect(out[0].datagram.len != 0);
@@ -1974,6 +1993,7 @@ test "Tls13ClientEndpoint receive step drains due recovery with committed route 
     try std.testing.expectEqual(transport_types.PacketNumberSpace.application, zero_due.deadline.recovery.space);
     try std.testing.expectEqual(@as(usize, 0), zero_due.drain.datagrams_written);
     try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, error.BufferTooSmall), zero_due.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), zero_due.drain.first_route_error);
     const zero_next_deadline = zero_step.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expect(zero_next_deadline == .recovery);
     try std.testing.expectEqual(transport_types.PacketNumberSpace.application, zero_next_deadline.recovery.space);
@@ -1996,6 +2016,7 @@ test "Tls13ClientEndpoint receive step drains due recovery with committed route 
     try std.testing.expectEqual(transport_types.PacketNumberSpace.application, due.deadline.recovery.space);
     try std.testing.expectEqual(@as(usize, 1), due.drain.datagrams_written);
     try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), due.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), due.drain.first_route_error);
     defer std.testing.allocator.free(due_out[0].datagram);
     try std.testing.expect(due_out[0].path.eql(new_path));
     try std.testing.expect(due_out[0].datagram.len != 0);
