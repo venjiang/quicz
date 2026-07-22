@@ -39,70 +39,88 @@ version-information 原语）：
 
 这是权威执行矩阵。本文后面的详细 ledger 只作为证据留存，不再作为 active queue。
 
-矩阵按交付门禁设计，不按功能清单堆任务。P0 任务只有在直接推进第一轮 QUIC v1
-transport 可用声明时才能进入队列。文档美化、examples、HTTP/3、DATAGRAM、qlog、
-PMTU/GSO、大范围 fuzz、完整 QUIC v2、第二外部栈都不是 P0；除非它们是修复某个 P0
-门禁失败的最小必要动作。
+矩阵围绕少数深模块 seam 组织：endpoint loop、protected stream I/O、recovery、
+lifecycle routing、TLS 集成，以及一个外部互通门禁。P0 任务必须直接推进这些 seam
+中的一个，让 QUIC v1 transport 更接近可用。examples、README 美化、HTTP/3、
+DATAGRAM、qlog、PMTU/GSO、完整 QUIC v2、大范围 fuzz、语言示例和第二外部栈都
+不是 P0；除非它们是修复某个 P0 门禁失败的最小必要动作。
 
 ### P0 完成定义
 
 只有下列 P0 门禁全部完成，`quicz` 才能声明第一轮 QUIC v1 transport 可用：
 
-- 本地 Zig client/server 通过 endpoint-owned UDP/TLS API 互通，不依赖 mock key 或
-  调用方 packet 胶水。
-- Protected bidi/uni stream 支持 data、FIN、reset/stop、stream-count credit
-  release 和 flow-control unblock。
-- ACK、loss detection、PTO、retransmission、RTT、bytes-in-flight 和 NewReno
-  baseline accounting 都由同一个 endpoint loop 驱动。
+- 本地 Zig client/server 通过 endpoint-owned UDP/TLS API 完成证书校验的 protected
+  handshake。
+- 同一个 endpoint seam 驱动 protected bidirectional/unidirectional stream data、
+  FIN、reset/stop、stream-count credit release 和 flow-control unblock。
+- ACK processing、loss detection、PTO、retransmission、RTT、bytes-in-flight 和
+  NewReno baseline accounting 都由 endpoint timer 与 receive step 驱动。
 - Retry、address validation、CID routing/retirement、stateless reset、close、
-  key discard、path validation 和单路径 migration 都有 endpoint-visible 的成功与
-  失败语义。
-- Pure-Zig TLS 1.3 是 P0 路径；废弃 OpenSSL adapter 和 mock-secret 路径不能是 P0
-  通过条件。
-- 一个外部栈门禁用 clean checkout 通过 `quic-go`。其它栈属于 P1 加固，不属于 P0。
+  key discard、path validation 和单路径 migration 都在 endpoint seam 暴露提交与
+  不提交结果。
+- P0 路径使用 pure-Zig TLS 1.3。Mock secret 与废弃 OpenSSL adapter 可以保留为测试
+  或兼容路径，但不能作为 P0 通过条件。
+- 一个 clean-checkout `quic-go` 门禁通过。Rust、s2n-quic、quiche、quinn 和
+  QUIC-Interop-Runner 覆盖属于 P1 加固。
 
-### 当前 P0 门禁
+### P0 任务矩阵
 
-| 门禁 | RFC 范围 | 当前状态 | 下一批任务 | 退出证据 |
-| --- | --- | --- | --- | --- |
-| P0-1 Endpoint event loop | RFC 9000 packet processing、connection lifecycle、timer；RFC 9001 TLS-owned packet space | Active | 增加一个只使用 endpoint API 的本地 Zig client/server UDP loop 测试。 | 本地 Zig endpoint loop 完成证书校验 handshake、protected STREAM echo、due timer service、protected close、key discard 和 route cleanup，不依赖 mock key、OpenSSL、examples 修改或调用方 per-case 分支。 |
-| P0-2 Streams 与 flow control | RFC 9000 Sections 2、4、19.8-19.14 | Next | 覆盖 bidi 和 uni STREAM data/FIN 跑在 protected endpoint packet 上。覆盖 MAX_STREAMS release、RESET_STREAM、STOP_SENDING、connection/stream window blocked/unblocked 和 retransmission requeue。 | 一个 protected endpoint-loop 测试或紧凑测试组证明 data、FIN、reset/stop、credit release、flow-control unblock 和 route-bound output。 |
-| P0-3 ACK、loss、PTO、congestion | RFC 9000 ACK；RFC 9002 loss detection、PTO、congestion control | Next | 证明 CRYPTO 和 STREAM PTO output route-bound 且可重传。证明 ACK cleanup 更新 outstanding packet、RTT、bytes-in-flight、congestion window 和 PTO backoff。证明 close/drain 会解除终态 timer。 | 确定性 endpoint 测试加一次 socket-backed loss run，通过 endpoint loop 驱动 recovery，不留下 stale deadline 或 tight loop。 |
-| P0-4 Routing 与 lifecycle safety | RFC 9000 Retry、token、CID、stateless reset、close、path validation、migration | Next | 确保畸形输入在 packet-number、ACK、stream、CID、token、route 或 timer mutation 前失败。确保 missing route 和 zero capacity 以 result metadata 返回。确保 Retry/token/CID/stateless-reset/close/path-validation 失败不提交状态。 | 边界测试返回 endpoint-visible result 或 close error，保持旧成功路径，并在 terminal drain 后清理 route、record 和 timer。 |
-| P0-5 TLS 1.3 生产边界 | RFC 9001 以及 QUIC 所需 TLS 1.3 handshake 行为 | Next | 保持 certificate、SNI、ALPN、transport-parameter、key-share、transcript、Finished、ticket 和 key-update 失败不提交状态。移除 P0 对 mock secret 或废弃 OpenSSL adapter 行为的剩余依赖。 | P0 endpoint 测试使用 pure-Zig TLS；每个可能破坏 P0-1 到 P0-4 或 P0-6 的 TLS/backend 失败类别都有 targeted rollback test。 |
-| P0-6 第一轮外部互通 | QUIC v1 对一个成熟栈互通 | Blocked on P0-1..P0-5 | 运行带证书校验和 Retry 的 `quic-go` handshake。运行 STREAM FIN echo、RESET_STREAM/STOP_SENDING、close 和一次可控 loss/PTO case。记录 clean-checkout 命令集。 | `quic-go` 通过第一轮外部门禁。Rust、s2n-quic、quiche、quinn、QUIC-Interop-Runner 形态和语言示例继续停放，除非必须用于诊断该门禁。 |
+| 阶段 | 任务 | RFC 重点 | 代码 seam | 退出证据 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| P0-A0 | 有界 endpoint receive step | RFC 9000 packet input/output/timer；RFC 9001 packet space | `Tls13ClientEndpoint`、`Tls13ServerEndpoint` | Client 与 server receive step 返回 input result、routed output、due work、close/key-discard/idle cleanup、route error、capacity error 和 next deadline，不需要调用方分支拼装。 | Done |
+| P0-A1 | 本地 endpoint TLS handshake | RFC 9001 handshake；RFC 9000 Initial/Handshake packet | Endpoint-owned client/server loop | Zig client/server 只通过 endpoint API 完成证书校验 handshake；output 保持 route-bound；不依赖 mock key、OpenSSL、examples 或调用方 per-case glue。 | Active |
+| P0-A2 | 本地 endpoint 1-RTT close loop | RFC 9000 1-RTT packet processing、stream data、close；RFC 9001 key discard | Endpoint-owned client/server loop | 同一个本地 loop 完成 protected STREAM echo、due timer service、protected close、key discard 和 route/record 退役。 | Next |
+| P0-B1 | Protected bidi/uni stream data | RFC 9000 Sections 2、4、19.8 | Endpoint 后面的 `Connection` stream state | Bidi 和 uni data plus FIN 能跑在 protected endpoint packet 上。 | Next |
+| P0-B2 | Stream control 与额度释放 | RFC 9000 Sections 4、19.11-19.14 | Stream-limit 与 flow-control state | RESET_STREAM、STOP_SENDING、MAX_STREAMS release、connection-window unblock 和 stream-window unblock 能跑在 protected endpoint packet 上。 | Next |
+| P0-B3 | Stream retransmission requeue | RFC 9002 stream frame loss recovery | Recovery queue 与 stream sender | 丢失的 STREAM/FIN/reset/stop data 会重新排队并重传，不重复提交 stream state。 | Next |
+| P0-C1 | ACK 与 RTT accounting | RFC 9000 ACK；RFC 9002 RTT/outstanding packet state | Recovery 与 ACK receive path | ACK cleanup 更新 outstanding packet、RTT sample、bytes-in-flight 和 ack-eliciting state。 | Next |
+| P0-C2 | Loss、PTO 与 NewReno 基线 | RFC 9002 packet/time loss、PTO、NewReno baseline | Endpoint timer service | CRYPTO 和 STREAM PTO output route-bound 且可重传；PTO backoff 与 congestion window 更新不会留下 stale deadline 或 tight loop。 | Next |
+| P0-C3 | 终态 timer disarm | RFC 9000 draining/closing；RFC 9002 timer stop condition | Endpoint deadline selection | Close、drain、idle 和 key-discard 终态路径会移除过期 timer 与 output。 | Next |
+| P0-D1 | Failure-before-mutation 不变量 | RFC 9000 packet/frame validation | Packet decoder、frame handler、endpoint admission | 畸形 packet/frame 在 packet-number、ACK、stream、CID、token、route 或 timer mutation 前失败。 | Next |
+| P0-D2 | Retry 与 address validation | RFC 9000 Retry、token、address validation | Server admission 与 token policy | Retry/token 成功与失败路径只提交已认证状态，并暴露 endpoint-visible error。 | Next |
+| P0-D3 | CID routing 与 stateless reset | RFC 9000 connection ID 与 stateless reset | Endpoint router 与 connection CID state | CID issue/retire、missing route、inactive CID reset、active reset 和终态 cleanup 保持 route 不变量。 | Next |
+| P0-D4 | Path validation 与单路径 migration | RFC 9000 path validation 与 migration | Endpoint route update seam | PATH_CHALLENGE/PATH_RESPONSE 与验证后的 route migration 通过 endpoint state 工作；验证失败不提交。 | Next |
+| P0-E1 | TLS rollback closure | RFC 9001 与 QUIC 依赖的 TLS 1.3 handshake 输入 | `tls13.zig`、`tls13_backend.zig` | Certificate、SNI、ALPN、transport-parameter、key-share、transcript、Finished、ticket 和 backend failure 不暴露半提交 QUIC state。 | Next |
+| P0-E2 | QUIC key phase handling | RFC 9001 1-RTT key update 与 key discard | TLS backend 与 packet protection | Key update、old-key retention、packet-number protection 和 discard deadline 通过 protected endpoint packet 覆盖。 | Next |
+| P0-F1 | 第一轮外部互通门禁 | QUIC v1 对一个成熟栈互通 | Process client/server 与 endpoint loop | Clean checkout 通过 `quic-go` 证书校验 handshake、Retry、stream echo/control、close 和一次可控 loss/PTO case。 | Blocked on P0-A..P0-E |
 
-### 当前执行队列
+### 立即执行队列
 
-按顺序推进。退出证据要求 protected endpoint 行为时，不能只用 mock-only 测试标记完成。
+按顺序推进。退出证据要求 protected endpoint 或外部互通行为时，不能只用 mock-only 测试
+标记完成。
 
-| 顺序 | 任务 | 状态 | 完成标准 |
+| 顺序 | 任务 | 状态 | 提交范围 |
 | --- | --- | --- | --- |
-| 1 | P0-1a Client 有界 receive step | Done | Client receive step 返回 receive output、due output、close/key-discard/idle transition、route error、capacity error 和 next deadline，不需要调用方分支拼装。 |
-| 2 | P0-1b Server 有界 receive step | Done | Server receive step 返回 admission、routed output、pending work、due cleanup、route error、capacity error 和 next deadline，不需要调用方分支拼装。 |
-| 3 | P0-1c 本地 Zig endpoint loop | Active | Zig client/server 只通过 endpoint API 完成证书校验 protected UDP handshake、STREAM echo、close、key discard 和 route cleanup。 |
-| 4 | P0-2a Bidi/uni streams | Next | Protected endpoint packet 覆盖 bidi 和 uni data plus FIN。 |
-| 5 | P0-2b Stream control 与 flow control | Next | Protected endpoint packet 覆盖 reset/stop、stream-count release、connection/stream flow-control unblock 和 retransmission requeue。 |
-| 6 | P0-3a PTO retransmission | Next | CRYPTO 和 STREAM PTO output 从 endpoint state 发出，且 route-bound、可重传。 |
-| 7 | P0-3b ACK/congestion accounting | Next | ACK cleanup 更新 outstanding state、RTT、bytes-in-flight、congestion state、PTO backoff 和 terminal timer disarm。 |
-| 8 | P0-4a Failure-before-mutation | Next | 畸形 packet/frame 在危险 packet-number、ACK、stream、CID、token、route 或 timer mutation 前失败。 |
-| 9 | P0-4b Route/token/CID/close/path 边界 | Next | Missing route、zero capacity、Retry/token/CID/stateless reset/close/path-validation/migration 失败保持已提交状态，并暴露 endpoint-visible result。 |
-| 10 | P0-5 TLS rollback closure | Next | 影响 P0 行为的剩余 TLS/backend 失败类别都有 rollback tests；P0 不再需要 mock secrets 或 OpenSSL。 |
-| 11 | P0-6 quic-go gate | Blocked on P0-1..P0-5 | Clean checkout 通过 `quic-go` handshake、Retry、stream echo/control、close 和一次可控 loss/PTO case。 |
+| 1 | P0-A1 本地 endpoint TLS handshake | Active | 增加最小核心 Zig 测试或 endpoint 调整，证明证书校验的本地 handshake。 |
+| 2 | P0-A2 本地 endpoint STREAM/close loop | Next | 扩展同一个本地 loop，覆盖 protected STREAM echo、due timer service、close、key discard 和 route cleanup。 |
+| 3 | P0-B1 protected bidi/uni stream data | Next | 增加 endpoint-level bidi/uni data 与 FIN 覆盖；只修这条证据需要的 stream/endpoint 代码。 |
+| 4 | P0-B2 stream control 与 flow-control credit | Next | 增加 endpoint-level reset/stop、stream-count release 和 flow-control unblock 覆盖。 |
+| 5 | P0-B3 stream retransmission requeue | Next | 证明丢失的 stream/control frame 通过 recovery requeue，且不重复提交 stream state。 |
+| 6 | P0-C1 ACK/RTT accounting | Next | 在 endpoint seam 关闭 ACK cleanup、RTT、outstanding packet 和 bytes-in-flight 证据。 |
+| 7 | P0-C2 loss/PTO/NewReno baseline | Next | 关闭 route-bound CRYPTO/STREAM PTO、loss detection、PTO backoff 与 congestion-window 证据。 |
+| 8 | P0-C3 terminal timer disarm | Next | 证明 close/drain/idle/key-discard 终态路径不会留下 stale deadline。 |
+| 9 | P0-D1 failure-before-mutation | Next | 为会修改共享状态的畸形 packet/frame 类别补 rollback test。 |
+| 10 | P0-D2 Retry/address validation | Next | 关闭认证 Retry/token admission 与 rejection 语义。 |
+| 11 | P0-D3 CID/stateless reset lifecycle | Next | 关闭 route/CID/reset cleanup 与 failure-result 语义。 |
+| 12 | P0-D4 path validation/migration | Next | 关闭验证后单路径 migration 的 endpoint route-update 行为。 |
+| 13 | P0-E1 TLS rollback closure | Next | 关闭剩余会破坏 P0 gate 的 TLS/backend rollback 类别。 |
+| 14 | P0-E2 QUIC key phase handling | Next | 通过 endpoint packet 关闭 1-RTT key update/discard 行为。 |
+| 15 | P0-F1 quic-go gate | Blocked | 运行并记录 clean-checkout 第一轮外部互通命令集。 |
 
 ### 停放工作
 
 | 优先级 | 目标 | 范围 | 重新进入规则 |
 | --- | --- | --- | --- |
-| P1 | 互通加固和生产策略 | 第二外部栈，例如 s2n-quic、quiche、quinn 或 Rust；QUIC-Interop-Runner 形态；更广 stream-limit/loss/migration case；生产 token、replay 和 path policy。 | P0-6 通过后进入；或第二外部栈是诊断 P0-6 失败的最小工具时进入。 |
-| P2 | 公开 API 与可维护性 | Endpoint API 命名/简化、README/examples 文档；pure-Zig TLS 稳定后可考虑 `src/tls/` 抽取。 | 第一轮 usable transport claim 后进入；除非 API 形态阻塞 P0 endpoint 测试。 |
-| P3 | 扩展和运维 | 生产/分布式 0-RTT replay policy、HTTP/3/QPACK、RFC 9221 DATAGRAM、qlog、PMTU/GSO/GRO 调优、完整 QUIC v2/RFC 9368、高级 congestion controller、multipath、大范围 fuzz 和 observability。 | P0/P1 稳定后进入；除非选定 P0/P1 互通目标要求窄子集。 |
+| P1 | 互通加固 | Rust/s2n-quic/quiche/quinn、第二外部栈、QUIC-Interop-Runner 形态、更广 stream-limit/loss/migration case。 | P0-F1 通过后进入；或第二外部栈是诊断 P0-F1 失败的最小工具时进入。 |
+| P1 | 生产策略加固 | Token 持久化/replay policy、path policy、运维 close/reset policy、更广安全回归矩阵。 | Endpoint P0 gate 稳定后进入；除非某个 P0 gate 先需要窄策略。 |
+| P2 | 公开 API 与可维护性 | Endpoint interface 命名/简化、README/examples 文档；TLS 稳定后可选 `src/tls/` 抽取。 | 第一轮 usable transport claim 后进入；除非当前 interface 阻塞 P0 测试。 |
+| P3 | 扩展和运维 | HTTP/3/QPACK、RFC 9221 DATAGRAM、qlog、PMTU/GSO/GRO、完整 QUIC v2/RFC 9368、高级 congestion controller、multipath、大范围 fuzz、observability 和语言示例。 | P0/P1 稳定后进入；除非选定互通目标要求窄子集。 |
 
 ### goal 循环取任务规则
 
-每轮开发默认选择当前执行队列的第一个未完成项，除非验证失败暴露更高风险的 P0 blocker。
+每轮开发默认选择立即执行队列的第一个未完成项，除非验证失败暴露更高风险的 P0 blocker。
 每轮完成时都要在证据变化时更新本文、更新 `goal.md`、运行相关 Zig 验证、提交并推送。
-Mock-only 测试可以辅助改动，但不能关闭退出证据要求 protected UDP 或外部互通的门禁。
+Mock-only 测试可以辅助改动，但不能关闭退出证据要求 protected endpoint packet 或外部互通的任务。
 
 ## 实用 Transport 基线
 
