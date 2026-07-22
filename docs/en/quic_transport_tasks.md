@@ -92,9 +92,9 @@ P0 gates below are complete:
 | P0-D2 | Retry and address validation | RFC 9000 Retry, tokens, address validation | Server admission and token policy | Retry/token success and failure paths commit only authenticated state and expose endpoint-visible errors. | Done |
 | P0-D3 | CID routing and stateless reset | RFC 9000 connection IDs and stateless reset | Endpoint router and connection CID state | CID issue/retire, missing route, inactive CID reset, active reset, and terminal cleanup preserve route invariants. | Done |
 | P0-D4 | Path validation and single-path migration | RFC 9000 path validation and migration | Endpoint route update seam | PATH_CHALLENGE/PATH_RESPONSE and validated route migration work through endpoint state; failed validation is non-committing. | Done |
-| P0-E1 | TLS rollback closure | RFC 9001 plus TLS 1.3 handshake inputs used by QUIC | `tls13.zig`, `tls13_backend.zig` | Certificate, SNI, ALPN, transport-parameter, key-share, transcript, Finished, ticket, and backend failures do not expose partially committed QUIC state. | Active |
-| P0-E2 | QUIC key phase handling | RFC 9001 1-RTT key update and key discard | TLS backend plus packet protection | Key update, old-key retention, packet-number protection, and discard deadlines are exercised through protected endpoint packets. | Next |
-| P0-F1 | First external interop gate | QUIC v1 against one mature stack | Process client/server plus endpoint loop | Clean checkout passes `quic-go` certificate-verified handshake, Retry, stream echo/control, close, and one controlled loss/PTO case. | Blocked on P0-A..P0-E |
+| P0-E1 | TLS rollback closure | RFC 9001 plus TLS 1.3 handshake inputs used by QUIC | `tls13.zig`, `tls13_backend.zig` | Certificate, SNI, ALPN, transport-parameter, key-share, transcript, Finished, ticket, and backend failures do not expose partially committed QUIC state. | Done |
+| P0-E2 | QUIC key phase handling | RFC 9001 1-RTT key update and key discard | TLS backend plus packet protection | Key update, old-key retention, packet-number protection, and discard deadlines are exercised through protected endpoint packets. | Done |
+| P0-F1 | First external interop gate | QUIC v1 against one mature stack | Process client/server plus endpoint loop | Clean checkout passes `quic-go` certificate-verified handshake, Retry, stream echo/control, close, and one controlled loss/PTO case. | Active |
 
 ### Immediate execution queue
 
@@ -115,9 +115,9 @@ by the required protected endpoint or external interop behavior.
 | 10 | P0-D2 Retry/address validation | Done | Close authenticated Retry/token admission and rejection semantics. |
 | 11 | P0-D3 CID/stateless reset lifecycle | Done | Close route/CID/reset cleanup and failure-result semantics. |
 | 12 | P0-D4 path validation/migration | Done | Close endpoint route-update behavior for validated single-path migration. |
-| 13 | P0-E1 TLS rollback closure | Active | Close remaining TLS/backend rollback classes that can break P0 gates. |
-| 14 | P0-E2 QUIC key phase handling | Next | Close 1-RTT key update/discard behavior through endpoint packets. |
-| 15 | P0-F1 quic-go gate | Blocked | Run and document the clean-checkout first external interop command set. |
+| 13 | P0-E1 TLS rollback closure | Done | Close remaining TLS/backend rollback classes that can break P0 gates. |
+| 14 | P0-E2 QUIC key phase handling | Done | Close 1-RTT key update/discard behavior through endpoint packets. |
+| 15 | P0-F1 quic-go gate | Active | Run and document the clean-checkout first external interop command set. |
 
 ### Parked work
 
