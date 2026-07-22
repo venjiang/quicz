@@ -693,6 +693,18 @@ pub const Tls13ClientEndpoint = struct {
         return datagram;
     }
 
+    /// Queue a protected APPLICATION_CLOSE and poll it for UDP send.
+    pub fn closeApplication(
+        self: *Tls13ClientEndpoint,
+        application_error_code: u64,
+        reason: []const u8,
+        now_millis: i64,
+    ) !?[]u8 {
+        const datagram = try self.transport.closeApplication(application_error_code, reason, now_millis);
+        try self.lifecycle.armRecoveryTimerFromConnection(self.connection_id, &self.transport.connection);
+        return datagram;
+    }
+
     /// Queue a protected application CONNECTION_CLOSE and return it with route.
     pub fn closeWithRoutePath(
         self: *Tls13ClientEndpoint,
@@ -704,6 +716,23 @@ pub const Tls13ClientEndpoint = struct {
         const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
         const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
         try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
+        const datagram = (try self.pollApplicationDatagram(now_millis)) orelse return null;
+        return .{
+            .datagram = datagram,
+            .path = path,
+        };
+    }
+
+    /// Queue a protected APPLICATION_CLOSE and return it with route.
+    pub fn closeApplicationWithRoutePath(
+        self: *Tls13ClientEndpoint,
+        application_error_code: u64,
+        reason: []const u8,
+        now_millis: i64,
+    ) !?ApplicationDatagramPathResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        try self.transport.connection.closeApplication(application_error_code, reason);
         const datagram = (try self.pollApplicationDatagram(now_millis)) orelse return null;
         return .{
             .datagram = datagram,
@@ -724,6 +753,24 @@ pub const Tls13ClientEndpoint = struct {
         _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
         if (out.len == 0) return error.BufferTooSmall;
         try self.transport.connection.closeConnection(application_error_code, frame_type, reason);
+        return .{
+            .drain = try self.drainApplicationDatagramsWithRoutePath(now_millis, out),
+            .next_deadline = self.nextDeadline(),
+        };
+    }
+
+    /// Queue a protected APPLICATION_CLOSE and drain route-bound output.
+    pub fn closeApplicationWithRoutePathAndDrainDatagrams(
+        self: *Tls13ClientEndpoint,
+        application_error_code: u64,
+        reason: []const u8,
+        now_millis: i64,
+        out: []ApplicationDatagramPathResult,
+    ) !CloseDatagramPathDrainResult {
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
+        _ = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        if (out.len == 0) return error.BufferTooSmall;
+        try self.transport.connection.closeApplication(application_error_code, reason);
         return .{
             .drain = try self.drainApplicationDatagramsWithRoutePath(now_millis, out),
             .next_deadline = self.nextDeadline(),
@@ -2560,8 +2607,12 @@ test "Tls13ClientEndpoint route-bound controls fail before mutating when route i
     try std.testing.expectEqual(@as(usize, 0), client.transport.connection.pending_stop_sending.items.len);
     try std.testing.expectError(error.UnknownConnectionId, client.closeWithRoutePath(0, 0, "missing route", 1));
     try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
+    try std.testing.expectError(error.UnknownConnectionId, client.closeApplicationWithRoutePath(0, "missing route", 1));
+    try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
     var close_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
     try std.testing.expectError(error.UnknownConnectionId, client.closeWithRoutePathAndDrainDatagrams(0, 0, "missing route", 1, &close_out));
+    try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
+    try std.testing.expectError(error.UnknownConnectionId, client.closeApplicationWithRoutePathAndDrainDatagrams(0, "missing route", 1, &close_out));
     try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
 }
 
@@ -2621,6 +2672,77 @@ test "Tls13ClientEndpoint drains close output with committed route and deadline"
         defer std.testing.allocator.free(drained.datagram);
         try std.testing.expect(drained.path.eql(new_path));
         try std.testing.expect(drained.datagram.len != 0);
+    }
+    const close_deadline = closed.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expect(close_deadline == .close_timeout);
+    try std.testing.expect(client.closeDeadlineMillis() != null);
+}
+
+test "Tls13ClientEndpoint drains application close output with committed route" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x63, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 5444),
+        .remote = old_path.remote,
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        13,
+        old_path,
+        .{ .active_migration_disabled = false },
+        .{},
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const traffic_secret = [_]u8{0x8a} ** 32;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = traffic_secret,
+        .peer = traffic_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xca, 0xcb, 0xcc, 0xcd };
+    const reset_token = [_]u8{0x9a} ** 16;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+    _ = try client.updatePath(new_path);
+
+    var zero_out: [0]Tls13ClientEndpoint.ApplicationDatagramPathResult = .{};
+    try std.testing.expectError(error.BufferTooSmall, client.closeApplicationWithRoutePathAndDrainDatagrams(57, "app done", 1, &zero_out));
+    try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
+    try std.testing.expectEqual(@as(?i64, null), client.closeDeadlineMillis());
+
+    var out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const closed = try client.closeApplicationWithRoutePathAndDrainDatagrams(57, "app done", 1, &out);
+    try std.testing.expectEqual(@as(usize, 1), closed.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), closed.drain.first_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    try std.testing.expect(out[0].path.eql(new_path));
+    const local_keys = protection.deriveAes128PacketProtectionKeys(traffic_secret);
+    var opened = try protection.unprotectShortPacketAes128(std.testing.allocator, local_keys, out[0].datagram, peer_connection_id.len, 0);
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .application_close => |close| {
+            try std.testing.expectEqual(@as(u64, 57), close.error_code);
+            try std.testing.expectEqualStrings("app done", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
     }
     const close_deadline = closed.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expect(close_deadline == .close_timeout);

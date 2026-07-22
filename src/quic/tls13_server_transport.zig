@@ -190,6 +190,17 @@ pub const Tls13ServerTransport = struct {
         return self.pollApplicationDatagram(now_millis);
     }
 
+    /// Queue a protected APPLICATION_CLOSE and poll it for send.
+    pub fn closeApplication(
+        self: *Tls13ServerTransport,
+        application_error_code: u64,
+        reason: []const u8,
+        now_millis: i64,
+    ) Error!?[]u8 {
+        try self.connection.closeApplication(application_error_code, reason);
+        return self.pollApplicationDatagram(now_millis);
+    }
+
     /// Return the active close deadline after `close()` queues a close.
     pub fn closeDeadlineMillis(self: *const Tls13ServerTransport) ?i64 {
         return self.connection.closeDeadlineMillis();

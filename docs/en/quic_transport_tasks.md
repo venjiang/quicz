@@ -106,6 +106,12 @@ entering the active CID pool, with rollback coverage for later invalid payload
 bytes. The close-propagating receive path maps the malformed overflow frame to
 `FRAME_ENCODING_ERROR`, matching the frame decoder and RFC 9000 Section 19.15.
 
+Endpoint-owned TLS client and server close APIs now expose route-bound
+`APPLICATION_CLOSE` output in addition to transport `CONNECTION_CLOSE`. Missing
+routes and zero-capacity drain calls are rejected before mutating close state,
+and client/server route-bound drains decrypt to `APPLICATION_CLOSE` on the
+committed route while selecting the close deadline.
+
 Pure-Zig TLS client-side EncryptedExtensions parsing now rejects malformed ALPN
 list lengths and empty protocol entries without committing negotiated ALPN,
 peer transport parameters, transcript, or handshake state.
@@ -1550,6 +1556,12 @@ QUIC unless the gap is named and the verification evidence is added here.
 | Interop | Partial | A certificate-verified Zig client completes a FIN-terminated protected STREAM echo against a local independent `quic-go` v0.59.0 server; separate Go and Rust clients complete the inverse echo direction against the Zig server. | Record repeatable peer-version evidence and add Retry, loss/recovery, version-negotiation, broader server, and application-protocol scenarios. |
 
 ## Progress Notes
+
+- 2026-07-22: Endpoint-owned TLS client and server APIs now expose protected
+  `APPLICATION_CLOSE` polling and route-bound drain helpers. Focused tests cover
+  missing-route and zero-capacity non-commit behavior, committed-route
+  `APPLICATION_CLOSE` decoding, and close-deadline selection for both endpoint
+  owners.
 
 - 2026-07-17: Tightened pure-Zig TLS server ClientHello extension
   validation. `Tls13Handshake.serverProcessClientHello()` now rejects repeated

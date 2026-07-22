@@ -2124,6 +2124,29 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Queue an APPLICATION_CLOSE and return it with the route.
+        pub fn closeApplicationWithRoutePath(
+            self: *Self,
+            connection_id: u64,
+            error_code: u64,
+            reason_phrase: []const u8,
+            now_millis: i64,
+        ) (root.Error || endpoint.RouteError)!?OneRttDatagramPathResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
+            try connection_of(record).closeApplication(error_code, reason_phrase);
+            const datagram = (try self.lifecycle.pollProtectedShortDatagramWithInstalledKeys(
+                connection_id,
+                connection_of(record),
+                now_millis,
+                destination_connection_id_of(record),
+            )) orelse return null;
+            return .{
+                .datagram = datagram,
+                .path = path,
+            };
+        }
+
         /// Queue a transport CONNECTION_CLOSE and drain route-bound output.
         pub fn closeWithRoutePathAndDrainDatagrams(
             self: *Self,
@@ -2160,6 +2183,41 @@ pub fn Tls13ServerEndpoint(
             };
         }
 
+        /// Queue an APPLICATION_CLOSE and drain route-bound output.
+        pub fn closeApplicationWithRoutePathAndDrainDatagrams(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            connection_id: u64,
+            error_code: u64,
+            reason_phrase: []const u8,
+            now_millis: i64,
+            out: []DatagramPathResult,
+        ) (root.Error || endpoint.RouteError)!CloseDatagramPathDrainResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
+            if (out.len == 0) return error.BufferTooSmall;
+            const connection = connection_of(record);
+            try connection.closeApplication(error_code, reason_phrase);
+            const drain = self.drainDatagramsWithRoutePath(
+                connection_id,
+                connection,
+                now_millis,
+                .{
+                    .space = .application,
+                    .destination_connection_id = destination_connection_id_of(record),
+                },
+                path,
+                out,
+            );
+            return .{
+                .drain = .{
+                    .datagrams_written = drain.datagrams_written,
+                    .first_error = drain.first_error,
+                },
+                .next_deadline = try self.nextDeadline(allocator),
+            };
+        }
+
         /// Queue a transport CONNECTION_CLOSE, drain route-bound output, and select the next deadline using scratch storage.
         pub fn closeWithRoutePathAndDrainDatagramsWithScratch(
             self: *Self,
@@ -2176,6 +2234,41 @@ pub fn Tls13ServerEndpoint(
             _ = self.records.deadline_view_scratch orelse return error.BufferTooSmall;
             const connection = connection_of(record);
             try connection.closeConnection(error_code, frame_type, reason_phrase);
+            const drain = self.drainDatagramsWithRoutePath(
+                connection_id,
+                connection,
+                now_millis,
+                .{
+                    .space = .application,
+                    .destination_connection_id = destination_connection_id_of(record),
+                },
+                path,
+                out,
+            );
+            return .{
+                .drain = .{
+                    .datagrams_written = drain.datagrams_written,
+                    .first_error = drain.first_error,
+                },
+                .next_deadline = try self.nextDeadlineWithScratch(),
+            };
+        }
+
+        /// Queue an APPLICATION_CLOSE, drain route-bound output, and select the next deadline using scratch storage.
+        pub fn closeApplicationWithRoutePathAndDrainDatagramsWithScratch(
+            self: *Self,
+            connection_id: u64,
+            error_code: u64,
+            reason_phrase: []const u8,
+            now_millis: i64,
+            out: []DatagramPathResult,
+        ) (root.Error || endpoint.RouteError)!CloseDatagramPathDrainResult {
+            const record = self.records.get(connection_id) orelse return error.UnknownConnectionId;
+            const path = try self.currentRecordRoutePath(record);
+            if (out.len == 0) return error.BufferTooSmall;
+            _ = self.records.deadline_view_scratch orelse return error.BufferTooSmall;
+            const connection = connection_of(record);
+            try connection.closeApplication(error_code, reason_phrase);
             const drain = self.drainDatagramsWithRoutePath(
                 connection_id,
                 connection,
@@ -3724,6 +3817,8 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     record_owned = false;
     try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.closeWithRoutePath(record_handle, 0, 0, "missing route", 1));
     try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.closeApplicationWithRoutePath(record_handle, 0, "missing route", 1));
+    try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
     var missing_route_close_out: [1]TestEndpoint.DatagramPathResult = undefined;
     try std.testing.expectError(
         error.UnknownConnectionId,
@@ -3731,6 +3826,29 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
             std.testing.allocator,
             record_handle,
             0,
+            0,
+            "missing route",
+            1,
+            &missing_route_close_out,
+        ),
+    );
+    try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        endpoint_owner.closeApplicationWithRoutePathAndDrainDatagrams(
+            std.testing.allocator,
+            record_handle,
+            0,
+            "missing route",
+            1,
+            &missing_route_close_out,
+        ),
+    );
+    try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
+    try std.testing.expectError(
+        error.UnknownConnectionId,
+        endpoint_owner.closeApplicationWithRoutePathAndDrainDatagramsWithScratch(
+            record_handle,
             0,
             "missing route",
             1,
@@ -9319,6 +9437,173 @@ test "Tls13ServerEndpoint drains close output with route and deadline" {
     defer std.testing.allocator.free(other_datagram.datagram);
     try std.testing.expect(other_datagram.path.eql(other_path));
     try std.testing.expect(other_datagram.datagram.len != 0);
+    const next_deadline = closed.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.close_timeout, next_deadline.kind);
+    try std.testing.expectEqual(record_handle, next_deadline.connection_id);
+    try std.testing.expect((try endpoint_owner.closeDeadlineMillis(record_handle)) != null);
+}
+
+test "Tls13ServerEndpoint drains application close output with route and deadline" {
+    const TestRecord = struct {
+        handle: u64,
+        connection: Connection,
+        backend: root.CryptoBackend,
+        destination_connection_id: []const u8,
+        source_connection_id: []const u8,
+        initial_destination_connection_id: []const u8,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return self.destination_connection_id;
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return self.source_connection_id;
+        }
+
+        fn initialDestinationConnectionId(self: *const @This()) []const u8 {
+            return self.initial_destination_connection_id;
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 1,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer endpoint_owner.deinit();
+
+    const old_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+    };
+    const new_path = endpoint.Udp4Tuple{
+        .local = old_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_444),
+    };
+    const secrets = try protection.deriveInitialSecrets(.v1, "server-app-close");
+    var empty_backend = EmptyBackend{};
+    const record = try std.testing.allocator.create(TestRecord);
+    var record_initialized = false;
+    var record_owned = true;
+    errdefer {
+        if (record_owned) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = 86,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+        .destination_connection_id = "peer",
+        .source_connection_id = "local",
+        .initial_destination_connection_id = "initial",
+    };
+    record_initialized = true;
+    try record.connection.validatePeerAddress();
+    try record.connection.confirmHandshake();
+    try record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try endpoint_owner.lifecycle.registerConnectionId(
+        record.handle,
+        TestRecord.sourceConnectionId(record),
+        old_path,
+        .{},
+    );
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(record.handle);
+    try endpoint_owner.records.adopt(record.handle, record);
+    record_owned = false;
+    const record_handle = record.handle;
+
+    _ = try endpoint_owner.lifecycle.updateRoutePathFromValidatedDatagramAndResetSpinBit(
+        TestRecord.sourceConnectionId(record),
+        new_path,
+        &record.connection,
+    );
+    var zero_out: [0]TestEndpoint.DatagramPathResult = .{};
+    try std.testing.expectError(error.BufferTooSmall, endpoint_owner.closeApplicationWithRoutePathAndDrainDatagramsWithScratch(
+        record_handle,
+        57,
+        "server app done",
+        10,
+        &zero_out,
+    ));
+    try std.testing.expectEqual(connection_module.ConnectionState.active, record.connection.connectionState());
+    try std.testing.expectEqual(@as(?i64, null), try endpoint_owner.closeDeadlineMillis(record_handle));
+
+    var out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const closed = try endpoint_owner.closeApplicationWithRoutePathAndDrainDatagramsWithScratch(
+        record_handle,
+        57,
+        "server app done",
+        10,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 1), closed.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), closed.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), closed.drain.first_route_error);
+    defer std.testing.allocator.free(out[0].datagram);
+    try std.testing.expectEqual(record_handle, out[0].connection_id);
+    try std.testing.expect(out[0].path.eql(new_path));
+
+    const local_keys = protection.deriveAes128PacketProtectionKeys(secrets.server.secret);
+    var opened = try protection.unprotectShortPacketAes128(
+        std.testing.allocator,
+        local_keys,
+        out[0].datagram,
+        TestRecord.destinationConnectionId(record).len,
+        0,
+    );
+    defer protection.deinitProtectedShortPacket(&opened, std.testing.allocator);
+    var decoded = try frame.decodeFrameSlice(opened.packet.plaintext, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+    switch (decoded.frame) {
+        .application_close => |close| {
+            try std.testing.expectEqual(@as(u64, 57), close.error_code);
+            try std.testing.expectEqualStrings("server app done", close.reason_phrase);
+        },
+        else => return error.TestUnexpectedResult,
+    }
     const next_deadline = closed.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.close_timeout, next_deadline.kind);
     try std.testing.expectEqual(record_handle, next_deadline.connection_id);
