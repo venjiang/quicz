@@ -1887,6 +1887,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   if the endpoint-owned record table changes unexpectedly during route/timer
   retirement, while preserving the existing unknown-record result.
 
+- 2026-07-22: Added explicit server closed-record reclaim.
+  `Tls13ServerEndpoint.reclaimClosedRecords()` exposes the existing
+  registry/lifecycle cleanup step directly for production event loops that want
+  to retire already-closed records, routes, and recovery timers before the next
+  admission or maintenance cycle.
+
 - 2026-07-17: Hardened server endpoint terminal record cleanup.
   `Tls13ServerEndpoint` now reports an internal consistency error if due
   idle/close retirement cannot remove the endpoint-owned record, instead of

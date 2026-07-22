@@ -1639,6 +1639,11 @@ close 和 route cleanup 事件。
   endpoint-owned record table 出现非预期变化，现在返回 internal consistency
   error，同时保留既有 unknown-record 结果。
 
+- 2026-07-22：新增显式 server closed-record reclaim。
+  `Tls13ServerEndpoint.reclaimClosedRecords()` 直接暴露现有 registry/lifecycle
+  cleanup step，生产 event loop 可以在下一次 admission 或维护周期前退役已 closed
+  的 record、route 和 recovery timer。
+
 - 2026-07-17：加固 server endpoint 终态 record cleanup。
   `Tls13ServerEndpoint` 在 due idle/close retirement 后如果无法移除
   endpoint-owned record，现在返回 internal consistency error，而不是依赖

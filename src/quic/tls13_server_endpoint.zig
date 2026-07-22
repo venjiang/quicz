@@ -485,6 +485,11 @@ pub fn Tls13ServerEndpoint(
             return self.records.retire(&self.lifecycle, connection_id);
         }
 
+        /// Retire lifecycle state and destroy endpoint-owned records that are already closed.
+        pub fn reclaimClosedRecords(self: *Self) root.Error!usize {
+            return self.records.removeClosedRecords(&self.lifecycle);
+        }
+
         /// Select the earliest deadline across all endpoint-owned records.
         pub fn nextDeadline(
             self: *Self,
@@ -4183,6 +4188,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         .local = accepted_secrets.server.secret,
         .peer = accepted_secrets.client.secret,
     });
+    const stale_record_handle = stale_record.handle;
     const stale_path = endpoint.Udp4Tuple{
         .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
         .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_445),
@@ -4212,6 +4218,13 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
     var closed_capacity_active_ids: [1]u64 = undefined;
     try std.testing.expectEqual(@as(usize, 0), (try closed_capacity_view.activeConnectionIds(&closed_capacity_active_ids)).len);
     try std.testing.expectEqual(@as(usize, 1), closed_capacity_endpoint.lifecycle.routeCount());
+
+    try std.testing.expectEqual(@as(usize, 1), try closed_capacity_endpoint.reclaimClosedRecords());
+    try std.testing.expect(closed_capacity_endpoint.records.get(stale_record_handle) == null);
+    try std.testing.expectEqual(@as(usize, 0), closed_capacity_endpoint.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 0), closed_capacity_endpoint.lifecycle.recoveryTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), try closed_capacity_endpoint.reclaimClosedRecords());
+    try std.testing.expect(closed_capacity_endpoint.hasConnectionCapacity());
 
     const reclaimed_capacity_record = try std.testing.allocator.create(TestRecord);
     var reclaimed_capacity_record_initialized = false;
@@ -4256,7 +4269,7 @@ test "Tls13ServerEndpoint owns bounded records with lifecycle state" {
         },
         .dropped_capacity => return error.TestUnexpectedResult,
     }
-    try std.testing.expect(closed_capacity_endpoint.records.get(stale_record.handle) == null);
+    try std.testing.expect(closed_capacity_endpoint.records.get(stale_record_handle) == null);
     try std.testing.expect(closed_capacity_endpoint.records.get(reclaimed_capacity_record.handle) != null);
     try std.testing.expectEqual(@as(usize, 1), closed_capacity_view.activeConnectionCount());
     const reclaimed_active_ids = try closed_capacity_view.activeConnectionIds(&closed_capacity_active_ids);
