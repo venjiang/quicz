@@ -1831,6 +1831,16 @@ pub const Connection = struct {
         return selected orelse self.peer_initial_source_connection_id;
     }
 
+    fn hasZeroLengthLocalInitialSourceConnectionId(self: Connection) bool {
+        const len = self.local_initial_source_connection_id_len orelse return false;
+        return len == 0;
+    }
+
+    fn sendsZeroLengthDestinationConnectionId(self: *const Connection) bool {
+        const destination_connection_id = self.peerDestinationConnectionId() orelse return false;
+        return destination_connection_id.len == 0;
+    }
+
     /// Return the Original Destination Connection ID remembered for transport parameters.
     ///
     /// Client connections record the DCID used by their first sent Initial and
@@ -2271,6 +2281,7 @@ pub const Connection = struct {
         retire_prior_to: u64,
     ) Error!u64 {
         if (self.isClosingOrClosed()) return error.ConnectionClosed;
+        if (self.hasZeroLengthLocalInitialSourceConnectionId()) return error.InvalidPacket;
         if (connection_id.len == 0 or connection_id.len > max_connection_id_len) return error.InvalidPacket;
         if (self.next_local_connection_id_sequence > max_quic_varint) return error.InvalidPacket;
         if (retire_prior_to > self.next_local_connection_id_sequence) return error.InvalidPacket;
@@ -6682,6 +6693,9 @@ pub const Connection = struct {
         new_connection_id: frame.NewConnectionIdFrame,
         frame_type_value: u64,
     ) ?FramePayloadCloseError {
+        if (self.sendsZeroLengthDestinationConnectionId()) {
+            return semanticCloseError(.protocol_violation, frame_type_value, "connection id zero");
+        }
         if (self.findActiveConnectionId(new_connection_id.sequence_number)) |existing| {
             if (!std.mem.eql(u8, existing.connection_id, new_connection_id.connection_id)) {
                 return semanticCloseError(.protocol_violation, frame_type_value, "connection id sequence");
@@ -6709,6 +6723,9 @@ pub const Connection = struct {
         retire_connection_id: frame.RetireConnectionIdFrame,
         frame_type_value: u64,
     ) ?FramePayloadCloseError {
+        if (self.hasZeroLengthLocalInitialSourceConnectionId()) {
+            return semanticCloseError(.protocol_violation, frame_type_value, "connection id zero");
+        }
         const local_id = self.findLocalConnectionId(retire_connection_id.sequence_number) orelse {
             return semanticCloseError(.protocol_violation, frame_type_value, "retire connection id");
         };
@@ -10432,6 +10449,7 @@ pub const Connection = struct {
     }
 
     fn receiveNewConnectionIdFrame(self: *Connection, new_connection_id: frame.NewConnectionIdFrame) Error!void {
+        if (self.sendsZeroLengthDestinationConnectionId()) return error.InvalidPacket;
         try self.retireConnectionIdsBefore(new_connection_id.retire_prior_to);
 
         if (self.findActiveConnectionId(new_connection_id.sequence_number)) |existing| {
@@ -10456,6 +10474,7 @@ pub const Connection = struct {
     }
 
     fn receiveRetireConnectionIdFrame(self: *Connection, retire_connection_id: frame.RetireConnectionIdFrame) Error!void {
+        if (self.hasZeroLengthLocalInitialSourceConnectionId()) return error.InvalidPacket;
         const local_id = self.findLocalConnectionId(retire_connection_id.sequence_number) orelse return error.InvalidPacket;
         if (!local_id.sent) return error.InvalidPacket;
         local_id.retired = true;
@@ -66715,6 +66734,57 @@ test "issueConnectionId allows replacement when retire_prior_to frees peer activ
     try std.testing.expect(conn.local_connection_ids.items[0].retired);
 }
 
+test "zero-length local initial source CID rejects NEW and RETIRE connection-id paths" {
+    var issue_conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer issue_conn.deinit();
+    try issue_conn.setLocalInitialSourceConnectionId(&.{});
+
+    const issue_token = [_]u8{0x5a} ** packet.stateless_reset_token_len;
+    const issue_cid = [_]u8{ 0xc3, 0, 0, 0 };
+    try std.testing.expectError(error.InvalidPacket, issue_conn.issueConnectionId(&issue_cid, issue_token, 0));
+    try std.testing.expectEqual(@as(u64, 0), issue_conn.localConnectionIdCount());
+    try std.testing.expectEqual(@as(usize, 0), issue_conn.pendingNewConnectionIdCount());
+
+    var retire_conn = try Connection.init(std.testing.allocator, .server, .{});
+    defer retire_conn.deinit();
+    try retire_conn.validatePeerAddress();
+
+    const retire_token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const retire_cid = [_]u8{ 0xc3, 0, 0, 1 };
+    try std.testing.expectEqual(@as(u64, 0), try retire_conn.issueConnectionId(&retire_cid, retire_token, 0));
+
+    var tx: [64]u8 = undefined;
+    _ = (try retire_conn.pollTx(0, &tx)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(retire_conn.local_connection_ids.items[0].sent);
+    try retire_conn.setLocalInitialSourceConnectionId(&.{});
+
+    var retire_buf: [16]u8 = undefined;
+    var retire_out = buffer.fixedWriter(&retire_buf);
+    try frame.encodeFrame(retire_out.writer(), .{ .retire_connection_id = .{ .sequence_number = 0 } });
+    const frame_type_value = rawFrameTypeValue(retire_out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, retire_conn.processDatagramOrClose(1, retire_out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, retire_conn.connectionState());
+    try std.testing.expectEqual(@as(u64, 1), retire_conn.localConnectionIdCount());
+    try std.testing.expect(!retire_conn.local_connection_ids.items[0].retired);
+    try std.testing.expectEqual(@as(?u64, null), retire_conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), retire_conn.nextPeerPacketNumber(.application));
+
+    var close_buf: [64]u8 = undefined;
+    const close_payload = (try retire_conn.pollTx(1, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("connection id zero", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
 test "RETIRE_CONNECTION_ID rejects unknown or unsent local ids" {
     var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
@@ -66932,6 +67002,46 @@ test "NEW_CONNECTION_ID rejects reused peer CID value across sequence numbers" {
     try std.testing.expectEqualSlices(u8, &cid, conn.active_connection_ids.items[0].connection_id);
     try std.testing.expectEqual(@as(?u64, 0), conn.pending_ack_largest);
     try std.testing.expectEqual(@as(u64, 1), conn.next_peer_packet_number);
+}
+
+test "zero-length peer destination CID rejects NEW_CONNECTION_ID" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+    try conn.setPeerInitialSourceConnectionId(&.{});
+
+    const token = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const cid = [_]u8{ 0xc2, 0, 0, 0 };
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &cid,
+        .stateless_reset_token = token,
+    } });
+    const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expectEqual(@as(usize, 0), conn.active_connection_ids.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var close_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(0, &close_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("connection id zero", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
 }
 
 test "NEW_CONNECTION_ID retire_prior_to rolls back when payload is invalid" {
