@@ -2175,6 +2175,23 @@ fn namedGroupSeenBefore(groups: []const u8, current_group_offset: usize, group: 
     return false;
 }
 
+fn signatureSchemeSeenBefore(schemes: []const u8, current_scheme_offset: usize, scheme: u16) bool {
+    var pos: usize = 0;
+    while (pos < current_scheme_offset) : (pos += 2) {
+        if (pos + 2 > current_scheme_offset) return false;
+        if (readU16(schemes[pos..]) == scheme) return true;
+    }
+    return false;
+}
+
+fn pskKeyExchangeModeSeenBefore(modes: []const u8, current_mode_offset: usize, mode: u8) bool {
+    var pos: usize = 0;
+    while (pos < current_mode_offset) : (pos += 1) {
+        if (modes[pos] == mode) return true;
+    }
+    return false;
+}
+
 fn alpnProtocolSeenBefore(protocols: []const u8, current_entry_offset: usize, protocol: []const u8) bool {
     var pos: usize = 0;
     while (pos < current_entry_offset) {
@@ -3664,7 +3681,11 @@ pub const Tls13Handshake = struct {
                     have_signature_algorithms = true;
                     var sp: usize = 2;
                     while (sp + 2 <= el) : (sp += 2) {
-                        if (readU16(ext[sp..]) == server_sig_scheme) {
+                        const scheme = readU16(ext[sp..]);
+                        if (signatureSchemeSeenBefore(ext[2..el], sp - 2, scheme)) {
+                            return error.DecodeError;
+                        }
+                        if (scheme == server_sig_scheme) {
                             client_supports_server_sig = true;
                         }
                     }
@@ -3714,6 +3735,9 @@ pub const Tls13Handshake = struct {
                     have_psk_key_exchange_modes = true;
                     var mp: usize = 1;
                     while (mp < el) : (mp += 1) {
+                        if (pskKeyExchangeModeSeenBefore(ext[1..el], mp - 1, ext[mp])) {
+                            return error.DecodeError;
+                        }
                         if (ext[mp] == 0x01) {
                             client_supports_psk_dhe_ke = true;
                         }
@@ -6443,6 +6467,29 @@ test "Tls13Handshake server rejects pre_shared_key without psk_key_exchange_mode
     try std.testing.expectError(error.MissingExtension, server.step());
 }
 
+test "Tls13Handshake server rejects duplicate ClientHello psk_key_exchange_modes entries without committing flags" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const hello = try replaceClientHelloExtensionBody(
+        &hello_buf,
+        base_hello.len,
+        @intFromEnum(ExtType.psk_key_exchange_modes),
+        &[_]u8{ 0x02, 0x01, 0x01 },
+    );
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.peer_offered_psk = true;
+    server.peer_offered_early_data = true;
+    const transcript_before = server.transcript.current();
+    server.provideData(hello);
+
+    try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expect(server.peer_offered_psk);
+    try std.testing.expect(server.peer_offered_early_data);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
+}
+
 test "Tls13Handshake server rejects pre_shared_key without psk_dhe_ke mode" {
     const psk = [_]u8{0xab} ** secret_len;
     var hello_buf: [1024]u8 = undefined;
@@ -6950,6 +6997,45 @@ test "Tls13Handshake server rejects missing signature_algorithms without committ
     server.provideData(hello);
 
     try std.testing.expectError(error.MissingExtension, server.step());
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, server.peer_tp[0..server.peer_tp_len]);
+    try std.testing.expect(server.peer_tp_available);
+    try std.testing.expectEqualSlices(u8, &old_peer_key_share, &server.peer_x25519_public);
+    try std.testing.expectEqualSlices(u8, &old_client_random, &server.client_random);
+    try std.testing.expect(server.client_random_available);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
+}
+
+test "Tls13Handshake server rejects duplicate ClientHello signature_algorithms entries without committing parsed state" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const hello = try replaceClientHelloExtensionBody(
+        &hello_buf,
+        base_hello.len,
+        @intFromEnum(ExtType.signature_algorithms),
+        &[_]u8{
+            0x00, 0x08,
+            0x04, 0x03,
+            0x08, 0x07,
+            0x08, 0x04,
+            0x04, 0x03,
+        },
+    );
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    server.peer_tp[0] = 0xde;
+    server.peer_tp[1] = 0xad;
+    server.peer_tp_len = 2;
+    server.peer_tp_available = true;
+    const old_peer_key_share = [_]u8{0x24} ** 32;
+    server.peer_x25519_public = old_peer_key_share;
+    const old_client_random = [_]u8{0x42} ** 32;
+    server.client_random = old_client_random;
+    server.client_random_available = true;
+    const transcript_before = server.transcript.current();
+    server.provideData(hello);
+
+    try std.testing.expectError(error.DecodeError, server.step());
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xde, 0xad }, server.peer_tp[0..server.peer_tp_len]);
     try std.testing.expect(server.peer_tp_available);
     try std.testing.expectEqualSlices(u8, &old_peer_key_share, &server.peer_x25519_public);
