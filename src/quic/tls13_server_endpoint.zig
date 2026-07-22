@@ -311,9 +311,10 @@ pub fn Tls13ServerEndpoint(
         }
 
         fn preflightDueRecoveryRoutes(
-            self: *const Self,
+            self: *Self,
             now_millis: i64,
-        ) endpoint.RouteError!void {
+        ) (root.Error || endpoint.RouteError)!void {
+            _ = try self.records.removeClosedRecords(&self.lifecycle);
             var iterator = self.records.records.iterator();
             while (iterator.next()) |entry| {
                 const connection_id = entry.key_ptr.*;
@@ -349,6 +350,25 @@ pub fn Tls13ServerEndpoint(
 
         fn currentRecordRoutePath(self: *const Self, record: *const Record) endpoint.RouteError!endpoint.Udp4Tuple {
             return self.lifecycle.currentRoutePath(source_connection_id_of(record));
+        }
+
+        fn classifyRoutePreflightError(err: anyerror) ?endpoint.RouteError {
+            return switch (err) {
+                error.InvalidConnectionIdLength,
+                error.InvalidConnectionIdSequence,
+                error.InvalidDatagram,
+                error.InvalidVersionList,
+                error.InvalidResetSize,
+                error.DuplicateConnectionId,
+                error.RouteCapacityReached,
+                error.StatelessResetTokenCapacityReached,
+                error.UnknownConnectionId,
+                error.AmbiguousConnectionId,
+                error.ActiveMigrationDisabled,
+                error.PathMismatch,
+                => @errorCast(err),
+                else => null,
+            };
         }
 
         fn retireRecordAfterTerminalPendingWork(
@@ -549,9 +569,10 @@ pub fn Tls13ServerEndpoint(
             out: []DatagramPathResult,
         ) root.Error!PendingWorkDatagramPathDrainResult {
             self.preflightDueRecoveryRoutes(now_millis) catch |err| {
+                const route_error = classifyRoutePreflightError(err) orelse return @errorCast(err);
                 return .{
                     .pending_work = .{},
-                    .drain = .{ .first_route_error = err },
+                    .drain = .{ .first_route_error = route_error },
                     .next_deadline = try self.nextDeadline(allocator),
                 };
             };
@@ -591,9 +612,10 @@ pub fn Tls13ServerEndpoint(
             out: []DatagramPathResult,
         ) root.Error!PendingWorkDatagramPathDrainResult {
             self.preflightDueRecoveryRoutes(now_millis) catch |err| {
+                const route_error = classifyRoutePreflightError(err) orelse return @errorCast(err);
                 return .{
                     .pending_work = .{},
-                    .drain = .{ .first_route_error = err },
+                    .drain = .{ .first_route_error = route_error },
                     .next_deadline = try self.nextDeadlineWithScratch(),
                 };
             };
@@ -3473,9 +3495,10 @@ pub fn Tls13ServerEndpoint(
             pending_out: []DatagramPathResult,
         ) root.Error!PendingStepPathResult {
             self.preflightDueRecoveryRoutes(now_millis) catch |err| {
+                const route_error = classifyRoutePreflightError(err) orelse return @errorCast(err);
                 return .{
                     .pending_work = .{},
-                    .pending_drain = .{ .first_route_error = err },
+                    .pending_drain = .{ .first_route_error = route_error },
                     .next_deadline = try self.nextDeadlineWithScratch(),
                 };
             };
@@ -3513,9 +3536,10 @@ pub fn Tls13ServerEndpoint(
             pending_out: []DatagramPathResult,
         ) (root.Error || endpoint.RouteError)!PendingStepPathResult {
             self.preflightDueRecoveryRoutes(now_millis) catch |err| {
+                const route_error = classifyRoutePreflightError(err) orelse return @errorCast(err);
                 return .{
                     .pending_work = .{},
-                    .pending_drain = .{ .first_route_error = err },
+                    .pending_drain = .{ .first_route_error = route_error },
                     .next_deadline = try self.nextDeadline(allocator),
                 };
             };
@@ -6915,6 +6939,167 @@ test "Tls13ServerEndpoint pairs due recovery output with committed route path" {
     const next_deadline = due.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(record.handle, next_deadline.connection_id);
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, next_deadline.kind);
+}
+
+test "Tls13ServerEndpoint route preflight reclaims closed records before route errors" {
+    const TestRecord = struct {
+        handle: u64,
+        local_id: []const u8,
+        peer_id: []const u8,
+        connection: Connection,
+        backend: root.CryptoBackend,
+
+        fn connectionRef(self: *@This()) *Connection {
+            return &self.connection;
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.backend;
+        }
+
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return self.peer_id;
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return self.local_id;
+        }
+
+        fn initialDestinationConnectionId(_: *const @This()) []const u8 {
+            return "initial";
+        }
+
+        fn markRetryValidated(_: *@This()) void {}
+
+        fn deinit(self: *@This()) void {
+            self.connection.deinit();
+        }
+    };
+    const EmptyBackend = struct {
+        fn backend(self: *@This()) root.CryptoBackend {
+            return .{
+                .context = self,
+                .receive = receive,
+                .pull = pull,
+            };
+        }
+
+        fn receive(_: *anyopaque, _: root.PacketNumberSpace, _: []const u8) root.Error!void {}
+
+        fn pull(_: *anyopaque, _: root.PacketNumberSpace, _: []u8) root.Error!?[]const u8 {
+            return null;
+        }
+    };
+    const TestEndpoint = Tls13ServerEndpoint(
+        TestRecord,
+        TestRecord.connectionRef,
+        TestRecord.cryptoBackend,
+        TestRecord.destinationConnectionId,
+        TestRecord.sourceConnectionId,
+        TestRecord.initialDestinationConnectionId,
+        TestRecord.markRetryValidated,
+        TestRecord.deinit,
+    );
+
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 2, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 2,
+    });
+    defer endpoint_owner.deinit();
+
+    const stale_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+    };
+    const live_path = endpoint.Udp4Tuple{
+        .local = stale_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_444),
+    };
+    const secrets = try protection.deriveInitialSecrets(.v1, "preflight-cleanup");
+    var empty_backend = EmptyBackend{};
+
+    const stale_record = try std.testing.allocator.create(TestRecord);
+    var stale_initialized = false;
+    var stale_owned = true;
+    errdefer {
+        if (stale_owned) {
+            if (stale_initialized) stale_record.deinit();
+            std.testing.allocator.destroy(stale_record);
+        }
+    }
+    stale_record.* = .{
+        .handle = 301,
+        .local_id = "stale-local",
+        .peer_id = "stale-peer",
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    stale_initialized = true;
+    try endpoint_owner.lifecycle.registerConnectionId(stale_record.handle, stale_record.local_id, stale_path, .{});
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(stale_record.handle);
+    const stale_handle = stale_record.handle;
+    stale_record.connection.state = .closed;
+    stale_record.connection.closed = true;
+    try endpoint_owner.records.adopt(stale_handle, stale_record);
+    stale_owned = false;
+
+    const live_record = try std.testing.allocator.create(TestRecord);
+    var live_initialized = false;
+    var live_owned = true;
+    errdefer {
+        if (live_owned) {
+            if (live_initialized) live_record.deinit();
+            std.testing.allocator.destroy(live_record);
+        }
+    }
+    live_record.* = .{
+        .handle = 302,
+        .local_id = "live-local",
+        .peer_id = "live-peer",
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+    };
+    live_initialized = true;
+    try live_record.connection.validatePeerAddress();
+    try live_record.connection.confirmHandshake();
+    try live_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    const live_handle = live_record.handle;
+    try endpoint_owner.lifecycle.registerConnectionId(live_handle, live_record.local_id, live_path, .{});
+    errdefer _ = endpoint_owner.lifecycle.retireConnection(live_handle);
+    _ = try live_record.connection.recordPacketSentInSpace(.application, 10, 100);
+    try endpoint_owner.lifecycle.armRecoveryTimerFromConnection(live_handle, &live_record.connection);
+    const live_deadline = live_record.connection.lossDetectionTimerDeadlineMillis() orelse return error.TestUnexpectedResult;
+    try endpoint_owner.records.adopt(live_handle, live_record);
+    live_owned = false;
+
+    try std.testing.expectEqual(@as(usize, 2), endpoint_owner.records.count());
+    try std.testing.expectEqual(@as(usize, 2), endpoint_owner.lifecycle.routeCount());
+    try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath("live-local", live_path));
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.routeCount());
+
+    var out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const result = try endpoint_owner.processPendingWorkAndDrainDatagramsWithRoutePathWithScratch(
+        live_deadline.deadline_millis,
+        .application,
+        &out,
+    );
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), result.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(usize, 0), result.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), result.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), result.drain.first_route_error);
+    try std.testing.expect(endpoint_owner.records.get(stale_handle) == null);
+    try std.testing.expect(endpoint_owner.records.get(live_handle) != null);
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.records.count());
+    try std.testing.expectEqual(@as(usize, 0), endpoint_owner.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(usize, 1), endpoint_owner.lifecycle.recoveryTimerCount());
+    const preserved_deadline = result.next_deadline orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(live_handle, preserved_deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, preserved_deadline.kind);
 }
 
 test "Tls13ServerEndpoint polls active record output with committed route path" {

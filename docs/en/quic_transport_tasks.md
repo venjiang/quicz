@@ -1898,6 +1898,11 @@ QUIC unless the gap is named and the verification evidence is added here.
   cleanup can destroy endpoint-owned records, so the evidence no longer reads
   through retired record pointers after route/timer cleanup.
 
+- 2026-07-22: Hardened server due-recovery route preflight cleanup.
+  Route-bound pending-work drains now reclaim already-closed endpoint-owned
+  records before checking due recovery routes, so a live missing-route error no
+  longer leaves stale closed records behind for the next production tick.
+
 - 2026-07-17: Hardened server endpoint terminal record cleanup.
   `Tls13ServerEndpoint` now reports an internal consistency error if due
   idle/close retirement cannot remove the endpoint-owned record, instead of

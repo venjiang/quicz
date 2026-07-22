@@ -1648,6 +1648,11 @@ close 和 route cleanup 事件。
   terminal polling 和 deadline 测试会在 cleanup 可能销毁 endpoint-owned
   record 前保存 handle，测试证据不再通过已退役 record 指针读取 handle。
 
+- 2026-07-22：加固 server due-recovery route preflight cleanup。
+  route-bound pending-work drain 现在会在检查 due recovery route 前回收已
+  closed 的 endpoint-owned record，因此 live 连接缺 route 的错误不会把 stale
+  closed record 留到下一次生产 tick。
+
 - 2026-07-17：加固 server endpoint 终态 record cleanup。
   `Tls13ServerEndpoint` 在 due idle/close retirement 后如果无法移除
   endpoint-owned record，现在返回 internal consistency error，而不是依赖
