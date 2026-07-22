@@ -11676,3 +11676,442 @@ test "Tls13 endpoints complete certificate-verified local handshake through endp
         try std.testing.expect(outbound.path.eql(server_path));
     }
 }
+
+test "Tls13 endpoints complete protected STREAM echo close and route retirement through endpoint routes" {
+    const TestServerRecord = struct {
+        handle: u64,
+        transport: Tls13ServerTransport,
+        retry_validated: bool = false,
+
+        fn clientScid(self: *const @This()) []const u8 {
+            return self.transport.connection.peerDestinationConnectionId() orelse
+                self.transport.peerInitialSourceConnectionId();
+        }
+
+        fn connectionRef(self: *@This()) *Connection {
+            return self.transport.connectionRef();
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.transport.cryptoBackend();
+        }
+
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return self.clientScid();
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return self.transport.localInitialSourceConnectionId();
+        }
+
+        fn initialDestinationConnectionId(self: *const @This()) []const u8 {
+            return if (self.retry_validated)
+                self.transport.localInitialSourceConnectionId()
+            else
+                self.transport.originalDestinationConnectionId();
+        }
+
+        fn markRetryValidated(self: *@This()) void {
+            self.retry_validated = true;
+        }
+
+        fn deinit(self: *@This()) void {
+            self.transport.deinit();
+        }
+    };
+    const TestServerEndpoint = Tls13ServerEndpoint(
+        TestServerRecord,
+        TestServerRecord.connectionRef,
+        TestServerRecord.cryptoBackend,
+        TestServerRecord.destinationConnectionId,
+        TestServerRecord.sourceConnectionId,
+        TestServerRecord.initialDestinationConnectionId,
+        TestServerRecord.markRetryValidated,
+        TestServerRecord.deinit,
+    );
+
+    const pem = @embedFile("testdata/quicz-echo-ca.pem");
+    const begin_marker = "-----BEGIN CERTIFICATE-----";
+    const end_marker = "-----END CERTIFICATE-----";
+    const begin = std.mem.indexOf(u8, pem, begin_marker) orelse return error.TestUnexpectedResult;
+    const encoded_start = begin + begin_marker.len;
+    const encoded_end = std.mem.indexOfPos(u8, pem, encoded_start, end_marker) orelse return error.TestUnexpectedResult;
+    const encoded = std.mem.trim(u8, pem[encoded_start..encoded_end], " \t\r\n");
+    var cert_der_storage: [512]u8 = undefined;
+    const decoder = std.base64.standard.decoderWithIgnore("\r\n");
+    const cert_der_len = try decoder.decode(&cert_der_storage, encoded);
+    const cert_der = cert_der_storage[0..cert_der_len];
+
+    const now_sec: i64 = 1_800_000_000;
+    var ca_bundle = std.crypto.Certificate.Bundle.empty;
+    defer ca_bundle.deinit(std.testing.allocator);
+    try ca_bundle.bytes.appendSlice(std.testing.allocator, cert_der);
+    try ca_bundle.parseCert(std.testing.allocator, 0, now_sec);
+
+    const server_private_key = [_]u8{
+        0x5b, 0xbf, 0x4f, 0x5a, 0x48, 0x42, 0x9f, 0x00,
+        0x5a, 0x57, 0x09, 0xc3, 0xb4, 0xc1, 0x3a, 0x64,
+        0x2e, 0xb1, 0x61, 0xf5, 0x0b, 0xde, 0x64, 0x4b,
+        0x3a, 0x38, 0xa6, 0x8f, 0xfa, 0x48, 0xda, 0x51,
+    };
+    const alpn = [_][]const u8{"hq-interop"};
+    const connection_config = root.Config{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+        .chosen_version = .v1,
+        .available_versions = &[_]quic_packet.Version{.v1},
+    };
+    const client_tls_config = tls13.TlsConfig{
+        .alpn = &alpn,
+        .server_name = "localhost",
+        .skip_cert_verify = false,
+        .now_sec = now_sec,
+        .ca_bundle = &ca_bundle,
+    };
+    const server_tls_config = tls13.TlsConfig{
+        .alpn = &alpn,
+        .cert_chain_der = &.{cert_der},
+        .private_key_bytes = &server_private_key,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    };
+
+    const client_handle: u64 = 8001;
+    const server_handle: u64 = 8002;
+    const original_dcid = [_]u8{ 0x0d, 0xc2, 0xd0, 0x01, 0x02, 0x03, 0x04, 0x05 };
+    const client_scid = [_]u8{ 0xc2, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    const server_scid = [_]u8{ 0x5e, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    const client_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4434),
+    };
+    const server_path = endpoint.Udp4Tuple{
+        .local = client_path.remote,
+        .remote = client_path.local,
+    };
+
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        client_handle,
+        client_path,
+        .{ .active_migration_disabled = true },
+        connection_config,
+        client_tls_config,
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    var server_endpoint = try TestServerEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer server_endpoint.deinit();
+
+    const record = try std.testing.allocator.create(TestServerRecord);
+    var record_initialized = false;
+    var record_owned_by_test = true;
+    errdefer {
+        if (record_owned_by_test) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = server_handle,
+        .transport = try Tls13ServerTransport.init(
+            std.testing.allocator,
+            connection_config,
+            server_tls_config,
+        ),
+    };
+    record_initialized = true;
+    try record.transport.connection.validatePeerAddress();
+    try record.transport.setLocalInitialSourceConnectionId(&server_scid);
+    try record.transport.setOriginalDestinationConnectionId(&original_dcid);
+
+    var client_scratch: [8192]u8 = undefined;
+    var server_scratch: [8192]u8 = undefined;
+
+    // --- Phase 1: TLS handshake ---
+    const client_initial = try client.beginWithRoutePath(10, &client_scratch);
+    defer std.testing.allocator.free(client_initial.datagram);
+
+    var classify_out: [256]u8 = undefined;
+    var hs_initial_out: [2]root.EndpointPolledDatagramResult = undefined;
+    var hs_handshake_out: [2]root.EndpointPolledDatagramResult = undefined;
+    var hs_installed_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
+    var hs_pending_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
+    const hs_step = try server_endpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmission(
+        std.testing.allocator,
+        server_path,
+        11,
+        client_initial.datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &classify_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        record.handle,
+        record,
+        &server_scid,
+        .{ .active_migration_disabled = true },
+        &server_scratch,
+        &[_]u8{},
+        &hs_initial_out,
+        &hs_handshake_out,
+        &hs_installed_out,
+        .application,
+        &hs_pending_out,
+    );
+    switch (hs_step.process) {
+        .accept_initial => {},
+        else => return error.TestUnexpectedResult,
+    }
+    const admission = hs_step.admission orelse return error.TestUnexpectedResult;
+    const admitted = switch (admission) {
+        .admitted => |a| a,
+        .dropped_capacity => return error.TestUnexpectedResult,
+    };
+    record_owned_by_test = false;
+    const hs_initial_written = admitted.initial.accepted.drain.datagrams_written;
+    const hs_handshake_written = admitted.handshake.?.backend.drain.datagrams_written;
+    defer {
+        for (hs_initial_out[0..hs_initial_written]) |o| std.testing.allocator.free(o.datagram);
+        for (hs_handshake_out[0..hs_handshake_written]) |o| std.testing.allocator.free(o.datagram);
+        for (hs_pending_out[0..hs_step.pending_drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    var client_finished_datagram: ?[]u8 = null;
+    errdefer if (client_finished_datagram) |d| std.testing.allocator.free(d);
+    for (hs_initial_out[0..hs_initial_written]) |o| {
+        const r = try client.receiveWithRoutePath(12, &client_scratch, o.datagram);
+        if (r.outbound_handshake) |f| client_finished_datagram = f.datagram;
+    }
+    for (hs_handshake_out[0..hs_handshake_written]) |o| {
+        const r = try client.receiveWithRoutePath(13, &client_scratch, o.datagram);
+        if (r.outbound_handshake) |f| client_finished_datagram = f.datagram;
+    }
+    try std.testing.expect(client.handshakeConfirmed());
+
+    const client_finished = client_finished_datagram orelse return error.TestUnexpectedResult;
+    client_finished_datagram = null;
+    defer std.testing.allocator.free(client_finished);
+
+    var fin_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var fin_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var fin_installed_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
+    var fin_pending_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
+    var fin_route_out: [256]u8 = undefined;
+    _ = try server_endpoint.receiveDatagramStepWithRoutePath(
+        std.testing.allocator,
+        server_path,
+        14,
+        client_finished,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &fin_route_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &server_scratch,
+        &[_]u8{},
+        &fin_initial_out,
+        &fin_handshake_out,
+        &fin_installed_out,
+        .application,
+        &fin_pending_out,
+    );
+    defer {
+        for (fin_pending_out[0..0]) |o| std.testing.allocator.free(o.datagram);
+    }
+    const active_record = server_endpoint.records.get(server_handle) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(active_record.transport.connection.handshakeConfirmed());
+
+    // --- Phase 2: Client sends protected STREAM data with FIN ---
+    const stream_id = try client.openStream();
+    try std.testing.expectEqual(@as(u64, 0), stream_id);
+    const echo_payload = "hello quicz";
+    var client_stream_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const client_stream_send = try client.sendStreamWithRoutePathAndDrainDatagrams(
+        stream_id,
+        echo_payload,
+        true,
+        20,
+        &client_stream_out,
+    );
+    try std.testing.expect(client_stream_send.drain.datagrams_written >= 1);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), client_stream_send.drain.first_error);
+    const client_stream_written = client_stream_send.drain.datagrams_written;
+    defer {
+        for (client_stream_out[0..client_stream_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 3: Server receives every client STREAM datagram ---
+    for (client_stream_out[0..client_stream_written]) |client_datagram| {
+        var s_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var s_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var s_installed_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var s_pending_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var s_route_out: [256]u8 = undefined;
+        const step = try server_endpoint.receiveDatagramStepWithRoutePath(
+            std.testing.allocator,
+            server_path,
+            21,
+            client_datagram.datagram,
+            &[_]u8{},
+            &[_]quic_packet.Version{.v1},
+            .{
+                .space = .application,
+                .out = &s_route_out,
+                .unpredictable_prefix = &[_]u8{},
+                .supported_versions = &[_]quic_packet.Version{.v1},
+            },
+            &server_scratch,
+            &[_]u8{},
+            &s_initial_out,
+            &s_handshake_out,
+            &s_installed_out,
+            .application,
+            &s_pending_out,
+        );
+        var phase3_installed_written: usize = 0;
+        switch (step.process) {
+            .routed => |routed| switch (routed) {
+                .installed_key => |ik| {
+                    phase3_installed_written = ik.drain.datagrams_written;
+                },
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        // Free server-side ACK/control output produced during receive.
+        for (s_installed_out[0..phase3_installed_written]) |o| std.testing.allocator.free(o.datagram);
+        for (s_pending_out[0..step.pending_drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 4: Server reads the stream data ---
+    var server_recv_buf: [64]u8 = undefined;
+    const server_recv_len = (try server_endpoint.recvStream(server_handle, stream_id, &server_recv_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(echo_payload, server_recv_buf[0..server_recv_len]);
+    try std.testing.expect(try server_endpoint.streamFinished(server_handle, stream_id));
+
+    // --- Phase 5: Server echoes the data back with FIN ---
+    var server_echo_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+    const server_echo = try server_endpoint.sendStreamWithRoutePathAndDrainDatagrams(
+        std.testing.allocator,
+        server_handle,
+        stream_id,
+        server_recv_buf[0..server_recv_len],
+        true,
+        22,
+        &server_echo_out,
+    );
+    try std.testing.expect(server_echo.drain.datagrams_written >= 1);
+    try std.testing.expectEqual(@as(?root.Error, null), server_echo.drain.first_error);
+    const server_echo_written = server_echo.drain.datagrams_written;
+    defer {
+        for (server_echo_out[0..server_echo_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 6: Client receives every server echo datagram ---
+    for (server_echo_out[0..server_echo_written]) |echo_datagram| {
+        var c_recv_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+        var c_due_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+        const c_step = try client.receiveDatagramStepWithRoutePath(
+            23,
+            &client_scratch,
+            echo_datagram.datagram,
+            &c_recv_out,
+            &c_due_out,
+        );
+        try std.testing.expect(c_step.receive.receive != null);
+        for (c_recv_out[0..c_step.receive.drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+        if (c_step.due) |due| {
+            for (c_due_out[0..due.drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+        }
+    }
+
+    // --- Phase 7: Client reads the echoed data ---
+    var client_recv_buf: [64]u8 = undefined;
+    const client_recv_len = (try client.recvStream(stream_id, &client_recv_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(echo_payload, client_recv_buf[0..client_recv_len]);
+    try std.testing.expect(try client.streamFinished(stream_id));
+
+    // --- Phase 8: Client sends APPLICATION_CLOSE ---
+    var client_close_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const client_close = try client.closeApplicationWithRoutePathAndDrainDatagrams(
+        0,
+        "echo done",
+        30,
+        &client_close_out,
+    );
+    try std.testing.expect(client_close.drain.datagrams_written >= 1);
+    const client_close_written = client_close.drain.datagrams_written;
+    defer {
+        for (client_close_out[0..client_close_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 9: Server receives every client close datagram ---
+    for (client_close_out[0..client_close_written]) |close_datagram| {
+        var sc_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var sc_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var sc_installed_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var sc_pending_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var sc_route_out: [256]u8 = undefined;
+        const sc_step = try server_endpoint.receiveDatagramStepWithRoutePath(
+            std.testing.allocator,
+            server_path,
+            31,
+            close_datagram.datagram,
+            &[_]u8{},
+            &[_]quic_packet.Version{.v1},
+            .{
+                .space = .application,
+                .out = &sc_route_out,
+                .unpredictable_prefix = &[_]u8{},
+                .supported_versions = &[_]quic_packet.Version{.v1},
+            },
+            &server_scratch,
+            &[_]u8{},
+            &sc_initial_out,
+            &sc_handshake_out,
+            &sc_installed_out,
+            .application,
+            &sc_pending_out,
+        );
+        var installed_key_drain_written: usize = 0;
+        switch (sc_step.process) {
+            .routed => |routed| switch (routed) {
+                .installed_key => |ik| {
+                    installed_key_drain_written = ik.drain.datagrams_written;
+                },
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        for (sc_installed_out[0..installed_key_drain_written]) |o| std.testing.allocator.free(o.datagram);
+        for (sc_pending_out[0..sc_step.pending_drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+    const closed_record = server_endpoint.records.get(server_handle) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(closed_record.transport.connection.connectionState() == .closing or
+        closed_record.transport.connection.connectionState() == .draining or
+        closed_record.transport.connection.connectionState() == .closed);
+
+    // --- Phase 10: Retire client route after close deadline ---
+    const client_close_deadline = client.closeDeadlineMillis() orelse return error.TestUnexpectedResult;
+    const client_retire = try client.retireAtCloseDeadline(client_close_deadline + 1);
+    const client_retired = client_retire orelse return error.TestUnexpectedResult;
+    try std.testing.expect(client_retired.routes_retired >= 1);
+
+    // --- Phase 11: Retire server record and verify cleanup ---
+    const server_retired = try server_endpoint.retireRecord(server_handle);
+    try std.testing.expect(server_retired.routes_retired >= 1);
+    try std.testing.expectEqual(@as(usize, 0), server_endpoint.activeConnectionCount());
+}
