@@ -129,6 +129,8 @@ pub fn Tls13ServerEndpoint(
             feed: root.EndpointFeedInstalledKeyDatagramResult,
             /// Pending-work actions applied after receive processing.
             pending_work: root.EndpointPendingWorkSweepResult,
+            /// Route preflight error before pending recovery work, if any.
+            pending_route_error: ?endpoint.RouteError = null,
             /// Protected output emitted after pending recovery work, if any.
             datagram: ?DatagramPathResult = null,
             /// Next endpoint-visible deadline after receive, pending work, and output poll.
@@ -1204,7 +1206,15 @@ pub fn Tls13ServerEndpoint(
                 datagram,
                 options,
             );
-            try self.preflightDueRecoveryRoutes(now_millis);
+            self.preflightDueRecoveryRoutes(now_millis) catch |err| {
+                const route_error = classifyRoutePreflightError(err) orelse return @errorCast(err);
+                return .{
+                    .feed = feed,
+                    .pending_work = .{},
+                    .pending_route_error = route_error,
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                };
+            };
             const pending_work = try self.records.processPendingWorkWithScratch(
                 &self.lifecycle,
                 now_millis,
@@ -6004,6 +6014,7 @@ test "Tls13ServerEndpoint feeds installed-key short datagram without receive-vie
     try std.testing.expectEqual(@as(usize, 0), feed_pending_poll.pending_work.idle_retired_count);
     try std.testing.expectEqual(@as(usize, 0), feed_pending_poll.pending_work.close_retired_count);
     try std.testing.expectEqual(@as(usize, 0), feed_pending_poll.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), feed_pending_poll.pending_route_error);
     try std.testing.expect(feed_pending_poll.datagram == null);
     try std.testing.expect(feed_pending_poll.next_deadline == null);
 
@@ -7557,7 +7568,7 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
         0x00,
     };
     var missing_route_poll_out: [128]u8 = undefined;
-    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagramWithRoutePathWithScratch(
+    const missing_route_poll = try endpoint_owner.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagramWithRoutePathWithScratch(
         first_path,
         deadline.deadline_millis,
         &unsupported_initial,
@@ -7568,7 +7579,16 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
             .supported_versions = &[_]quic_packet.Version{.v1},
         },
         .application,
-    ));
+    );
+    switch (missing_route_poll.feed) {
+        .version_negotiation => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), missing_route_poll.pending_work.idle_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_poll.pending_work.close_retired_count);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_poll.pending_work.recovery_serviced_count);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_poll.pending_route_error);
+    try std.testing.expect(missing_route_poll.datagram == null);
     const missing_route_poll_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, missing_route_poll_deadline.kind);
     try std.testing.expectEqual(deadline.connection_id, missing_route_poll_deadline.connection_id);

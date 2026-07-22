@@ -1353,9 +1353,10 @@ close 和 route cleanup 事件。
   解码，以及两个 endpoint owner 的 close-deadline 选择。
 
 - 2026-07-22：Server endpoint 的 route-bound feed/pending-work/poll scratch
-  现在会在 service recovery 前预检 due recovery output route。缺失 route 会返回
-  `UnknownConnectionId` 并保留 recovery deadline，与既有 route-bound drain
-  preflight 行为一致，避免 recovery timer 已被 service 但没有已提交 output path。
+  现在会在 service recovery 前预检 due recovery output route。缺失 route 会通过
+  `pending_route_error = UnknownConnectionId` 上报，同时保留 feed result 和
+  recovery deadline。该行为与既有 route-bound drain preflight 一致，避免 recovery
+  timer 已被 service 但没有已提交 output path。
 
 - 2026-07-17：收紧纯 Zig TLS server 的 ClientHello extension 校验。
   `Tls13Handshake.serverProcessClientHello()` 现在会拒绝重复的 extension

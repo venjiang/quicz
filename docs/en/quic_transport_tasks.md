@@ -1565,8 +1565,9 @@ QUIC unless the gap is named and the verification evidence is added here.
 
 - 2026-07-22: Server endpoint route-bound feed/pending-work/poll scratch now
   preflights due recovery output routes before servicing recovery. A missing
-  route returns `UnknownConnectionId` with the recovery deadline preserved,
-  matching the existing route-bound drain preflight behavior and avoiding a
+  route is reported as `pending_route_error = UnknownConnectionId`, while the
+  feed result remains visible and the recovery deadline is preserved. This
+  matches the existing route-bound drain preflight behavior and avoids a
   serviced recovery timer with no committed output path.
 
 - 2026-07-17: Tightened pure-Zig TLS server ClientHello extension
