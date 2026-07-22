@@ -2192,6 +2192,15 @@ fn pskKeyExchangeModeSeenBefore(modes: []const u8, current_mode_offset: usize, m
     return false;
 }
 
+fn tlsVersionSeenBefore(versions: []const u8, current_version_offset: usize, version: u16) bool {
+    var pos: usize = 0;
+    while (pos < current_version_offset) : (pos += 2) {
+        if (pos + 2 > current_version_offset) return false;
+        if (readU16(versions[pos..]) == version) return true;
+    }
+    return false;
+}
+
 fn alpnProtocolSeenBefore(protocols: []const u8, current_entry_offset: usize, protocol: []const u8) bool {
     var pos: usize = 0;
     while (pos < current_entry_offset) {
@@ -3585,9 +3594,12 @@ pub const Tls13Handshake = struct {
                     }
                     var vp: usize = 1;
                     while (vp + 2 <= el) : (vp += 2) {
-                        if (readU16(ext[vp..]) == version_tls_1_3) {
+                        const version = readU16(ext[vp..]);
+                        if (tlsVersionSeenBefore(ext[1..el], vp - 1, version)) {
+                            return error.DecodeError;
+                        }
+                        if (version == version_tls_1_3) {
                             have_version = true;
-                            break;
                         }
                     }
                 },
@@ -7273,6 +7285,36 @@ test "Tls13Handshake server rejects malformed ClientHello supported_versions len
     var server = Tls13Handshake.initServer(.{}, &[_]u8{});
     server.provideData(hello);
     try std.testing.expectError(error.DecodeError, server.step());
+}
+
+test "Tls13Handshake server rejects duplicate ClientHello supported_versions entries without committing parsed state" {
+    var hello_buf: [1024]u8 = undefined;
+    const base_hello = try clientHelloBytes(.{}, &hello_buf);
+    const hello = try replaceClientHelloExtensionBody(
+        &hello_buf,
+        base_hello.len,
+        @intFromEnum(ExtType.supported_versions),
+        &[_]u8{
+            0x04,
+            0x03,
+            0x04,
+            0x03,
+            0x04,
+        },
+    );
+
+    var server = Tls13Handshake.initServer(.{}, &[_]u8{});
+    const old_client_random = [_]u8{0x42} ** 32;
+    server.client_random = old_client_random;
+    server.client_random_available = true;
+    const transcript_before = server.transcript.current();
+    server.provideData(hello);
+
+    try std.testing.expectError(error.DecodeError, server.step());
+    try std.testing.expectEqualSlices(u8, &old_client_random, &server.client_random);
+    try std.testing.expect(server.client_random_available);
+    try std.testing.expectEqualSlices(u8, &transcript_before, &server.transcript.current());
+    try std.testing.expectEqual(HandshakeState.server_wait_client_hello, server.state);
 }
 
 test "Tls13Handshake server rejects malformed ClientHello key_share length" {

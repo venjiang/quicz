@@ -115,9 +115,9 @@ binder verification result、PSK selection 与 ClientHello transcript update
 同样只会在服务端准备推进状态后提交。
 需要证书路径时，服务端 ClientHello 处理现在还会在发出
 ServerHello、排队 ServerHello 输出或提交已解析 peer 状态前拒绝缺失的
-`signature_algorithms`、重复的 `signature_algorithms` 条目、重复的
-`psk_key_exchange_modes` 条目、空证书条目、过大的本地证书链或编码后的
-Certificate flight，以及缺失、过短或其它非法的本地私钥配置。
+`signature_algorithms`、重复的 `supported_versions` 条目、重复的
+`signature_algorithms` 条目、重复的 `psk_key_exchange_modes` 条目、空证书条目、
+过大的本地证书链或编码后的 Certificate flight，以及缺失、过短或其它非法的本地私钥配置。
 纯 Zig TLS client-side ServerHello 解析现在还会拒绝重复 ClientHello random 的
 ServerHello random，且不会提交 peer random、transcript 或 handshake secret；
 ServerHello cipher suite 错误时同样会保持 staged peer key、peer random、PSK
@@ -1657,6 +1657,10 @@ close 和 route cleanup 事件。
 - 2026-07-22：加固 server ClientHello vector entry validation。
   纯 Zig TLS server parsing 现在会拒绝重复的 `signature_algorithms` 和
   `psk_key_exchange_modes` 条目，并保持 peer state 与 transcript progress 未提交。
+
+- 2026-07-22：加固 server ClientHello supported-version vector validation。
+  纯 Zig TLS server parsing 现在会拒绝重复的 `supported_versions` 条目，并保持
+  parsed ClientHello state 与 transcript progress 未提交。
 
 - 2026-07-17：加固 server endpoint 终态 record cleanup。
   `Tls13ServerEndpoint` 在 due idle/close retirement 后如果无法移除

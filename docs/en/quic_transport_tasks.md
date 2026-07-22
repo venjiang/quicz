@@ -131,12 +131,12 @@ PSK identity, obfuscated
 ticket age, binder bytes, binder offset, binder verification result, PSK
 selection, and the ClientHello transcript update are likewise committed only
 after the server is ready to advance. When the certificate path is required,
-server-side ClientHello processing now rejects missing `signature_algorithms`,
-duplicate `signature_algorithms` entries, duplicate `psk_key_exchange_modes`
-entries, empty certificate entries, oversized configured certificate chains or
-encoded Certificate flights, plus missing, short, or otherwise invalid
-configured private keys before committing parsed peer state or queuing/emitting
-ServerHello. Server-side Certificate output now also prevalidates the
+server-side ClientHello processing now rejects duplicate `supported_versions`
+entries, missing `signature_algorithms`, duplicate `signature_algorithms`
+entries, duplicate `psk_key_exchange_modes` entries, empty certificate entries,
+oversized configured certificate chains or encoded Certificate flights, plus
+missing, short, or otherwise invalid configured private keys before committing
+parsed peer state or queuing/emitting ServerHello. Server-side Certificate output now also prevalidates the
 configured chain before writing bytes, so a later invalid certificate entry
 cannot leave a partial Certificate message in the output buffer. Pure-Zig TLS
 client-side ServerHello parsing now also
@@ -1908,6 +1908,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   server parsing now rejects duplicate `signature_algorithms` and
   `psk_key_exchange_modes` entries without committing peer state or transcript
   progress.
+
+- 2026-07-22: Hardened server ClientHello supported-version vector validation.
+  Pure-Zig TLS server parsing now rejects duplicate `supported_versions`
+  entries without committing parsed ClientHello state or transcript progress.
 
 - 2026-07-17: Hardened server endpoint terminal record cleanup.
   `Tls13ServerEndpoint` now reports an internal consistency error if due
