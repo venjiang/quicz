@@ -35,6 +35,26 @@ version-information 原语）：
 - HTTP/3 和 QPACK
 - Multipath 以及其他 QUIC WG 进行中的草案
 
+## 实现优先级矩阵
+
+成熟 QUIC 栈会在核心 transport 可用后继续长期完善。quic-go、s2n-quic、quiche 的
+发布节奏都呈现类似模式：先保证核心握手、stream、recovery、routing、close 和互通；
+FIPS 或 crypto provider 细节、qlog、HTTP/3、DATAGRAM、PMTU、fuzz 覆盖、API cleanup
+和性能调优会持续后置演进。`quicz` 也应采用这个形状，而不是在第一轮可用
+transport 前补完所有可选或低频功能。
+
+| 优先级 | 目标 | 当前范围 | 退出证据 |
+| --- | --- | --- | --- |
+| P0 | 基本可用 QUIC v1 transport | Endpoint-owned UDP client/server loop；证书校验的 TLS-owned Initial/Handshake/1-RTT packet protection；bidirectional 和 unidirectional STREAM open/read/write/FIN；RESET_STREAM 与 STOP_SENDING；connection、stream、stream-count flow control；ACK/loss/PTO/NewReno baseline；CONNECTION_CLOSE 与 APPLICATION_CLOSE；CID routing、NEW_CONNECTION_ID/RETIRE_CONNECTION_ID、Retry/address validation、stateless reset、idle/close cleanup。 | 本地 Zig client/server 通过 protected UDP 完成 STREAM echo；至少一个外部栈与 `quicz` 完成证书校验 bidirectional STREAM FIN echo、Retry、close，以及一次可控 loss/PTO 运行。 |
+| P1 | 互通加固和生产策略 | 更广的 stream-limit interop；route migration/path validation policy；生产 token/replay policy；多连接 server event-loop policy；常见 RFC 9000 frame 错误映射和 rollback 缺口；可行时加入第二个外部栈 smoke 证据。 | quic-go 加 s2n-quic/quiche/基础 Rust client-server 路径之一，通过小型可重复矩阵：handshake、stream echo、reset/stop、Retry、close、loss recovery。 |
+| P2 | 公开可用性和可维护性 | 公开 API 简化、稳定 endpoint API 命名、精简 README/examples 文档；pure-Zig TLS 行为稳定后，如能降低耦合，再单独抽取 `src/tls/`。 | 用户面对的小 API 能构建 client/server，不需要接触内部 lifecycle 变体；文档链接完整 examples，但 examples 不再作为开发主目标。 |
+| P3 | 扩展和高级运维 | 0-RTT 生产/分布式 replay policy、HTTP/3/QPACK、RFC 9221 DATAGRAM、qlog、PMTU/GSO/GRO、完整 QUIC v2/RFC 9368、高级 congestion controller、multipath、广泛 fuzz/observability。 | P0/P1 稳定后再跟踪；除非选定互通目标要求，否则这些项不能阻塞第一轮可用 QUIC v1 transport。 |
+
+任务选择规则：优先选择最高优先级里尚未完成、且能让第一轮可用 transport 更真实的项。
+只有会阻塞 handshake、protected stream I/O、close、recovery、routing、Retry/address
+validation 或必需外部互通证据的修复，才归入 P0；其他都归入 P1/P2/P3，除非它是解除
+P0 阻塞的最小安全路径，否则后置。
+
 ## 实用 Transport 基线
 
 | 功能 | 实用目标 | quicz 状态 |
