@@ -81,8 +81,8 @@ covered by protected endpoint behavior when required.
 
 | Order | Task ID | Status | Done when |
 | --- | --- | --- | --- |
-| 1 | P0-A1 | Active | Client bounded receive step returns receive output, due output, close/key-discard/idle transitions, route errors, capacity errors, and next deadline without caller-side branching. |
-| 2 | P0-A2 | Next | Server bounded receive step returns admission, routed output, pending work, due cleanup, route errors, capacity errors, and next deadline without caller-side branching. |
+| 1 | P0-A1 | Done | Client bounded receive step returns receive output, due output, close/key-discard/idle transitions, route errors, capacity errors, and next deadline without caller-side branching. |
+| 2 | P0-A2 | Active | Server bounded receive step returns admission, routed output, pending work, due cleanup, route errors, capacity errors, and next deadline without caller-side branching. |
 | 3 | P0-A3 | Next | A local Zig endpoint-loop test completes certificate-verified protected UDP handshake, STREAM echo, close, key discard, and route cleanup through endpoint APIs only. |
 | 4 | P0-B1/B2 | Next | Protected endpoint-loop stream tests cover bidi and uni FIN paths. |
 | 5 | P0-B3/B4 | Next | Protected endpoint-loop tests cover reset/stop, stream-count credit release, flow-control unblock, and retransmission requeue. |
@@ -162,6 +162,10 @@ through `receive.drain.first_route_error = UnknownConnectionId` instead of
 throwing before a result can be returned. The datagram is not processed, the
 connection state is preserved, and the same route-error metadata is visible
 through the full `receiveDatagramStepWithRoutePath()` result shape.
+P0-A1 is complete: `receiveDatagramStepWithRoutePath()` now exposes receive
+output, due recovery output, idle/close/key-discard transitions, route errors,
+capacity errors, and post-step deadline selection in a single bounded client
+result shape. P0-A2 is the next active task.
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` processing now tracks the largest
 peer `Retire Prior To` value. It rejects `retire_prior_to > sequence_number`
