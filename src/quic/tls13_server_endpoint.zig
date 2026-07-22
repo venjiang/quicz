@@ -12311,6 +12311,116 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
         for (ss_pending_out[0..ss_step.pending_drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
     }
 
+    // --- Phase 7o: Client sends a new bidi stream for duplicate-discard proof ---
+    const dup_stream_id = try client.openStream();
+    const dup_payload = "duplicate proof";
+    var client_dup_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const client_dup_send = try client.sendStreamWithRoutePathAndDrainDatagrams(
+        dup_stream_id,
+        dup_payload,
+        true,
+        34,
+        &client_dup_out,
+    );
+    try std.testing.expect(client_dup_send.drain.datagrams_written >= 1);
+    const client_dup_written = client_dup_send.drain.datagrams_written;
+    defer {
+        for (client_dup_out[0..client_dup_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 7p: Server receives the original datagrams ---
+    for (client_dup_out[0..client_dup_written]) |dup_datagram| {
+        var d1_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var d1_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var d1_installed_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var d1_pending_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var d1_route_out: [256]u8 = undefined;
+        const d1_step = try server_endpoint.receiveDatagramStepWithRoutePath(
+            std.testing.allocator,
+            server_path,
+            35,
+            dup_datagram.datagram,
+            &[_]u8{},
+            &[_]quic_packet.Version{.v1},
+            .{
+                .space = .application,
+                .out = &d1_route_out,
+                .unpredictable_prefix = &[_]u8{},
+                .supported_versions = &[_]quic_packet.Version{.v1},
+            },
+            &server_scratch,
+            &[_]u8{},
+            &d1_initial_out,
+            &d1_handshake_out,
+            &d1_installed_out,
+            .application,
+            &d1_pending_out,
+        );
+        var d1_ik_written: usize = 0;
+        switch (d1_step.process) {
+            .routed => |routed| switch (routed) {
+                .installed_key => |ik| {
+                    d1_ik_written = ik.drain.datagrams_written;
+                },
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        for (d1_installed_out[0..d1_ik_written]) |o| std.testing.allocator.free(o.datagram);
+        for (d1_pending_out[0..d1_step.pending_drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 7q: Server reads the stream data ---
+    var server_dup_read_buf: [64]u8 = undefined;
+    const server_dup_read_len = (try server_endpoint.recvStream(server_handle, dup_stream_id, &server_dup_read_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(dup_payload, server_dup_read_buf[0..server_dup_read_len]);
+    try std.testing.expect(try server_endpoint.streamFinished(server_handle, dup_stream_id));
+
+    // --- Phase 7r: Server receives the same datagrams again (duplicate discard) ---
+    for (client_dup_out[0..client_dup_written]) |dup_datagram| {
+        var d2_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var d2_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var d2_installed_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var d2_pending_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var d2_route_out: [256]u8 = undefined;
+        const d2_step = try server_endpoint.receiveDatagramStepWithRoutePath(
+            std.testing.allocator,
+            server_path,
+            36,
+            dup_datagram.datagram,
+            &[_]u8{},
+            &[_]quic_packet.Version{.v1},
+            .{
+                .space = .application,
+                .out = &d2_route_out,
+                .unpredictable_prefix = &[_]u8{},
+                .supported_versions = &[_]quic_packet.Version{.v1},
+            },
+            &server_scratch,
+            &[_]u8{},
+            &d2_initial_out,
+            &d2_handshake_out,
+            &d2_installed_out,
+            .application,
+            &d2_pending_out,
+        );
+        var d2_ik_written: usize = 0;
+        switch (d2_step.process) {
+            .routed => |routed| switch (routed) {
+                .installed_key => |ik| {
+                    d2_ik_written = ik.drain.datagrams_written;
+                },
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        for (d2_installed_out[0..d2_ik_written]) |o| std.testing.allocator.free(o.datagram);
+        for (d2_pending_out[0..d2_step.pending_drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+    // Duplicate STREAM data is discarded idempotently — stream state unchanged.
+    var server_dup_verify_buf: [64]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, null), try server_endpoint.recvStream(server_handle, dup_stream_id, &server_dup_verify_buf));
+
     // --- Phase 7b: Service due server recovery timer ---
     if (try server_endpoint.nextDeadline(std.testing.allocator)) |server_deadline| {
         var due_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
