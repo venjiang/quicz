@@ -12047,6 +12047,116 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
     try std.testing.expectEqualStrings(echo_payload, client_recv_buf[0..client_recv_len]);
     try std.testing.expect(try client.streamFinished(stream_id));
 
+    // --- Phase 7c: Client sends a unidirectional stream with FIN ---
+    const uni_stream_id = try client.openUniStream();
+    try std.testing.expectEqual(@as(u64, 2), uni_stream_id);
+    const uni_payload = "uni data";
+    var client_uni_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const client_uni_send = try client.sendStreamWithRoutePathAndDrainDatagrams(
+        uni_stream_id,
+        uni_payload,
+        true,
+        24,
+        &client_uni_out,
+    );
+    try std.testing.expect(client_uni_send.drain.datagrams_written >= 1);
+    const client_uni_written = client_uni_send.drain.datagrams_written;
+    defer {
+        for (client_uni_out[0..client_uni_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 7d: Server receives every client uni-stream datagram ---
+    for (client_uni_out[0..client_uni_written]) |uni_datagram| {
+        var su_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var su_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var su_installed_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var su_pending_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var su_route_out: [256]u8 = undefined;
+        const su_step = try server_endpoint.receiveDatagramStepWithRoutePath(
+            std.testing.allocator,
+            server_path,
+            25,
+            uni_datagram.datagram,
+            &[_]u8{},
+            &[_]quic_packet.Version{.v1},
+            .{
+                .space = .application,
+                .out = &su_route_out,
+                .unpredictable_prefix = &[_]u8{},
+                .supported_versions = &[_]quic_packet.Version{.v1},
+            },
+            &server_scratch,
+            &[_]u8{},
+            &su_initial_out,
+            &su_handshake_out,
+            &su_installed_out,
+            .application,
+            &su_pending_out,
+        );
+        var su_ik_written: usize = 0;
+        switch (su_step.process) {
+            .routed => |routed| switch (routed) {
+                .installed_key => |ik| {
+                    su_ik_written = ik.drain.datagrams_written;
+                },
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        for (su_installed_out[0..su_ik_written]) |o| std.testing.allocator.free(o.datagram);
+        for (su_pending_out[0..su_step.pending_drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 7e: Server reads the uni-stream data ---
+    var server_uni_buf: [64]u8 = undefined;
+    const server_uni_len = (try server_endpoint.recvStream(server_handle, uni_stream_id, &server_uni_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(uni_payload, server_uni_buf[0..server_uni_len]);
+    try std.testing.expect(try server_endpoint.streamFinished(server_handle, uni_stream_id));
+
+    // --- Phase 7f: Server sends a unidirectional stream with FIN ---
+    const server_uni_id = try server_endpoint.openUniStream(server_handle);
+    try std.testing.expectEqual(@as(u64, 3), server_uni_id);
+    const server_uni_payload = "server uni";
+    var server_uni_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+    const server_uni_send = try server_endpoint.sendStreamWithRoutePathAndDrainDatagrams(
+        std.testing.allocator,
+        server_handle,
+        server_uni_id,
+        server_uni_payload,
+        true,
+        26,
+        &server_uni_out,
+    );
+    try std.testing.expect(server_uni_send.drain.datagrams_written >= 1);
+    const server_uni_written = server_uni_send.drain.datagrams_written;
+    defer {
+        for (server_uni_out[0..server_uni_written]) |o| std.testing.allocator.free(o.datagram);
+    }
+
+    // --- Phase 7g: Client receives every server uni-stream datagram ---
+    for (server_uni_out[0..server_uni_written]) |suni_datagram| {
+        var cu_recv_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+        var cu_due_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+        const cu_step = try client.receiveDatagramStepWithRoutePath(
+            27,
+            &client_scratch,
+            suni_datagram.datagram,
+            &cu_recv_out,
+            &cu_due_out,
+        );
+        try std.testing.expect(cu_step.receive.receive != null);
+        for (cu_recv_out[0..cu_step.receive.drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+        if (cu_step.due) |due| {
+            for (cu_due_out[0..due.drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+        }
+    }
+
+    // --- Phase 7h: Client reads the server uni-stream data ---
+    var client_uni_recv_buf: [64]u8 = undefined;
+    const client_uni_recv_len = (try client.recvStream(server_uni_id, &client_uni_recv_buf)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(server_uni_payload, client_uni_recv_buf[0..client_uni_recv_len]);
+    try std.testing.expect(try client.streamFinished(server_uni_id));
+
     // --- Phase 7b: Service due server recovery timer ---
     if (try server_endpoint.nextDeadline(std.testing.allocator)) |server_deadline| {
         var due_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
