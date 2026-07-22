@@ -125,6 +125,9 @@ socket loop 可以在不进行 per-call allocation 的路径里 queue control、
 route-bound output 并选择下一 deadline。测试覆盖 missing-route、zero-capacity
 和 missing-scratch preflight 在状态变化前失败，以及已提交 route 上的 protected
 output 与下一 deadline 选择。
+Server due-deadline route-bound recovery drain 现在会在 allocator 和 scratch
+路径里通过 `drain.first_route_error` 暴露 missing-route preflight 失败，保留 due
+recovery deadline，不 service recovery，也不消费 output。
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` 处理现在会跟踪 peer 最大
 `Retire Prior To` 值。它会在 retiring peer-issued connection IDs、排队
@@ -1392,6 +1395,11 @@ close 和 route cleanup 事件。
   Server fixed-capacity endpoint 也暴露这些 drain 的 scratch-backed 变体；lifecycle
   测试覆盖 missing-route、zero-capacity、missing-scratch non-commit，以及已提交
   route 上的 output 和 deadline 选择。
+
+- 2026-07-22：Server due-deadline route-bound recovery drain 现在会通过
+  route-aware drain result 报告缺失 committed route，不再从 socket-loop 路径直接抛错。
+  Allocator 与 scratch 测试覆盖 Application 和 Initial recovery deadline，证明 route
+  preflight 失败时不会 service recovery、不会消费 output，也不会丢失 deadline。
 
 - 2026-07-22：Connection-level `NEW_TOKEN` 校验现在补充了畸形空 token
   的显式回归覆盖。只回滚的 receive 路径会拒绝该 wire payload，不存 token，也不

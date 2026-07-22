@@ -96,7 +96,7 @@ pub fn Tls13ServerEndpoint(
             /// Pending-work actions applied for the due deadline.
             pending_work: root.EndpointPendingWorkResult,
             /// Bounded output drain after a due recovery timer, if any.
-            drain: root.EndpointDatagramDrainResult,
+            drain: DatagramPathDrainResult,
             /// Next endpoint-visible deadline after due work and output drain.
             next_deadline: ?root.EndpointConnectionDeadline = null,
         };
@@ -803,7 +803,14 @@ pub fn Tls13ServerEndpoint(
             ) != null or deadline.recovery.?.space == .initial);
             if (drains_recovery_datagram and out.len == 0) return error.BufferTooSmall;
             const route_path = if (drains_recovery_datagram)
-                try self.lifecycle.currentRoutePath(source_connection_id)
+                self.lifecycle.currentRoutePath(source_connection_id) catch |err| {
+                    return .{
+                        .deadline = deadline,
+                        .pending_work = .{},
+                        .drain = .{ .first_route_error = err },
+                        .next_deadline = try self.nextDeadline(allocator),
+                    };
+                }
             else
                 null;
 
@@ -818,17 +825,21 @@ pub fn Tls13ServerEndpoint(
                 );
                 const serviced = pending.recovery_serviced orelse break :pending pending;
                 if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
+                const drain = self.drainDatagramsWithRoutePath(
+                    deadline.connection_id,
+                    connection,
+                    now_millis,
+                    options,
+                    route_path.?,
+                    out,
+                );
                 return .{
                     .deadline = deadline,
                     .pending_work = pending,
-                    .drain = self.drainDatagramsWithRoutePath(
-                        deadline.connection_id,
-                        connection,
-                        now_millis,
-                        options,
-                        route_path.?,
-                        out,
-                    ),
+                    .drain = .{
+                        .datagrams_written = drain.datagrams_written,
+                        .first_error = drain.first_error,
+                    },
                     .next_deadline = try self.nextDeadline(allocator),
                 };
             } else if (deadline.kind == .recovery and deadline.recovery != null and deadline.recovery.?.space == .initial) pending: {
@@ -839,17 +850,21 @@ pub fn Tls13ServerEndpoint(
                 );
                 const serviced = pending.recovery_serviced orelse break :pending pending;
                 if (serviced.timer.space != .initial) return error.InvalidPacket;
+                const drain = self.drainInitialDatagramsWithRoutePath(
+                    deadline.connection_id,
+                    record,
+                    connection,
+                    now_millis,
+                    route_path.?,
+                    out,
+                );
                 return .{
                     .deadline = deadline,
                     .pending_work = pending,
-                    .drain = self.drainInitialDatagramsWithRoutePath(
-                        deadline.connection_id,
-                        record,
-                        connection,
-                        now_millis,
-                        route_path.?,
-                        out,
-                    ),
+                    .drain = .{
+                        .datagrams_written = drain.datagrams_written,
+                        .first_error = drain.first_error,
+                    },
                     .next_deadline = try self.nextDeadline(allocator),
                 };
             } else try self.lifecycle.processPendingWork(
@@ -884,7 +899,14 @@ pub fn Tls13ServerEndpoint(
             ) != null or deadline.recovery.?.space == .initial);
             if (drains_recovery_datagram and out.len == 0) return error.BufferTooSmall;
             const route_path = if (drains_recovery_datagram)
-                try self.lifecycle.currentRoutePath(source_connection_id)
+                self.lifecycle.currentRoutePath(source_connection_id) catch |err| {
+                    return .{
+                        .deadline = deadline,
+                        .pending_work = .{},
+                        .drain = .{ .first_route_error = err },
+                        .next_deadline = try self.nextDeadlineWithScratch(),
+                    };
+                }
             else
                 null;
 
@@ -899,17 +921,21 @@ pub fn Tls13ServerEndpoint(
                 );
                 const serviced = pending.recovery_serviced orelse break :pending pending;
                 if (serviced.timer.space != options.recoveryPacketNumberSpace()) return error.InvalidPacket;
+                const drain = self.drainDatagramsWithRoutePath(
+                    deadline.connection_id,
+                    connection,
+                    now_millis,
+                    options,
+                    route_path.?,
+                    out,
+                );
                 return .{
                     .deadline = deadline,
                     .pending_work = pending,
-                    .drain = self.drainDatagramsWithRoutePath(
-                        deadline.connection_id,
-                        connection,
-                        now_millis,
-                        options,
-                        route_path.?,
-                        out,
-                    ),
+                    .drain = .{
+                        .datagrams_written = drain.datagrams_written,
+                        .first_error = drain.first_error,
+                    },
                     .next_deadline = try self.nextDeadlineWithScratch(),
                 };
             } else if (deadline.kind == .recovery and deadline.recovery != null and deadline.recovery.?.space == .initial) pending: {
@@ -920,17 +946,21 @@ pub fn Tls13ServerEndpoint(
                 );
                 const serviced = pending.recovery_serviced orelse break :pending pending;
                 if (serviced.timer.space != .initial) return error.InvalidPacket;
+                const drain = self.drainInitialDatagramsWithRoutePath(
+                    deadline.connection_id,
+                    record,
+                    connection,
+                    now_millis,
+                    route_path.?,
+                    out,
+                );
                 return .{
                     .deadline = deadline,
                     .pending_work = pending,
-                    .drain = self.drainInitialDatagramsWithRoutePath(
-                        deadline.connection_id,
-                        record,
-                        connection,
-                        now_millis,
-                        route_path.?,
-                        out,
-                    ),
+                    .drain = .{
+                        .datagrams_written = drain.datagrams_written,
+                        .first_error = drain.first_error,
+                    },
                     .next_deadline = try self.nextDeadlineWithScratch(),
                 };
             } else try self.lifecycle.processPendingWork(
@@ -7577,10 +7607,32 @@ test "Tls13ServerEndpoint pairs due recovery output with committed route path" {
 
     var due_out: [1]TestEndpoint.DatagramPathResult = undefined;
     try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(server_dcid, new_path));
-    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
+    const missing_route_due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
+        std.testing.allocator,
         deadline.deadline_millis,
         &due_out,
-    ));
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, missing_route_due.deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, missing_route_due.deadline.kind);
+    try std.testing.expect(missing_route_due.pending_work.recovery_serviced == null);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), missing_route_due.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_due.drain.first_route_error);
+    const allocator_preserved_deadline = (try endpoint_owner.nextDeadline(std.testing.allocator)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, allocator_preserved_deadline.kind);
+    try std.testing.expectEqual(record.handle, allocator_preserved_deadline.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.application, allocator_preserved_deadline.recovery.?.space);
+
+    const missing_route_due_scratch = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
+        deadline.deadline_millis,
+        &due_out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, missing_route_due_scratch.deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, missing_route_due_scratch.deadline.kind);
+    try std.testing.expect(missing_route_due_scratch.pending_work.recovery_serviced == null);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_due_scratch.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), missing_route_due_scratch.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_due_scratch.drain.first_route_error);
     const preserved_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, preserved_deadline.kind);
     try std.testing.expectEqual(record.handle, preserved_deadline.connection_id);
@@ -8569,10 +8621,32 @@ test "Tls13ServerEndpoint pairs Initial due recovery output with committed route
 
     var due_out: [1]TestEndpoint.DatagramPathResult = undefined;
     try std.testing.expect(try endpoint_owner.lifecycle.retireConnectionIdOnPath(server_dcid, new_path));
-    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
+    const missing_route_due = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePath(
+        std.testing.allocator,
         deadline.deadline_millis,
         &due_out,
-    ));
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, missing_route_due.deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, missing_route_due.deadline.kind);
+    try std.testing.expect(missing_route_due.pending_work.recovery_serviced == null);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_due.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), missing_route_due.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_due.drain.first_route_error);
+    const allocator_preserved_deadline = (try endpoint_owner.nextDeadline(std.testing.allocator)) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, allocator_preserved_deadline.kind);
+    try std.testing.expectEqual(record.handle, allocator_preserved_deadline.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.initial, allocator_preserved_deadline.recovery.?.space);
+
+    const missing_route_due_scratch = (try endpoint_owner.processDueDeadlineAndDrainDatagramsWithRoutePathWithScratch(
+        deadline.deadline_millis,
+        &due_out,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(record.handle, missing_route_due_scratch.deadline.connection_id);
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, missing_route_due_scratch.deadline.kind);
+    try std.testing.expect(missing_route_due_scratch.pending_work.recovery_serviced == null);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_due_scratch.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), missing_route_due_scratch.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_due_scratch.drain.first_route_error);
     const preserved_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, preserved_deadline.kind);
     try std.testing.expectEqual(record.handle, preserved_deadline.connection_id);

@@ -138,6 +138,10 @@ queue controls, drain route-bound output, and select the next deadline without
 per-call allocation. Tests cover missing-route, zero-capacity, and missing
 scratch preflight failures before mutation, plus committed-route protected
 output and next-deadline selection.
+Server due-deadline route-bound recovery drains now surface missing-route
+preflight failures through `drain.first_route_error` for both allocator and
+scratch paths, preserving the due recovery deadline without servicing recovery
+or consuming output.
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` processing now tracks the largest
 peer `Retire Prior To` value. It rejects `retire_prior_to > sequence_number`
@@ -1607,6 +1611,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   drains; the lifecycle test covers missing-route, zero-capacity, and
   missing-scratch non-commit behavior plus committed-route output and deadline
   selection.
+
+- 2026-07-22: Server due-deadline route-bound recovery drains now report a
+  missing committed route through the route-aware drain result instead of
+  throwing from the socket-loop path. Allocator and scratch tests cover
+  Application and Initial recovery deadlines, proving no recovery service,
+  output consumption, or deadline loss happens on route preflight failure.
 
 - 2026-07-22: Connection-level `NEW_TOKEN` validation now has explicit
   malformed-empty-token regression coverage. The rollback-only receive path
