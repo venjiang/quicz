@@ -1025,6 +1025,17 @@ pub fn build(b: *std.Build) void {
         run_interop_external_client_cmd.addArgs(args);
     }
 
+    // zig build run-interop-external (standalone, no OpenSSL dependency)
+    const run_interop_standalone = b.step(
+        "run-interop-external",
+        "Run certificate-verified QUIC echo against an external server (standalone)",
+    );
+    const run_interop_standalone_cmd = b.addRunArtifact(exe_interop_external_client);
+    run_interop_standalone.dependOn(&run_interop_standalone_cmd.step);
+    if (b.args) |args| {
+        run_interop_standalone_cmd.addArgs(args);
+    }
+
     // zig build run-codec
     const run_codec = b.step("run-codec", "Run quicz codec roundtrip example");
     const run_codec_cmd = b.addRunArtifact(exe_codec);

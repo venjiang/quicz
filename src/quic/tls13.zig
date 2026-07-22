@@ -3210,6 +3210,10 @@ pub const Tls13Handshake = struct {
                     }
                     accepted_early_data = true;
                 },
+                @intFromEnum(ExtType.server_name) => {
+                    // RFC 8446 §4.2: server echoes SNI acceptance; empty body.
+                    if (self.config.server_name == null) return error.DecodeError;
+                },
                 else => return error.DecodeError,
             }
         }
