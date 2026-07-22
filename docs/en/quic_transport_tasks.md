@@ -132,7 +132,9 @@ ticket age, binder bytes, binder offset, binder verification result, PSK
 selection, and the ClientHello transcript update are likewise committed only
 after the server is ready to advance. When multiple ClientHello PSK identities
 are offered, server-side selection now stages the matching configured identity
-and same-index binder instead of always verifying the first binder.
+and same-index binder instead of always verifying the first binder, and the
+subsequent ServerHello `pre_shared_key.selected_identity` now reports that
+same index.
 When the certificate path is required,
 server-side ClientHello processing now rejects duplicate `supported_versions`
 entries, missing `signature_algorithms`, duplicate `signature_algorithms`

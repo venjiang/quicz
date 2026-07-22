@@ -1399,11 +1399,20 @@ test "Tls13Handshake server selects matching ClientHello PSK identity beyond fir
 
     try std.testing.expect(server.peer_offered_psk);
     try std.testing.expect(server.psk_selected);
+    try std.testing.expectEqual(@as(u16, 1), server.psk_selected_identity);
     try std.testing.expect(server.peer_psk_binder_valid);
     try std.testing.expect(server.server_early_traffic_secret_derived);
     try std.testing.expectEqual(@as(usize, matching_ticket.len), server.peer_psk_identity_len);
     try std.testing.expectEqualSlices(u8, &matching_ticket, server.peer_psk_identity[0..server.peer_psk_identity_len]);
     try std.testing.expectEqual(@as(u32, 0x01020304), server.peer_psk_obfuscated_ticket_age);
+
+    const server_hello_action = try server.step();
+    const selected = try serverHelloExtension(
+        server_hello_action.send_data.data,
+        @intFromEnum(ExtType.pre_shared_key),
+    );
+    try std.testing.expectEqual(@as(usize, 2), selected.body_len);
+    try std.testing.expectEqual(@as(u16, 1), readU16(server_hello_action.send_data.data[selected.body_offset..]));
 }
 
 test "Tls13Handshake server applies PSK ticket age policy" {
@@ -2404,6 +2413,7 @@ pub const Tls13Handshake = struct {
     // pre_shared_key resumption in the ClientHello.
     has_psk: bool = false,
     psk_selected: bool = false,
+    psk_selected_identity: u16 = 0,
 
     // Session ticket from a post-handshake NewSessionTicket (client side).
     // Carried in the pre_shared_key extension of a resumed ClientHello.
@@ -2483,6 +2493,7 @@ pub const Tls13Handshake = struct {
         self.resumption_psk = null;
         self.has_psk = false;
         self.psk_selected = false;
+        self.psk_selected_identity = 0;
         self.session_ticket_len = 0;
         self.session_ticket_age_add = 0;
         self.session_ticket_allows_early_data = false;
@@ -2555,6 +2566,7 @@ pub const Tls13Handshake = struct {
         self.resumption_psk = null;
         self.has_psk = false;
         self.psk_selected = false;
+        self.psk_selected_identity = 0;
         self.session_ticket_len = 0;
         self.session_ticket_age_add = 0;
         self.session_ticket_allows_early_data = false;
@@ -3885,6 +3897,7 @@ pub const Tls13Handshake = struct {
         var next_transcript = self.transcript;
         var next_key_schedule = self.key_schedule;
         var next_psk_selected = false;
+        var next_psk_selected_identity: u16 = 0;
         var next_peer_psk_binder_valid = false;
         var next_server_early_traffic_secret: [secret_len]u8 = undefined;
         var next_server_early_traffic_secret_derived = false;
@@ -3926,6 +3939,10 @@ pub const Tls13Handshake = struct {
                     break :replay filter.consume(parsed_peer_psk_identity[0..parsed_peer_psk_identity_len]);
                 } else true;
                 next_psk_selected = replay_allowed;
+                next_psk_selected_identity = if (replay_allowed)
+                    std.math.cast(u16, parsed_peer_psk_identity_index orelse 0) orelse return error.DecodeError
+                else
+                    0;
                 if (replay_allowed and offered_early_data) {
                     next_server_early_traffic_secret = next_key_schedule.deriveEarlyTrafficSecret(next_transcript.current());
                     next_server_early_traffic_secret_derived = true;
@@ -3949,6 +3966,7 @@ pub const Tls13Handshake = struct {
         self.transcript = next_transcript;
         self.key_schedule = next_key_schedule;
         self.psk_selected = next_psk_selected;
+        self.psk_selected_identity = next_psk_selected_identity;
         self.client_random = parsed_client_random;
         self.client_random_available = true;
         self.negotiated_alpn_len = selected_alpn_len;
@@ -4038,7 +4056,7 @@ pub const Tls13Handshake = struct {
         pos += 32;
         if (self.psk_selected) {
             pos = writeExtHeader(buf, pos, @intFromEnum(ExtType.pre_shared_key), 2);
-            writeU16(buf[pos..], 0);
+            writeU16(buf[pos..], self.psk_selected_identity);
             pos += 2;
         }
         const ext_len = pos - ext_start - 2;
