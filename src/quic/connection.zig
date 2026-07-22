@@ -68987,6 +68987,24 @@ test "client stores NEW_TOKEN values up to configured limit" {
     try std.testing.expectEqualStrings("two", conn.latestNewToken().?);
 }
 
+test "client rejects empty NEW_TOKEN without storing token" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const empty_new_token = [_]u8{
+        @intFromEnum(frame.FrameType.new_token),
+        0x00, // empty token length
+    };
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(0, &empty_new_token));
+    try std.testing.expectEqual(@as(usize, 0), conn.stored_new_tokens.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pending_ack_largest);
+    try std.testing.expectEqual(@as(u64, 0), conn.next_peer_packet_number);
+
+    var out_buf: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(?[]u8, null), try conn.pollTx(0, &out_buf));
+}
+
 test "server rejects NEW_TOKEN from peer" {
     var conn = try Connection.init(std.testing.allocator, .server, .{});
     defer conn.deinit();
@@ -69621,6 +69639,39 @@ test "processDatagramOrClose queues protocol violation close for server NEW_TOKE
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
             try std.testing.expectEqual(frame_type_value, close.frame_type);
             try std.testing.expectEqualStrings("new token", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramOrClose queues frame encoding close for empty NEW_TOKEN" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const empty_new_token = [_]u8{
+        @intFromEnum(frame.FrameType.new_token),
+        0x00, // empty token length
+    };
+    const frame_type_value = rawFrameTypeValue(&empty_new_token);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(0, &empty_new_token));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 0), conn.stored_new_tokens.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 0), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(0, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
         },
         else => return error.InvalidPacket,
     }
