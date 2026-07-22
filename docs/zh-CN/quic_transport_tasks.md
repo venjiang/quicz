@@ -37,62 +37,67 @@ version-information 原语）：
 
 ## QUIC 核心任务矩阵
 
-这是权威执行矩阵。本文后面的详细 ledger 只作为证据留存，不再作为取任务队列。
+这是权威执行矩阵。本文后面的详细 ledger 只作为证据留存，不再作为 active queue。
 
 P0 表示“声称第一轮 QUIC v1 transport 可用前必须完成”。P1 及以后先停放，除非能
-直接解除某个 P0 退出测试的阻塞。2026-07-22 核对成熟 QUIC 栈当前 release notes 后，
-只把它们当作优先级信号：反复出现的 transport 工作集中在 crypto/TLS 正确性、endpoint
-timer、stream 与 flow-control accounting、recovery/PTO、CID/path/MTU 安全、
-close/error 传播、fuzz 和可重复 interop。`quicz` 按这个顺序推进：先本地核心
-transport，P0 最后才做其它语言互通，examples 和可选扩展放到 P0 之后。
+直接解除某个 P0 退出测试的阻塞。优先级刻意收窄：先完成 RFC
+8999/9000/9001/9002 transport core，先跑通本地 Zig 互通；只有本地 protected
+endpoint 路径不再需要调用方胶水后，才进入其它语言互通。
 
-### 任务准入规则
+### P0 任务准入
 
 任务进入 active queue 前必须同时满足：
 
-- 映射到 RFC 8999、RFC 9000、RFC 9001 或 RFC 9002 中 QUIC v1 client/server
-  transport 必需的行为。
-- 能新增或收紧对应 Zig 测试。
-- 推进下方一个 P0 退出门禁，或修复阻塞某个门禁的回归。
+- 实现或加固 RFC 8999、RFC 9000、RFC 9001 或 RFC 9002 中 QUIC v1 transport
+  必需行为。
+- 能用 Zig 测试或现有核心 transport probe 验证。
+- 推进下方一个 P0 行，或修复阻塞某个 P0 行的回归。
 - 不修改 examples、README polish、HTTP/3、DATAGRAM、qlog、PMTU/GSO、大范围 fuzz
-  或第二外部栈；除非它们是解除 P0 退出测试阻塞的最小步骤。
+  或第二外部栈。
 
-### P0 退出门禁
+### P0 执行矩阵
 
-| 门禁 | P0 退出前必须具备 | 当前阻塞点 | 退出证据 |
+| ID | 能力 | 下一批可执行任务 | 退出证据 |
 | --- | --- | --- | --- |
-| P0-1. 本地 TLS-owned endpoint 纵向路径 | Zig client 和 Zig server 通过 endpoint API 完成证书校验 UDP 握手、protected STREAM 传输、due-deadline service、protected close、key discard 和 route cleanup。 | socket loop 仍围绕 receive/process/drain/timer/error reporting 存在 per-case 胶水。 | 一个有界 client loop 和一个有界 server loop 可从公开 endpoint API 运行，不依赖 mock key、OpenSSL，也不改 examples。 |
-| P0-2. Protected STREAM 与 flow-control 纵向路径 | Protected UDP 覆盖 bidi/uni open、write、read、FIN、RESET_STREAM、STOP_SENDING、stream-count credit release、connection/stream flow-control unblock 和 retransmission requeue。 | 现有证据很广，但分散在多个 targeted path 和旧 loopback 中。 | 一个聚焦 Zig endpoint-loop 测试证明完整 stream/control/credit 路径跑在 protected 1-RTT packet 上。 |
-| P0-3. ACK、loss、PTO 与 NewReno 基线 | ACK cleanup、RTT/loss/PTO 推进、STREAM/CRYPTO retransmission、bytes-in-flight accounting 和终态 timer disarm 都能通过 endpoint 观测。 | timer 集成缺口仍可能卡住或误报真实 endpoint loop。 | 确定性测试加一次 socket-backed loss run 证明 route-bound PTO、ACK cleanup，以及 terminal close/drain 后没有 recovery deadline。 |
-| P0-4. 生命周期安全与路由边界 | 畸形输入、missing route、zero capacity、invalid Retry/token/CID、stateless reset、path validation、migration、idle close 和显式 close 都在危险状态变化前失败。 | client/server due-deadline 与 receive-step 路径的 route/error 表面仍未完全一致。 | 每个边界都返回 endpoint-visible result 或 close error，保持旧成功路径，并在 terminal drain 后清理 route/record/timer。 |
-| P0-5. TLS/backend 生产边界 | Certificate、SNI、ALPN、transport-parameter、key-share、transcript、Finished、ticket 和 key-update 失败在本地 protected path 上都不提交状态。 | 只继续处理会破坏 P0 本地纵向路径或互通的失败路径。 | 本地 protected path 不依赖 mock secret 或 OpenSSL；失败路径都有 targeted rollback test。 |
-| P0-6. 第一轮外部互通门禁 | 一个外部栈重复通过 `quicz` client/server 的握手、证书校验、Retry、STREAM FIN echo、RESET_STREAM/STOP_SENDING、close 和一次可控 loss/PTO。 | P0-1 到 P0-5 仍需要本地胶水时，不提前把外部互通作为下一任务。 | P0 外部门禁只使用 `quic-go`；Rust/s2n-quic/quiche/quinn 移到 P1，除非必须用来调试 P0 结果。 |
+| P0-A | 本地 TLS-owned endpoint loop | A1. 将 client receive/drain/due-deadline 结果收敛为一个有界 step。A2. 将 server receive/admission/pending/due-deadline 结果收敛为一个有界 step。A3. 增加一个只使用 endpoint API 的本地证书校验 Zig client/server UDP loop 测试。 | 本地 Zig client/server 完成 handshake、protected STREAM、due deadline service、protected close、key discard 和 route cleanup，不依赖 mock key、OpenSSL、examples 修改或 socket-loop per-case 胶水。 |
+| P0-B | Protected STREAM 与 flow-control 纵向路径 | B1. 证明 bidi open/write/read/FIN 能跑在 protected endpoint packet 上。B2. 证明 uni open/write/read/FIN。B3. 证明 stream-count credit release、RESET_STREAM 和 STOP_SENDING。B4. 证明 connection/stream flow-control unblock 与 retransmission requeue。 | 一个聚焦 endpoint-loop 测试覆盖 stream data、FIN、reset/stop、credit release、flow-control unblock 和 route-bound protected output。 |
+| P0-C | ACK、loss、PTO 与 NewReno 基线 | C1. 证明 route-bound PTO 会重传 CRYPTO。C2. 证明 route-bound PTO 会重传 STREAM。C3. 证明 ACK cleanup 会更新 outstanding state、RTT、bytes-in-flight 和 congestion state。C4. 证明 PTO backoff 不会 tight-loop，terminal close/drain 会 disarm recovery timer。 | 确定性 endpoint 测试加一次 socket-backed loss run，证明 recovery 可驱动真实 endpoint loop，且不会留下 stale deadline。 |
+| P0-D | 生命周期安全与路由边界 | D1. 确认畸形输入在 packet-number、ACK、stream、CID、token 或 route mutation 前失败。D2. 确认 missing route 和 zero capacity 作为 endpoint-visible metadata 返回，而不是 late throw。D3. 确认 Retry/token/CID/stateless-reset/close cleanup 失败时不提交状态。D4. 确认 path validation 和单路径 migration 只在验证后更新 route。 | 每个边界都返回 endpoint-visible result 或 close error，保持旧成功路径，并在 terminal drain 后清理 route、record 和 timer。 |
+| P0-E | TLS/backend 生产边界 | E1. 保持 certificate、SNI、ALPN 和 transport-parameter 失败不提交状态。E2. 保持 key-share、transcript、Finished、ticket 和 key-update 失败不提交状态。E3. 移除 P0 对 mock secret 或废弃 OpenSSL adapter 的剩余依赖。 | 本地 protected endpoint 测试使用 pure-Zig TLS；会破坏 P0-A 到 P0-D 或 P0-F 的失败类别都有 targeted rollback test。 |
+| P0-F | 第一轮外部互通门禁 | F1. 运行带证书校验和 Retry 的 `quic-go` handshake。F2. 运行 STREAM FIN echo、RESET_STREAM/STOP_SENDING 和 close。F3. 运行一次可控 loss/PTO case。F4. 记录 clean-checkout 命令集。 | P0 外部门禁只使用 `quic-go`。Rust、s2n-quic、quiche、quinn、QUIC-Interop-Runner 形态和语言示例停放到 P1，除非必须用于诊断该门禁。 |
 
-### Active P0 任务队列
+### 当前 active queue
 
-| 顺序 | 任务 | 门禁 | 完成标准 |
+按顺序推进。退出证据要求 protected endpoint 行为时，不能只用 mock-only 测试标记完成。
+
+| 顺序 | 任务 ID | 状态 | 完成标准 |
 | --- | --- | --- | --- |
-| 1 | 收敛 endpoint socket-loop step 表面 | P0-1 | Client 和 server 各自暴露一个有界 receive/process/drain/due-deadline result shape，UDP loop 可直接调用，不需要 per-case 胶水。 |
-| 2 | 证明 protected stream/control/credit 纵向路径 | P0-2 | 一个 endpoint-loop 测试覆盖 bidi FIN、uni FIN、stream-count release、RESET_STREAM、STOP_SENDING、flow-control unblock 和 route-bound output。 |
-| 3 | 加固 recovery timer 集成 | P0-3 | Endpoint 测试证明 route-bound PTO 会重传 CRYPTO/STREAM，ACK 会清理 outstanding state，PTO backoff 不会形成 tight loop，terminal close/drain 会 disarm recovery timer。 |
-| 4 | 扫 Close、CID、Retry、reset 和 migration 安全边界 | P0-4 | Missing-route、zero-capacity、invalid token/CID、stateless reset、close 和 migration 失败都能通过 endpoint 观测且不提交状态。 |
-| 5 | 修剪 TLS/backend rollback 阻塞点 | P0-5 | 只剩会影响本地 protected 纵向路径或 P0 互通的失败路径；每个都有 targeted rollback test。 |
-| 6 | 运行第一轮外部互通门禁 | P0-6 | `quic-go` 互通可从干净 checkout 重复运行，覆盖 handshake、Retry、FIN echo、reset/stop、close 和可控 PTO。 |
+| 1 | P0-A1 | Active | Client 有界 receive step 返回 receive output、due output、close/key-discard/idle transition、route error、capacity error 和 next deadline，不需要调用方分支拼装。 |
+| 2 | P0-A2 | Next | Server 有界 receive step 返回 admission、routed output、pending work、due cleanup、route error、capacity error 和 next deadline，不需要调用方分支拼装。 |
+| 3 | P0-A3 | Next | 本地 Zig endpoint-loop 测试只通过 endpoint API 完成证书校验 protected UDP handshake、STREAM echo、close、key discard 和 route cleanup。 |
+| 4 | P0-B1/B2 | Next | Protected endpoint-loop stream 测试覆盖 bidi 与 uni FIN 路径。 |
+| 5 | P0-B3/B4 | Next | Protected endpoint-loop 测试覆盖 reset/stop、stream-count credit release、flow-control unblock 和 retransmission requeue。 |
+| 6 | P0-C1/C2 | Next | Endpoint 测试证明 CRYPTO 与 STREAM PTO output 是 route-bound 且可重传。 |
+| 7 | P0-C3/C4 | Next | Endpoint 测试证明 ACK cleanup、bytes-in-flight/congestion accounting、PTO backoff 和 terminal timer disarm。 |
+| 8 | P0-D1/D2 | Next | 畸形输入、missing route 和 zero capacity 返回 endpoint-visible failure，不发生危险状态变化。 |
+| 9 | P0-D3/D4 | Next | Retry/token/CID/stateless-reset/close/path-validation/migration 失败保持已提交状态并清理终态 record。 |
+| 10 | P0-E | Next | 只剩会影响本地 protected 纵向路径或第一轮互通的 TLS/backend 失败路径；每个都有 rollback coverage。 |
+| 11 | P0-F | Blocked on P0-A..P0-E | `quic-go` 从 clean checkout 通过第一轮外部互通门禁。 |
 
-### P0 后停放项
+### 停放队列
 
-| 优先级 | 目标 | 范围 | 退出证据 |
+| 优先级 | 目标 | 范围 | 重新进入规则 |
 | --- | --- | --- | --- |
-| P1 | 互通加固和生产策略 | 第二外部栈，例如 s2n-quic、quiche、quinn 或小型 Rust 路径；QUIC-Interop-Runner 形态；更广 stream-limit/loss/migration case；生产 token/replay/path policy。 | 两个外部栈通过可重复 smoke matrix：handshake、stream echo、reset/stop、Retry、close、loss recovery 和一个 migration/path-validation case。 |
-| P2 | 公开可用性和可维护性 | 公开 endpoint API 简化、稳定 API 命名、精简 README 与 examples 文档；pure-Zig TLS 行为稳定后，如能降低耦合，再考虑 `src/tls/` 抽取。 | 用户可以用公开 API 构建基本 client/server，不需要接触内部 lifecycle 变体；文档链接 examples，但 examples 不是开发主目标。 |
-| P3 | 扩展和高级运维 | 0-RTT 生产/分布式 replay policy、HTTP/3/QPACK、RFC 9221 DATAGRAM、qlog、PMTU/GSO/GRO 调优、完整 QUIC v2/RFC 9368、高级 congestion controller、multipath 和广泛 fuzz/observability。 | 仅在 P0/P1 稳定后跟踪；除非选定 P0/P1 互通目标要求窄子集，否则不提前做。 |
+| P1 | 互通加固和生产策略 | 第二外部栈，例如 s2n-quic、quiche、quinn 或小型 Rust 路径；QUIC-Interop-Runner 形态；更广 stream-limit/loss/migration case；生产 token/replay/path policy。 | P0-F 通过后再进入；或第二外部栈是诊断 P0-F 失败的最小方式时进入。 |
+| P2 | 公开可用性和可维护性 | 公开 endpoint API 简化、稳定 API 命名、精简 README 与 examples 文档；pure-Zig TLS 行为稳定后，如能降低耦合，再考虑 `src/tls/` 抽取。 | 第一轮 usable transport claim 后再进入；除非公开 API 缺陷阻塞 P0 endpoint 测试。 |
+| P3 | 扩展和高级运维 | 0-RTT 生产/分布式 replay policy、HTTP/3/QPACK、RFC 9221 DATAGRAM、qlog、PMTU/GSO/GRO 调优、完整 QUIC v2/RFC 9368、高级 congestion controller、multipath 和广泛 fuzz/observability。 | P0/P1 稳定后再进入；除非选定 P0/P1 互通目标要求窄子集。 |
 
 ### goal 循环取任务规则
 
-每轮开发默认选择 active P0 队列中第一个未完成任务，除非当前 diff 或验证输出暴露更高风险的
-P0 blocker。每完成一轮都要在证据变化时更新本文、更新 `goal.md`、运行相关 Zig 验证、
-提交并推送。退出条件要求 protected UDP 或外部互通时，不能用 mock-only 测试把 P0
-门禁标为 Done。
+每轮开发默认选择当前 active queue 的第一个未完成项，除非验证失败暴露更高风险的 P0
+blocker。每轮完成时都要在证据变化时更新本文、更新 `goal.md`、运行相关 Zig 验证、
+提交并推送。Mock-only 测试可以辅助改动，但退出证据要求 protected UDP 或外部互通时，
+不能只靠 mock-only 测试关闭 P0 行。
 
 ## 实用 Transport 基线
 
