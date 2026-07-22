@@ -85,8 +85,8 @@ P0 gates below are complete:
 | P0-B1 | Protected bidi/uni stream data | RFC 9000 Sections 2, 4, 19.8 | `Connection` stream state behind endpoint send/receive | Bidi and uni data plus FIN work over protected endpoint packets. | Done |
 | P0-B2 | Stream control and credit release | RFC 9000 Sections 4, 19.11-19.14 | Stream-limit and flow-control state | RESET_STREAM, STOP_SENDING, MAX_STREAMS release, connection-window unblock, and stream-window unblock work over protected endpoint packets. | Done |
 | P0-B3 | Stream retransmission requeue | RFC 9002 loss recovery for stream frames | Recovery queue plus stream sender | Lost STREAM/FIN/reset/stop data is requeued and retransmitted without duplicating committed stream state. | Done |
-| P0-C1 | ACK and RTT accounting | RFC 9000 ACK; RFC 9002 RTT and outstanding packet state | Recovery and ACK receive path | ACK cleanup updates outstanding packets, RTT samples, bytes-in-flight, and ack-eliciting state. | Active |
-| P0-C2 | Loss, PTO, and congestion baseline | RFC 9002 packet/time loss, PTO, NewReno baseline | Endpoint timer service | CRYPTO and STREAM PTO output is route-bound and retransmittable; PTO backoff and congestion window updates do not create stale deadlines or tight loops. | Next |
+| P0-C1 | ACK and RTT accounting | RFC 9000 ACK; RFC 9002 RTT and outstanding packet state | Recovery and ACK receive path | ACK cleanup updates outstanding packets, RTT samples, bytes-in-flight, and ack-eliciting state. | Done |
+| P0-C2 | Loss, PTO, and congestion baseline | RFC 9002 packet/time loss, PTO, NewReno baseline | Endpoint timer service | CRYPTO and STREAM PTO output is route-bound and retransmittable; PTO backoff and congestion window updates do not create stale deadlines or tight loops. | Active |
 | P0-C3 | Terminal timer disarm | RFC 9000 draining/closing; RFC 9002 timer stop conditions | Endpoint deadline selection | Close, drain, idle, and key-discard terminal paths remove obsolete timers and outputs. | Next |
 | P0-D1 | Failure-before-mutation invariants | RFC 9000 packet/frame validation | Packet decoder, frame handlers, endpoint admission | Malformed packets and frames fail before packet-number, ACK, stream, CID, token, route, or timer mutation. | Next |
 | P0-D2 | Retry and address validation | RFC 9000 Retry, tokens, address validation | Server admission and token policy | Retry/token success and failure paths commit only authenticated state and expose endpoint-visible errors. | Next |
@@ -108,8 +108,8 @@ by the required protected endpoint or external interop behavior.
 | 3 | P0-B1 protected bidi/uni stream data | Done | Added client-initiated uni, server-initiated uni, and bidi echo with FIN through protected endpoint packets. |
 | 4 | P0-B2 stream control and flow-control credit | Done | Add endpoint-level reset/stop, stream-count release, and flow-control unblock coverage. |
 | 5 | P0-B3 stream retransmission requeue | Done | Prove lost stream/control frames requeue through recovery without duplicate stream commits. |
-| 6 | P0-C1 ACK/RTT accounting | Active | Close ACK cleanup, RTT, outstanding packet, and bytes-in-flight evidence at the endpoint seam. |
-| 7 | P0-C2 loss/PTO/NewReno baseline | Next | Close route-bound CRYPTO/STREAM PTO, loss detection, PTO backoff, and congestion-window evidence. |
+| 6 | P0-C1 ACK/RTT accounting | Done | Close ACK cleanup, RTT, outstanding packet, and bytes-in-flight evidence at the endpoint seam. |
+| 7 | P0-C2 loss/PTO/NewReno baseline | Active | Close route-bound CRYPTO/STREAM PTO, loss detection, PTO backoff, and congestion-window evidence. |
 | 8 | P0-C3 terminal timer disarm | Next | Prove close/drain/idle/key-discard terminal paths do not leave stale deadlines. |
 | 9 | P0-D1 failure-before-mutation | Next | Add rollback tests for malformed packet/frame classes that can mutate shared state. |
 | 10 | P0-D2 Retry/address validation | Next | Close authenticated Retry/token admission and rejection semantics. |

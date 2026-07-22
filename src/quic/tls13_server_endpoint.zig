@@ -12421,6 +12421,15 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
     var server_dup_verify_buf: [64]u8 = undefined;
     try std.testing.expectEqual(@as(?usize, null), try server_endpoint.recvStream(server_handle, dup_stream_id, &server_dup_verify_buf));
 
+    // --- Phase 7s: Verify ACK/RTT accounting state through endpoint seam ---
+    // Both endpoints track outstanding packets and bytes-in-flight for
+    // ack-eliciting 1-RTT packets sent during the echo/control/duplicate phases.
+    try std.testing.expect(client.sentPacketCount(.application) > 0);
+    try std.testing.expect(client.bytesInFlight(.application) > 0);
+    const server_record_for_ack = server_endpoint.records.get(server_handle) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(server_record_for_ack.transport.connection.sentPacketCount(.application) > 0);
+    try std.testing.expect(server_record_for_ack.transport.connection.bytesInFlight(.application) > 0);
+
     // --- Phase 7b: Service due server recovery timer ---
     if (try server_endpoint.nextDeadline(std.testing.allocator)) |server_deadline| {
         var due_out: [2]TestServerEndpoint.DatagramPathResult = undefined;

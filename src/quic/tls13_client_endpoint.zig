@@ -758,6 +758,21 @@ pub const Tls13ClientEndpoint = struct {
         return self.transport.streamFinished(stream_id);
     }
 
+    /// Return the count of sent packets tracked for ACK-driven recovery in one space.
+    pub fn sentPacketCount(self: *const Tls13ClientEndpoint, space: connection_module.PacketNumberSpace) usize {
+        return self.transport.connection.sentPacketCount(space);
+    }
+
+    /// Return the bytes in flight for congestion control in one space.
+    pub fn bytesInFlight(self: *const Tls13ClientEndpoint, space: connection_module.PacketNumberSpace) usize {
+        return self.transport.connection.bytesInFlight(space);
+    }
+
+    /// Return the smoothed RTT estimate in milliseconds for one space.
+    pub fn smoothedRttMillis(self: *const Tls13ClientEndpoint, space: connection_module.PacketNumberSpace) u64 {
+        return self.transport.connection.smoothedRttMillis(space);
+    }
+
     /// Queue a protected application CONNECTION_CLOSE and poll it for UDP send.
     pub fn close(
         self: *Tls13ClientEndpoint,
