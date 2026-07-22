@@ -12537,9 +12537,14 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
     const client_retire = try client.retireAtCloseDeadline(client_close_deadline + 1);
     const client_retired = client_retire orelse return error.TestUnexpectedResult;
     try std.testing.expect(client_retired.routes_retired >= 1);
+    // Terminal timer disarm: no stale deadlines remain after client route retirement.
+    try std.testing.expect(client.nextDeadline() == null);
 
     // --- Phase 11: Retire server record and verify cleanup ---
     const server_retired = try server_endpoint.retireRecord(server_handle);
     try std.testing.expect(server_retired.routes_retired >= 1);
     try std.testing.expectEqual(@as(usize, 0), server_endpoint.activeConnectionCount());
+    // Terminal timer disarm: no stale deadlines or routes remain after server record retirement.
+    try std.testing.expectEqual(@as(?root.EndpointConnectionDeadline, null), try server_endpoint.nextDeadline(std.testing.allocator));
+    try std.testing.expectEqual(@as(usize, 0), server_endpoint.lifecycle.routeCount());
 }
