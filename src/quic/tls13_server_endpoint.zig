@@ -12430,6 +12430,65 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
     try std.testing.expect(server_record_for_ack.transport.connection.sentPacketCount(.application) > 0);
     try std.testing.expect(server_record_for_ack.transport.connection.bytesInFlight(.application) > 0);
 
+    // --- Phase 7t: Failure-before-mutation — corrupted datagram does not mutate state ---
+    {
+        const fbm_record = server_endpoint.records.get(server_handle) orelse return error.TestUnexpectedResult;
+        const fbm_sent_before = fbm_record.transport.connection.sentPacketCount(.application);
+        const fbm_bif_before = fbm_record.transport.connection.bytesInFlight(.application);
+        // Corrupt a copy of the client's duplicate-stream datagram.
+        var corrupted_buf: [2048]u8 = undefined;
+        const corrupted_src = client_dup_out[0].datagram;
+        @memcpy(corrupted_buf[0..corrupted_src.len], corrupted_src);
+        corrupted_buf[corrupted_src.len - 1] ^= 0xff; // flip last payload byte
+        var fbm_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var fbm_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+        var fbm_installed_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var fbm_pending_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
+        var fbm_route_out: [256]u8 = undefined;
+        const fbm_result = server_endpoint.receiveDatagramStepWithRoutePath(
+            std.testing.allocator,
+            server_path,
+            39,
+            corrupted_buf[0..corrupted_src.len],
+            &[_]u8{},
+            &[_]quic_packet.Version{.v1},
+            .{
+                .space = .application,
+                .out = &fbm_route_out,
+                .unpredictable_prefix = &[_]u8{},
+                .supported_versions = &[_]quic_packet.Version{.v1},
+            },
+            &server_scratch,
+            &[_]u8{},
+            &fbm_initial_out,
+            &fbm_handshake_out,
+            &fbm_installed_out,
+            .application,
+            &fbm_pending_out,
+        );
+        if (fbm_result) |fbm_step| {
+            // Datagram was processed (dropped or routed); free any output.
+            var fbm_ik_written: usize = 0;
+            switch (fbm_step.process) {
+                .routed => |routed| switch (routed) {
+                    .installed_key => |ik| {
+                        fbm_ik_written = ik.drain.datagrams_written;
+                    },
+                    else => {},
+                },
+                else => {},
+            }
+            for (fbm_installed_out[0..fbm_ik_written]) |o| std.testing.allocator.free(o.datagram);
+            for (fbm_pending_out[0..fbm_step.pending_drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+        } else |_| {
+            // AEAD or frame decode failure is expected.
+        }
+        // Failure-before-mutation: sentPacketCount and bytesInFlight unchanged.
+        const fbm_after = server_endpoint.records.get(server_handle) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(fbm_sent_before, fbm_after.transport.connection.sentPacketCount(.application));
+        try std.testing.expectEqual(fbm_bif_before, fbm_after.transport.connection.bytesInFlight(.application));
+    }
+
     // --- Phase 7b: Service due server recovery timer with PTO evidence ---
     if (try server_endpoint.nextDeadline(std.testing.allocator)) |server_deadline| {
         var due_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
