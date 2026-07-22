@@ -62,6 +62,15 @@ packet/key/token and RFC 9368 version-information primitives:
 | qlog, PMTU discovery, GSO/GRO, advanced congestion selection | Operational/performance extensions after the transport loop works. | Deferred or missing. |
 | External interop | Required to claim the first usable transport milestone. | Partial: a client-only binary completes certificate-verified QUIC/TLS handshakes with two independently implemented local servers, plus certificate-verified bidirectional STREAM FIN echoes through a `quic-go` v0.59.0 server that forces Retry and a separate run whose peer drops one post-handshake 1-RTT packet for PTO recovery; a v1-only `quic-go` server returns Version Negotiation to a Zig v2 Initial, after which Zig validates it and completes a fresh v1 certificate-verified stream echo. Go and Rust clients complete certificate-verified bidirectional STREAM FIN echoes against the local Zig server, including its bounded Retry path. A `quic-go` client also proves sequential stream-count credit release across streams 0-to-4-to-8-to-12, RESET_STREAM(41), server STOP_SENDING(42) followed by peer RESET_STREAM(42), uni stream 2-to-3 FIN exchange, and server PTO recovery after it drops four post-stream Zig datagrams or four server-flight datagrams before handshake completion. Broader server and application-protocol scenarios remain unproven. |
 
+Connection-level RFC 9000 `NEW_CONNECTION_ID` processing now tracks the largest
+peer `Retire Prior To` value. It rejects `retire_prior_to > sequence_number`
+before retiring peer-issued connection IDs, queuing `RETIRE_CONNECTION_ID`,
+advancing peer packet-number state, or scheduling ACKs. Newly received sequence
+numbers below the largest retained threshold are retired immediately instead of
+entering the active CID pool, with rollback coverage for later invalid payload
+bytes. The close-propagating receive path maps the malformed overflow frame to
+`FRAME_ENCODING_ERROR`, matching the frame decoder and RFC 9000 Section 19.15.
+
 Pure-Zig TLS client-side EncryptedExtensions parsing now rejects malformed ALPN
 list lengths and empty protocol entries without committing negotiated ALPN,
 peer transport parameters, transcript, or handshake state.

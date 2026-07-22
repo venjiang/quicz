@@ -675,6 +675,7 @@ pub const Connection = struct {
     local_connection_ids: std.ArrayList(LocalConnectionId),
     next_local_connection_id_sequence: u64,
     peer_active_connection_id_limit: u64,
+    largest_peer_retire_prior_to: u64,
     pending_retire_connection_ids: std.ArrayList(u64),
     stored_new_tokens: std.ArrayList([]u8),
     pending_new_tokens: std.ArrayList([]u8),
@@ -836,6 +837,7 @@ pub const Connection = struct {
             .local_connection_ids = .empty,
             .next_local_connection_id_sequence = 0,
             .peer_active_connection_id_limit = min_active_connection_id_limit,
+            .largest_peer_retire_prior_to = 0,
             .pending_retire_connection_ids = .empty,
             .stored_new_tokens = .empty,
             .pending_new_tokens = .empty,
@@ -6940,6 +6942,7 @@ pub const Connection = struct {
         for (self.local_connection_ids.items, local_connection_id_snapshots) |local_id, *snapshot| {
             snapshot.* = .{ .retired = local_id.retired };
         }
+        const largest_peer_retire_prior_to_snapshot = self.largest_peer_retire_prior_to;
         const pending_retire_connection_id_count = self.pending_retire_connection_ids.items.len;
         const stored_new_token_count = self.stored_new_tokens.items.len;
         const pending_reset_stream_count = self.pending_reset_streams.items.len;
@@ -7042,6 +7045,7 @@ pub const Connection = struct {
             @memcpy(self.outstanding_path_challenges.items[0..outstanding_path_challenge_count], outstanding_path_challenge_snapshots);
             self.rollbackActiveConnectionIds(active_connection_id_count, active_connection_id_snapshots);
             self.rollbackLocalConnectionIds(local_connection_id_count, local_connection_id_snapshots);
+            self.largest_peer_retire_prior_to = largest_peer_retire_prior_to_snapshot;
             self.pending_retire_connection_ids.items.len = pending_retire_connection_id_count;
             self.rollbackStoredNewTokens(stored_new_token_count);
             self.pending_reset_streams.items.len = pending_reset_stream_count;
@@ -10450,11 +10454,18 @@ pub const Connection = struct {
 
     fn receiveNewConnectionIdFrame(self: *Connection, new_connection_id: frame.NewConnectionIdFrame) Error!void {
         if (self.sendsZeroLengthDestinationConnectionId()) return error.InvalidPacket;
+        if (new_connection_id.retire_prior_to > new_connection_id.sequence_number) return error.InvalidPacket;
+        self.largest_peer_retire_prior_to = @max(self.largest_peer_retire_prior_to, new_connection_id.retire_prior_to);
         try self.retireConnectionIdsBefore(new_connection_id.retire_prior_to);
 
         if (self.findActiveConnectionId(new_connection_id.sequence_number)) |existing| {
             if (!std.mem.eql(u8, existing.connection_id, new_connection_id.connection_id)) return error.InvalidPacket;
             if (!statelessResetTokensEqual(existing.stateless_reset_token, new_connection_id.stateless_reset_token)) return error.InvalidPacket;
+            return;
+        }
+
+        if (new_connection_id.sequence_number < self.largest_peer_retire_prior_to) {
+            try self.queueRetireConnectionId(new_connection_id.sequence_number);
             return;
         }
 
@@ -67044,6 +67055,154 @@ test "zero-length peer destination CID rejects NEW_CONNECTION_ID" {
     }
 }
 
+test "NEW_CONNECTION_ID rejects retire_prior_to greater than sequence number before retirement" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    const cid0 = [_]u8{ 0xcf, 0, 0, 0 };
+    const cid1 = [_]u8{ 0xcf, 0, 0, 1 };
+
+    var datagram: [96]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &cid0,
+        .stateless_reset_token = token0,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    var tx: [64]u8 = undefined;
+    _ = (try conn.pollTx(0, &tx)).?;
+
+    out = buffer.fixedWriter(&datagram);
+    try out.writer().writeByte(@intFromEnum(frame.FrameType.new_connection_id));
+    try packet.encodeVarInt(out.writer(), 1);
+    try packet.encodeVarInt(out.writer(), 2);
+    try out.writer().writeByte(@as(u8, @intCast(cid1.len)));
+    try out.writer().writeAll(&cid1);
+    try out.writer().writeAll(&token1);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(1, out.getWritten()));
+    try std.testing.expectEqual(@as(usize, 1), conn.active_connection_ids.items.len);
+    try std.testing.expectEqual(@as(u64, 1), conn.activeConnectionIdCount());
+    try std.testing.expect(!conn.active_connection_ids.items[0].retired);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_retire_connection_ids.items.len);
+    try std.testing.expectEqual(@as(?u64, null), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 1), conn.nextPeerPacketNumber(.application));
+}
+
+test "NEW_CONNECTION_ID retires newly received ids below largest retire_prior_to" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const token1 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token2 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    const token3 = [_]u8{0xa5} ** packet.stateless_reset_token_len;
+    const cid1 = [_]u8{ 0xce, 0, 0, 1 };
+    const cid2 = [_]u8{ 0xce, 0, 0, 2 };
+    const cid3 = [_]u8{ 0xce, 0, 0, 3 };
+
+    var datagram: [96]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &cid1,
+        .stateless_reset_token = token1,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    var tx: [64]u8 = undefined;
+    _ = (try conn.pollTx(0, &tx)).?;
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 3,
+        .retire_prior_to = 3,
+        .connection_id = &cid3,
+        .stateless_reset_token = token3,
+    } });
+    try conn.processDatagram(1, out.getWritten());
+
+    try std.testing.expectEqual(@as(u64, 3), conn.largest_peer_retire_prior_to);
+    try std.testing.expectEqual(@as(usize, 2), conn.active_connection_ids.items.len);
+    try std.testing.expect(conn.active_connection_ids.items[0].retired);
+    try std.testing.expect(!conn.active_connection_ids.items[1].retired);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_retire_connection_ids.items.len);
+    try std.testing.expectEqual(@as(u64, 1), conn.pending_retire_connection_ids.items[0]);
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 2,
+        .retire_prior_to = 0,
+        .connection_id = &cid2,
+        .stateless_reset_token = token2,
+    } });
+    try conn.processDatagram(2, out.getWritten());
+
+    try std.testing.expectEqual(@as(u64, 3), conn.largest_peer_retire_prior_to);
+    try std.testing.expectEqual(@as(usize, 2), conn.active_connection_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 2), conn.pending_retire_connection_ids.items.len);
+    try std.testing.expectEqual(@as(u64, 1), conn.pending_retire_connection_ids.items[0]);
+    try std.testing.expectEqual(@as(u64, 2), conn.pending_retire_connection_ids.items[1]);
+}
+
+test "NEW_CONNECTION_ID below largest retire_prior_to rolls back when payload is invalid" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+
+    const token1 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token2 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    const token3 = [_]u8{0xa6} ** packet.stateless_reset_token_len;
+    const cid1 = [_]u8{ 0xcd, 0, 0, 1 };
+    const cid2 = [_]u8{ 0xcd, 0, 0, 2 };
+    const cid3 = [_]u8{ 0xcd, 0, 0, 3 };
+
+    var datagram: [96]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &cid1,
+        .stateless_reset_token = token1,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    var tx: [64]u8 = undefined;
+    _ = (try conn.pollTx(0, &tx)).?;
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 3,
+        .retire_prior_to = 3,
+        .connection_id = &cid3,
+        .stateless_reset_token = token3,
+    } });
+    try conn.processDatagram(1, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 2,
+        .retire_prior_to = 0,
+        .connection_id = &cid2,
+        .stateless_reset_token = token2,
+    } });
+    try out.writer().writeByte(0xff);
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagram(2, out.getWritten()));
+    try std.testing.expectEqual(@as(u64, 3), conn.largest_peer_retire_prior_to);
+    try std.testing.expectEqual(@as(usize, 2), conn.active_connection_ids.items.len);
+    try std.testing.expect(conn.active_connection_ids.items[0].retired);
+    try std.testing.expect(!conn.active_connection_ids.items[1].retired);
+    try std.testing.expectEqual(@as(usize, 1), conn.pending_retire_connection_ids.items.len);
+    try std.testing.expectEqual(@as(u64, 1), conn.pending_retire_connection_ids.items[0]);
+    try std.testing.expectEqual(@as(?u64, 1), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 2), conn.nextPeerPacketNumber(.application));
+}
+
 test "NEW_CONNECTION_ID retire_prior_to rolls back when payload is invalid" {
     var conn = try Connection.init(std.testing.allocator, .client, .{});
     defer conn.deinit();
@@ -69834,6 +69993,59 @@ test "processDatagramOrClose queues protocol violation close for NEW_CONNECTION_
             try std.testing.expectEqual(transport_error.codeValue(.protocol_violation), close.error_code);
             try std.testing.expectEqual(frame_type_value, close.frame_type);
             try std.testing.expectEqualStrings("reset token reuse", close.reason_phrase);
+        },
+        else => return error.InvalidPacket,
+    }
+}
+
+test "processDatagramOrClose queues frame-encoding close for NEW_CONNECTION_ID retire_prior_to overflow" {
+    var conn = try Connection.init(std.testing.allocator, .client, .{});
+    defer conn.deinit();
+    try conn.validatePeerAddress();
+
+    const token0 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    const token1 = [_]u8{ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    const cid0 = [_]u8{ 0xe3, 0, 0, 0 };
+    const cid1 = [_]u8{ 0xe3, 0, 0, 1 };
+
+    var datagram: [64]u8 = undefined;
+    var out = buffer.fixedWriter(&datagram);
+    try frame.encodeFrame(out.writer(), .{ .new_connection_id = .{
+        .sequence_number = 0,
+        .retire_prior_to = 0,
+        .connection_id = &cid0,
+        .stateless_reset_token = token0,
+    } });
+    try conn.processDatagram(0, out.getWritten());
+
+    out = buffer.fixedWriter(&datagram);
+    try out.writer().writeByte(@intFromEnum(frame.FrameType.new_connection_id));
+    try packet.encodeVarInt(out.writer(), 1);
+    try packet.encodeVarInt(out.writer(), 2);
+    try out.writer().writeByte(@as(u8, @intCast(cid1.len)));
+    try out.writer().writeAll(&cid1);
+    try out.writer().writeAll(&token1);
+    const frame_type_value = rawFrameTypeValue(out.getWritten());
+
+    try std.testing.expectError(error.InvalidPacket, conn.processDatagramOrClose(1, out.getWritten()));
+    try std.testing.expectEqual(ConnectionState.closing, conn.connectionState());
+    try std.testing.expect(conn.pending_close != null);
+    try std.testing.expectEqual(@as(usize, 1), conn.active_connection_ids.items.len);
+    try std.testing.expect(!conn.active_connection_ids.items[0].retired);
+    try std.testing.expectEqual(@as(usize, 0), conn.pending_retire_connection_ids.items.len);
+    try std.testing.expectEqual(@as(?u64, 0), conn.pendingAckLargest(.application));
+    try std.testing.expectEqual(@as(u64, 1), conn.nextPeerPacketNumber(.application));
+
+    var out_buf: [64]u8 = undefined;
+    const close_payload = (try conn.pollTx(1, &out_buf)) orelse return error.TestUnexpectedResult;
+    var decoded = try frame.decodeFrameSlice(close_payload, std.testing.allocator);
+    defer frame.deinitFrame(&decoded.frame, std.testing.allocator);
+
+    switch (decoded.frame) {
+        .connection_close => |close| {
+            try std.testing.expectEqual(transport_error.codeValue(.frame_encoding_error), close.error_code);
+            try std.testing.expectEqual(frame_type_value, close.frame_type);
+            try std.testing.expectEqualStrings("frame encoding", close.reason_phrase);
         },
         else => return error.InvalidPacket,
     }
