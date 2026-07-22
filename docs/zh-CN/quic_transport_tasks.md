@@ -141,6 +141,10 @@ Client 有界 receive step 现在也会在处理 protected Application-space dat
 同轮 ACK/application output 待发送时，把零容量 receive output 报告为
 `receive.drain.first_error = BufferTooSmall`。待发送 output 会保留到后续
 route-bound drain，socket loop 不再需要额外猜测 receive-generated output 是否仍排队。
+Client 有界 receive/drain step 现在会把缺失 committed receive route 报告为
+`receive.drain.first_route_error = UnknownConnectionId`，不再在返回 result 前直接抛错。
+该 datagram 不会被处理，connection state 会保持不变；完整
+`receiveDatagramStepWithRoutePath()` result shape 也能看到同一个 route-error metadata。
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` 处理现在会跟踪 peer 最大
 `Retire Prior To` 值。它会在 retiring peer-issued connection IDs、排队

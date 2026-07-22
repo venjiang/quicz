@@ -157,6 +157,11 @@ datagram is processed and same-step ACK/application output is pending. The
 pending output is preserved for a later route-bound drain, so socket loops do
 not need a separate heuristic to discover that receive-generated output was
 left queued.
+Client bounded receive/drain steps now report a missing committed receive route
+through `receive.drain.first_route_error = UnknownConnectionId` instead of
+throwing before a result can be returned. The datagram is not processed, the
+connection state is preserved, and the same route-error metadata is visible
+through the full `receiveDatagramStepWithRoutePath()` result shape.
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` processing now tracks the largest
 peer `Retire Prior To` value. It rejects `retire_prior_to > sequence_number`

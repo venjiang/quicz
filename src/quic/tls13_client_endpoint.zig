@@ -198,8 +198,14 @@ pub const Tls13ClientEndpoint = struct {
         datagram: []const u8,
         out: []ApplicationDatagramPathResult,
     ) !ReceiveOrCloseDatagramPathDrainResult {
-        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return error.UnknownConnectionId;
-        const path = try self.lifecycle.currentRoutePath(local_source_connection_id);
+        const local_source_connection_id = self.transport.connection.localInitialSourceConnectionId() orelse return .{
+            .drain = .{ .first_route_error = error.UnknownConnectionId },
+            .next_deadline = self.nextDeadline(),
+        };
+        const path = self.lifecycle.currentRoutePath(local_source_connection_id) catch |err| return .{
+            .drain = .{ .first_route_error = err },
+            .next_deadline = self.nextDeadline(),
+        };
         const received = self.receive(now_millis, scratch, datagram) catch |err| {
             if (err != error.InvalidPacket and err != error.ConnectionClosed) return err;
             var result = ReceiveOrCloseDatagramPathDrainResult{
@@ -1404,7 +1410,29 @@ test "Tls13ClientEndpoint receive close drain reports zero output capacity" {
     var scratch: [128]u8 = undefined;
     var drain_out: [2]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
     try std.testing.expect(try client.lifecycle.retireConnectionIdOnPath(&client_scid, new_path));
-    try std.testing.expectError(error.UnknownConnectionId, client.receiveWithRoutePathOrCloseAndDrainDatagrams(10, &scratch, invalid_datagram, &drain_out));
+    const missing_route_received = try client.receiveWithRoutePathOrCloseAndDrainDatagrams(10, &scratch, invalid_datagram, &drain_out);
+    try std.testing.expect(missing_route_received.receive == null);
+    try std.testing.expectEqual(@as(?transport_types.Error, null), missing_route_received.receive_error);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_received.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), missing_route_received.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_received.drain.first_route_error);
+    try std.testing.expectEqual(@as(?client_transport.ClientTransportDeadline, null), missing_route_received.next_deadline);
+    try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
+
+    var step_due_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const missing_route_step = try client.receiveDatagramStepWithRoutePath(
+        10,
+        &scratch,
+        invalid_datagram,
+        &drain_out,
+        &step_due_out,
+    );
+    try std.testing.expect(missing_route_step.receive.receive == null);
+    try std.testing.expectEqual(@as(?transport_types.Error, null), missing_route_step.receive.receive_error);
+    try std.testing.expectEqual(@as(usize, 0), missing_route_step.receive.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), missing_route_step.receive.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, error.UnknownConnectionId), missing_route_step.receive.drain.first_route_error);
+    try std.testing.expectEqual(@as(?client_transport.ClientTransportDeadline, null), missing_route_step.next_deadline);
     try std.testing.expectEqual(transport_types.ConnectionState.active, client.transport.connection.connectionState());
     try client.lifecycle.registerConnectionId(client.connection_id, &client_scid, new_path, .{ .active_migration_disabled = false });
 
