@@ -11934,6 +11934,9 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
     const active_record = server_endpoint.records.get(server_handle) orelse return error.TestUnexpectedResult;
     try std.testing.expect(active_record.transport.connection.handshakeConfirmed());
 
+    // --- Phase 1b: Verify obsolete Initial key discard after handshake ---
+    try std.testing.expect(active_record.transport.connection.packetNumberSpaceDiscarded(.initial));
+
     // --- Phase 2: Client sends protected STREAM data with FIN ---
     const stream_id = try client.openStream();
     try std.testing.expectEqual(@as(u64, 0), stream_id);
@@ -12043,6 +12046,19 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
     const client_recv_len = (try client.recvStream(stream_id, &client_recv_buf)) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(echo_payload, client_recv_buf[0..client_recv_len]);
     try std.testing.expect(try client.streamFinished(stream_id));
+
+    // --- Phase 7b: Service due server recovery timer ---
+    if (try server_endpoint.nextDeadline(std.testing.allocator)) |server_deadline| {
+        var due_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
+        const due_result = try server_endpoint.processDueDeadlineAndDrainDatagramsWithRoutePath(
+            std.testing.allocator,
+            server_deadline.deadline_millis,
+            &due_out,
+        );
+        if (due_result) |due| {
+            for (due_out[0..due.drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+        }
+    }
 
     // --- Phase 8: Client sends APPLICATION_CLOSE ---
     var client_close_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
