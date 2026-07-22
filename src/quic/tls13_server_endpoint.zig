@@ -1204,6 +1204,7 @@ pub fn Tls13ServerEndpoint(
                 datagram,
                 options,
             );
+            try self.preflightDueRecoveryRoutes(now_millis);
             const pending_work = try self.records.processPendingWorkWithScratch(
                 &self.lifecycle,
                 now_millis,
@@ -7555,6 +7556,24 @@ test "Tls13ServerEndpoint polls active record output with committed route path" 
         0x33,
         0x00,
     };
+    var missing_route_poll_out: [128]u8 = undefined;
+    try std.testing.expectError(error.UnknownConnectionId, endpoint_owner.feedDatagramWithInstalledKeysAndProcessPendingWorkAndPollDatagramWithRoutePathWithScratch(
+        first_path,
+        deadline.deadline_millis,
+        &unsupported_initial,
+        .{
+            .space = .application,
+            .out = &missing_route_poll_out,
+            .unpredictable_prefix = &.{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        .application,
+    ));
+    const missing_route_poll_deadline = (try endpoint_owner.nextDeadlineWithScratch()) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.recovery, missing_route_poll_deadline.kind);
+    try std.testing.expectEqual(deadline.connection_id, missing_route_poll_deadline.connection_id);
+    try std.testing.expectEqual(root.PacketNumberSpace.application, missing_route_poll_deadline.recovery.?.space);
+
     var missing_route_step_out: [128]u8 = undefined;
     var missing_route_scratch: [64]u8 = undefined;
     var missing_route_initial_out: [1]root.EndpointPolledDatagramResult = undefined;

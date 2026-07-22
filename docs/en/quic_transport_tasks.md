@@ -1563,6 +1563,12 @@ QUIC unless the gap is named and the verification evidence is added here.
   `APPLICATION_CLOSE` decoding, and close-deadline selection for both endpoint
   owners.
 
+- 2026-07-22: Server endpoint route-bound feed/pending-work/poll scratch now
+  preflights due recovery output routes before servicing recovery. A missing
+  route returns `UnknownConnectionId` with the recovery deadline preserved,
+  matching the existing route-bound drain preflight behavior and avoiding a
+  serviced recovery timer with no committed output path.
+
 - 2026-07-17: Tightened pure-Zig TLS server ClientHello extension
   validation. `Tls13Handshake.serverProcessClientHello()` now rejects repeated
   extension type IDs even when the duplicated extension is unknown and would
