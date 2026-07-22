@@ -12430,16 +12430,45 @@ test "Tls13 endpoints complete protected STREAM echo close and route retirement 
     try std.testing.expect(server_record_for_ack.transport.connection.sentPacketCount(.application) > 0);
     try std.testing.expect(server_record_for_ack.transport.connection.bytesInFlight(.application) > 0);
 
-    // --- Phase 7b: Service due server recovery timer ---
+    // --- Phase 7b: Service due server recovery timer with PTO evidence ---
     if (try server_endpoint.nextDeadline(std.testing.allocator)) |server_deadline| {
-        var due_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
+        var due_out: [4]TestServerEndpoint.DatagramPathResult = undefined;
         const due_result = try server_endpoint.processDueDeadlineAndDrainDatagramsWithRoutePath(
             std.testing.allocator,
             server_deadline.deadline_millis,
             &due_out,
         );
         if (due_result) |due| {
-            for (due_out[0..due.drain.datagrams_written]) |o| std.testing.allocator.free(o.datagram);
+            // PTO/recovery output is route-bound: each datagram carries the committed path.
+            for (due_out[0..due.drain.datagrams_written]) |o| {
+                try std.testing.expect(o.path.eql(server_path));
+                std.testing.allocator.free(o.datagram);
+            }
+            // PTO backoff: the next deadline (if any) must not be earlier than
+            // the serviced deadline, preventing tight timer loops.
+            if (due.next_deadline) |next_dl| {
+                try std.testing.expect(next_dl.deadline_millis >= server_deadline.deadline_millis);
+            }
+        }
+    }
+
+    // --- Phase 7b2: Service due client recovery timer with PTO evidence ---
+    if (client.nextDeadline()) |client_deadline| {
+        var client_pto_out: [4]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+        const client_due = try client.serviceDueDeadlineAndDrainDatagramsWithRoutePath(
+            client_deadline.deadlineMillis(),
+            &client_pto_out,
+        );
+        if (client_due) |due| {
+            // Client PTO output is route-bound.
+            for (client_pto_out[0..due.drain.datagrams_written]) |o| {
+                try std.testing.expect(o.path.eql(client_path));
+                std.testing.allocator.free(o.datagram);
+            }
+            // PTO backoff: next deadline must not regress.
+            if (due.next_deadline) |next_dl| {
+                try std.testing.expect(next_dl.deadlineMillis() >= client_deadline.deadlineMillis());
+            }
         }
     }
 
