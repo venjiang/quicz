@@ -232,7 +232,10 @@ pub const Tls13ClientEndpoint = struct {
             .next_deadline = self.nextDeadline(),
         };
         if (received.transport.application_processed) {
-            result.drain = try self.drainApplicationDatagramsWithRoutePath(now_millis, out);
+            result.drain = if (out.len == 0)
+                .{ .first_error = error.BufferTooSmall }
+            else
+                try self.drainApplicationDatagramsWithRoutePath(now_millis, out);
             result.next_deadline = self.nextDeadline();
         }
         return result;
@@ -1423,6 +1426,83 @@ test "Tls13ClientEndpoint receive close drain reports zero output capacity" {
         try std.testing.expect(drained.datagram.len != 0);
     }
     try std.testing.expect(client.nextDeadline() != null);
+}
+
+test "Tls13ClientEndpoint receive step reports zero receive output capacity" {
+    const original_dcid = [_]u8{ 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 };
+    const client_scid = [_]u8{ 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52 };
+    const alpn = [_][]const u8{"hq-interop"};
+    const path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4444),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        119,
+        path,
+        .{ .active_migration_disabled = false },
+        .{ .initial_rtt_ms = 100 },
+        .{ .alpn = &alpn, .server_name = "localhost", .skip_cert_verify = true },
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    const client_secret = [_]u8{0x35} ** protection.traffic_secret_len;
+    const server_secret = [_]u8{0x36} ** protection.traffic_secret_len;
+    try client.transport.connection.confirmHandshake();
+    try client.transport.connection.installOneRttTrafficSecrets(.{
+        .local = client_secret,
+        .peer = server_secret,
+    });
+    const peer_connection_id = [_]u8{ 0xcc, 0xcd, 0xce, 0xcf };
+    const reset_token = [_]u8{0x78} ** packet.stateless_reset_token_len;
+    var encoded: [64]u8 = undefined;
+    var writer = buffer.fixedWriter(&encoded);
+    try frame.encodeFrame(writer.writer(), .{ .new_connection_id = .{
+        .sequence_number = 1,
+        .retire_prior_to = 0,
+        .connection_id = &peer_connection_id,
+        .stateless_reset_token = reset_token,
+    } });
+    try client.transport.connection.processDatagram(0, writer.getWritten());
+
+    var plaintext: [32]u8 = [_]u8{0} ** 32;
+    var plaintext_writer = buffer.fixedWriter(&plaintext);
+    try frame.encodeFrame(plaintext_writer.writer(), .{ .ping = {} });
+    const packet_number = client.transport.connection.nextPeerPacketNumber(.application);
+    const peer_datagram = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = &client_scid,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = packet_number,
+    }, try packet.encodePacketNumberForHeader(packet_number, null), protection.deriveAes128PacketProtectionKeys(server_secret), &plaintext);
+    defer std.testing.allocator.free(peer_datagram);
+
+    var scratch: [128]u8 = undefined;
+    var zero_receive_out: [0]Tls13ClientEndpoint.ApplicationDatagramPathResult = .{};
+    var due_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const step = try client.receiveDatagramStepWithRoutePath(
+        10,
+        &scratch,
+        peer_datagram,
+        &zero_receive_out,
+        &due_out,
+    );
+    const received = step.receive.receive orelse return error.TestUnexpectedResult;
+    try std.testing.expect(received.transport.application_processed);
+    try std.testing.expectEqual(@as(?transport_types.Error, null), step.receive.receive_error);
+    try std.testing.expectEqual(@as(usize, 0), step.receive.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, error.BufferTooSmall), step.receive.drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), step.receive.drain.first_route_error);
+
+    var receive_out: [1]Tls13ClientEndpoint.ApplicationDatagramPathResult = undefined;
+    const drained = try client.drainApplicationDatagramsWithRoutePath(11, &receive_out);
+    try std.testing.expectEqual(@as(usize, 1), drained.datagrams_written);
+    try std.testing.expectEqual(@as(?Tls13ClientEndpoint.ApplicationDatagramPollError, null), drained.first_error);
+    defer std.testing.allocator.free(receive_out[0].datagram);
+    try std.testing.expect(receive_out[0].path.eql(path));
+    try std.testing.expect(receive_out[0].datagram.len != 0);
 }
 
 test "Tls13ClientEndpoint receive drains route-bound close on frame error" {

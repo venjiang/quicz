@@ -151,6 +151,12 @@ preflight failures through `drain.first_route_error`, preserving the due
 recovery deadline without servicing recovery or consuming output. The same
 drain result still reports zero-capacity as `drain.first_error` before route
 lookup, preserving the prior non-commit guard.
+Client bounded receive steps now also report zero receive-output capacity as
+`receive.drain.first_error = BufferTooSmall` when a protected Application-space
+datagram is processed and same-step ACK/application output is pending. The
+pending output is preserved for a later route-bound drain, so socket loops do
+not need a separate heuristic to discover that receive-generated output was
+left queued.
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` processing now tracks the largest
 peer `Retire Prior To` value. It rejects `retire_prior_to > sequence_number`

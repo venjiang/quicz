@@ -137,6 +137,10 @@ Client due-deadline route-bound recovery drain 现在会通过
 `drain.first_route_error` 暴露 missing-route preflight 失败，保留 due recovery
 deadline，不 service recovery，也不消费 output。同一个 drain result 仍会在 route
 lookup 前用 `drain.first_error` 报告 zero-capacity，保持原有 non-commit guard。
+Client 有界 receive step 现在也会在处理 protected Application-space datagram 且
+同轮 ACK/application output 待发送时，把零容量 receive output 报告为
+`receive.drain.first_error = BufferTooSmall`。待发送 output 会保留到后续
+route-bound drain，socket loop 不再需要额外猜测 receive-generated output 是否仍排队。
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` 处理现在会跟踪 peer 最大
 `Retire Prior To` 值。它会在 retiring peer-issued connection IDs、排队
