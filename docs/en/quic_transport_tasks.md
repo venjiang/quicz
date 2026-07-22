@@ -80,8 +80,8 @@ P0 gates below are complete:
 | Phase | Task | RFC focus | Code seam | Exit evidence | Status |
 | --- | --- | --- | --- | --- | --- |
 | P0-A0 | Bounded endpoint receive steps | RFC 9000 packet input, output, timers; RFC 9001 packet spaces | `Tls13ClientEndpoint`, `Tls13ServerEndpoint` | Client and server receive steps return input result, routed output, due work, close/key-discard/idle cleanup, route errors, capacity errors, and next deadline without caller-side branching. | Done |
-| P0-A1 | Local endpoint TLS handshake | RFC 9001 handshake; RFC 9000 Initial/Handshake packets | Endpoint-owned client/server loop | A Zig client and server complete a certificate-verified handshake through endpoint APIs only; outputs remain route-bound; no mock keys, OpenSSL, examples, or per-case caller glue. | Active |
-| P0-A2 | Local endpoint 1-RTT close loop | RFC 9000 1-RTT packet processing, stream data, close; RFC 9001 key discard | Endpoint-owned client/server loop | The same local loop sends protected STREAM echo, services due timers, emits protected close, discards obsolete keys, and retires routes/records. | Next |
+| P0-A1 | Local endpoint TLS handshake | RFC 9001 handshake; RFC 9000 Initial/Handshake packets | Endpoint-owned client/server loop | A Zig client and server complete a certificate-verified handshake through endpoint APIs only; outputs remain route-bound; no mock keys, OpenSSL, examples, or per-case caller glue. | Done |
+| P0-A2 | Local endpoint 1-RTT close loop | RFC 9000 1-RTT packet processing, stream data, close; RFC 9001 key discard | Endpoint-owned client/server loop | The same local loop sends protected STREAM echo, services due timers, emits protected close, discards obsolete keys, and retires routes/records. | Active |
 | P0-B1 | Protected bidi/uni stream data | RFC 9000 Sections 2, 4, 19.8 | `Connection` stream state behind endpoint send/receive | Bidi and uni data plus FIN work over protected endpoint packets. | Next |
 | P0-B2 | Stream control and credit release | RFC 9000 Sections 4, 19.11-19.14 | Stream-limit and flow-control state | RESET_STREAM, STOP_SENDING, MAX_STREAMS release, connection-window unblock, and stream-window unblock work over protected endpoint packets. | Next |
 | P0-B3 | Stream retransmission requeue | RFC 9002 loss recovery for stream frames | Recovery queue plus stream sender | Lost STREAM/FIN/reset/stop data is requeued and retransmitted without duplicating committed stream state. | Next |
@@ -103,8 +103,8 @@ by the required protected endpoint or external interop behavior.
 
 | Order | Task | Status | Commit scope |
 | --- | --- | --- | --- |
-| 1 | P0-A1 local endpoint TLS handshake | Active | Add the smallest core Zig test or endpoint adjustment needed for certificate-verified local handshake. |
-| 2 | P0-A2 local endpoint STREAM/close loop | Next | Extend the same local loop to protected STREAM echo, due timer service, close, key discard, and route cleanup. |
+| 1 | P0-A1 local endpoint TLS handshake | Done | Added the smallest core Zig endpoint test for certificate-verified local handshake. |
+| 2 | P0-A2 local endpoint STREAM/close loop | Active | Extend the same local loop to protected STREAM echo, due timer service, close, key discard, and route cleanup. |
 | 3 | P0-B1 protected bidi/uni stream data | Next | Add endpoint-level bidi/uni data and FIN coverage; fix only stream/endpoint code needed for that proof. |
 | 4 | P0-B2 stream control and flow-control credit | Next | Add endpoint-level reset/stop, stream-count release, and flow-control unblock coverage. |
 | 5 | P0-B3 stream retransmission requeue | Next | Prove lost stream/control frames requeue through recovery without duplicate stream commits. |
@@ -136,6 +136,15 @@ document when evidence changes, updates `goal.md`, runs relevant Zig validation,
 commits, and pushes. Mock-only tests may support a change, but they cannot close
 a task whose exit evidence requires protected endpoint packets or external
 interop.
+
+P0-A1 is complete: `Tls13 endpoints complete certificate-verified local handshake
+through endpoint routes` decodes the local trust-anchor certificate, configures
+the client with `skip_cert_verify = false`, admits a `Tls13ServerTransport`
+record through `Tls13ServerEndpoint`, forwards only route-bound endpoint
+datagrams, sends the client Finished flight back through the routed server
+receive step, and confirms both client and server handshake state. P0-A2 is now
+active; STREAM echo, due timer service, protected close, key discard, and
+route/record cleanup remain open.
 
 ## Practical Transport Baseline
 
@@ -199,11 +208,11 @@ Application-space datagram is processed and ACK output is pending. The queued
 ACK is preserved for a later route-bound poll, so server socket loops do not
 need an extra post-receive probe to discover that receive-generated output was
 left queued.
-P0-1b is complete: the server receive-step APIs now return admission, routed
+P0-A0 is complete: the server receive-step APIs now return admission, routed
 output, pending work, idle/close/key-discard due cleanup, route errors, capacity
-errors, and post-step deadline selection in bounded result shapes. P0-1c is now
-active and must use local Zig endpoint APIs only; mock-only or installed-key-only
-evidence cannot close the local endpoint-loop gate.
+errors, and post-step deadline selection in bounded result shapes. P0-A1 is
+complete and P0-A2 is now active; mock-only or installed-key-only evidence
+cannot close protected endpoint-loop tasks.
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` processing now tracks the largest
 peer `Retire Prior To` value. It rejects `retire_prior_to > sequence_number`

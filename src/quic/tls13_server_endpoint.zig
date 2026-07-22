@@ -15,9 +15,14 @@ const endpoint_lifecycle = @import("endpoint_lifecycle.zig");
 const frame = @import("frame.zig");
 const quic_packet = @import("packet.zig");
 const protection = @import("protection.zig");
+const tls13 = @import("tls13.zig");
+const tls13_client_endpoint = @import("tls13_client_endpoint.zig");
+const tls13_server_transport = @import("tls13_server_transport.zig");
 
 const Connection = connection_module.Connection;
 const EndpointConnectionLifecycle = endpoint_lifecycle.EndpointConnectionLifecycle;
+const Tls13ClientEndpoint = tls13_client_endpoint.Tls13ClientEndpoint;
+const Tls13ServerTransport = tls13_server_transport.Tls13ServerTransport;
 
 /// Build an endpoint owner for one caller-defined TLS server record type.
 ///
@@ -11339,4 +11344,335 @@ test "Tls13ServerEndpoint receive step reports active stateless reset and close 
     try std.testing.expectEqual(root.EndpointConnectionDeadlineKind.close_timeout, reset_next_deadline.kind);
     const step_next_deadline = step.next_deadline orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(reset_next_deadline, step_next_deadline);
+}
+
+test "Tls13 endpoints complete certificate-verified local handshake through endpoint routes" {
+    const TestServerRecord = struct {
+        handle: u64,
+        transport: Tls13ServerTransport,
+        retry_validated: bool = false,
+
+        fn clientScid(self: *const @This()) []const u8 {
+            return self.transport.connection.peerDestinationConnectionId() orelse
+                self.transport.peerInitialSourceConnectionId();
+        }
+
+        fn connectionRef(self: *@This()) *Connection {
+            return self.transport.connectionRef();
+        }
+
+        fn cryptoBackend(self: *@This()) root.CryptoBackend {
+            return self.transport.cryptoBackend();
+        }
+
+        fn destinationConnectionId(self: *const @This()) []const u8 {
+            return self.clientScid();
+        }
+
+        fn sourceConnectionId(self: *const @This()) []const u8 {
+            return self.transport.localInitialSourceConnectionId();
+        }
+
+        fn initialDestinationConnectionId(self: *const @This()) []const u8 {
+            return if (self.retry_validated)
+                self.transport.localInitialSourceConnectionId()
+            else
+                self.transport.originalDestinationConnectionId();
+        }
+
+        fn markRetryValidated(self: *@This()) void {
+            self.retry_validated = true;
+        }
+
+        fn deinit(self: *@This()) void {
+            self.transport.deinit();
+        }
+    };
+    const TestServerEndpoint = Tls13ServerEndpoint(
+        TestServerRecord,
+        TestServerRecord.connectionRef,
+        TestServerRecord.cryptoBackend,
+        TestServerRecord.destinationConnectionId,
+        TestServerRecord.sourceConnectionId,
+        TestServerRecord.initialDestinationConnectionId,
+        TestServerRecord.markRetryValidated,
+        TestServerRecord.deinit,
+    );
+
+    const pem = @embedFile("testdata/quicz-echo-ca.pem");
+    const begin_marker = "-----BEGIN CERTIFICATE-----";
+    const end_marker = "-----END CERTIFICATE-----";
+    const begin = std.mem.indexOf(u8, pem, begin_marker) orelse return error.TestUnexpectedResult;
+    const encoded_start = begin + begin_marker.len;
+    const encoded_end = std.mem.indexOfPos(u8, pem, encoded_start, end_marker) orelse return error.TestUnexpectedResult;
+    const encoded = std.mem.trim(u8, pem[encoded_start..encoded_end], " \t\r\n");
+    var cert_der_storage: [512]u8 = undefined;
+    const decoder = std.base64.standard.decoderWithIgnore("\r\n");
+    const cert_der_len = try decoder.decode(&cert_der_storage, encoded);
+    const cert_der = cert_der_storage[0..cert_der_len];
+
+    const now_sec: i64 = 1_800_000_000;
+    var ca_bundle = std.crypto.Certificate.Bundle.empty;
+    defer ca_bundle.deinit(std.testing.allocator);
+    try ca_bundle.bytes.appendSlice(std.testing.allocator, cert_der);
+    try ca_bundle.parseCert(std.testing.allocator, 0, now_sec);
+
+    const server_private_key = [_]u8{
+        0x5b, 0xbf, 0x4f, 0x5a, 0x48, 0x42, 0x9f, 0x00,
+        0x5a, 0x57, 0x09, 0xc3, 0xb4, 0xc1, 0x3a, 0x64,
+        0x2e, 0xb1, 0x61, 0xf5, 0x0b, 0xde, 0x64, 0x4b,
+        0x3a, 0x38, 0xa6, 0x8f, 0xfa, 0x48, 0xda, 0x51,
+    };
+    const alpn = [_][]const u8{"hq-interop"};
+    const connection_config = root.Config{
+        .initial_max_data = 8192,
+        .initial_max_stream_data = 2048,
+        .initial_max_streams_bidi = 8,
+        .max_datagram_size = 8192,
+        .chosen_version = .v1,
+        .available_versions = &[_]quic_packet.Version{.v1},
+    };
+    const client_tls_config = tls13.TlsConfig{
+        .alpn = &alpn,
+        .server_name = "localhost",
+        .skip_cert_verify = false,
+        .now_sec = now_sec,
+        .ca_bundle = &ca_bundle,
+    };
+    const server_tls_config = tls13.TlsConfig{
+        .alpn = &alpn,
+        .cert_chain_der = &.{cert_der},
+        .private_key_bytes = &server_private_key,
+        .private_key_algorithm = .ecdsa_p256_sha256,
+    };
+
+    const client_handle: u64 = 7001;
+    const server_handle: u64 = 7002;
+    const original_dcid = [_]u8{ 0x0d, 0xc1, 0xd0, 0x01, 0x02, 0x03, 0x04, 0x05 };
+    const client_scid = [_]u8{ 0xc1, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    const server_scid = [_]u8{ 0x5e, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    const client_path = endpoint.Udp4Tuple{
+        .local = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 54_443),
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 4433),
+    };
+    const server_path = endpoint.Udp4Tuple{
+        .local = client_path.remote,
+        .remote = client_path.local,
+    };
+
+    var client = try Tls13ClientEndpoint.init(
+        std.testing.allocator,
+        client_handle,
+        client_path,
+        .{ .active_migration_disabled = true },
+        connection_config,
+        client_tls_config,
+        original_dcid,
+        client_scid,
+    );
+    defer client.deinit();
+
+    var server_endpoint = try TestServerEndpoint.initWithCapacity(std.testing.allocator, 1, .{
+        .max_routes = 2,
+        .max_stateless_reset_tokens = 1,
+    });
+    defer server_endpoint.deinit();
+
+    const record = try std.testing.allocator.create(TestServerRecord);
+    var record_initialized = false;
+    var record_owned_by_test = true;
+    errdefer {
+        if (record_owned_by_test) {
+            if (record_initialized) record.deinit();
+            std.testing.allocator.destroy(record);
+        }
+    }
+    record.* = .{
+        .handle = server_handle,
+        .transport = try Tls13ServerTransport.init(
+            std.testing.allocator,
+            connection_config,
+            server_tls_config,
+        ),
+    };
+    record_initialized = true;
+    try record.transport.connection.validatePeerAddress();
+    try record.transport.setLocalInitialSourceConnectionId(&server_scid);
+    try record.transport.setOriginalDestinationConnectionId(&original_dcid);
+
+    var client_scratch: [8192]u8 = undefined;
+    var server_scratch: [8192]u8 = undefined;
+    const client_initial = try client.beginWithRoutePath(10, &client_scratch);
+    defer std.testing.allocator.free(client_initial.datagram);
+    try std.testing.expect(client_initial.path.eql(client_path));
+
+    var classify_out: [256]u8 = undefined;
+    var server_initial_out: [2]root.EndpointPolledDatagramResult = undefined;
+    var server_handshake_out: [2]root.EndpointPolledDatagramResult = undefined;
+    var server_installed_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
+    var server_pending_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
+    const server_initial_step = try server_endpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmission(
+        std.testing.allocator,
+        server_path,
+        11,
+        client_initial.datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &classify_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        record.handle,
+        record,
+        &server_scid,
+        .{ .active_migration_disabled = true },
+        &server_scratch,
+        &[_]u8{},
+        &server_initial_out,
+        &server_handshake_out,
+        &server_installed_out,
+        .application,
+        &server_pending_out,
+    );
+    switch (server_initial_step.process) {
+        .accept_initial => {},
+        else => return error.TestUnexpectedResult,
+    }
+    const admission = server_initial_step.admission orelse return error.TestUnexpectedResult;
+    const admitted = switch (admission) {
+        .admitted => |admitted| admitted,
+        .dropped_capacity => return error.TestUnexpectedResult,
+    };
+    record_owned_by_test = false;
+    try std.testing.expect(admitted.initial.path.eql(server_path));
+    try std.testing.expectEqual(@as(usize, 1), admitted.initial.accepted.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), admitted.initial.accepted.drain.first_error);
+    try std.testing.expect(admitted.handshake != null);
+    const server_handshake = admitted.handshake.?;
+    try std.testing.expect(server_handshake.path.eql(server_path));
+    try std.testing.expectEqual(@as(usize, 1), server_handshake.backend.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, null), server_handshake.backend.drain.first_error);
+    try std.testing.expectEqual(@as(usize, 0), server_initial_step.pending_drain.datagrams_written);
+    defer {
+        for (server_initial_out[0..admitted.initial.accepted.drain.datagrams_written]) |outbound| {
+            std.testing.allocator.free(outbound.datagram);
+        }
+        for (server_handshake_out[0..server_handshake.backend.drain.datagrams_written]) |outbound| {
+            std.testing.allocator.free(outbound.datagram);
+        }
+        for (server_pending_out[0..server_initial_step.pending_drain.datagrams_written]) |outbound| {
+            std.testing.allocator.free(outbound.datagram);
+        }
+    }
+
+    var client_finished_datagram: ?[]u8 = null;
+    errdefer if (client_finished_datagram) |datagram| std.testing.allocator.free(datagram);
+    var delivered_server_flights: usize = 0;
+    for (server_initial_out[0..admitted.initial.accepted.drain.datagrams_written]) |outbound| {
+        try std.testing.expectEqual(server_handle, outbound.connection_id);
+        const received = try client.receiveWithRoutePath(12, &client_scratch, outbound.datagram);
+        try std.testing.expectEqual(client_handle, received.receive.route.connection_id);
+        if (received.outbound_handshake) |finished| {
+            try std.testing.expect(client_finished_datagram == null);
+            try std.testing.expect(finished.path.eql(client_path));
+            client_finished_datagram = finished.datagram;
+        }
+        delivered_server_flights += 1;
+    }
+    for (server_handshake_out[0..server_handshake.backend.drain.datagrams_written]) |outbound| {
+        try std.testing.expectEqual(server_handle, outbound.connection_id);
+        const received = try client.receiveWithRoutePath(13, &client_scratch, outbound.datagram);
+        try std.testing.expectEqual(client_handle, received.receive.route.connection_id);
+        if (received.outbound_handshake) |finished| {
+            try std.testing.expect(client_finished_datagram == null);
+            try std.testing.expect(finished.path.eql(client_path));
+            client_finished_datagram = finished.datagram;
+        }
+        delivered_server_flights += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), delivered_server_flights);
+    try std.testing.expect(client.handshakeConfirmed());
+
+    const client_finished = client_finished_datagram orelse return error.TestUnexpectedResult;
+    client_finished_datagram = null;
+    defer std.testing.allocator.free(client_finished);
+    var server_finish_initial_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var server_finish_handshake_out: [1]root.EndpointPolledDatagramResult = undefined;
+    var server_finish_installed_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
+    var server_finish_pending_out: [2]TestServerEndpoint.DatagramPathResult = undefined;
+    var server_finish_route_out: [256]u8 = undefined;
+    const server_finish_step = try server_endpoint.receiveDatagramStepWithRoutePath(
+        std.testing.allocator,
+        server_path,
+        14,
+        client_finished,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        .{
+            .space = .application,
+            .out = &server_finish_route_out,
+            .unpredictable_prefix = &[_]u8{},
+            .supported_versions = &[_]quic_packet.Version{.v1},
+        },
+        &server_scratch,
+        &[_]u8{},
+        &server_finish_initial_out,
+        &server_finish_handshake_out,
+        &server_finish_installed_out,
+        .application,
+        &server_finish_pending_out,
+    );
+    var server_finish_initial_written: usize = 0;
+    var server_finish_handshake_written: usize = 0;
+    var server_finish_installed_written: usize = 0;
+    switch (server_finish_step.process) {
+        .routed => |routed| switch (routed) {
+            .long => |long| switch (long) {
+                .packet => |long_packet| switch (long_packet) {
+                    .initial => |initial| {
+                        server_finish_initial_written = initial.initial.backend.backend.drain.datagrams_written;
+                        if (initial.handshake) |handshake| {
+                            try std.testing.expect(handshake.path.eql(server_path));
+                            server_finish_handshake_written = handshake.backend.drain.datagrams_written;
+                        }
+                    },
+                    .handshake => |handshake| {
+                        try std.testing.expect(handshake.backend.path.eql(server_path));
+                        server_finish_handshake_written = handshake.backend.backend.drain.datagrams_written;
+                    },
+                },
+                .coalesced_initial_handshake => |handshake| {
+                    try std.testing.expect(handshake.backend.path.eql(server_path));
+                    server_finish_handshake_written = handshake.backend.backend.drain.datagrams_written;
+                },
+            },
+            .installed_key => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    server_finish_installed_written += server_finish_step.pending_drain.datagrams_written;
+    defer {
+        for (server_finish_initial_out[0..server_finish_initial_written]) |outbound| {
+            std.testing.allocator.free(outbound.datagram);
+        }
+        for (server_finish_handshake_out[0..server_finish_handshake_written]) |outbound| {
+            std.testing.allocator.free(outbound.datagram);
+        }
+        for (server_finish_pending_out[0..server_finish_installed_written]) |outbound| {
+            std.testing.allocator.free(outbound.datagram);
+        }
+    }
+    const active_record = server_endpoint.records.get(server_handle) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(active_record.transport.connection.handshakeConfirmed());
+    try std.testing.expect((try server_endpoint.lifecycle.currentRoutePath(active_record.sourceConnectionId())).eql(server_path));
+    try std.testing.expectEqual(@as(usize, 1), server_endpoint.activeConnectionCount());
+    try std.testing.expectEqual(@as(usize, 2), server_endpoint.lifecycle.routeCount());
+    try std.testing.expectEqual(@as(?root.Error, null), server_finish_step.pending_drain.first_error);
+    try std.testing.expectEqual(@as(?endpoint.RouteError, null), server_finish_step.pending_drain.first_route_error);
+    for (server_finish_pending_out[0..server_finish_step.pending_drain.datagrams_written]) |outbound| {
+        try std.testing.expectEqual(server_handle, outbound.connection_id);
+        try std.testing.expect(outbound.path.eql(server_path));
+    }
 }
