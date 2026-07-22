@@ -43,38 +43,59 @@ packet/key/token and RFC 9368 version-information primitives:
 
 ## Implementation Priority Matrix
 
-The planning rule is to finish a small, real QUIC v1 transport before expanding
-side features. Mature QUIC stacks generally become useful first through
-handshake, packet protection, streams, recovery, endpoint routing, close, and
-interop; operational extensions, API polish, HTTP/3, DATAGRAM, qlog, PMTU, and
-larger fuzz/performance programs continue afterward. `quicz` should follow that
-shape.
+The planning rule is to finish a small, externally provable QUIC v1 transport
+before expanding side features. Mature QUIC stacks continue to spend release
+work on TLS/crypto boundaries, endpoint timers, MTU and path behavior,
+stream/flow-control correctness, CID retirement, close/error propagation,
+recovery/PTO edge cases, fuzzing, and interop automation. `quicz` should follow
+that pattern: vertical transport usability first, examples and optional
+extensions later.
 
-### P0 execution matrix: first usable QUIC v1 transport
+Reference signal reviewed on 2026-07-22:
 
-| ID | Workstream | Why it is P0 | Delivery scope | Exit evidence |
+- `quic-go`: recent releases emphasize TLS/crypto compliance, Retry/key-update
+  integration tests, PTO/ACK fixes, MTU estimation, stream API behavior, qlog,
+  and fuzzing.
+- `s2n-quic`: recent releases emphasize MTU probing, handshake packet storage,
+  first-packet error handling, endpoint events, and interop automation.
+- `quiche`: recent releases emphasize bounded path events, flow-control window
+  correctness, CID retirement, Retry/PMTUD APIs, PTO/loss overflow fixes, and
+  retransmission of lost control frames.
+
+### Task intake filter
+
+A task is accepted into P0 only if it moves one of the gates below toward a
+working QUIC v1 client/server transport. Isolated examples, README polish,
+HTTP/3, DATAGRAM, qlog, CUBIC/BBR, broad fuzzing, and second-stack interop are
+not P0 unless they are the smallest step that unblocks a P0 gate.
+
+### P0 execution gates: first usable QUIC v1 transport
+
+| Gate | Status | Scope | Exit evidence | Next-task rule |
 | --- | --- | --- | --- | --- |
-| P0.1 | TLS-owned packet protection | Without this, all stream/recovery evidence can still be mock-only. | Pure-Zig TLS drives Initial, Handshake, and 1-RTT secrets; protected long/short packet send and receive use installed TLS secrets; certificate, SNI, ALPN, and transport-parameter failures do not commit connection state. | Local Zig client/server completes a certificate-verified handshake over UDP and exchanges protected 1-RTT packets without mock keys or OpenSSL. |
-| P0.2 | Endpoint-owned UDP lifecycle | Users need one owner that can drive sockets, routes, timers, cleanup, and close. | Client and server endpoints own connection records, route registration, datagram classification, receive/process/drain steps, next-deadline selection, idle cleanup, close cleanup, and capacity/admission failures. | A bounded local client/server loop completes handshake, stream transfer, timer service, close, and route cleanup through endpoint APIs. |
-| P0.3 | STREAM data path | STREAM is the minimum useful transport payload. | Bidirectional and unidirectional open/read/write/FIN; ordered delivery; retransmission requeue; RESET_STREAM; STOP_SENDING; MAX_STREAMS release; connection and per-stream flow control. | Protected UDP echo covers bidi and uni FIN paths, flow-control unblock, reset/stop, stream-count credit release, and retransmission after a controlled drop. |
-| P0.4 | ACK, loss, PTO, and NewReno baseline | A transport that only works on perfect loopback is not usable. | ACK validation; RTT sampling; packet/time-threshold loss; PTO probes; ACK/loss-driven STREAM and CRYPTO retransmission; bytes-in-flight accounting; minimum NewReno behavior. | Deterministic tests plus one socket-backed loss run show retransmission and eventual ACK cleanup; no recovery timer remains armed after terminal close/drain. |
-| P0.5 | Close, CID, Retry, address validation, and stateless reset | These are required to survive normal QUIC lifecycle edges and common interop paths. | CONNECTION_CLOSE and APPLICATION_CLOSE emission; peer close handling; NEW_CONNECTION_ID and RETIRE_CONNECTION_ID routing; Retry token validation; address-validation route update; idle close; stateless reset receive and inactive-CID reset emission. | Endpoint tests cover each lifecycle edge without mutating state before route/capacity validation, and protected close/reset packets are observable on the committed route. |
-| P0.6 | First external interop gate | Local-only success is insufficient to claim usable QUIC. | One repeatable external-stack matrix against `quicz`: client and server direction where practical; certificate verification; Retry; stream FIN echo; close; one controlled loss/PTO case. | `quic-go` is the default first gate. A second stack is not required for P0 unless the first gate exposes ambiguity that another implementation must resolve. |
+| P0-A. Spec envelope and safety invariants | Partial | RFC 8999/9000 packet and frame codecs, transport parameters, error-code mapping, rollback before state mutation, and wire-size limits. | Focused tests show malformed input rejection before ACK/CID/token/stream mutation, and close-propagating APIs emit the correct transport error. | Only pick this when a gap blocks TLS, endpoint routing, recovery, close, or interop. |
+| P0-B. TLS-owned packet protection | Partial | Pure-Zig TLS drives Initial, Handshake, and 1-RTT secrets; protected long/short packets use installed TLS secrets; certificate, SNI, ALPN, and transport-parameter failures stay non-committing. | Local Zig client/server completes certificate-verified UDP handshake and exchanges protected 1-RTT packets without mock keys or OpenSSL. | Prefer this before expanding endpoint variants or public API polish. |
+| P0-C. Endpoint-owned UDP lifecycle | Partial | Client/server endpoints own connection records, routes, datagram classification, receive/process/drain, timers, cleanup, close, and admission/capacity failures. | A bounded local client/server loop completes handshake, STREAM transfer, due-deadline service, close, and route cleanup only through endpoint APIs. | Prefer vertical socket-loop gaps over adding narrower helper variants. |
+| P0-D. STREAM and flow-control vertical | Partial | Bidi/uni open, read, write, FIN, ordered delivery, RESET_STREAM, STOP_SENDING, MAX_STREAMS release, connection flow control, stream flow control, and retransmission requeue. | Protected UDP echo covers bidi and uni FIN, flow-control unblock, reset/stop, stream-count credit release, and one controlled retransmission. | Pick real protected-path gaps before codec-only edge cases. |
+| P0-E. ACK, loss, PTO, and NewReno baseline | Partial | ACK validation, RTT sampling, packet/time-threshold loss, PTO probes, ACK/loss-driven STREAM and CRYPTO retransmission, bytes-in-flight accounting, and minimum NewReno behavior. | Deterministic tests plus one socket-backed loss run show retransmission, ACK cleanup, and no recovery timer after terminal close/drain. | Prioritize timer/recovery bugs that can stall a real endpoint loop. |
+| P0-F. Lifecycle security edges | Partial | CONNECTION_CLOSE, APPLICATION_CLOSE, peer close, NEW_CONNECTION_ID, RETIRE_CONNECTION_ID, Retry, address validation, path validation for migration, idle close, stateless reset receive, and inactive-CID reset emission. | Endpoint tests prove non-commit before route/capacity validation and observable protected close/reset on the committed route. | Pick only edges needed for robust client/server operation or the interop gate. |
+| P0-G. First external interop gate | Partial | Repeatable `quicz` client/server interop against one external stack, including certificate verification, Retry, STREAM FIN echo, close, and one controlled loss/PTO case. | `quic-go` is the default first gate. A second stack is not required for P0 unless `quic-go` exposes ambiguous behavior that needs another implementation to disambiguate. | Run after the local Zig endpoint vertical is stable enough to avoid chasing fixture noise. |
 
-### Post-P0 matrix
+### P1/P2/P3 after P0
 
 | Priority | Goal | Scope | Exit evidence |
 | --- | --- | --- | --- |
-| P1 | Interop hardening and production policies | Broader stream-limit interop; server multi-connection event-loop policy; production token/replay storage policy; route migration policy; common RFC 9000 error-code and rollback gaps; second external stack such as s2n-quic, quiche, or a small Rust path. | Two external stacks pass a repeatable smoke matrix: handshake, stream echo, reset/stop, Retry, close, and loss recovery. |
-| P2 | Public usability and maintainability | Public endpoint API simplification; stable API names; concise README and examples documentation; optional `src/tls/` extraction after pure-Zig TLS behavior stabilizes. | A user can build a basic client/server from public APIs without internal lifecycle variants; docs link to examples but examples are not the development target. |
-| P3 | Extensions and advanced operations | 0-RTT production/distributed replay policy; HTTP/3/QPACK; RFC 9221 DATAGRAM; qlog; PMTU/GSO/GRO; full QUIC v2/RFC 9368; advanced congestion controllers; multipath; broad fuzzing and observability. | Tracked only after P0/P1 are stable, unless a selected P0/P1 interop target requires a narrow subset. |
+| P1 | Interop hardening and production policy | Second external stack such as s2n-quic, quiche, quinn, or a small Rust path; QUIC-Interop-Runner shape; broader stream-limit/loss/migration cases; production token/replay/path policy. | Two external stacks pass a repeatable smoke matrix: handshake, stream echo, reset/stop, Retry, close, loss recovery, and one migration/path-validation case. |
+| P2 | Public usability and maintainability | Public endpoint API simplification, stable API names, concise README and examples documentation, and optional `src/tls/` extraction after pure-Zig TLS behavior stabilizes. | A user can build a basic client/server from public APIs without internal lifecycle variants; docs link to examples, but examples are not the development target. |
+| P3 | Extensions and advanced operations | 0-RTT production/distributed replay policy, HTTP/3/QPACK, RFC 9221 DATAGRAM, qlog, PMTU/GSO/GRO tuning, full QUIC v2/RFC 9368, advanced congestion controllers, multipath, and broad fuzzing/observability. | Tracked only after P0/P1 are stable, unless a selected P0/P1 interop target requires a narrow subset. |
 
-Task selection rule: always pick the highest incomplete P0 workstream that makes
-the first usable transport more real. A change only belongs in P0 if it can
-block TLS-owned handshake, protected STREAM I/O, close, recovery, endpoint
-routing, Retry/address validation, stateless reset, idle cleanup, or the first
-external interop gate. Everything else is P1/P2/P3 unless it is the smallest
-safe step that unblocks a P0 item.
+### Goal-loop scheduling rule
+
+Each development loop chooses the highest-risk incomplete P0 gate, then selects
+the smallest code/test task that improves its exit evidence. Do not work on
+examples or documentation except when they are required to record completed
+core evidence. Do not mark a matrix item done from mock-only tests if the exit
+evidence requires protected UDP or external interop.
 
 ## Practical Transport Baseline
 
