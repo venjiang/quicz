@@ -1685,6 +1685,13 @@ pub fn Tls13ServerEndpoint(
                 },
             }
             const output_path = feed.selected_output_path orelse route_path;
+            if (out.len == 0 and connection.pendingAckLargest(.application) != null) {
+                return .{
+                    .feed = feed,
+                    .drain = .{ .first_error = error.BufferTooSmall },
+                    .next_deadline = try self.nextDeadline(self.records.allocator),
+                };
+            }
             const drain = self.drainDatagramsWithRoutePath(
                 route.connection_id,
                 connection,
@@ -1766,6 +1773,13 @@ pub fn Tls13ServerEndpoint(
                 },
             }
             const output_path = feed.selected_output_path orelse route_path;
+            if (out.len == 0 and connection.pendingAckLargest(.application) != null) {
+                return .{
+                    .feed = feed,
+                    .drain = .{ .first_error = error.BufferTooSmall },
+                    .next_deadline = try self.nextDeadlineWithScratch(),
+                };
+            }
             const drain = self.drainDatagramsWithRoutePath(
                 route.connection_id,
                 connection,
@@ -10724,8 +10738,8 @@ test "Tls13ServerEndpoint installed-key close output uses routed CID path when c
         }
     };
 
-    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 3, .{
-        .max_routes = 5,
+    var endpoint_owner = try TestEndpoint.initWithCapacity(std.testing.allocator, 4, .{
+        .max_routes = 6,
         .max_stateless_reset_tokens = 4,
     });
     defer endpoint_owner.deinit();
@@ -10901,6 +10915,77 @@ test "Tls13ServerEndpoint installed-key close output uses routed CID path when c
     const preserved_close = (try endpoint_owner.pollOneRttDatagramWithRoutePath(zero_record.handle, 4)) orelse return error.TestUnexpectedResult;
     defer std.testing.allocator.free(preserved_close.datagram);
     try std.testing.expect(preserved_close.path.eql(zero_path));
+
+    const receive_step_path = endpoint.Udp4Tuple{
+        .local = first_path.local,
+        .remote = endpoint.Udp4Address.init(.{ 127, 0, 0, 1 }, 50_013),
+    };
+    const receive_step_record = try std.testing.allocator.create(TestRecord);
+    receive_step_record.* = .{
+        .handle = 104,
+        .connection = try Connection.init(std.testing.allocator, .server, .{}),
+        .backend = empty_backend.backend(),
+        .local_id = "loc-d",
+        .routed_id = "alt-d",
+        .peer_id = "peer-d",
+    };
+    try receive_step_record.connection.validatePeerAddress();
+    try receive_step_record.connection.confirmHandshake();
+    try receive_step_record.connection.installOneRttTrafficSecrets(.{
+        .local = secrets.server.secret,
+        .peer = secrets.client.secret,
+    });
+    try endpoint_owner.lifecycle.registerConnectionId(receive_step_record.handle, receive_step_record.local_id, receive_step_path, .{});
+    try endpoint_owner.records.adopt(receive_step_record.handle, receive_step_record);
+
+    const ping_plaintext = [_]u8{@intFromEnum(frame.FrameType.ping)} ++ ([_]u8{0} ** 31);
+    const ping_packet_number = receive_step_record.connection.nextPeerPacketNumber(.application);
+    const ping_datagram = try protection.protectShortPacketAes128(std.testing.allocator, .{
+        .dcid = receive_step_record.local_id,
+        .spin_bit = false,
+        .key_phase = false,
+        .packet_number = ping_packet_number,
+    }, try quic_packet.encodePacketNumberForHeader(ping_packet_number, null), secrets.client, &ping_plaintext);
+    defer std.testing.allocator.free(ping_datagram);
+
+    var zero_receive_step_installed_out: [0]TestEndpoint.DatagramPathResult = .{};
+    var receive_step_pending_out: [1]TestEndpoint.DatagramPathResult = undefined;
+    const receive_step = try endpoint_owner.receiveDatagramStepWithRoutePath(
+        std.testing.allocator,
+        receive_step_path,
+        5,
+        ping_datagram,
+        &[_]u8{},
+        &[_]quic_packet.Version{.v1},
+        options,
+        &scratch,
+        &[_]u8{},
+        &initial_out,
+        &handshake_out,
+        &zero_receive_step_installed_out,
+        .application,
+        &receive_step_pending_out,
+    );
+    const receive_step_installed = switch (receive_step.process) {
+        .routed => |routed| switch (routed) {
+            .installed_key => |installed_key| installed_key,
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    const receive_step_feed = receive_step_installed.feed orelse return error.TestUnexpectedResult;
+    const receive_step_route = switch (receive_step_feed.feed) {
+        .routed => |routed| routed,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(receive_step_record.handle, receive_step_route.connection_id);
+    try std.testing.expectEqual(@as(usize, 0), receive_step_installed.drain.datagrams_written);
+    try std.testing.expectEqual(@as(?root.Error, error.BufferTooSmall), receive_step_installed.drain.first_error);
+    try std.testing.expectEqual(connection_module.ConnectionState.active, receive_step_record.connection.connectionState());
+
+    const preserved_ack = (try endpoint_owner.pollOneRttDatagramWithRoutePath(receive_step_record.handle, 6)) orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(preserved_ack.datagram);
+    try std.testing.expect(preserved_ack.path.eql(receive_step_path));
 }
 
 test "Tls13ServerEndpoint bounded receive reports active stateless reset and retires record" {
