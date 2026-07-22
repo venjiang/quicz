@@ -119,6 +119,12 @@ Endpoint-owned TLS client/server 的 stream 控制现在有有界 route-bound dr
 API，覆盖 STREAM data、RESET_STREAM 和 STOP_SENDING。测试覆盖 missing-route
 与 zero-capacity preflight 在 stream 状态变化前失败，并在已提交 route 上 drain
 protected 1-RTT output，同时返回下一 endpoint-visible deadline。
+Server-side fixed-capacity endpoint 也为同样的
+STREAM/RESET_STREAM/STOP_SENDING drain 暴露 scratch-backed 变体，因此有界
+socket loop 可以在不进行 per-call allocation 的路径里 queue control、drain
+route-bound output 并选择下一 deadline。测试覆盖 missing-route、zero-capacity
+和 missing-scratch preflight 在状态变化前失败，以及已提交 route 上的 protected
+output 与下一 deadline 选择。
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` 处理现在会跟踪 peer 最大
 `Retire Prior To` 值。它会在 retiring peer-issued connection IDs、排队
@@ -1383,6 +1389,9 @@ close 和 route cleanup 事件。
   route-bound drain API，覆盖 STREAM data、RESET_STREAM 和 STOP_SENDING。
   聚焦测试覆盖 missing-route 与 zero-capacity non-commit，以及已提交 route 上的
   protected output 和下一 deadline 选择。
+  Server fixed-capacity endpoint 也暴露这些 drain 的 scratch-backed 变体；lifecycle
+  测试覆盖 missing-route、zero-capacity、missing-scratch non-commit，以及已提交
+  route 上的 output 和 deadline 选择。
 
 - 2026-07-22：Connection-level `NEW_TOKEN` 校验现在补充了畸形空 token
   的显式回归覆盖。只回滚的 receive 路径会拒绝该 wire payload，不存 token，也不

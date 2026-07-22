@@ -132,6 +132,12 @@ route-bound drain APIs for STREAM data, RESET_STREAM, and STOP_SENDING. The
 tests cover missing-route and zero-capacity preflight failures before stream
 state mutation, then drain protected 1-RTT output on the committed route and
 return the next endpoint-visible deadline.
+Server-side fixed-capacity endpoints also expose scratch-backed variants for
+the same STREAM/RESET_STREAM/STOP_SENDING drains, so bounded socket loops can
+queue controls, drain route-bound output, and select the next deadline without
+per-call allocation. Tests cover missing-route, zero-capacity, and missing
+scratch preflight failures before mutation, plus committed-route protected
+output and next-deadline selection.
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` processing now tracks the largest
 peer `Retire Prior To` value. It rejects `retire_prior_to > sequence_number`
@@ -1597,6 +1603,10 @@ QUIC unless the gap is named and the verification evidence is added here.
   bounded route-bound drain APIs for STREAM data, RESET_STREAM, and
   STOP_SENDING. Focused tests cover missing-route and zero-capacity non-commit
   behavior plus committed-route protected output and next-deadline selection.
+  Server fixed-capacity endpoints also expose scratch-backed variants for those
+  drains; the lifecycle test covers missing-route, zero-capacity, and
+  missing-scratch non-commit behavior plus committed-route output and deadline
+  selection.
 
 - 2026-07-22: Connection-level `NEW_TOKEN` validation now has explicit
   malformed-empty-token regression coverage. The rollback-only receive path
