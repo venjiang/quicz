@@ -75,7 +75,7 @@ P0 gates below are complete:
 
 | Gate | RFC scope | Current status | Next tasks | Exit evidence |
 | --- | --- | --- | --- | --- |
-| P0-1 Endpoint event loop | RFC 9000 packet processing, connection lifecycle, timers; RFC 9001 TLS-owned packet spaces | Active | Finish server bounded receive/admission/pending/due-deadline step. Then add one local Zig client/server UDP loop test that uses endpoint APIs only. | Local Zig endpoint loop completes certificate-verified handshake, protected STREAM echo, due timer service, protected close, key discard, and route cleanup without mock keys, OpenSSL, examples changes, or caller-side per-case branching. |
+| P0-1 Endpoint event loop | RFC 9000 packet processing, connection lifecycle, timers; RFC 9001 TLS-owned packet spaces | Active | Add one local Zig client/server UDP loop test that uses endpoint APIs only. | Local Zig endpoint loop completes certificate-verified handshake, protected STREAM echo, due timer service, protected close, key discard, and route cleanup without mock keys, OpenSSL, examples changes, or caller-side per-case branching. |
 | P0-2 Streams and flow control | RFC 9000 Sections 2, 4, 19.8-19.14 | Next | Cover bidi and uni STREAM data/FIN over protected endpoint packets. Cover MAX_STREAMS release, RESET_STREAM, STOP_SENDING, blocked/unblocked connection and stream windows, and retransmission requeue. | One protected endpoint-loop test or tight test set proves data, FIN, reset/stop, credit release, flow-control unblock, and route-bound output. |
 | P0-3 ACK, loss, PTO, congestion | RFC 9000 ACK rules; RFC 9002 loss detection, PTO, congestion control | Next | Prove CRYPTO and STREAM PTO output is route-bound and retransmittable. Prove ACK cleanup updates outstanding packets, RTT, bytes-in-flight, congestion window, and PTO backoff. Prove close/drain disarms terminal timers. | Deterministic endpoint tests plus one socket-backed loss run drive recovery through the endpoint loop without stale deadlines or tight loops. |
 | P0-4 Routing and lifecycle safety | RFC 9000 Retry, tokens, CID, stateless reset, close, path validation, migration | Next | Ensure malformed input fails before packet-number, ACK, stream, CID, token, route, or timer mutation. Ensure missing route and zero capacity are returned as result metadata. Ensure Retry/token/CID/stateless-reset/close/path-validation failures are non-committing. | Edge tests return endpoint-visible results or close errors, preserve old success paths, and clean route, record, and timer state after terminal drain. |
@@ -90,8 +90,8 @@ by protected endpoint behavior when that behavior is required.
 | Order | Task | Status | Done when |
 | --- | --- | --- | --- |
 | 1 | P0-1a Client bounded receive step | Done | Client receive step returns receive output, due output, close/key-discard/idle transitions, route errors, capacity errors, and next deadline without caller-side branching. |
-| 2 | P0-1b Server bounded receive step | Active | Server receive step returns admission, routed output, pending work, due cleanup, route errors, capacity errors, and next deadline without caller-side branching. |
-| 3 | P0-1c Local Zig endpoint loop | Next | Zig client/server complete certificate-verified protected UDP handshake, STREAM echo, close, key discard, and route cleanup through endpoint APIs only. |
+| 2 | P0-1b Server bounded receive step | Done | Server receive step returns admission, routed output, pending work, due cleanup, route errors, capacity errors, and next deadline without caller-side branching. |
+| 3 | P0-1c Local Zig endpoint loop | Active | Zig client/server complete certificate-verified protected UDP handshake, STREAM echo, close, key discard, and route cleanup through endpoint APIs only. |
 | 4 | P0-2a Bidi/uni streams | Next | Protected endpoint packets cover bidi and uni data plus FIN. |
 | 5 | P0-2b Stream control and flow control | Next | Protected endpoint packets cover reset/stop, stream-count release, connection/stream flow-control unblock, and retransmission requeue. |
 | 6 | P0-3a PTO retransmission | Next | CRYPTO and STREAM PTO output is route-bound and retransmittable from endpoint state. |
@@ -172,13 +172,18 @@ through the full `receiveDatagramStepWithRoutePath()` result shape.
 P0-1a is complete: `receiveDatagramStepWithRoutePath()` now exposes receive
 output, due recovery output, idle/close/key-discard transitions, route errors,
 capacity errors, and post-step deadline selection in a single bounded client
-result shape. P0-1b is the next active task.
+result shape.
 Server routed installed-key receive/drain now reports zero installed-key output
 capacity as `drain.first_error = BufferTooSmall` when a protected
 Application-space datagram is processed and ACK output is pending. The queued
 ACK is preserved for a later route-bound poll, so server socket loops do not
 need an extra post-receive probe to discover that receive-generated output was
 left queued.
+P0-1b is complete: the server receive-step APIs now return admission, routed
+output, pending work, idle/close/key-discard due cleanup, route errors, capacity
+errors, and post-step deadline selection in bounded result shapes. P0-1c is now
+active and must use local Zig endpoint APIs only; mock-only or installed-key-only
+evidence cannot close the local endpoint-loop gate.
 
 Connection-level RFC 9000 `NEW_CONNECTION_ID` processing now tracks the largest
 peer `Retire Prior To` value. It rejects `retire_prior_to > sequence_number`
