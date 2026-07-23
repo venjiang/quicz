@@ -160,10 +160,10 @@ Work proceeds by main functionality alignment against these stacks.
 | P1-B1 | Interop-Runner shape | QUIC-Interop-Runner compatible test binary and scenario set | Local interop-runner dry-run passes handshake/transfer/retry | Next |
 | P1-C1 | Stream-limit scenarios | MAX_STREAMS exhaustion, stream-count credit race, uni/bidi limit edge | Endpoint tests cover stream-limit exhaustion and credit release under load | Done |
 | P1-C2 | Loss/migration scenarios | Multi-packet loss, persistent congestion, path migration under loss | Endpoint tests cover multi-loss and migration-with-loss sequences | Done |
-| P1-D1 | Token persistence/replay | Address validation token persistence, replay rejection across restart | Token store/reload/replay tests pass | Active |
-| P1-D2 | Path policy hardening | Path validation failure policy, anti-amplification edge, NAT rebinding | Path failure and amplification-limit tests pass | Next |
-| P1-D3 | Close/reset policy | Operational close/reset error codes, drain timing, stateless reset policy | Close/reset policy tests cover error-code namespace and drain behavior | Next |
-| P1-D4 | Security regression matrix | Fuzz-derived frame/packet edge, overflow, timing side-channel audit | Regression matrix passes; no unguarded varint/length/offset paths | Next |
+| P1-D1 | Token persistence/replay | Address validation token persistence, replay rejection across restart | Token store/reload/replay tests pass | Done |
+| P1-D2 | Path policy hardening | Path validation failure policy, anti-amplification edge, NAT rebinding | Path failure and amplification-limit tests pass | Done |
+| P1-D3 | Close/reset policy | Operational close/reset error codes, drain timing, stateless reset policy | Close/reset policy tests cover error-code namespace and drain behavior | Done |
+| P1-D4 | Security regression matrix | Fuzz-derived frame/packet edge, overflow, timing side-channel audit | Regression matrix passes; no unguarded varint/length/offset paths | Done |
 
 ### P1 execution queue
 
@@ -174,10 +174,10 @@ Work proceeds by main functionality alignment against these stacks.
 | 3 | P1-B1 Interop-Runner shape | Next | Build interop-runner compatible binary and scenario set |
 | 4 | P1-C1 stream-limit scenarios | Done | Add stream-limit exhaustion and credit race endpoint tests |
 | 5 | P1-C2 loss/migration scenarios | Done | Add multi-loss and migration-with-loss endpoint tests |
-| 6 | P1-D1 token persistence/replay | Active | Add token store/reload/replay tests |
-| 7 | P1-D2 path policy hardening | Next | Add path failure and amplification-limit tests |
-| 8 | P1-D3 close/reset policy | Next | Add close/reset error-code and drain policy tests |
-| 9 | P1-D4 security regression matrix | Next | Audit and add regression tests for frame/packet edge cases |
+| 6 | P1-D1 token persistence/replay | Done | Add token store/reload/replay tests |
+| 7 | P1-D2 path policy hardening | Done | Add path failure and amplification-limit tests |
+| 8 | P1-D3 close/reset policy | Done | Add close/reset error-code and drain policy tests |
+| 9 | P1-D4 security regression matrix | Done | Audit and add regression tests for frame/packet edge cases |
 
 ## Practical Transport Baseline
 
