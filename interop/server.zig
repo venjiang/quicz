@@ -195,7 +195,6 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("failed to load private key: {}\n", .{err});
         return err;
     };
-    _ = private_key;
 
     std.debug.print("quicz interop server: certificate loaded ({d} bytes DER)\n", .{cert_der.len});
 
@@ -223,6 +222,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Event loop: receive datagrams, process through endpoint, send responses
     var recv_buf: [max_datagram_size]u8 = undefined;
+    var next_handle: u64 = 1;
 
     while (true) {
         const timeout = std.Io.Timeout{
@@ -242,14 +242,40 @@ pub fn main(init: std.process.Init) !void {
         );
         const path = endpoint.Udp4Tuple{ .local = local_addr, .remote = from_addr };
 
-        // Process through endpoint
+        // Process through endpoint with Initial admission
         var initial_out: [4]quicz.EndpointPolledDatagramResult = undefined;
         var handshake_out: [4]quicz.EndpointPolledDatagramResult = undefined;
         var installed_out: [16]ServerEndpoint.DatagramPathResult = undefined;
         var pending_out: [16]ServerEndpoint.DatagramPathResult = undefined;
         var scratch: [8192]u8 = undefined;
 
-        const step = server_endpoint.receiveDatagramStepWithRoutePath(
+        // Create a new record for potential Initial admission
+        const handle = next_handle;
+        next_handle += 1;
+        var server_scid: [8]u8 = undefined;
+        io.randomSecure(&server_scid) catch {};
+
+        var record = ServerRecord{
+            .handle = handle,
+            .transport = Tls13ServerTransport.init(allocator, .{
+                .initial_max_data = 65536,
+                .initial_max_stream_data = 16384,
+                .initial_max_streams_bidi = 128,
+                .initial_max_streams_uni = 128,
+                .max_datagram_size = max_datagram_size,
+                .initial_rtt_ms = 100,
+                .max_idle_timeout_ms = 30000,
+            }, .{
+                .alpn = &[_][]const u8{"hq-interop"},
+                .cert_chain_der = &.{cert_der},
+                .private_key_bytes = &private_key,
+                .private_key_algorithm = .ecdsa_p256_sha256,
+            }) catch continue,
+        };
+        record.transport.connection.validatePeerAddress() catch {};
+        record.transport.setLocalInitialSourceConnectionId(&server_scid) catch {};
+
+        const step = server_endpoint.receiveDatagramStepWithRoutePathAndInitialRecordAdmission(
             allocator,
             path,
             0,
@@ -262,6 +288,10 @@ pub fn main(init: std.process.Init) !void {
                 .unpredictable_prefix = &[_]u8{},
                 .supported_versions = &[_]quic_packet.Version{.v1},
             },
+            handle,
+            &record,
+            &server_scid,
+            .{},
             &scratch,
             &[_]u8{},
             &initial_out,
@@ -269,7 +299,10 @@ pub fn main(init: std.process.Init) !void {
             &installed_out,
             .application,
             &pending_out,
-        ) catch continue;
+        ) catch {
+            record.transport.deinit();
+            continue;
+        };
 
         // Send response datagrams back to client
         var dest = std.Io.net.IpAddress{
