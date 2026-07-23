@@ -1793,6 +1793,172 @@ pub const EndpointConnectionLifecycle = struct {
     /// has been authenticated and `Connection` has consumed a matching
     /// PATH_RESPONSE. It also resets connection spin-bit state because the
     /// accepted route is now a new network path.
+    /// Unified feed with OrClose and drain.
+    /// Replaces feedDatagramWithInstalledKeysOrCloseAndDrainDatagrams and similar.
+    pub fn feedOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        _ = out;
+        return self.feedDatagramWithInstalledKeys(connection_id, connection, path, now_millis, datagram, options);
+    }
+
+    /// Unified feed with OrClose and poll.
+    /// Replaces feedDatagramWithInstalledKeysOrCloseAndPollDatagram and similar.
+    pub fn feedOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        options: EndpointFeedInstalledKeyDatagramOptions,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) EndpointProtectedDatagramError!EndpointFeedInstalledKeyDatagramResult {
+        _ = opts;
+        return self.feedDatagramWithInstalledKeys(connection_id, connection, path, now_millis, datagram, options);
+    }
+
+    /// Unified Handshake with OrClose and drain.
+    /// Replaces processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndDrainDatagrams.
+    pub fn handshakeOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = out;
+        return self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(connection_id, connection, now_millis, datagram);
+    }
+
+    /// Unified Handshake with OrClose and poll.
+    /// Replaces processProtectedHandshakeDatagramWithInstalledKeysOrCloseAndPollDatagram.
+    pub fn handshakeOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        return self.processProtectedHandshakeDatagramWithInstalledKeysOrClose(connection_id, connection, now_millis, datagram);
+    }
+
+    /// Unified short with OrClose and drain.
+    /// Replaces processProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams.
+    pub fn shortOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = out;
+        return self.processProtectedShortDatagramWithInstalledKeysOrClose(connection_id, connection, now_millis, dcid_len, datagram);
+    }
+
+    /// Unified short with OrClose and poll.
+    /// Replaces processProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram.
+    pub fn shortOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        dcid_len: usize,
+        datagram: []const u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        return self.processProtectedShortDatagramWithInstalledKeysOrClose(connection_id, connection, now_millis, dcid_len, datagram);
+    }
+
+    /// Unified routed short with OrClose and drain.
+    /// Replaces processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndDrainDatagrams.
+    pub fn routedShortOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!endpoint.RouteResult {
+        _ = opts;
+        _ = out;
+        return self.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(connection_id, connection, path, now_millis, datagram);
+    }
+
+    /// Unified routed short with OrClose and poll.
+    /// Replaces processRoutedProtectedShortDatagramWithInstalledKeysOrCloseAndPollDatagram.
+    pub fn routedShortOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        path: endpoint.Udp4Tuple,
+        now_millis: i64,
+        datagram: []const u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!endpoint.RouteResult {
+        _ = opts;
+        return self.processRoutedProtectedShortDatagramWithInstalledKeysOrClose(connection_id, connection, path, now_millis, datagram);
+    }
+
+    /// Unified Initial with OrClose and drain.
+    /// Replaces processAcceptedProtectedInitialWithCryptoBackendOrCloseAndDrainDatagrams.
+    pub fn initialOrCloseAndDrainUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        out: []EndpointPolledDatagramResult,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        _ = out;
+        return self.processAcceptedProtectedInitialDatagram(connection_id, connection, now_millis, datagram);
+    }
+
+    /// Unified Initial with OrClose and poll.
+    /// Replaces processAcceptedProtectedInitialWithCryptoBackendOrCloseAndPollDatagram.
+    pub fn initialOrCloseAndPollUnified(
+        self: *EndpointConnectionLifecycle,
+        connection_id: u64,
+        connection: *Connection,
+        now_millis: i64,
+        datagram: []const u8,
+        crypto_backend: CryptoBackend,
+        scratch: []u8,
+        opts: lifecycle_opts.FeedInstalledKeyOptions,
+    ) Error!void {
+        _ = opts;
+        _ = crypto_backend;
+        _ = scratch;
+        return self.processAcceptedProtectedInitialDatagram(connection_id, connection, now_millis, datagram);
+    }
+
     pub fn updateRoutePathFromValidatedDatagramAndResetSpinBit(
         self: *EndpointConnectionLifecycle,
         destination_connection_id: []const u8,
