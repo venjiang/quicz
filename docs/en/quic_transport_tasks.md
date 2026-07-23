@@ -146,6 +146,39 @@ receive step, and confirms both client and server handshake state. P0-A2 is now
 active; STREAM echo, due timer service, protected close, key discard, and
 route/record cleanup remain open.
 
+
+### P1 task matrix
+
+P1 re-entry rule satisfied: P0-F1 passed. Reference implementations: quic-go
+(Go, P0 interop done), quiche (Rust/Cloudflare), quinn (Rust/quinn-rs).
+Work proceeds by main functionality alignment against these stacks.
+
+| Phase | Task | Scope | Exit evidence | Status |
+| --- | --- | --- | --- | --- |
+| P1-A1 | quinn interop handshake+echo | quinn (Rust) certificate-verified handshake, bidi/uni stream echo, close | `zig build run-interop-external` against quinn server: handshake + echo pass | Next |
+| P1-A2 | quinn interop Retry+loss | quinn Retry, controlled loss/PTO, stream control | Retry and one loss/PTO case pass against quinn | Next |
+| P1-B1 | Interop-Runner shape | QUIC-Interop-Runner compatible test binary and scenario set | Local interop-runner dry-run passes handshake/transfer/retry | Next |
+| P1-C1 | Stream-limit scenarios | MAX_STREAMS exhaustion, stream-count credit race, uni/bidi limit edge | Endpoint tests cover stream-limit exhaustion and credit release under load | Next |
+| P1-C2 | Loss/migration scenarios | Multi-packet loss, persistent congestion, path migration under loss | Endpoint tests cover multi-loss and migration-with-loss sequences | Next |
+| P1-D1 | Token persistence/replay | Address validation token persistence, replay rejection across restart | Token store/reload/replay tests pass | Next |
+| P1-D2 | Path policy hardening | Path validation failure policy, anti-amplification edge, NAT rebinding | Path failure and amplification-limit tests pass | Next |
+| P1-D3 | Close/reset policy | Operational close/reset error codes, drain timing, stateless reset policy | Close/reset policy tests cover error-code namespace and drain behavior | Next |
+| P1-D4 | Security regression matrix | Fuzz-derived frame/packet edge, overflow, timing side-channel audit | Regression matrix passes; no unguarded varint/length/offset paths | Next |
+
+### P1 execution queue
+
+| Order | Task | Status | Scope |
+| --- | --- | --- | --- |
+| 1 | P1-A1 quinn interop handshake+echo | Next | Clone quinn, build echo server, run quicz interop client against it |
+| 2 | P1-A2 quinn interop Retry+loss | Next | Extend quinn interop to Retry and loss/PTO scenarios |
+| 3 | P1-B1 Interop-Runner shape | Next | Build interop-runner compatible binary and scenario set |
+| 4 | P1-C1 stream-limit scenarios | Next | Add stream-limit exhaustion and credit race endpoint tests |
+| 5 | P1-C2 loss/migration scenarios | Next | Add multi-loss and migration-with-loss endpoint tests |
+| 6 | P1-D1 token persistence/replay | Next | Add token store/reload/replay tests |
+| 7 | P1-D2 path policy hardening | Next | Add path failure and amplification-limit tests |
+| 8 | P1-D3 close/reset policy | Next | Add close/reset error-code and drain policy tests |
+| 9 | P1-D4 security regression matrix | Next | Audit and add regression tests for frame/packet edge cases |
+
 ## Practical Transport Baseline
 
 | Feature | Practical target | quicz status |
